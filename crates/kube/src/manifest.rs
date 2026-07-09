@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, ValidationDirective};
 use kube::core::{ApiResource, GroupVersionKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -36,6 +37,77 @@ pub fn resource_ref(value: &serde_json::Value) -> Option<ResourceRef> {
         name: s(&["metadata", "name"])?,
         namespace: s(&["metadata", "namespace"]),
     })
+}
+
+/// Side-by-side alignment tag for one diff row.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffTag {
+    Same,
+    Insert,
+    Delete,
+    Replace,
+}
+
+/// One aligned row of a side-by-side diff. `left` is the current (live) line,
+/// `right` the proposed line; either is `None` for a pure insert/delete.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct DiffRow {
+    pub tag: DiffTag,
+    pub left: Option<String>,
+    pub right: Option<String>,
+}
+
+/// Compute line-aligned side-by-side rows. Consecutive deletes followed by
+/// inserts pair into `Replace` rows; leftovers become `Delete`/`Insert`.
+pub fn align_rows(current: &str, proposed: &str) -> Vec<DiffRow> {
+    let diff = TextDiff::from_lines(current, proposed);
+    let mut rows = Vec::new();
+    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let flush = |rows: &mut Vec<DiffRow>, pending: &mut std::collections::VecDeque<String>| {
+        while let Some(left) = pending.pop_front() {
+            rows.push(DiffRow {
+                tag: DiffTag::Delete,
+                left: Some(left),
+                right: None,
+            });
+        }
+    };
+    for change in diff.iter_all_changes() {
+        let line = change
+            .value()
+            .strip_suffix('\n')
+            .unwrap_or(change.value())
+            .to_string();
+        match change.tag() {
+            ChangeTag::Equal => {
+                flush(&mut rows, &mut pending);
+                rows.push(DiffRow {
+                    tag: DiffTag::Same,
+                    left: Some(line.clone()),
+                    right: Some(line),
+                });
+            }
+            ChangeTag::Delete => pending.push_back(line),
+            ChangeTag::Insert => {
+                if let Some(left) = pending.pop_front() {
+                    rows.push(DiffRow {
+                        tag: DiffTag::Replace,
+                        left: Some(left),
+                        right: Some(line),
+                    });
+                } else {
+                    rows.push(DiffRow {
+                        tag: DiffTag::Insert,
+                        left: None,
+                        right: Some(line),
+                    });
+                }
+            }
+        }
+    }
+    flush(&mut rows, &mut pending);
+    rows
 }
 
 /// Split a multi-document YAML string into parsed JSON values, skipping empty
@@ -523,5 +595,29 @@ metadata:
         assert_eq!(r.kind, "Deployment");
         assert_eq!(r.name, "web");
         assert_eq!(r.namespace.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn align_rows_pairs_a_changed_line() {
+        let rows = align_rows("spec:\n  replicas: 3\n", "spec:\n  replicas: 5\n");
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].tag, DiffTag::Same));
+        assert_eq!(rows[0].left.as_deref(), Some("spec:"));
+        assert!(matches!(rows[1].tag, DiffTag::Replace));
+        assert_eq!(rows[1].left.as_deref(), Some("  replicas: 3"));
+        assert_eq!(rows[1].right.as_deref(), Some("  replicas: 5"));
+    }
+
+    #[test]
+    fn align_rows_marks_pure_insert_and_delete() {
+        let rows = align_rows("a\n", "a\nb\n");
+        assert!(matches!(rows[1].tag, DiffTag::Insert));
+        assert_eq!(rows[1].left, None);
+        assert_eq!(rows[1].right.as_deref(), Some("b"));
+
+        let rows = align_rows("a\nb\n", "a\n");
+        assert!(matches!(rows[1].tag, DiffTag::Delete));
+        assert_eq!(rows[1].left.as_deref(), Some("b"));
+        assert_eq!(rows[1].right, None);
     }
 }
