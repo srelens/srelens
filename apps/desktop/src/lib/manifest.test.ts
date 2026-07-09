@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { getManifest, listNodes, applyManifest, listEvents, listResource } from "./manifest";
+import { getManifest, listNodes, applyManifest, diffManifest, parseResourceVersion, listEvents, listResource } from "./manifest";
 
 describe("getManifest", () => {
   it("passes kind/namespace/name and returns yaml", async () => {
@@ -53,18 +53,18 @@ describe("listEvents", () => {
 
 describe("applyManifest", () => {
   it("passes context+yaml and returns applied", async () => {
-    const invoke = vi.fn().mockResolvedValue({ applied: true, kind: "ConfigMap", name: "cm" });
-    const out = await applyManifest("kind-dev", "kind: ConfigMap\n", invoke);
+    const invoke = vi.fn().mockResolvedValue({ documents: [{ kind: "ConfigMap", name: "cm", applied: true, conflict: null, error: null }], applied: true });
+    const out = await applyManifest("kind-dev", "kind: ConfigMap\n", false, invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", {
       context: "kind-dev",
       yaml: "kind: ConfigMap\n",
+      force: false,
     });
     expect(out.applied).toBe(true);
-    expect(out.kind).toBe("ConfigMap");
   });
 
   it("normalises errors", async () => {
-    const out = await applyManifest("c", "bad", () => Promise.reject(new Error("invalid")));
+    const out = await applyManifest("c", "bad", false, () => Promise.reject(new Error("invalid")));
     expect(out.error).toContain("invalid");
   });
 });
@@ -88,5 +88,50 @@ describe("listResource", () => {
       Promise.reject(new Error("forbidden")),
     );
     expect(out.error).toContain("forbidden");
+  });
+});
+
+describe("applyManifest force + multi-doc", () => {
+  it("passes force and returns per-document results", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      documents: [{ kind: "ConfigMap", name: "a", applied: true, conflict: null, error: null }],
+      applied: true,
+    });
+    const out = await applyManifest("ctx", "kind: ConfigMap", true, invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", force: true });
+    expect(out.applied).toBe(true);
+    expect(out.documents?.[0].name).toBe("a");
+  });
+
+  it("defaults force to false", async () => {
+    const invoke = vi.fn().mockResolvedValue({ documents: [], applied: true });
+    await applyManifest("ctx", "kind: ConfigMap", undefined, invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", force: false });
+  });
+
+  it("surfaces call errors", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("boom"));
+    const out = await applyManifest("ctx", "x", false, invoke);
+    expect(out.error).toContain("boom");
+  });
+});
+
+describe("diffManifest", () => {
+  it("returns documents", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      documents: [{ kind: "ConfigMap", name: "a", namespace: "d", exists: true, changed: true, rows: [], currentResourceVersion: "9" }],
+    });
+    const out = await diffManifest("ctx", "kind: ConfigMap", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.diffManifest", { context: "ctx", yaml: "kind: ConfigMap" });
+    expect(out.documents?.[0].currentResourceVersion).toBe("9");
+  });
+});
+
+describe("parseResourceVersion", () => {
+  it("reads metadata.resourceVersion", () => {
+    expect(parseResourceVersion("metadata:\n  resourceVersion: \"42\"\n")).toBe("42");
+  });
+  it("returns null when absent", () => {
+    expect(parseResourceVersion("metadata:\n  name: a\n")).toBeNull();
   });
 });

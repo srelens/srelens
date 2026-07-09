@@ -1,3 +1,4 @@
+import { parse } from "yaml";
 import { invokeCapability, type Invoker } from "../transport/transport";
 
 export interface NodeSummary {
@@ -107,20 +108,77 @@ export async function getSecret(
   }
 }
 
-/** Server-side apply a YAML manifest via `k8s.applyManifest`. */
+export interface Conflict {
+  managers: string[];
+  fields: string[];
+  message: string;
+}
+
+export interface ApplyDoc {
+  kind: string;
+  name: string;
+  applied: boolean;
+  conflict?: Conflict | null;
+  error?: string | null;
+}
+
+export interface DiffRow {
+  tag: "same" | "insert" | "delete" | "replace";
+  left: string | null;
+  right: string | null;
+}
+
+export interface DiffDoc {
+  kind: string;
+  name: string;
+  namespace: string | null;
+  exists: boolean;
+  changed: boolean;
+  rows: DiffRow[];
+  currentResourceVersion: string | null;
+}
+
+/** Server-side apply one or more YAML documents via `k8s.applyManifest`. */
 export async function applyManifest(
   context: string,
   yaml: string,
+  force = false,
   invoke: Invoker = invokeCapability,
-): Promise<{ applied?: boolean; kind?: string; name?: string; error?: string }> {
+): Promise<{ documents?: ApplyDoc[]; applied?: boolean; error?: string }> {
   try {
-    const out = await invoke<{ applied: boolean; kind: string; name: string }>(
-      "k8s.applyManifest",
-      { context, yaml },
-    );
-    return { applied: out.applied, kind: out.kind, name: out.name };
+    const out = await invoke<{ documents: ApplyDoc[]; applied: boolean }>("k8s.applyManifest", {
+      context,
+      yaml,
+      force,
+    });
+    return { documents: out.documents, applied: out.applied };
   } catch (e) {
     return { error: String(e) };
+  }
+}
+
+/** Diff a manifest against the cluster (dry-run) via `k8s.diffManifest`. */
+export async function diffManifest(
+  context: string,
+  yaml: string,
+  invoke: Invoker = invokeCapability,
+): Promise<{ documents?: DiffDoc[]; error?: string }> {
+  try {
+    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", { context, yaml });
+    return { documents: out.documents };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+/** Read `metadata.resourceVersion` from a manifest, for stale-edit detection. */
+export function parseResourceVersion(yaml: string): string | null {
+  try {
+    const doc = parse(yaml) as { metadata?: { resourceVersion?: unknown } } | null;
+    const rv = doc?.metadata?.resourceVersion;
+    return rv == null ? null : String(rv);
+  } catch {
+    return null;
   }
 }
 
