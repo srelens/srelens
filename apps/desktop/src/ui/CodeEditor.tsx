@@ -22,26 +22,34 @@ import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { yaml } from "@codemirror/lang-yaml";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { autocompletion, completionKeymap, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
-import { parseDocument } from "yaml";
+import { parseAllDocuments } from "yaml";
 import { tags as t } from "@lezer/highlight";
 import type { SchemaBundle } from "../lib/schema";
 import { extractApiVersionKind, pathAtCursor, fieldCompletions, valueCompletions } from "../lib/schemaComplete";
 
-/** Parse YAML and return syntax errors/warnings as diagnostics. Pure + tested. */
+/**
+ * Parse YAML (one or more `---`-separated documents) and return syntax
+ * errors/warnings across ALL documents as diagnostics. The `yaml` package
+ * reports absolute offsets into the full source, so ranges from later
+ * documents still land correctly without any per-document adjustment.
+ * Pure + tested.
+ */
 export function yamlDiagnostics(text: string): Diagnostic[] {
   const len = text.length;
   if (!text.trim()) return [];
   const clamp = (n: number) => Math.max(0, Math.min(n, len));
   try {
-    const doc = parseDocument(text, { prettyErrors: false });
+    const docs = parseAllDocuments(text, { prettyErrors: false });
     const asDiag = (issue: { pos?: [number, number, number?]; message: string }, severity: "error" | "warning"): Diagnostic => {
       const [from, to] = issue.pos ?? [0, 1];
       return { from: clamp(from), to: Math.max(clamp(to), clamp(from) + 1), severity, message: issue.message };
     };
-    return [
-      ...doc.errors.map((e) => asDiag(e, "error")),
-      ...doc.warnings.map((w) => asDiag(w, "warning")),
-    ];
+    const diagnostics: Diagnostic[] = [];
+    for (const doc of docs) {
+      diagnostics.push(...doc.errors.map((e) => asDiag(e, "error")));
+      diagnostics.push(...doc.warnings.map((w) => asDiag(w, "warning")));
+    }
+    return diagnostics;
   } catch (e) {
     return [{ from: 0, to: len, severity: "error", message: String(e) }];
   }
@@ -80,23 +88,25 @@ function extractFieldPaths(message: string): string[] {
 export function k8sDiagnostics(text: string, messages: string[]): Diagnostic[] {
   if (!messages.length || !text.trim()) return [];
   const len = text.length;
-  let doc: ReturnType<typeof parseDocument> | null = null;
+  let docs: ReturnType<typeof parseAllDocuments> = [];
   try {
-    doc = parseDocument(text);
+    docs = parseAllDocuments(text);
   } catch {
-    doc = null;
+    docs = [];
   }
   const topTo = Math.max(1, text.indexOf("\n") === -1 ? len : text.indexOf("\n"));
   const diagnostics: Diagnostic[] = [];
   for (const message of messages) {
-    const ranges = doc
-      ? extractFieldPaths(message)
-          .map((p) => {
-            const node = doc!.getIn(fieldSegments(p), true) as { range?: [number, number] } | undefined;
-            return node?.range ? ([node.range[0], node.range[1]] as [number, number]) : null;
-          })
-          .filter((r): r is [number, number] => !!r)
-      : [];
+    const ranges = extractFieldPaths(message)
+      .map((p) => {
+        const segments = fieldSegments(p);
+        for (const doc of docs) {
+          const node = doc.getIn(segments, true) as { range?: [number, number] } | undefined;
+          if (node?.range) return [node.range[0], node.range[1]] as [number, number];
+        }
+        return null;
+      })
+      .filter((r): r is [number, number] => !!r);
     if (ranges.length) {
       for (const [from, to] of ranges) {
         diagnostics.push({ from, to: Math.max(to, from + 1), severity: "error", message });

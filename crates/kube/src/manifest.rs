@@ -557,10 +557,48 @@ fn clean_kube_error(e: kube::Error) -> String {
     }
 }
 
+/// Validate one already-parsed document against the API server (dry-run,
+/// strict field validation). `None` means the document has no
+/// apiVersion/kind/metadata.name yet — nothing to validate, not an error.
+/// `Some(Err(_))` carries the cleaned server error message.
+async fn validate_document(
+    client: &kube::Client,
+    value: &serde_json::Value,
+) -> Option<Result<(), String>> {
+    let r = resource_ref(value)?;
+    let (group, version) = parse_api_version(&r.api_version);
+    let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = match &r.namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+        None => Api::all_with(client.clone(), &ar),
+    };
+    let params = PatchParams {
+        field_manager: Some("srelens".into()),
+        dry_run: true,
+        force: true,
+        field_validation: Some(ValidationDirective::Strict),
+    };
+    let result = match tokio::time::timeout(
+        request_timeout(),
+        api.patch(&r.name, &params, &Patch::Apply(value)),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => return Some(Err("validation timed out".into())),
+    };
+    Some(result.map(|_| ()).map_err(clean_kube_error))
+}
+
 /// `k8s.validateManifest` — server-side dry-run apply with strict field
-/// validation. Returns the API server's real verdict (unknown fields, wrong
-/// types, invalid values, admission errors) as data, so the editor can surface
-/// Kubernetes-aware diagnostics — CRDs included, no bundled schema needed.
+/// validation, one or more `---`-separated documents. Returns the API
+/// server's real verdict (unknown fields, wrong types, invalid values,
+/// admission errors) as data for every document, so the editor can surface
+/// Kubernetes-aware diagnostics anywhere in a multi-document manifest — CRDs
+/// included, no bundled schema needed. `valid` is true only when every
+/// document validates (documents without enough identity to validate yet are
+/// skipped, not treated as failures).
 pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ValidateIn, ValidateOut, _, _>(
         "k8s.validateManifest",
@@ -569,57 +607,38 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ValidateIn| {
             let cache = cache.clone();
             async move {
-                let value: serde_json::Value = match serde_yaml::from_str(&input.yaml) {
-                    Ok(v) => v,
+                let docs = match split_documents(&input.yaml) {
+                    Ok(docs) => docs,
                     Err(e) => {
                         return Ok(ValidateOut {
                             valid: false,
-                            errors: vec![format!("parse yaml: {e}")],
+                            errors: vec![e.to_string()],
                         })
                     }
                 };
-                let get_str = |path: &[&str]| -> Option<String> {
-                    let mut cur = &value;
-                    for key in path {
-                        cur = cur.get(key)?;
+                let mut errors = Vec::new();
+                let mut client: Option<kube::Client> = None;
+                for value in &docs {
+                    if resource_ref(value).is_none() {
+                        // Nothing to validate against the server yet; not an error.
+                        continue;
                     }
-                    cur.as_str().map(String::from)
-                };
-                let (Some(api_version), Some(kind), Some(name)) = (
-                    get_str(&["apiVersion"]),
-                    get_str(&["kind"]),
-                    get_str(&["metadata", "name"]),
-                ) else {
-                    // Nothing to validate against the server yet; not an error.
-                    return Ok(ValidateOut { valid: true, errors: vec![] });
-                };
-                let namespace = get_str(&["metadata", "namespace"]);
-
-                let (group, version) = parse_api_version(&api_version);
-                let gvk = GroupVersionKind::gvk(&group, &version, &kind);
-                let ar = ApiResource::from_gvk(&gvk);
-                let client = cache
-                    .get(&input.context)
-                    .await
-                    .map_err(CapabilityError::Handler)?;
-                let api: Api<DynamicObject> = match &namespace {
-                    Some(ns) => Api::namespaced_with(client, ns, &ar),
-                    None => Api::all_with(client, &ar),
-                };
-                let params = PatchParams {
-                    field_manager: Some("srelens".into()),
-                    dry_run: true,
-                    force: true,
-                    field_validation: Some(ValidationDirective::Strict),
-                };
-                let result =
-                    tokio::time::timeout(request_timeout(), api.patch(&name, &params, &Patch::Apply(&value)))
-                        .await
-                        .map_err(|_| CapabilityError::Handler("validation timed out".into()))?;
-                Ok(match result {
-                    Ok(_) => ValidateOut { valid: true, errors: vec![] },
-                    Err(e) => ValidateOut { valid: false, errors: vec![clean_kube_error(e)] },
-                })
+                    if client.is_none() {
+                        client = Some(
+                            cache
+                                .get(&input.context)
+                                .await
+                                .map_err(CapabilityError::Handler)?,
+                        );
+                    }
+                    if let Some(Err(message)) =
+                        validate_document(client.as_ref().unwrap(), value).await
+                    {
+                        errors.push(message);
+                    }
+                }
+                let valid = errors.is_empty();
+                Ok(ValidateOut { valid, errors })
             }
         },
     )

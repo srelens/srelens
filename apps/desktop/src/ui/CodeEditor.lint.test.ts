@@ -26,6 +26,26 @@ describe("yamlDiagnostics", () => {
     const diags = yamlDiagnostics("ports: [80, 443\n");
     expect(diags.some((d) => d.severity === "error")).toBe(true);
   });
+
+  it("returns no diagnostics for a valid two-document manifest", () => {
+    const doc1 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\n";
+    const doc2 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app-2\n";
+    const twoDoc = `${doc1}---\n${doc2}`;
+    expect(yamlDiagnostics(twoDoc)).toHaveLength(0);
+  });
+
+  it("locates a syntax error in the SECOND document of a multi-doc manifest", () => {
+    const doc1 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\n";
+    const separator = "---\n";
+    const badDoc2 = "spec:\n  foo: bar: baz\n";
+    const twoDoc = `${doc1}${separator}${badDoc2}`;
+    const secondDocOffset = doc1.length + separator.length;
+    const diags = yamlDiagnostics(twoDoc);
+    expect(diags.length).toBeGreaterThan(0);
+    expect(diags[0].severity).toBe("error");
+    // The offending line lives inside the second document, not at/before the `---`.
+    expect(diags[0].from).toBeGreaterThanOrEqual(secondDocOffset);
+  });
 });
 
 const manifest = `apiVersion: apps/v1
@@ -68,5 +88,19 @@ describe("k8sDiagnostics (server validation → editor positions)", () => {
   it("returns nothing for no messages or empty text", () => {
     expect(k8sDiagnostics(manifest, [])).toHaveLength(0);
     expect(k8sDiagnostics("", ["some error"])).toHaveLength(0);
+  });
+
+  it("maps a field that exists only in the SECOND document to a range inside it", () => {
+    const doc1 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\nspec:\n  replicas: 1\n";
+    const separator = "---\n";
+    const doc2 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app-2\nspec:\n  replicas: 1\n  foo: bar\n";
+    const twoDoc = `${doc1}${separator}${doc2}`;
+    const separatorOffset = doc1.length;
+    const diags = k8sDiagnostics(twoDoc, ['strict decoding error: unknown field "spec.foo"']);
+    expect(diags).toHaveLength(1);
+    expect(diags[0].from).toBeGreaterThan(separatorOffset);
+    const at = twoDoc.indexOf("bar");
+    expect(diags[0].from).toBeLessThanOrEqual(at);
+    expect(diags[0].to).toBeGreaterThanOrEqual(at);
   });
 });
