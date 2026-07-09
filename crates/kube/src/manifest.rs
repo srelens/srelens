@@ -525,6 +525,152 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     )
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffIn {
+    pub context: String,
+    pub yaml: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffDoc {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+    /// False when the resource does not exist yet (a create).
+    pub exists: bool,
+    /// True when current and proposed differ.
+    pub changed: bool,
+    pub rows: Vec<DiffRow>,
+    /// Live resourceVersion, for stale-edit detection (None when creating).
+    /// Serializes as `currentResourceVersion` (camelCase) for the frontend.
+    pub current_resource_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiffOut {
+    pub documents: Vec<DiffDoc>,
+}
+
+/// Drop server-managed noise and status so the diff shows only meaningful
+/// spec/metadata changes. Redacts Secret values when `is_secret`.
+pub fn normalize_for_diff(value: &mut serde_json::Value, is_secret: bool) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("status");
+        if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+            for k in [
+                "managedFields",
+                "resourceVersion",
+                "generation",
+                "uid",
+                "creationTimestamp",
+            ] {
+                meta.remove(k);
+            }
+        }
+    }
+    if is_secret {
+        crate::secrets::redact_secret_data(value);
+    }
+}
+
+/// `k8s.diffManifest` — for each document, diff the live object against the
+/// server dry-run apply result (current | proposed) as aligned rows.
+pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<DiffIn, DiffOut, _, _>(
+        "k8s.diffManifest",
+        "diff a manifest against the cluster via server dry-run apply (per document)",
+        Annotations {
+            read_only: true,
+            destructive: false,
+            requires_confirm: false,
+            sensitive: true,
+        },
+        move |input: DiffIn| {
+            let cache = cache.clone();
+            async move {
+                let docs = split_documents(&input.yaml)?;
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                let mut documents = Vec::with_capacity(docs.len());
+                for value in docs {
+                    let r = resource_ref(&value).ok_or_else(|| {
+                        CapabilityError::Handler(
+                            "document missing apiVersion/kind/metadata.name".into(),
+                        )
+                    })?;
+                    let (group, version) = parse_api_version(&r.api_version);
+                    let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
+                    let ar = ApiResource::from_gvk(&gvk);
+                    let api: Api<DynamicObject> = match &r.namespace {
+                        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+                        None => Api::all_with(client.clone(), &ar),
+                    };
+                    let is_secret = r.kind == "Secret" && group.is_empty();
+
+                    // Current live object (may not exist).
+                    let current = tokio::time::timeout(request_timeout(), api.get_opt(&r.name))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("diff get timed out".into()))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                    let current_resource_version = current
+                        .as_ref()
+                        .and_then(|o| o.metadata.resource_version.clone());
+                    let exists = current.is_some();
+                    let mut current_json = match current {
+                        Some(o) => serde_json::to_value(o)
+                            .map_err(|e| CapabilityError::Handler(e.to_string()))?,
+                        None => serde_json::json!({}),
+                    };
+
+                    // Proposed = server dry-run apply (force to compute merged end-state).
+                    let params = PatchParams {
+                        field_manager: Some("srelens".into()),
+                        dry_run: true,
+                        force: true,
+                        field_validation: None,
+                    };
+                    let proposed = tokio::time::timeout(
+                        request_timeout(),
+                        api.patch(&r.name, &params, &Patch::Apply(&value)),
+                    )
+                    .await
+                    .map_err(|_| CapabilityError::Handler("diff dry-run timed out".into()))?
+                    .map_err(|e| CapabilityError::Handler(clean_kube_error(e)))?;
+                    let mut proposed_json = serde_json::to_value(proposed)
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+
+                    normalize_for_diff(&mut current_json, is_secret);
+                    normalize_for_diff(&mut proposed_json, is_secret);
+                    let current_yaml = if exists {
+                        serde_yaml::to_string(&current_json)
+                            .map_err(|e| CapabilityError::Handler(e.to_string()))?
+                    } else {
+                        String::new()
+                    };
+                    let proposed_yaml = serde_yaml::to_string(&proposed_json)
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                    let rows = align_rows(&current_yaml, &proposed_yaml);
+                    let changed = rows.iter().any(|row| row.tag != DiffTag::Same);
+
+                    documents.push(DiffDoc {
+                        kind: r.kind,
+                        name: r.name,
+                        namespace: r.namespace,
+                        exists,
+                        changed,
+                        rows,
+                        current_resource_version,
+                    });
+                }
+                Ok(DiffOut { documents })
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,5 +765,36 @@ metadata:
         assert!(matches!(rows[1].tag, DiffTag::Delete));
         assert_eq!(rows[1].left.as_deref(), Some("b"));
         assert_eq!(rows[1].right, None);
+    }
+
+    #[test]
+    fn normalize_for_diff_strips_noise_and_status() {
+        let mut v: serde_json::Value = serde_yaml::from_str(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  resourceVersion: \"7\"\n  managedFields: [x]\n  uid: u\nstatus:\n  phase: Running\ndata:\n  k: v\n",
+        ).unwrap();
+        normalize_for_diff(&mut v, false);
+        assert!(v.get("status").is_none());
+        assert!(v["metadata"].get("resourceVersion").is_none());
+        assert!(v["metadata"].get("managedFields").is_none());
+        assert!(v["metadata"].get("uid").is_none());
+        assert_eq!(v["data"]["k"], "v");
+    }
+
+    #[test]
+    fn normalize_for_diff_redacts_secret_values() {
+        let mut v: serde_json::Value = serde_yaml::from_str(
+            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\ndata:\n  token: c2VjcmV0\n",
+        )
+        .unwrap();
+        normalize_for_diff(&mut v, true);
+        assert_ne!(v["data"]["token"], "c2VjcmV0");
+    }
+
+    #[test]
+    fn diff_capability_is_read_only() {
+        let cap = diff_manifest_capability(ClientCache::new(PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.diffManifest");
+        assert!(cap.annotations.read_only);
+        assert!(cap.annotations.sensitive);
     }
 }
