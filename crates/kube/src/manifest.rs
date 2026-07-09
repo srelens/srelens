@@ -206,6 +206,34 @@ pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
     )
 }
 
+/// Map a server-side-apply patch outcome to a per-document result: success,
+/// a structured 409 conflict, or a cleaned error. Pure, so it is unit-testable.
+fn apply_doc_from_result(kind: String, name: String, result: Result<(), kube::Error>) -> ApplyDoc {
+    match result {
+        Ok(()) => ApplyDoc {
+            kind,
+            name,
+            applied: true,
+            conflict: None,
+            error: None,
+        },
+        Err(kube::Error::Api(resp)) if resp.code == 409 => ApplyDoc {
+            kind,
+            name,
+            applied: false,
+            conflict: Some(parse_conflict(&resp.message)),
+            error: None,
+        },
+        Err(e) => ApplyDoc {
+            kind,
+            name,
+            applied: false,
+            conflict: None,
+            error: Some(clean_kube_error(e)),
+        },
+    }
+}
+
 /// Map a supported Kind to its GroupVersionKind and whether it is namespaced.
 pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
     let (group, version, k, namespaced) = match kind {
@@ -495,29 +523,7 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                             continue;
                         }
                     };
-                    let doc = match result {
-                        Ok(_) => ApplyDoc {
-                            kind: r.kind,
-                            name: r.name,
-                            applied: true,
-                            conflict: None,
-                            error: None,
-                        },
-                        Err(kube::Error::Api(resp)) if resp.code == 409 => ApplyDoc {
-                            kind: r.kind,
-                            name: r.name,
-                            applied: false,
-                            conflict: Some(parse_conflict(&resp.message)),
-                            error: None,
-                        },
-                        Err(e) => ApplyDoc {
-                            kind: r.kind,
-                            name: r.name,
-                            applied: false,
-                            conflict: None,
-                            error: Some(clean_kube_error(e)),
-                        },
-                    };
+                    let doc = apply_doc_from_result(r.kind, r.name, result.map(|_| ()));
                     documents.push(doc);
                 }
                 let applied = overall_applied(&documents);
@@ -690,6 +696,41 @@ fn canonicalize_diff_strings(value: &mut serde_json::Value) {
     }
 }
 
+/// Build one document's diff from its already-fetched current + proposed JSON.
+/// Pure (no I/O) so it is unit-testable; the capability supplies the fetched
+/// values. `current_json` is `json!({})` when the resource does not exist.
+fn diff_document(
+    kind: String,
+    name: String,
+    namespace: Option<String>,
+    exists: bool,
+    current_resource_version: Option<String>,
+    mut current_json: serde_json::Value,
+    mut proposed_json: serde_json::Value,
+    is_secret: bool,
+) -> Result<DiffDoc, CapabilityError> {
+    normalize_for_diff(&mut current_json, is_secret);
+    normalize_for_diff(&mut proposed_json, is_secret);
+    let current_yaml = if exists {
+        serde_yaml::to_string(&current_json).map_err(|e| CapabilityError::Handler(e.to_string()))?
+    } else {
+        String::new()
+    };
+    let proposed_yaml = serde_yaml::to_string(&proposed_json)
+        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+    let rows = align_rows(&current_yaml, &proposed_yaml);
+    let changed = rows.iter().any(|row| row.tag != DiffTag::Same);
+    Ok(DiffDoc {
+        kind,
+        name,
+        namespace,
+        exists,
+        changed,
+        rows,
+        current_resource_version,
+    })
+}
+
 /// `k8s.diffManifest` — for each document, diff the live object against the
 /// server dry-run apply result (current | proposed) as aligned rows.
 pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
@@ -735,7 +776,7 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                         .as_ref()
                         .and_then(|o| o.metadata.resource_version.clone());
                     let exists = current.is_some();
-                    let mut current_json = match current {
+                    let current_json = match current {
                         Some(o) => serde_json::to_value(o)
                             .map_err(|e| CapabilityError::Handler(e.to_string()))?,
                         None => serde_json::json!({}),
@@ -755,31 +796,19 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(|_| CapabilityError::Handler("diff dry-run timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(clean_kube_error(e)))?;
-                    let mut proposed_json = serde_json::to_value(proposed)
+                    let proposed_json = serde_json::to_value(proposed)
                         .map_err(|e| CapabilityError::Handler(e.to_string()))?;
 
-                    normalize_for_diff(&mut current_json, is_secret);
-                    normalize_for_diff(&mut proposed_json, is_secret);
-                    let current_yaml = if exists {
-                        serde_yaml::to_string(&current_json)
-                            .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                    } else {
-                        String::new()
-                    };
-                    let proposed_yaml = serde_yaml::to_string(&proposed_json)
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                    let rows = align_rows(&current_yaml, &proposed_yaml);
-                    let changed = rows.iter().any(|row| row.tag != DiffTag::Same);
-
-                    documents.push(DiffDoc {
-                        kind: r.kind,
-                        name: r.name,
-                        namespace: r.namespace,
+                    documents.push(diff_document(
+                        r.kind,
+                        r.name,
+                        r.namespace,
                         exists,
-                        changed,
-                        rows,
                         current_resource_version,
-                    });
+                        current_json,
+                        proposed_json,
+                        is_secret,
+                    )?);
                 }
                 Ok(DiffOut { documents })
             }
@@ -983,5 +1012,315 @@ metadata:
         }))
         .unwrap();
         assert!(!input.force);
+    }
+
+    // -- diff_document -----------------------------------------------------
+
+    #[test]
+    fn diff_document_marks_changed_replica_update() {
+        let current = serde_json::json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": { "name": "web" },
+            "spec": { "replicas": 3 }
+        });
+        let proposed = serde_json::json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": { "name": "web" },
+            "spec": { "replicas": 5 }
+        });
+        let doc = diff_document(
+            "Deployment".into(),
+            "web".into(),
+            None,
+            true,
+            Some("42".into()),
+            current,
+            proposed,
+            false,
+        )
+        .unwrap();
+        assert!(doc.exists);
+        assert!(doc.changed);
+        assert_eq!(doc.current_resource_version.as_deref(), Some("42"));
+        assert!(doc.rows.iter().any(|r| matches!(r.tag, DiffTag::Replace)));
+    }
+
+    #[test]
+    fn diff_document_handles_create_with_empty_current() {
+        let proposed = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": "cfg" },
+            "data": { "k": "v" }
+        });
+        let doc = diff_document(
+            "ConfigMap".into(),
+            "cfg".into(),
+            None,
+            false,
+            None,
+            serde_json::json!({}),
+            proposed,
+            false,
+        )
+        .unwrap();
+        assert!(!doc.exists);
+        assert!(doc.changed);
+        assert!(doc.current_resource_version.is_none());
+        // The current side is empty, so every row is an insert (or the doc
+        // has no "same" rows at all since there's nothing to align against).
+        assert!(doc.rows.iter().all(|r| r.left.is_none()));
+    }
+
+    #[test]
+    fn diff_document_redacts_secret_values_on_both_sides() {
+        let current = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "s" },
+            "data": { "token": "c2VjcmV0" }
+        });
+        let proposed = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "s" },
+            "data": { "token": "bmV3c2VjcmV0" }
+        });
+        let doc = diff_document(
+            "Secret".into(),
+            "s".into(),
+            None,
+            true,
+            None,
+            current,
+            proposed,
+            true,
+        )
+        .unwrap();
+        for row in &doc.rows {
+            if let Some(left) = &row.left {
+                assert!(!left.contains("c2VjcmV0"));
+            }
+            if let Some(right) = &row.right {
+                assert!(!right.contains("bmV3c2VjcmV0"));
+            }
+        }
+    }
+
+    // -- apply_doc_from_result ----------------------------------------------
+
+    #[test]
+    fn apply_doc_from_result_ok_is_applied() {
+        let doc = apply_doc_from_result("Pod".into(), "web".into(), Ok(()));
+        assert!(doc.applied);
+        assert!(doc.conflict.is_none());
+        assert!(doc.error.is_none());
+    }
+
+    #[test]
+    fn apply_doc_from_result_409_becomes_conflict() {
+        let err = kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "conflict with \"kubectl\": .spec.replicas".into(),
+            reason: "Conflict".into(),
+            code: 409,
+        });
+        let doc = apply_doc_from_result("Deployment".into(), "web".into(), Err(err));
+        assert!(!doc.applied);
+        assert!(doc.error.is_none());
+        let conflict = doc.conflict.expect("expected a conflict");
+        assert!(conflict.managers.contains(&"kubectl".to_string()));
+    }
+
+    #[test]
+    fn apply_doc_from_result_other_error_is_cleaned() {
+        let err = kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "boom".into(),
+            reason: "InternalError".into(),
+            code: 500,
+        });
+        let doc = apply_doc_from_result("Deployment".into(), "web".into(), Err(err));
+        assert!(!doc.applied);
+        assert!(doc.conflict.is_none());
+        assert!(doc.error.as_deref().unwrap_or_default().contains("boom"));
+    }
+
+    // -- gvk_for extra arms ---------------------------------------------------
+
+    #[test]
+    fn gvk_for_covers_more_kinds() {
+        let (gvk, ns) = gvk_for("Service").unwrap();
+        assert_eq!(gvk.kind, "Service");
+        assert!(ns);
+        let (gvk, ns) = gvk_for("Ingress").unwrap();
+        assert_eq!(gvk.group, "networking.k8s.io");
+        assert!(ns);
+        let (gvk, ns) = gvk_for("ClusterRole").unwrap();
+        assert_eq!(gvk.group, "rbac.authorization.k8s.io");
+        assert!(!ns);
+        let (gvk, ns) = gvk_for("StorageClass").unwrap();
+        assert_eq!(gvk.group, "storage.k8s.io");
+        assert!(!ns);
+        let (gvk, ns) = gvk_for("HorizontalPodAutoscaler").unwrap();
+        assert_eq!(gvk.group, "autoscaling");
+        assert!(ns);
+        let (gvk, ns) = gvk_for("EndpointSlice").unwrap();
+        assert_eq!(gvk.group, "discovery.k8s.io");
+        assert!(ns);
+        let (gvk, ns) = gvk_for("MutatingWebhookConfiguration").unwrap();
+        assert_eq!(gvk.group, "admissionregistration.k8s.io");
+        assert!(!ns);
+    }
+
+    // -- resolve_api_resource --------------------------------------------------
+
+    #[test]
+    fn resolve_api_resource_uses_static_table_when_no_crd_fields() {
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "Deployment".into(),
+            namespace: Some("prod".into()),
+            name: "web".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        let (ar, namespaced) = resolve_api_resource(&input).unwrap();
+        assert_eq!(ar.group, "apps");
+        assert_eq!(ar.kind, "Deployment");
+        assert!(namespaced);
+    }
+
+    #[test]
+    fn resolve_api_resource_uses_dynamic_crd_fields_when_supplied() {
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "Widget".into(),
+            namespace: Some("prod".into()),
+            name: "w1".into(),
+            group: Some("example.com".into()),
+            version: Some("v1alpha1".into()),
+            plural: Some("widgets".into()),
+        };
+        let (ar, namespaced) = resolve_api_resource(&input).unwrap();
+        assert_eq!(ar.group, "example.com");
+        assert_eq!(ar.version, "v1alpha1");
+        assert_eq!(ar.kind, "Widget");
+        assert_eq!(ar.plural, "widgets");
+        assert!(namespaced);
+    }
+
+    #[test]
+    fn resolve_api_resource_cluster_scoped_when_namespace_empty_for_crd() {
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "Widget".into(),
+            namespace: None,
+            name: "w1".into(),
+            group: Some("example.com".into()),
+            version: Some("v1alpha1".into()),
+            plural: Some("widgets".into()),
+        };
+        let (_, namespaced) = resolve_api_resource(&input).unwrap();
+        assert!(!namespaced);
+    }
+
+    #[test]
+    fn resolve_api_resource_rejects_unsupported_kind() {
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "Bogus".into(),
+            namespace: None,
+            name: "x".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        assert!(resolve_api_resource(&input).is_err());
+    }
+
+    // -- parse_api_version edge cases ------------------------------------------
+
+    #[test]
+    fn parse_api_version_handles_multi_segment_group() {
+        // Only the first "/" is a separator; the rest of the string is the version.
+        let (group, version) = parse_api_version("networking.k8s.io/v1");
+        assert_eq!(group, "networking.k8s.io");
+        assert_eq!(version, "v1");
+    }
+
+    #[test]
+    fn parse_api_version_handles_empty_string() {
+        let (group, version) = parse_api_version("");
+        assert_eq!(group, "");
+        assert_eq!(version, "");
+    }
+
+    // -- align_rows additional cases --------------------------------------------
+
+    #[test]
+    fn align_rows_pairs_multi_line_replace_group() {
+        let current = "a\nb\nc\n";
+        let proposed = "a\nx\ny\nc\n";
+        let rows = align_rows(current, proposed);
+        // First and last rows are unchanged; the two middle lines pair up as
+        // Replace rows (delete "b"/insert "x" paired, "c" stays Same-ish since
+        // there's no leftover "y" to pair — it becomes a pure Insert).
+        assert!(matches!(rows[0].tag, DiffTag::Same));
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r.tag, DiffTag::Replace) && r.left.as_deref() == Some("b")));
+        assert!(matches!(rows.last().unwrap().tag, DiffTag::Same));
+    }
+
+    #[test]
+    fn align_rows_handles_asymmetric_insert_delete_counts() {
+        // Two deletes, one insert: one Replace pair, one leftover Delete.
+        let rows = align_rows("a\nb\nc\n", "a\nz\n");
+        let replace_count = rows
+            .iter()
+            .filter(|r| matches!(r.tag, DiffTag::Replace))
+            .count();
+        let delete_count = rows
+            .iter()
+            .filter(|r| matches!(r.tag, DiffTag::Delete))
+            .count();
+        assert_eq!(replace_count, 1);
+        assert_eq!(delete_count, 1);
+
+        // One delete, two inserts: one Replace pair, one leftover Insert.
+        let rows = align_rows("a\nb\n", "a\ny\nz\n");
+        let replace_count = rows
+            .iter()
+            .filter(|r| matches!(r.tag, DiffTag::Replace))
+            .count();
+        let insert_count = rows
+            .iter()
+            .filter(|r| matches!(r.tag, DiffTag::Insert))
+            .count();
+        assert_eq!(replace_count, 1);
+        assert_eq!(insert_count, 1);
+    }
+
+    // -- normalize_for_diff on stringData --------------------------------------
+
+    #[test]
+    fn normalize_for_diff_does_not_touch_string_data_key_names() {
+        // redact_secret_data only blanks the `data` map; `stringData` (raw,
+        // un-encoded values) is a distinct field. Document current behavior:
+        // normalize_for_diff still strips noise/status around it, and leaves
+        // stringData values untouched (only `data` is redacted).
+        let mut v: serde_json::Value = serde_yaml::from_str(
+            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n  uid: u\nstringData:\n  password: hunter2\ndata:\n  token: c2VjcmV0\nstatus:\n  phase: Active\n",
+        )
+        .unwrap();
+        normalize_for_diff(&mut v, true);
+        assert!(v.get("status").is_none());
+        assert!(v["metadata"].get("uid").is_none());
+        assert_eq!(v["data"]["token"], "");
+        assert_eq!(v["stringData"]["password"], "hunter2");
     }
 }
