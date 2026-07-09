@@ -71,6 +71,10 @@ export function ManifestEditor({
   const [diffing, setDiffing] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const loadedRvRef = React.useRef<string | null>(null);
+  // Set after a successful apply so the next background diff rebaselines
+  // `loadedRvRef` to the freshly-bumped resourceVersion — otherwise the user's
+  // OWN apply would be mistaken for an external change ("Changed elsewhere").
+  const rebaselineRef = React.useRef(false);
   const diffHandleRef = useRef<HTMLDivElement>(null);
   const [diffWidth, setDiffWidth] = useState(480);
   const diffStartX = useRef(0);
@@ -136,26 +140,37 @@ export function ManifestEditor({
     const docs = out.documents ?? [];
     const conflicted = docs.filter((d) => d.conflict);
     const failed = docs.filter((d) => d.error);
+    // Surface every document that failed outright (inline error + toast).
+    const surfaceFailed = (failedDocs: ApplyDoc[]) => {
+      const names = failedDocs.map((d) => `${d.kind}/${d.name}`).join(", ");
+      const label =
+        failedDocs.length > 1 ? `Failed to apply ${failedDocs.length} documents: ${names}` : `Failed to apply ${names}`;
+      const detail = failedDocs.map((d) => d.error).filter(Boolean).join("; ") || "apply failed";
+      setError(label);
+      notify.error(label, detail);
+    };
     // Close the confirm dialog for any resolved response (conflict, failure, or
     // success) — the conflict banner and error text render inline, outside the
     // (now-inert) dialog, so they'd otherwise never be reachable.
     setConfirming(false);
     if (conflicted.length > 0) {
       setConflictDocs(docs);
+      // A different document may have hard-failed alongside the conflict — show
+      // that error now too, rather than hiding it until the user clicks Force.
+      if (failed.length > 0) surfaceFailed(failed);
       return;
     }
     setConflictDocs(null);
     if (failed.length > 0) {
-      const names = failed.map((d) => `${d.kind}/${d.name}`).join(", ");
-      const label = failed.length > 1 ? `Failed to apply ${failed.length} documents: ${names}` : `Failed to apply ${names}`;
-      const detail = failed.map((d) => d.error).filter(Boolean).join("; ") || "apply failed";
-      setError(label);
-      notify.error(label, detail);
+      surfaceFailed(failed);
       return;
     }
     const first = docs[0];
     const applied = { kind: first?.kind ?? "", name: first?.name ?? "" };
     setResult(applied);
+    // The apply bumped the live resourceVersion; rebaseline off the next diff so
+    // this own change isn't later flagged as "Changed elsewhere".
+    rebaselineRef.current = true;
     const label = docs.length > 1 ? `Applied ${docs.length} resources` : `Applied ${applied.kind || "resource"} ${applied.name}`.trim();
     notify.success(label);
     onApplied?.(applied);
@@ -185,7 +200,17 @@ export function ManifestEditor({
     const t = setTimeout(() => {
       void diffManifest(context, yaml).then((out) => {
         if (!active) return;
-        setDiffDocs(out.error ? [] : out.documents ?? []);
+        const docs = out.error ? [] : out.documents ?? [];
+        // After a successful apply, adopt the freshly-bumped resourceVersion as
+        // the new baseline so the user's OWN change isn't flagged as external.
+        if (rebaselineRef.current) {
+          const rv = docs.find((d) => d.currentResourceVersion)?.currentResourceVersion;
+          if (rv) {
+            loadedRvRef.current = rv;
+            rebaselineRef.current = false;
+          }
+        }
+        setDiffDocs(docs);
         setDiffing(false);
       });
     }, 700);

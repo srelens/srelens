@@ -182,6 +182,13 @@ export function parseResourceVersion(yaml: string): string | null {
   }
 }
 
+/** A single validation error, tagged with the (empty-doc-skipped) document it
+ *  came from so the editor can place it on the right `---`-separated document. */
+export interface ValidateError {
+  docIndex: number;
+  message: string;
+}
+
 /**
  * Validate a manifest against the API server (server-side dry-run, strict).
  * Returns the server's verdict + error messages. `error` is only set when the
@@ -191,9 +198,9 @@ export async function validateManifest(
   context: string,
   yaml: string,
   invoke: Invoker = invokeCapability,
-): Promise<{ valid?: boolean; errors?: string[]; error?: string }> {
+): Promise<{ valid?: boolean; errors?: ValidateError[]; error?: string }> {
   try {
-    const out = await invoke<{ valid: boolean; errors: string[] }>("k8s.validateManifest", {
+    const out = await invoke<{ valid: boolean; errors: ValidateError[] }>("k8s.validateManifest", {
       context,
       yaml,
     });

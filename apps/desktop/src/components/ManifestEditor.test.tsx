@@ -191,6 +191,90 @@ describe("ManifestEditor", () => {
     expect(screen.getByRole("button", { name: "Changes" })).toBeDefined();
   });
 
+  it("surfaces a hard error even when another document conflicts (first response)", async () => {
+    applyManifestMock.mockResolvedValue({
+      applied: false,
+      documents: [
+        {
+          kind: "ConfigMap",
+          name: "cfg",
+          applied: false,
+          conflict: { managers: ["kubectl"], fields: [".data.x"], message: "conflict on cfg" },
+        },
+        { kind: "Deployment", name: "web", applied: false, error: "deploy blew up" },
+      ],
+    });
+    render(
+      <ManifestEditor
+        context="ctx"
+        yaml={"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n"}
+        onYamlChange={() => {}}
+        fill
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    // The conflict banner appears for the conflicting document…
+    const banner = await screen.findByRole("alert");
+    expect(within(banner).getByText(/ConfigMap\/cfg/)).toBeDefined();
+    // …AND the OTHER document's hard error is surfaced on the same response,
+    // not swallowed until after the user clicks Force.
+    await waitFor(() => expect(notifyMock.error).toHaveBeenCalled());
+    expect(screen.getByText(/Failed to apply/)).toBeDefined();
+  });
+
+  it("does not flag the user's own apply as changed elsewhere (rebaselines rv after apply)", async () => {
+    let liveRv = "1";
+    let diffName = "web-before";
+    diffManifestMock.mockImplementation(async () => ({
+      documents: [
+        {
+          kind: "Deployment",
+          name: diffName,
+          namespace: null,
+          exists: true,
+          changed: true,
+          rows: [{ tag: "insert", left: null, right: "x" }],
+          currentResourceVersion: liveRv,
+        },
+      ],
+    }));
+    applyManifestMock.mockImplementation(async () => {
+      liveRv = "9"; // a successful apply bumps the live resourceVersion
+      return { applied: true, documents: [{ kind: "Deployment", name: "web", applied: true }] };
+    });
+
+    function Harness() {
+      const [yaml, setYaml] = useState(
+        'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  resourceVersion: "1"\n',
+      );
+      return <ManifestEditor context="ctx" yaml={yaml} onYamlChange={setYaml} fill />;
+    }
+    render(<Harness />);
+
+    // Open the Changes panel so each diff resolution is observable via DiffView.
+    fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+    // The first diff sees live rv "1" (matches the loaded manifest) → no badge.
+    expect(await screen.findByText("Deployment/web-before", {}, { timeout: 3000 })).toBeDefined();
+    expect(screen.queryByText(/changed elsewhere/i)).toBeNull();
+
+    // Apply — this bumps the live rv to "9" for the user's OWN change.
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(applyManifestMock).toHaveBeenCalled());
+
+    // A later edit triggers a fresh diff that now reports live rv "9".
+    diffName = "web-after";
+    fireEvent.change(screen.getByLabelText("Manifest YAML"), {
+      target: {
+        value: 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  resourceVersion: "1"\n  labels:\n    a: b\n',
+      },
+    });
+    expect(await screen.findByText("Deployment/web-after", {}, { timeout: 3000 })).toBeDefined();
+
+    // The stale badge must NOT appear: the rv bump was our own apply, so the
+    // baseline was rebased to "9" rather than flagged as an external change.
+    expect(screen.queryByText(/changed elsewhere/i)).toBeNull();
+  });
+
   it("fill mode: diff pane is hidden by default; Changes reveals a resizable split, Hide changes collapses it", async () => {
     const { container } = render(
       <ManifestEditor

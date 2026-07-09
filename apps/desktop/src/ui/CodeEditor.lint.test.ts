@@ -59,7 +59,7 @@ spec:
 
 describe("k8sDiagnostics (server validation → editor positions)", () => {
   it("positions an unknown-field error at that field in the YAML", () => {
-    const diags = k8sDiagnostics(manifest, ['strict decoding error: unknown field "spec.foo"']);
+    const diags = k8sDiagnostics(manifest, [{ docIndex: 0, message: 'strict decoding error: unknown field "spec.foo"' }]);
     expect(diags).toHaveLength(1);
     // The range should cover the `foo: bar` value, not the top of the doc.
     const at = manifest.indexOf("bar");
@@ -70,7 +70,7 @@ describe("k8sDiagnostics (server validation → editor positions)", () => {
 
   it("positions an invalid-value error at the offending field", () => {
     const diags = k8sDiagnostics(manifest, [
-      'Deployment.apps "my-app" is invalid: spec.replicas: Invalid value: -1: must be >= 0',
+      { docIndex: 0, message: 'Deployment.apps "my-app" is invalid: spec.replicas: Invalid value: -1: must be >= 0' },
     ]);
     expect(diags).toHaveLength(1);
     const at = manifest.indexOf("-1");
@@ -79,7 +79,7 @@ describe("k8sDiagnostics (server validation → editor positions)", () => {
   });
 
   it("falls back to the top of the document when no field can be located", () => {
-    const diags = k8sDiagnostics(manifest, ["admission webhook denied the request"]);
+    const diags = k8sDiagnostics(manifest, [{ docIndex: 0, message: "admission webhook denied the request" }]);
     expect(diags).toHaveLength(1);
     expect(diags[0].from).toBe(0);
     expect(diags[0].message).toContain("admission webhook");
@@ -87,7 +87,7 @@ describe("k8sDiagnostics (server validation → editor positions)", () => {
 
   it("returns nothing for no messages or empty text", () => {
     expect(k8sDiagnostics(manifest, [])).toHaveLength(0);
-    expect(k8sDiagnostics("", ["some error"])).toHaveLength(0);
+    expect(k8sDiagnostics("", [{ docIndex: 0, message: "some error" }])).toHaveLength(0);
   });
 
   it("maps a field that exists only in the SECOND document to a range inside it", () => {
@@ -96,11 +96,30 @@ describe("k8sDiagnostics (server validation → editor positions)", () => {
     const doc2 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app-2\nspec:\n  replicas: 1\n  foo: bar\n";
     const twoDoc = `${doc1}${separator}${doc2}`;
     const separatorOffset = doc1.length;
-    const diags = k8sDiagnostics(twoDoc, ['strict decoding error: unknown field "spec.foo"']);
+    const diags = k8sDiagnostics(twoDoc, [{ docIndex: 1, message: 'strict decoding error: unknown field "spec.foo"' }]);
     expect(diags).toHaveLength(1);
     expect(diags[0].from).toBeGreaterThan(separatorOffset);
     const at = twoDoc.indexOf("bar");
     expect(diags[0].from).toBeLessThanOrEqual(at);
     expect(diags[0].to).toBeGreaterThanOrEqual(at);
+  });
+
+  it("uses docIndex to target the SECOND document when the field exists in BOTH", () => {
+    // `spec.replicas` is present in BOTH documents. An error tagged docIndex:1
+    // must land in the SECOND document, not the first — a first-match-wins
+    // implementation would wrongly point at doc 1's replicas.
+    const doc1 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\nspec:\n  replicas: 1\n";
+    const separator = "---\n";
+    const doc2 = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app-2\nspec:\n  replicas: 2\n";
+    const twoDoc = `${doc1}${separator}${doc2}`;
+    const separatorOffset = doc1.length;
+    const diags = k8sDiagnostics(twoDoc, [
+      { docIndex: 1, message: 'Deployment.apps "my-app-2" is invalid: spec.replicas: Invalid value: 2: bad' },
+    ]);
+    expect(diags).toHaveLength(1);
+    // Must point into the SECOND document (past the `---`), i.e. at doc2's replicas.
+    expect(diags[0].from).toBeGreaterThan(separatorOffset);
+    const secondReplicas = twoDoc.indexOf("replicas: 2");
+    expect(diags[0].from).toBeGreaterThanOrEqual(secondReplicas);
   });
 });

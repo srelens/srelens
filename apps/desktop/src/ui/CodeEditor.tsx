@@ -85,34 +85,38 @@ function extractFieldPaths(message: string): string[] {
  * in the YAML, else at the top of the document — so the error is always shown.
  * Pure + tested.
  */
-export function k8sDiagnostics(text: string, messages: string[]): Diagnostic[] {
-  if (!messages.length || !text.trim()) return [];
+export function k8sDiagnostics(text: string, errors: Array<{ docIndex: number; message: string }>): Diagnostic[] {
+  if (!errors.length || !text.trim()) return [];
   const len = text.length;
+  const clamp = (n: number) => Math.max(0, Math.min(n, len));
   let docs: ReturnType<typeof parseAllDocuments> = [];
   try {
-    docs = parseAllDocuments(text);
+    // Match the backend's split (which skips empty documents) so docIndex aligns.
+    docs = parseAllDocuments(text).filter((d) => d.contents != null);
   } catch {
     docs = [];
   }
-  const topTo = Math.max(1, text.indexOf("\n") === -1 ? len : text.indexOf("\n"));
   const diagnostics: Diagnostic[] = [];
-  for (const message of messages) {
-    const ranges = extractFieldPaths(message)
-      .map((p) => {
-        const segments = fieldSegments(p);
-        for (const doc of docs) {
-          const node = doc.getIn(segments, true) as { range?: [number, number] } | undefined;
-          if (node?.range) return [node.range[0], node.range[1]] as [number, number];
-        }
-        return null;
-      })
-      .filter((r): r is [number, number] => !!r);
+  for (const { docIndex, message } of errors) {
+    const doc = docs[docIndex];
+    const ranges = doc
+      ? extractFieldPaths(message)
+          .map((p) => {
+            const node = doc.getIn(fieldSegments(p), true) as { range?: [number, number] } | undefined;
+            return node?.range ? ([node.range[0], node.range[1]] as [number, number]) : null;
+          })
+          .filter((r): r is [number, number] => !!r)
+      : [];
     if (ranges.length) {
       for (const [from, to] of ranges) {
-        diagnostics.push({ from, to: Math.max(to, from + 1), severity: "error", message });
+        diagnostics.push({ from: clamp(from), to: Math.max(clamp(to), clamp(from) + 1), severity: "error", message });
       }
     } else {
-      diagnostics.push({ from: 0, to: topTo, severity: "error", message });
+      // Fall back to the START of the target document (not the whole-text top).
+      const docStart = (doc?.contents as { range?: [number, number] } | undefined)?.range?.[0] ?? 0;
+      const nl = text.indexOf("\n", docStart);
+      const to = nl === -1 ? len : nl;
+      diagnostics.push({ from: clamp(docStart), to: Math.max(clamp(to), clamp(docStart) + 1), severity: "error", message });
     }
   }
   return diagnostics;
@@ -227,7 +231,7 @@ export interface CodeEditorProps {
    * error messages (empty = valid). Wired to `k8s.validateManifest`. When set,
    * the editor lints against the API server in addition to YAML syntax.
    */
-  schemaValidate?: (yaml: string) => Promise<string[]>;
+  schemaValidate?: (yaml: string) => Promise<Array<{ docIndex: number; message: string }>>;
   /**
    * k8s field autocomplete: resolve the OpenAPI schema for a kind (wired to
    * `k8s.openApiSchema`). When set, the editor offers field-name and enum-value
