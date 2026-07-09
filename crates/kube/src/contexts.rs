@@ -87,6 +87,14 @@ pub struct DeleteContextOut {
     pub success: bool,
 }
 
+/// Build the capability that deletes a context (and its now-unused cluster and
+/// user entries) from whichever kubeconfig file it was found in.
+///
+/// The kubeconfig is rewritten via `serde_yaml`, so any existing YAML comments
+/// or formatting in the source file are not preserved — this is a known
+/// limitation. The write itself is atomic: the new contents are written to a
+/// temporary file in the same directory and then renamed over the original,
+/// so a failure mid-write cannot leave the kubeconfig truncated or corrupted.
 pub fn delete_context_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DeleteContextIn, DeleteContextOut, _, _>(
         "k8s.deleteContext",
@@ -182,10 +190,34 @@ pub fn delete_context_capability(cache: Arc<ClientCache>) -> Capability {
                                     }
                                 }
 
-                                // Write back
+                                // Write back atomically: write to a temp file in the same
+                                // directory, then rename over the original so a mid-write
+                                // failure can't truncate or corrupt the kubeconfig.
                                 let updated_yaml = serde_yaml::to_string(&yaml_value)
                                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                                std::fs::write(&path, updated_yaml)
+                                let dir =
+                                    path.parent().unwrap_or_else(|| std::path::Path::new("."));
+                                let tmp = dir.join(format!(
+                                    ".{}.srelens-tmp",
+                                    path.file_name()
+                                        .and_then(|f| f.to_str())
+                                        .unwrap_or("kubeconfig")
+                                ));
+                                std::fs::write(&tmp, &updated_yaml)
+                                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    if let Ok(meta) = std::fs::metadata(&path) {
+                                        let _ = std::fs::set_permissions(
+                                            &tmp,
+                                            std::fs::Permissions::from_mode(
+                                                meta.permissions().mode(),
+                                            ),
+                                        );
+                                    }
+                                }
+                                std::fs::rename(&tmp, &path)
                                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
 
                                 found = true;
@@ -283,7 +315,15 @@ mod tests {
     #[tokio::test]
     async fn deletes_a_context_from_kubeconfig_file() {
         let dir = std::env::temp_dir();
-        let path = dir.join("srelens-test-delete-kubeconfig.yaml");
+        let unique = format!(
+            "srelens-test-delete-{}-{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let path = dir.join(unique);
         tokio::fs::write(
             &path,
             "clusters:\n  - name: a\n    cluster: { server: https://a }\ncontexts:\n  - name: ctx-a\n    context: { cluster: a, user: user-a }\nusers:\n  - name: user-a\n    user: {}\n",
