@@ -356,15 +356,62 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApplyIn {
     pub context: String,
-    /// The full resource manifest as YAML.
+    /// One or more resource manifests as YAML (documents separated by `---`).
     pub yaml: String,
+    /// Force apply, taking ownership of fields held by other managers.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Fields owned by other managers that block a non-forced apply.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Conflict {
+    pub managers: Vec<String>,
+    pub fields: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ApplyDoc {
+    pub kind: String,
+    pub name: String,
+    pub applied: bool,
+    pub conflict: Option<Conflict>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ApplyOut {
-    pub kind: String,
-    pub name: String,
+    pub documents: Vec<ApplyDoc>,
+    /// True only when every document applied with no conflict or error.
     pub applied: bool,
+}
+
+/// Best-effort parse of an apiserver SSA conflict message into managers
+/// (quoted names) and field paths (leading-dot tokens).
+pub fn parse_conflict(message: &str) -> Conflict {
+    let mut managers = Vec::new();
+    let mut i = 0;
+    while let Some(start) = message[i..].find('"') {
+        let abs = i + start + 1;
+        if let Some(end) = message[abs..].find('"') {
+            managers.push(message[abs..abs + end].to_string());
+            i = abs + end + 1;
+        } else {
+            break;
+        }
+    }
+    let fields = message
+        .split_whitespace()
+        .map(|t| t.trim_start_matches('-').trim())
+        .filter(|t| t.starts_with('.') && t.len() > 1)
+        .map(String::from)
+        .collect();
+    Conflict {
+        managers,
+        fields,
+        message: message.to_string(),
+    }
 }
 
 /// Split an `apiVersion` into (group, version). Core resources ("v1") have an
@@ -376,11 +423,18 @@ pub fn parse_api_version(api_version: &str) -> (String, String) {
     }
 }
 
-/// `k8s.applyManifest` — server-side apply a YAML manifest (create or update).
+/// True only when there is at least one document and every one applied.
+fn overall_applied(docs: &[ApplyDoc]) -> bool {
+    !docs.is_empty() && docs.iter().all(|d| d.applied)
+}
+
+/// `k8s.applyManifest` — server-side apply one or more YAML documents with field
+/// manager `srelens`. Non-forcing by default: field conflicts come back as
+/// structured `Conflict` data (per document) rather than a raw 409.
 pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ApplyIn, ApplyOut, _, _>(
         "k8s.applyManifest",
-        "server-side apply a resource manifest (YAML); creates or updates",
+        "server-side apply resource manifests (YAML, multi-doc); creates or updates",
         Annotations {
             read_only: false,
             destructive: false,
@@ -390,44 +444,84 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ApplyIn| {
             let cache = cache.clone();
             async move {
-                let value: serde_json::Value = serde_yaml::from_str(&input.yaml)
-                    .map_err(|e| CapabilityError::Handler(format!("parse yaml: {e}")))?;
-                let get_str = |path: &[&str]| -> Option<String> {
-                    let mut cur = &value;
-                    for key in path {
-                        cur = cur.get(key)?;
-                    }
-                    cur.as_str().map(String::from)
-                };
-                let api_version = get_str(&["apiVersion"])
-                    .ok_or_else(|| CapabilityError::Handler("missing apiVersion".into()))?;
-                let kind = get_str(&["kind"])
-                    .ok_or_else(|| CapabilityError::Handler("missing kind".into()))?;
-                let name = get_str(&["metadata", "name"])
-                    .ok_or_else(|| CapabilityError::Handler("missing metadata.name".into()))?;
-                let namespace = get_str(&["metadata", "namespace"]);
-
-                let (group, version) = parse_api_version(&api_version);
-                let gvk = GroupVersionKind::gvk(&group, &version, &kind);
-                let ar = ApiResource::from_gvk(&gvk);
+                let docs = split_documents(&input.yaml)?;
                 let client = cache
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                let api: Api<DynamicObject> = match &namespace {
-                    Some(ns) => Api::namespaced_with(client, ns, &ar),
-                    None => Api::all_with(client, &ar),
-                };
-                let params = PatchParams::apply("srelens").force();
-                tokio::time::timeout(request_timeout(), api.patch(&name, &params, &Patch::Apply(&value)))
+                let mut documents = Vec::with_capacity(docs.len());
+                for value in docs {
+                    let r = match resource_ref(&value) {
+                        Some(r) => r,
+                        None => {
+                            documents.push(ApplyDoc {
+                                kind: String::new(),
+                                name: String::new(),
+                                applied: false,
+                                conflict: None,
+                                error: Some(
+                                    "document missing apiVersion/kind/metadata.name".into(),
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                    let (group, version) = parse_api_version(&r.api_version);
+                    let ar =
+                        ApiResource::from_gvk(&GroupVersionKind::gvk(&group, &version, &r.kind));
+                    let api: Api<DynamicObject> = match &r.namespace {
+                        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+                        None => Api::all_with(client.clone(), &ar),
+                    };
+                    let mut params = PatchParams::apply("srelens");
+                    if input.force {
+                        params = params.force();
+                    }
+                    let result = match tokio::time::timeout(
+                        request_timeout(),
+                        api.patch(&r.name, &params, &Patch::Apply(&value)),
+                    )
                     .await
-                    .map_err(|_| CapabilityError::Handler("apply timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                Ok(ApplyOut {
-                    kind,
-                    name,
-                    applied: true,
-                })
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            documents.push(ApplyDoc {
+                                kind: r.kind,
+                                name: r.name,
+                                applied: false,
+                                conflict: None,
+                                error: Some("apply timed out".into()),
+                            });
+                            continue;
+                        }
+                    };
+                    let doc = match result {
+                        Ok(_) => ApplyDoc {
+                            kind: r.kind,
+                            name: r.name,
+                            applied: true,
+                            conflict: None,
+                            error: None,
+                        },
+                        Err(kube::Error::Api(resp)) if resp.code == 409 => ApplyDoc {
+                            kind: r.kind,
+                            name: r.name,
+                            applied: false,
+                            conflict: Some(parse_conflict(&resp.message)),
+                            error: None,
+                        },
+                        Err(e) => ApplyDoc {
+                            kind: r.kind,
+                            name: r.name,
+                            applied: false,
+                            conflict: None,
+                            error: Some(clean_kube_error(e)),
+                        },
+                    };
+                    documents.push(doc);
+                }
+                let applied = overall_applied(&documents);
+                Ok(ApplyOut { documents, applied })
             }
         },
     )
@@ -796,5 +890,48 @@ metadata:
         assert_eq!(cap.id, "k8s.diffManifest");
         assert!(cap.annotations.read_only);
         assert!(cap.annotations.sensitive);
+    }
+
+    #[test]
+    fn parse_conflict_extracts_managers_and_fields() {
+        let msg = "Apply failed with 2 conflicts: conflicts with \"kubectl\" using apps/v1:\n- .spec.replicas\n- .spec.template.spec.containers[0].image";
+        let c = parse_conflict(msg);
+        assert!(c.managers.contains(&"kubectl".to_string()));
+        assert!(c.fields.iter().any(|f| f == ".spec.replicas"));
+        assert!(c
+            .fields
+            .iter()
+            .any(|f| f == ".spec.template.spec.containers[0].image"));
+        assert_eq!(c.message, msg);
+    }
+
+    #[test]
+    fn overall_applied_requires_nonempty_all_applied() {
+        assert!(!overall_applied(&[]));
+        let ok = ApplyDoc {
+            kind: "Pod".into(),
+            name: "a".into(),
+            applied: true,
+            conflict: None,
+            error: None,
+        };
+        let bad = ApplyDoc {
+            kind: "Pod".into(),
+            name: "b".into(),
+            applied: false,
+            conflict: None,
+            error: Some("x".into()),
+        };
+        assert!(overall_applied(std::slice::from_ref(&ok)));
+        assert!(!overall_applied(&[ok, bad]));
+    }
+
+    #[test]
+    fn apply_in_defaults_force_false() {
+        let input: ApplyIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: Pod"
+        }))
+        .unwrap();
+        assert!(!input.force);
     }
 }
