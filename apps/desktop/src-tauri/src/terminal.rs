@@ -24,14 +24,14 @@ struct Session {
 /// Tauri-managed state owning running local terminals (keyed by numeric id).
 pub struct TerminalManager {
     next_id: AtomicU64,
-    sessions: Mutex<HashMap<u64, Arc<Session>>>,
+    sessions: Arc<Mutex<HashMap<u64, Arc<Session>>>>,
 }
 
 impl TerminalManager {
     pub fn new() -> Self {
         Self {
             next_id: AtomicU64::new(1),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -45,13 +45,23 @@ fn write_locked_kubeconfig(id: u64, context: &str, extra: &[String]) -> Result<P
     paths.extend(extra.iter().map(PathBuf::from));
     let yaml = srelens_kube::connect::single_context_kubeconfig_yaml(&paths, context)?;
 
-    let path = std::env::temp_dir().join(format!("srelens-term-{id}.kubeconfig"));
-    std::fs::write(&path, yaml).map_err(|e| e.to_string())?;
+    // Unique per-process + per-session name, created atomically with O_EXCL so a
+    // pre-existing path/symlink can't be followed or overwritten, and mode 0600 at
+    // creation so there's no world-readable window before perms are applied.
+    let path = std::env::temp_dir().join(format!(
+        "srelens-term-{}-{}.kubeconfig",
+        std::process::id(),
+        id
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    let mut file = opts.open(&path).map_err(|e| e.to_string())?;
+    file.write_all(yaml.as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -112,6 +122,7 @@ pub async fn start_terminal(
     // Blocking read loop on a dedicated thread (portable-pty readers are sync).
     let out_channel = format!("term:out:{id}");
     let exit_channel = format!("term:exit:{id}");
+    let sessions = Arc::clone(&manager.sessions);
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -126,6 +137,7 @@ pub async fn start_terminal(
         }
         let _ = app.emit(&exit_channel, Option::<String>::None);
         let _ = std::fs::remove_file(&overlay);
+        sessions.lock().unwrap().remove(&id);
     });
 
     Ok(id)

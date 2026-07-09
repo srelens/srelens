@@ -45,7 +45,10 @@ export function LocalTerminal({
         context,
         kubeconfigFiles,
         (chunk) => term.write(chunk),
-        () => term.write("\r\n[shell exited]\r\n"),
+        () => {
+          term.write("\r\n[shell exited]\r\n");
+          session?.close();
+        },
         { cols: term.cols, rows: term.rows },
       ).then((s) => {
         if (disposed) {
