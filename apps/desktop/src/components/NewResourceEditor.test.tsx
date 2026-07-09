@@ -3,7 +3,10 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import React from "react";
 
 const { applyManifestMock } = vi.hoisted(() => ({ applyManifestMock: vi.fn() }));
-vi.mock("../lib/manifest", () => ({ applyManifest: applyManifestMock }));
+vi.mock("../lib/manifest", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/manifest")>()),
+  applyManifest: applyManifestMock,
+}));
 vi.mock("../ui/CodeEditor", () => ({
   CodeEditor: ({ value, onChange, ariaLabel }: { value: string; onChange?: (v: string) => void; ariaLabel?: string }) => (
     <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange?.(e.target.value)} />
@@ -16,7 +19,10 @@ beforeEach(() => applyManifestMock.mockReset());
 
 describe("NewResourceEditor", () => {
   it("prefills a template and applies it, staying open on success", async () => {
-    applyManifestMock.mockResolvedValue({ applied: true, kind: "Service", name: "my-app" });
+    applyManifestMock.mockResolvedValue({
+      applied: true,
+      documents: [{ kind: "Service", name: "my-app", applied: true }],
+    });
     const onCreated = vi.fn();
     render(<NewResourceEditor context="kind-dev" namespace="prod" initialKind="Service" onCreated={onCreated} />);
 
@@ -26,7 +32,7 @@ describe("NewResourceEditor", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
-    await waitFor(() => expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", editor.value));
+    await waitFor(() => expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", editor.value, false));
     expect(await screen.findByText(/Applied Service/)).toBeDefined();
     expect(onCreated).toHaveBeenCalled();
     // Editor is still present (tab stays open to create more).

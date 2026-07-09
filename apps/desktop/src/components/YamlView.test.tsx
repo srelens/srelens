@@ -53,7 +53,10 @@ describe("YamlView", () => {
 
   it("edits and applies the manifest behind a confirm", async () => {
     getManifestMock.mockResolvedValue({ yaml: "kind: ConfigMap\n" });
-    applyManifestMock.mockResolvedValue({ applied: true, kind: "ConfigMap", name: "cm" });
+    applyManifestMock.mockResolvedValue({
+      applied: true,
+      documents: [{ kind: "ConfigMap", name: "cm", applied: true }],
+    });
     render(<YamlView context="kind-dev" kind="ConfigMap" namespace="default" name="cm" />);
 
     const textarea = await screen.findByLabelText("Manifest YAML");
@@ -68,7 +71,7 @@ describe("YamlView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     await waitFor(() =>
-      expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", "kind: ConfigMap\ndata:\n  k: v\n"),
+      expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", "kind: ConfigMap\ndata:\n  k: v\n", false),
     );
   });
 });
