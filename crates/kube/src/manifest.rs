@@ -418,15 +418,27 @@ pub struct ApplyOut {
 /// Best-effort parse of an apiserver SSA conflict message into managers
 /// (quoted names) and field paths (leading-dot tokens).
 pub fn parse_conflict(message: &str) -> Conflict {
+    // Managers are the quoted names in the "conflict(s) with \"…\"" clause, up
+    // to the ':' that ends that clause (e.g. `conflicts with "kubectl" and
+    // "helm" using v1: .spec.replicas`). Scoping to this region avoids
+    // mislabeling a quoted resource name/value elsewhere in the message as a
+    // manager.
     let mut managers = Vec::new();
-    let mut i = 0;
-    while let Some(start) = message[i..].find('"') {
-        let abs = i + start + 1;
-        if let Some(end) = message[abs..].find('"') {
-            managers.push(message[abs..abs + end].to_string());
-            i = abs + end + 1;
-        } else {
-            break;
+    if let Some(w) = message.find("with \"") {
+        let region_end = message[w..]
+            .find(':')
+            .map(|i| w + i)
+            .unwrap_or(message.len());
+        let region = &message[w..region_end];
+        let mut i = 0;
+        while let Some(s) = region[i..].find('"') {
+            let abs = i + s + 1;
+            if let Some(e) = region[abs..].find('"') {
+                managers.push(region[abs..abs + e].to_string());
+                i = abs + e + 1;
+            } else {
+                break;
+            }
         }
     }
     let fields = message
@@ -543,8 +555,19 @@ pub struct ValidateIn {
 pub struct ValidateOut {
     /// True when the API server accepts the manifest (dry-run).
     pub valid: bool,
-    /// Validation error messages (empty when valid).
-    pub errors: Vec<String>,
+    /// Validation errors (empty when valid).
+    pub errors: Vec<ValidateError>,
+}
+
+/// A single validation error, tagged with the document it belongs to so the
+/// editor can surface it against the right document in a multi-doc manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidateError {
+    /// Index of the document (in split order, skipping empty docs) the error
+    /// belongs to. Serializes as `docIndex`.
+    pub doc_index: usize,
+    pub message: String,
 }
 
 /// Extract a clean, human message from a kube error — the API server's
@@ -591,6 +614,23 @@ async fn validate_document(
     Some(result.map(|_| ()).map_err(clean_kube_error))
 }
 
+/// Build the validation result from per-document outcomes. `None` = the
+/// document had no identity yet (skipped, not a failure); `Some(Ok(()))` =
+/// valid; a `Some(Err(message))` becomes a `ValidateError` tagged with its
+/// doc index. Pure, so it is unit-testable independent of the API server.
+fn aggregate_validation(results: Vec<(usize, Option<Result<(), String>>)>) -> ValidateOut {
+    let mut errors = Vec::new();
+    for (doc_index, r) in results {
+        if let Some(Err(message)) = r {
+            errors.push(ValidateError { doc_index, message });
+        }
+    }
+    ValidateOut {
+        valid: errors.is_empty(),
+        errors,
+    }
+}
+
 /// `k8s.validateManifest` — server-side dry-run apply with strict field
 /// validation, one or more `---`-separated documents. Returns the API
 /// server's real verdict (unknown fields, wrong types, invalid values,
@@ -612,15 +652,19 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     Err(e) => {
                         return Ok(ValidateOut {
                             valid: false,
-                            errors: vec![e.to_string()],
+                            errors: vec![ValidateError {
+                                doc_index: 0,
+                                message: e.to_string(),
+                            }],
                         })
                     }
                 };
-                let mut errors = Vec::new();
                 let mut client: Option<kube::Client> = None;
-                for value in &docs {
+                let mut results: Vec<(usize, Option<Result<(), String>>)> = Vec::new();
+                for (doc_index, value) in docs.iter().enumerate() {
                     if resource_ref(value).is_none() {
                         // Nothing to validate against the server yet; not an error.
+                        results.push((doc_index, None));
                         continue;
                     }
                     if client.is_none() {
@@ -631,14 +675,12 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                                 .map_err(CapabilityError::Handler)?,
                         );
                     }
-                    if let Some(Err(message)) =
-                        validate_document(client.as_ref().unwrap(), value).await
-                    {
-                        errors.push(message);
-                    }
+                    results.push((
+                        doc_index,
+                        validate_document(client.as_ref().unwrap(), value).await,
+                    ));
                 }
-                let valid = errors.is_empty();
-                Ok(ValidateOut { valid, errors })
+                Ok(aggregate_validation(results))
             }
         },
     )
@@ -772,11 +814,12 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(CapabilityError::Handler)?;
                 let mut documents = Vec::with_capacity(docs.len());
                 for value in docs {
-                    let r = resource_ref(&value).ok_or_else(|| {
-                        CapabilityError::Handler(
-                            "document missing apiVersion/kind/metadata.name".into(),
-                        )
-                    })?;
+                    let r = match resource_ref(&value) {
+                        Some(r) => r,
+                        // Incomplete document (e.g. still being typed) — skip
+                        // it rather than aborting the whole diff.
+                        None => continue,
+                    };
                     let (group, version) = parse_api_version(&r.api_version);
                     let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
                     let ar = ApiResource::from_gvk(&gvk);
@@ -1004,6 +1047,21 @@ metadata:
     }
 
     #[test]
+    fn parse_conflict_scopes_managers_to_the_with_clause() {
+        // Two managers in the "conflicts with ... and ..." clause, plus a
+        // quoted value AFTER the clause-ending ':' that must NOT be picked up
+        // as a manager.
+        let msg = "Apply failed with 2 conflicts: conflicts with \"kubectl\" and \"helm\" using apps/v1:\n- .spec.replicas\n- .metadata.labels.\"app\": \"web\"";
+        let c = parse_conflict(msg);
+        assert!(c.managers.contains(&"kubectl".to_string()));
+        assert!(c.managers.contains(&"helm".to_string()));
+        assert_eq!(c.managers.len(), 2);
+        assert!(!c.managers.contains(&"web".to_string()));
+        assert!(!c.managers.contains(&"app".to_string()));
+        assert_eq!(c.message, msg);
+    }
+
+    #[test]
     fn overall_applied_requires_nonempty_all_applied() {
         assert!(!overall_applied(&[]));
         let ok = ApplyDoc {
@@ -1031,6 +1089,31 @@ metadata:
         }))
         .unwrap();
         assert!(!input.force);
+    }
+
+    // -- aggregate_validation -----------------------------------------------
+
+    #[test]
+    fn aggregate_validation_empty_input_is_valid() {
+        let out = aggregate_validation(vec![]);
+        assert!(out.valid);
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn aggregate_validation_identityless_and_valid_docs_are_valid() {
+        let out = aggregate_validation(vec![(0, None), (1, Some(Ok(())))]);
+        assert!(out.valid);
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn aggregate_validation_tags_error_with_doc_index() {
+        let out = aggregate_validation(vec![(0, Some(Ok(()))), (2, Some(Err("boom".to_string())))]);
+        assert!(!out.valid);
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(out.errors[0].doc_index, 2);
+        assert_eq!(out.errors[0].message, "boom");
     }
 
     // -- diff_document -----------------------------------------------------
