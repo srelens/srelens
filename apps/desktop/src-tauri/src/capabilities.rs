@@ -51,6 +51,7 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
         cache.clone(),
         default_kubeconfig_paths(),
     ));
+    reg.register(srelens_kube::contexts::delete_context_capability(cache.clone()));
 
     reg.register(srelens_kube::connect::cluster_info_capability(cache.clone()));
     reg.register(srelens_kube::workloads::list_namespaces_capability(

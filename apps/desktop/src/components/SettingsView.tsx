@@ -21,6 +21,7 @@ import {
   GripVertical,
   ClipboardPaste,
   Plug,
+  Trash2,
 } from "lucide-react";
 import {
   PageHeader,
@@ -33,7 +34,7 @@ import {
   type ThemeMode,
   type ThemeName,
 } from "../ui";
-import { listContexts, type ClusterContext } from "../lib/clusters";
+import { listContexts, deleteContext, type ClusterContext } from "../lib/clusters";
 import {
   DEFAULT_WORKSPACE_LAYOUT,
   REQUEST_TIMEOUT,
@@ -107,6 +108,9 @@ export function SettingsView({
   contextOrder,
   onContextOrderChange,
   initialSection = "appearance",
+  contexts: passedContexts = null,
+  contextsError = "",
+  onDeleteContext,
 }: {
   theme: Theme;
   onThemeNameChange: (name: ThemeName) => void;
@@ -123,10 +127,13 @@ export function SettingsView({
   onContextOrderChange: (order: string[]) => void;
   /** Section to open on mount (e.g. deep-linked from the update toast). */
   initialSection?: SettingsSection;
+  contexts?: ClusterContext[] | null;
+  contextsError?: string;
+  onDeleteContext?: (name: string) => Promise<void>;
 }) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
-  const [contexts, setContexts] = useState<ClusterContext[] | null>(null);
-  const [contextError, setContextError] = useState("");
+  const [internalContexts, setInternalContexts] = useState<ClusterContext[] | null>(null);
+  const [internalError, setInternalError] = useState("");
   const [contextQuery, setContextQuery] = useState("");
   const [selectedContextName, setSelectedContextName] = useState<string | null>(null);
   const [logoError, setLogoError] = useState("");
@@ -184,17 +191,54 @@ export function SettingsView({
   };
 
   useEffect(() => {
+    if (passedContexts !== null) return;
     let active = true;
     void listContexts(kubeconfigFiles).then((outcome) => {
       if (!active) return;
-      setContexts(outcome.contexts ?? []);
+      setInternalContexts(outcome.contexts ?? []);
       setSelectedContextName((current) => current ?? outcome.contexts?.[0]?.name ?? null);
-      setContextError(outcome.error ?? "");
+      setInternalError(outcome.error ?? "");
     });
     return () => {
       active = false;
     };
-  }, [kubeconfigFiles]);
+  }, [kubeconfigFiles, passedContexts]);
+
+  useEffect(() => {
+    if (passedContexts !== null) {
+      setSelectedContextName((current) => {
+        if (current && passedContexts.some((c) => c.name === current)) {
+          return current;
+        }
+        return passedContexts[0]?.name ?? null;
+      });
+    }
+  }, [passedContexts]);
+
+  const contexts = passedContexts !== null ? passedContexts : internalContexts;
+  const contextError = passedContexts !== null ? contextsError : internalError;
+
+  const handleDeleteContext = async (name: string) => {
+    if (!window.confirm(`Are you sure you want to remove context "${name}"? This will modify the kubeconfig file.`)) {
+      return;
+    }
+    if (onDeleteContext) {
+      await onDeleteContext(name);
+      setSelectedContextName(null);
+    } else {
+      try {
+        await deleteContext(name);
+        resetContext(name);
+        onContextOrderChange(contextOrder.filter((item) => item !== name));
+        void listContexts(kubeconfigFiles).then((outcome) => {
+          setInternalContexts(outcome.contexts ?? []);
+          setSelectedContextName(null);
+        });
+      } catch (e) {
+        alert(`Failed to delete context: ${e}`);
+      }
+    }
+  };
 
   const updateContext = (name: string, patch: ContextProfiles[string]) => {
     onContextProfilesChange({
@@ -757,6 +801,14 @@ export function SettingsView({
                         </span>
                         <Button variant="ghost" size="sm" onClick={() => resetContext(selectedContext.name)}>
                           <RotateCcw data-icon="inline-start" /> Reset identity
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="hover:text-destructive hover:bg-destructive/10 text-muted-foreground"
+                          onClick={() => void handleDeleteContext(selectedContext.name)}
+                        >
+                          <Trash2 data-icon="inline-start" /> Remove context
                         </Button>
                       </footer>
                     </article>

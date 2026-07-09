@@ -59,6 +59,11 @@ impl ClientCache {
     pub async fn invalidate(&self, context: &str) {
         self.clients.lock().await.remove(context);
     }
+
+    /// Clear all cached clients (e.g. after a kubeconfig change).
+    pub async fn clear(&self) {
+        self.clients.lock().await.clear();
+    }
 }
 
 #[cfg(test)]

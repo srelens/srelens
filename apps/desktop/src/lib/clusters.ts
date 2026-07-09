@@ -51,3 +51,13 @@ export async function connectCluster(
     return { context, reachable: false, error: String(e) };
   }
 }
+
+/**
+ * Delete a context from its source kubeconfig file via the backend.
+ */
+export async function deleteContext(
+  context: string,
+  invoke: Invoker = invokeCapability,
+): Promise<{ success: boolean }> {
+  return invoke<{ success: boolean }>("k8s.deleteContext", { context });
+}

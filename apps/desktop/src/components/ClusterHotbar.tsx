@@ -22,6 +22,7 @@ export function ClusterHotbar({
   contextProfiles = {},
   kubeconfigFiles = EMPTY_LIST,
   contextOrder = EMPTY_LIST,
+  contexts: passedContexts,
 }: {
   openContext: string | null;
   onOpenContext: (context: string) => void;
@@ -31,18 +32,24 @@ export function ClusterHotbar({
   contextProfiles?: ContextProfiles;
   kubeconfigFiles?: string[];
   contextOrder?: string[];
+  contexts?: ClusterContext[];
 }) {
-  const [contexts, setContexts] = useState<ClusterContext[]>([]);
+  const [internalContexts, setInternalContexts] = useState<ClusterContext[]>([]);
 
   useEffect(() => {
+    if (passedContexts) return;
     let active = true;
     void listContexts(kubeconfigFiles).then((o) => {
-      if (active && o.contexts) setContexts(orderContexts(o.contexts, contextOrder));
+      if (active && o.contexts) setInternalContexts(orderContexts(o.contexts, contextOrder));
     });
     return () => {
       active = false;
     };
-  }, [contextOrder, kubeconfigFiles]);
+  }, [contextOrder, kubeconfigFiles, passedContexts]);
+
+  const contexts = passedContexts
+    ? orderContexts(passedContexts, contextOrder)
+    : internalContexts;
 
   return (
     <div className="fl-hotbar">

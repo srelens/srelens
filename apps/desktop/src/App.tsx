@@ -49,6 +49,7 @@ import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
 import type { SettingsSection } from "./components/SettingsView";
+import { listContexts, deleteContext, type ClusterContext } from "./lib/clusters";
 
 interface ViewTab {
   id: number;
@@ -94,6 +95,65 @@ export function App() {
   // nonce bumps to remount SettingsView at the requested section when asked.
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("appearance");
   const [settingsSectionNonce, setSettingsSectionNonce] = useState(0);
+
+  const [contexts, setContexts] = useState<ClusterContext[] | null>(null);
+  const [contextsError, setContextsError] = useState("");
+
+  const refreshContexts = () => {
+    listContexts(kubeconfigFiles).then((o) => {
+      setContexts(o.contexts ?? []);
+      setContextsError(o.error ?? "");
+
+      // Auto close any tabs of clusters/contexts that no longer exist!
+      if (o.contexts) {
+        const existingNames = new Set(o.contexts.map((c) => c.name));
+        setTabs((ts) => ts.filter((t) => !t.cluster || existingNames.has(t.cluster)));
+      }
+    });
+  };
+
+  useEffect(() => {
+    refreshContexts();
+  }, [kubeconfigFiles]);
+
+  // Listen to external/internal kubeconfig changes
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const unlistenPromise = listen("kubeconfig-changed", () => {
+      refreshContexts();
+    }).catch(() => () => {});
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  const handleDeleteContext = async (name: string) => {
+    try {
+      await deleteContext(name);
+
+      // Clean up profiles
+      const nextProfiles = { ...contextProfiles };
+      delete nextProfiles[name];
+      changeContextProfiles(nextProfiles);
+
+      // Clean up order
+      const nextOrder = contextOrder.filter((item) => item !== name);
+      changeContextOrder(nextOrder);
+
+      // Clean up namespace preference
+      const nextNs = { ...clusterNs };
+      delete nextNs[name];
+      setClusterNs(nextNs);
+
+      // Close open tabs for this cluster
+      setTabs((ts) => ts.filter((t) => t.cluster !== name));
+
+      // Refresh list
+      refreshContexts();
+    } catch (e) {
+      alert(`Failed to delete context: ${e}`);
+    }
+  };
 
   // Persist per-cluster namespace whenever it changes.
   useEffect(() => saveClusterNamespaces(clusterNs), [clusterNs]);
@@ -417,6 +477,7 @@ export function App() {
         contextProfiles={contextProfiles}
         kubeconfigFiles={kubeconfigFiles}
         contextOrder={contextOrder}
+        contexts={contexts ?? []}
       />
       {activeCluster && (
         <Sidebar
@@ -463,6 +524,9 @@ export function App() {
                       onKubeconfigFilesChange={changeKubeconfigFiles}
                       contextOrder={contextOrder}
                       onContextOrderChange={changeContextOrder}
+                      contexts={contexts}
+                      contextsError={contextsError}
+                      onDeleteContext={handleDeleteContext}
                     />
                   ) : activeTab.crd && activeCluster ? (
                     <CustomResourceBrowser
@@ -534,6 +598,8 @@ export function App() {
                       contextProfiles={contextProfiles}
                       kubeconfigFiles={kubeconfigFiles}
                       contextOrder={contextOrder}
+                      contexts={contexts}
+                      contextsError={contextsError}
                     />
                   )}
                 </div>
@@ -558,6 +624,8 @@ export function App() {
             contextProfiles={contextProfiles}
             kubeconfigFiles={kubeconfigFiles}
             contextOrder={contextOrder}
+            contexts={contexts}
+            contextsError={contextsError}
           />
         )}
       </div>

@@ -326,4 +326,36 @@ describe("SettingsView", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
     expect(await screen.findByText(/endpoint unreachable/)).toBeDefined();
   });
+
+  it("shows a delete context button and triggers onDeleteContext on click", async () => {
+    const onDeleteContext = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+        onDeleteContext={onDeleteContext}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    // Wait for the context details panel to render for the default selection (prod-eu)
+    const removeButton = await screen.findByRole("button", { name: "Remove context" });
+    fireEvent.click(removeButton);
+
+    expect(window.confirm).toHaveBeenCalledWith('Are you sure you want to remove context "prod-eu"? This will modify the kubeconfig file.');
+    expect(onDeleteContext).toHaveBeenCalledWith("prod-eu");
+  });
 });

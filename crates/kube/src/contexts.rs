@@ -77,6 +77,138 @@ pub fn list_contexts_capability(cache: Arc<ClientCache>, default_paths: Vec<Path
     )
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteContextIn {
+    pub context: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DeleteContextOut {
+    pub success: bool,
+}
+
+pub fn delete_context_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<DeleteContextIn, DeleteContextOut, _, _>(
+        "k8s.deleteContext",
+        "delete a context and its associated cluster and user from its kubeconfig source",
+        Annotations::DESTRUCTIVE,
+        move |input: DeleteContextIn| {
+            let cache = cache.clone();
+            async move {
+                let context_name = input.context;
+                let paths = cache.paths().await;
+                let mut found = false;
+
+                for path in paths {
+                    if !path.exists() {
+                        continue;
+                    }
+                    let content = match std::fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+
+                    let mut yaml_value: serde_yaml::Value = match serde_yaml::from_str(&content) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    if let Some(mapping) = yaml_value.as_mapping_mut() {
+                        if let Some(contexts) = mapping.get_mut("contexts").and_then(|c| c.as_sequence_mut()) {
+                            let mut target_index = None;
+                            let mut cluster_to_remove = None;
+                            let mut user_to_remove = None;
+
+                            for (i, ctx) in contexts.iter().enumerate() {
+                                if let Some(name) = ctx.get("name").and_then(|n| n.as_str()) {
+                                    if name == context_name {
+                                        target_index = Some(i);
+                                        if let Some(context_data) = ctx.get("context") {
+                                            cluster_to_remove = context_data.get("cluster").and_then(|c| c.as_str()).map(String::from);
+                                            user_to_remove = context_data.get("user").and_then(|u| u.as_str()).map(String::from);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let Some(idx) = target_index {
+                                contexts.remove(idx);
+
+                                // Check if cluster or user are used by any other contexts in this file
+                                let mut cluster_used = false;
+                                let mut user_used = false;
+                                for ctx in contexts.iter() {
+                                    if let Some(context_data) = ctx.get("context") {
+                                        if let Some(c) = context_data.get("cluster").and_then(|c| c.as_str()) {
+                                            if Some(c) == cluster_to_remove.as_deref() {
+                                                cluster_used = true;
+                                            }
+                                        }
+                                        if let Some(u) = context_data.get("user").and_then(|u| u.as_str()) {
+                                            if Some(u) == user_to_remove.as_deref() {
+                                                user_used = true;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Remove the cluster if no longer used
+                                if !cluster_used {
+                                    if let Some(cluster_name) = cluster_to_remove {
+                                        if let Some(clusters) = mapping.get_mut("clusters").and_then(|c| c.as_sequence_mut()) {
+                                            if let Some(pos) = clusters.iter().position(|c| c.get("name").and_then(|n| n.as_str()) == Some(&cluster_name)) {
+                                                clusters.remove(pos);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Remove the user if no longer used
+                                if !user_used {
+                                    if let Some(user_name) = user_to_remove {
+                                        if let Some(users) = mapping.get_mut("users").and_then(|u| u.as_sequence_mut()) {
+                                            if let Some(pos) = users.iter().position(|u| u.get("name").and_then(|n| n.as_str()) == Some(&user_name)) {
+                                                users.remove(pos);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Update current-context if needed
+                                if let Some(current_context) = mapping.get_mut("current-context") {
+                                    if current_context.as_str() == Some(&context_name) {
+                                        mapping.remove("current-context");
+                                    }
+                                }
+
+                                // Write back
+                                let updated_yaml = serde_yaml::to_string(&yaml_value)
+                                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                                std::fs::write(&path, updated_yaml)
+                                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if found {
+                    cache.invalidate(&context_name).await;
+                    Ok(DeleteContextOut { success: true })
+                } else {
+                    Err(CapabilityError::Handler(format!(
+                        "Context '{}' not found in any loaded kubeconfigs",
+                        context_name
+                    )))
+                }
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +278,38 @@ mod tests {
 
         let _ = tokio::fs::remove_file(first).await;
         let _ = tokio::fs::remove_file(second).await;
+    }
+
+    #[tokio::test]
+    async fn deletes_a_context_from_kubeconfig_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("srelens-test-delete-kubeconfig.yaml");
+        tokio::fs::write(
+            &path,
+            "clusters:\n  - name: a\n    cluster: { server: https://a }\ncontexts:\n  - name: ctx-a\n    context: { cluster: a, user: user-a }\nusers:\n  - name: user-a\n    user: {}\n",
+        )
+        .await
+        .unwrap();
+
+        let cache = ClientCache::new(path.clone());
+        let mut reg = Registry::new();
+        reg.register(delete_context_capability(cache.clone()));
+        reg.register(list_contexts_capability(cache.clone(), vec![path.clone()]));
+
+        // Delete the context
+        let out = reg.invoke("k8s.deleteContext", json!({ "context": "ctx-a" })).await.unwrap();
+        assert_eq!(out["success"], true);
+
+        // List contexts to check that it is empty
+        let out_list = reg.invoke("k8s.listContexts", json!({})).await.unwrap();
+        assert_eq!(out_list["contexts"].as_array().unwrap().len(), 0);
+
+        // Verify the file content on disk has no clusters, contexts, or users
+        let file_content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!file_content.contains("ctx-a"));
+        assert!(!file_content.contains("https://a"));
+        assert!(!file_content.contains("user-a"));
+
+        let _ = tokio::fs::remove_file(&path).await;
     }
 }

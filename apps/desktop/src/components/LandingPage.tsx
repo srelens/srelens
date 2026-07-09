@@ -43,28 +43,38 @@ export function LandingPage({
   contextProfiles = {},
   kubeconfigFiles = EMPTY_LIST,
   contextOrder = EMPTY_LIST,
+  contexts: passedContexts = null,
+  contextsError = "",
 }: {
   onOpenContext: (context: string) => void;
   onOpenSettings: () => void;
   contextProfiles?: ContextProfiles;
   kubeconfigFiles?: string[];
   contextOrder?: string[];
+  contexts?: ClusterContext[] | null;
+  contextsError?: string;
 }) {
-  const [contexts, setContexts] = useState<ClusterContext[] | null>(null);
-  const [error, setError] = useState("");
+  const [internalContexts, setInternalContexts] = useState<ClusterContext[] | null>(null);
+  const [internalError, setInternalError] = useState("");
   const [query, setQuery] = useState("");
 
   useEffect(() => {
+    if (passedContexts !== null) return;
     let active = true;
     void listContexts(kubeconfigFiles).then((outcome) => {
       if (!active) return;
-      setContexts(orderContexts(outcome.contexts ?? [], contextOrder));
-      setError(outcome.error ?? "");
+      setInternalContexts(orderContexts(outcome.contexts ?? [], contextOrder));
+      setInternalError(outcome.error ?? "");
     });
     return () => {
       active = false;
     };
-  }, [contextOrder, kubeconfigFiles]);
+  }, [contextOrder, kubeconfigFiles, passedContexts]);
+
+  const contexts = passedContexts !== null
+    ? orderContexts(passedContexts, contextOrder)
+    : internalContexts;
+  const error = passedContexts !== null ? contextsError : internalError;
 
   const currentContext = contexts?.find((context) => context.isCurrent) ?? contexts?.[0] ?? null;
   const filteredContexts = useMemo(() => {

@@ -136,6 +136,57 @@ fn install_macos_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+async fn watch_kubeconfig_files(app_handle: tauri::AppHandle, cache: std::sync::Arc<ClientCache>) {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+    use tauri::Emitter;
+
+    let mut last_modified: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
+
+    // Initialize the map with current files
+    let initial_paths = cache.paths().await;
+    for path in initial_paths {
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        last_modified.insert(path, modified);
+    }
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        let current_paths = cache.paths().await;
+        let mut changed = false;
+
+        let mut next_modified = HashMap::new();
+        for path in current_paths {
+            let current_mod = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+            if let Some(prev) = last_modified.get(&path) {
+                if *prev != current_mod {
+                    changed = true;
+                }
+            } else {
+                changed = true;
+            }
+            next_modified.insert(path.clone(), current_mod);
+        }
+
+        // Check if any path was removed
+        for path in last_modified.keys() {
+            if !next_modified.contains_key(path) {
+                changed = true;
+            }
+        }
+
+        last_modified = next_modified;
+
+        if changed {
+            cache.clear().await;
+            let _ = app_handle.emit("kubeconfig-changed", ());
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // The SRELENS_TIMEOUT_SECS override is applied in `main()` before dispatch,
@@ -152,8 +203,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
+    let watcher_cache = cache.clone();
     builder
-        .setup(|app| {
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -165,6 +217,12 @@ pub fn run() {
             size_main_window(app);
             #[cfg(target_os = "macos")]
             install_macos_menu(app)?;
+
+            let handle = app.handle().clone();
+            tokio::spawn(async move {
+                watch_kubeconfig_files(handle, watcher_cache).await;
+            });
+
             Ok(())
         })
         .manage(AppRegistry(registry))
