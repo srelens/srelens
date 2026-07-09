@@ -3956,3 +3956,16 @@ body {
     width: 100%;
   }
 }
+
+.fl-diff { display: flex; flex-direction: column; gap: 6px; }
+.fl-diff__title { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
+.fl-diff__badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; }
+.fl-diff__badge--new { background: color-mix(in srgb, var(--fl-color-success, #22c55e) 18%, transparent); }
+.fl-diff__empty { padding: 8px; color: var(--fl-color-muted-foreground, #888); font-size: 13px; }
+.fl-diff__table { width: 100%; border-collapse: collapse; table-layout: fixed; font-family: var(--fl-font-mono, ui-monospace, monospace); font-size: 12px; }
+.fl-diff__cell { width: 50%; white-space: pre-wrap; word-break: break-word; padding: 0 8px; vertical-align: top; border-left: 1px solid var(--fl-color-border, #e5e7eb); }
+.fl-diff__row--same { color: color-mix(in srgb, currentColor 55%, transparent); }
+.fl-diff__row--replace .fl-diff__cell--left,
+.fl-diff__row--delete .fl-diff__cell--left { background: color-mix(in srgb, var(--fl-color-danger, #ef4444) 14%, transparent); }
+.fl-diff__row--replace .fl-diff__cell--right,
+.fl-diff__row--insert .fl-diff__cell--right { background: color-mix(in srgb, var(--fl-color-success, #22c55e) 16%, transparent); }
