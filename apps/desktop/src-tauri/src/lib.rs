@@ -218,8 +218,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             install_macos_menu(app)?;
 
+            // Use Tauri's managed async runtime — `tokio::spawn` here panics
+            // ("no reactor running") because `setup` runs before/outside a Tokio
+            // runtime context.
             let handle = app.handle().clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 watch_kubeconfig_files(handle, watcher_cache).await;
             });
 
