@@ -66,18 +66,24 @@ fn write_locked_kubeconfig(id: u64, context: &str, extra: &[String]) -> Result<P
 }
 
 /// Start a local shell scoped to `context`. Returns the session id; output
-/// streams on `term:out:<id>` and a `term:exit:<id>` event fires when it ends.
+/// streams on `term:out:<channel>` and a `term:exit:<channel>` event fires
+/// when it ends, where `channel` is the caller-supplied subscription token.
 #[tauri::command]
 pub async fn start_terminal(
     context: String,
     extra_kubeconfigs: Vec<String>,
+    channel: String,
     cols: Option<u16>,
     rows: Option<u16>,
     app: AppHandle,
     manager: State<'_, TerminalManager>,
 ) -> Result<u64, String> {
     let id = manager.next_id.fetch_add(1, Ordering::SeqCst);
-    let overlay = write_locked_kubeconfig(id, &context, &extra_kubeconfigs)?;
+    let ctx = context.clone();
+    let extra = extra_kubeconfigs.clone();
+    let overlay = tokio::task::spawn_blocking(move || write_locked_kubeconfig(id, &ctx, &extra))
+        .await
+        .map_err(|e| e.to_string())??;
     let kubeconfig = overlay.clone().into_os_string();
 
     let pty = native_pty_system();
@@ -120,20 +126,40 @@ pub async fn start_terminal(
     manager.sessions.lock().unwrap().insert(id, session);
 
     // Blocking read loop on a dedicated thread (portable-pty readers are sync).
-    let out_channel = format!("term:out:{id}");
-    let exit_channel = format!("term:exit:{id}");
+    let out_channel = format!("term:out:{channel}");
+    let exit_channel = format!("term:exit:{channel}");
     let sessions = Arc::clone(&manager.sessions);
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app.emit(&out_channel, chunk);
+                    carry.extend_from_slice(&buf[..n]);
+                    // Emit the valid UTF-8 prefix; keep an incomplete trailing
+                    // multibyte sequence (<=3 bytes) for the next read. If the
+                    // leftover exceeds 3 bytes it contains an actually-invalid byte,
+                    // so flush it lossily rather than stalling.
+                    let valid = std::str::from_utf8(&carry)
+                        .map(|s| s.len())
+                        .unwrap_or_else(|e| e.valid_up_to());
+                    let cut = if carry.len() - valid > 3 {
+                        carry.len()
+                    } else {
+                        valid
+                    };
+                    if cut > 0 {
+                        let text = String::from_utf8_lossy(&carry[..cut]).into_owned();
+                        let _ = app.emit(&out_channel, text);
+                        carry.drain(..cut);
+                    }
                 }
                 Err(_) => break,
             }
+        }
+        if !carry.is_empty() {
+            let _ = app.emit(&out_channel, String::from_utf8_lossy(&carry).into_owned());
         }
         let _ = app.emit(&exit_channel, Option::<String>::None);
         let _ = std::fs::remove_file(&overlay);

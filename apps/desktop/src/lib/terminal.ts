@@ -1,4 +1,4 @@
-import { invokeCommand, on } from "../transport/transport";
+import { invokeCommand, subscribe } from "../transport/transport";
 
 export interface TerminalSession {
   /** Send keystrokes / pasted input to the shell's stdin. */
@@ -8,6 +8,9 @@ export interface TerminalSession {
   /** Close the session and unsubscribe. */
   close: () => void;
 }
+
+// Monotonic id so each terminal gets a unique channel.
+let terminalSeq = 0;
 
 /**
  * Open a local shell scoped to `context` (kubectl targets it by default).
@@ -21,14 +24,25 @@ export async function startLocalTerminal(
   onExit: () => void,
   size?: { cols: number; rows: number },
 ): Promise<TerminalSession> {
-  const session = await invokeCommand<number>("start_terminal", {
-    context,
-    extraKubeconfigs,
-    cols: size?.cols ?? null,
-    rows: size?.rows ?? null,
-  });
-  const disposeOut = on(`term:out:${session}`, (p) => onData(p as string));
-  const disposeExit = on(`term:exit:${session}`, () => onExit());
+  // Unique channel so we can subscribe BEFORE the backend spawns and emits —
+  // otherwise the first prompt can race ahead of the listener.
+  const channel = `term-${terminalSeq++}`;
+  const disposeOut = await subscribe(`term:out:${channel}`, (p) => onData(p as string));
+  const disposeExit = await subscribe(`term:exit:${channel}`, () => onExit());
+  let session: number;
+  try {
+    session = await invokeCommand<number>("start_terminal", {
+      context,
+      extraKubeconfigs,
+      channel,
+      cols: size?.cols ?? null,
+      rows: size?.rows ?? null,
+    });
+  } catch (e) {
+    disposeOut();
+    disposeExit();
+    throw e;
+  }
   return {
     send: (data) => void invokeCommand("terminal_input", { session, data }),
     resize: (cols, rows) => void invokeCommand("terminal_resize", { session, cols, rows }),
