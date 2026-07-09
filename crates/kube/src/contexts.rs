@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client_cache::ClientCache;
 use crate::connect::load_kubeconfigs;
+use crate::local_cluster::classify;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -25,6 +26,16 @@ pub struct ContextDto {
     pub server: String,
     #[serde(rename = "isCurrent")]
     pub is_current: bool,
+    /// Whether this context points at a local development cluster (kind, k3d,
+    /// minikube, docker-desktop, kiac, vind, …). Classified precision-first:
+    /// only a tool-generated name earns this, and cloud auth always wins as
+    /// remote, so a production cluster is never marked local. See
+    /// [`crate::local_cluster`].
+    #[serde(rename = "isLocal")]
+    pub is_local: bool,
+    /// The detected local provider (e.g. `"kind"`, `"vind"`), when `isLocal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -56,19 +67,35 @@ pub fn list_contexts_capability(cache: Arc<ClientCache>, default_paths: Vec<Path
                     .map_err(CapabilityError::Handler)?;
                 let current = config.current_context.unwrap_or_default();
                 let clusters = config.clusters;
+                let auth_infos = config.auth_infos;
                 let contexts = config.contexts.into_iter().map(|named| {
                     let context = named.context.unwrap_or_default();
                     let cluster_name = context.cluster;
+                    let user_name = context.user;
                     let server = clusters.iter()
                         .find(|cluster| cluster.name == cluster_name)
                         .and_then(|cluster| cluster.cluster.as_ref())
                         .and_then(|cluster| cluster.server.clone())
                         .unwrap_or_default();
+                    // Resolve the user's auth to gate cloud/managed clusters out
+                    // of the "local" bucket (see local_cluster::classify).
+                    let auth = auth_infos.iter()
+                        .find(|entry| entry.name == user_name)
+                        .and_then(|entry| entry.auth_info.as_ref());
+                    let exec_command = auth
+                        .and_then(|info| info.exec.as_ref())
+                        .and_then(|exec| exec.command.as_deref());
+                    let auth_provider = auth
+                        .and_then(|info| info.auth_provider.as_ref())
+                        .map(|provider| provider.name.as_str());
+                    let class = classify(&named.name, &cluster_name, &server, exec_command, auth_provider);
                     ContextDto {
                         is_current: named.name == current,
                         name: named.name,
                         cluster: cluster_name,
                         server,
+                        is_local: class.is_local,
+                        provider: class.provider.map(|provider| provider.as_str().to_string()),
                     }
                 }).collect();
                 Ok(ListContextsOut { contexts })
@@ -118,6 +145,57 @@ mod tests {
         reg.register(list_contexts_capability(ClientCache::new(path.clone()), vec![path]));
         let err = reg.invoke("k8s.listContexts", json!({})).await.unwrap_err();
         assert!(matches!(err, CapabilityError::Handler(_)));
+    }
+
+    #[tokio::test]
+    async fn classifies_local_and_remote_contexts() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("srelens-classify-kubeconfig.yaml");
+        // A local kind cluster (client-cert auth) and a managed EKS cluster
+        // (aws exec plugin) side by side.
+        tokio::fs::write(
+            &path,
+            r#"apiVersion: v1
+kind: Config
+clusters:
+- name: kind-dev
+  cluster: { server: "https://127.0.0.1:6443" }
+- name: eks-prod
+  cluster: { server: "https://abc123.gr7.us-east-1.eks.amazonaws.com" }
+contexts:
+- name: kind-dev
+  context: { cluster: kind-dev, user: kind-dev }
+- name: eks-prod
+  context: { cluster: eks-prod, user: eks-prod }
+users:
+- name: kind-dev
+  user: { client-certificate-data: abc }
+- name: eks-prod
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: aws
+      args: ["eks", "get-token"]
+"#,
+        )
+        .await
+        .unwrap();
+
+        let mut reg = Registry::new();
+        reg.register(list_contexts_capability(ClientCache::new(path.clone()), vec![path.clone()]));
+        let out = reg.invoke("k8s.listContexts", json!({})).await.unwrap();
+        let contexts = out["contexts"].as_array().unwrap();
+
+        let kind = contexts.iter().find(|c| c["name"] == "kind-dev").unwrap();
+        assert_eq!(kind["isLocal"], true);
+        assert_eq!(kind["provider"], "kind");
+
+        // Managed EKS: remote despite reachability, and `provider` is omitted.
+        let eks = contexts.iter().find(|c| c["name"] == "eks-prod").unwrap();
+        assert_eq!(eks["isLocal"], false);
+        assert!(eks["provider"].is_null());
+
+        let _ = tokio::fs::remove_file(&path).await;
     }
 
     #[tokio::test]

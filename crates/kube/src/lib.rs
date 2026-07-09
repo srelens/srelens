@@ -109,6 +109,7 @@ pub mod ingresses;
 pub mod jobs;
 pub mod kubeconfig;
 pub mod limitranges;
+pub mod local_cluster;
 pub mod logs;
 pub mod manifest;
 pub mod metrics;

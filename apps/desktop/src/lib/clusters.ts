@@ -5,6 +5,15 @@ export interface ClusterContext {
   cluster: string;
   server: string;
   isCurrent: boolean;
+  /**
+   * Whether this context points at a local development cluster (kind, k3d,
+   * minikube, docker-desktop, kiac, vind, …). Classified precision-first in the
+   * Rust core: only a tool-generated name earns it and cloud auth always wins
+   * as remote, so a production cluster is never marked local.
+   */
+  isLocal?: boolean;
+  /** The detected local provider (e.g. "kind", "vind"), when `isLocal`. */
+  provider?: string;
 }
 
 export interface ContextsOutcome {
