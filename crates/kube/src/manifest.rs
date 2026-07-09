@@ -666,6 +666,28 @@ pub fn normalize_for_diff(value: &mut serde_json::Value, is_secret: bool) {
     if is_secret {
         crate::secrets::redact_secret_data(value);
     }
+    canonicalize_diff_strings(value);
+}
+
+/// For diff display only: strip trailing whitespace from each line of every
+/// multi-line string value, recursively. YAML block scalars (`|`) cannot carry
+/// trailing spaces, so serde_yaml falls back to an escaped single-line quoted
+/// string on whichever side has them — producing a spurious whole-block diff.
+/// Canonicalizing both sides keeps equal multi-line strings in readable block
+/// style and drops whitespace-only noise.
+fn canonicalize_diff_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) if s.contains('\n') => {
+            *s = s
+                .split('\n')
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(canonicalize_diff_strings),
+        serde_json::Value::Object(o) => o.values_mut().for_each(canonicalize_diff_strings),
+        _ => {}
+    }
 }
 
 /// `k8s.diffManifest` — for each document, diff the live object against the
@@ -882,6 +904,34 @@ metadata:
         .unwrap();
         normalize_for_diff(&mut v, true);
         assert_ne!(v["data"]["token"], "c2VjcmV0");
+    }
+
+    #[test]
+    fn canonicalize_strips_trailing_line_whitespace() {
+        let mut v = serde_json::json!({ "args": ["# c \nmkdir -p /app \nwhile true; do sleep 30; done;\n"] });
+        canonicalize_diff_strings(&mut v);
+        assert_eq!(
+            v["args"][0],
+            "# c\nmkdir -p /app\nwhile true; do sleep 30; done;\n"
+        );
+    }
+
+    #[test]
+    fn normalize_makes_multiline_serialize_as_block_not_quoted() {
+        // Same logical script; one side has trailing spaces (would force serde_yaml
+        // into escaped quoted style), the other is clean. After normalize_for_diff,
+        // both must serialize identically in readable block style — no spurious diff.
+        let mut clean = serde_json::json!({ "args": ["# c\nmkdir -p /app\ndone;\n"] });
+        let mut spaced = serde_json::json!({ "args": ["# c \nmkdir -p /app \ndone;\n"] });
+        normalize_for_diff(&mut clean, false);
+        normalize_for_diff(&mut spaced, false);
+        let cy = serde_yaml::to_string(&clean).unwrap();
+        let sy = serde_yaml::to_string(&spaced).unwrap();
+        assert_eq!(cy, sy);
+        assert!(cy.contains("- |"), "expected block scalar, got:\n{cy}");
+        // And align_rows over the two now shows no changes.
+        let rows = align_rows(&cy, &sy);
+        assert!(rows.iter().all(|r| matches!(r.tag, DiffTag::Same)));
     }
 
     #[test]
