@@ -19,14 +19,16 @@ use serde::{Deserialize, Serialize};
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
 
-/// Blank the values of a serialized Secret's `data` map in place, keeping the
-/// keys. `get_object` runs this so the generic structured-detail path never
-/// carries Secret material — values are only read through the dedicated,
-/// consent-gateable `k8s.getSecret`.
+/// Blank the values of a serialized Secret's `data` and `stringData` maps in
+/// place, keeping the keys. `get_object` runs this so the generic
+/// structured-detail path never carries Secret material — values are only
+/// read through the dedicated, consent-gateable `k8s.getSecret`.
 pub(crate) fn redact_secret_data(object: &mut serde_json::Value) {
-    if let Some(data) = object.get_mut("data").and_then(|d| d.as_object_mut()) {
-        for value in data.values_mut() {
-            *value = serde_json::Value::String(String::new());
+    for key in ["data", "stringData"] {
+        if let Some(map) = object.get_mut(key).and_then(|d| d.as_object_mut()) {
+            for value in map.values_mut() {
+                *value = serde_json::Value::String(String::new());
+            }
         }
     }
 }
@@ -171,6 +173,27 @@ mod tests {
         assert_eq!(data["tls.crt"], serde_json::json!(""));
         assert_eq!(data["tls.key"], serde_json::json!(""));
         assert!(!object.to_string().contains("U0VDUkVU"));
+    }
+
+    #[test]
+    fn redaction_blanks_string_data_values_but_keeps_keys() {
+        let mut object = serde_json::json!({
+            "kind": "Secret",
+            "metadata": { "name": "web-creds" },
+            "data": { "tls.crt": "U0VDUkVU" },
+            "stringData": { "password": "hunter2", "username": "admin" }
+        });
+        redact_secret_data(&mut object);
+        let data = object["data"].as_object().unwrap();
+        assert_eq!(data["tls.crt"], serde_json::json!(""));
+        let string_data = object["stringData"].as_object().unwrap();
+        // Keys remain so the UI can list them...
+        assert!(string_data.contains_key("password"));
+        assert!(string_data.contains_key("username"));
+        // ...but every value is blanked — no material survives the generic path.
+        assert_eq!(string_data["password"], serde_json::json!(""));
+        assert_eq!(string_data["username"], serde_json::json!(""));
+        assert!(!object.to_string().contains("hunter2"));
     }
 
     #[test]

@@ -129,6 +129,7 @@ export function ManifestEditor({
     setBusy(false);
     if (out.error) {
       setError(out.error);
+      setConflictDocs(null);
       notify.error(`Failed to apply ${confirm?.name ?? "resource"}`, out.error);
       return;
     }
@@ -166,11 +167,16 @@ export function ManifestEditor({
     else void doApply(false);
   }
 
-  // Debounced dry-run diff against the cluster, whenever the Changes panel is
-  // open. Guarded by `active` so a stale response from a superseded edit can't
-  // clobber a newer one.
+  // Debounced dry-run diff against the cluster. Runs in the background in
+  // fill mode regardless of whether the Changes panel is open, so a
+  // concurrently-modified resource is flagged (via `staleRv`, derived from
+  // `diffDocs`) without the user having to open the panel first — the panel
+  // itself only renders when `showDiff` is true. (The drawer has no diff
+  // panel, so it's fine for non-fill callers to skip this.) Guarded by
+  // `active` so a stale response from a superseded edit can't clobber a
+  // newer one.
   React.useEffect(() => {
-    if (!showDiff || !yaml.trim()) {
+    if (!fill || !yaml.trim()) {
       setDiffDocs(null);
       return;
     }
@@ -187,7 +193,7 @@ export function ManifestEditor({
       active = false;
       clearTimeout(t);
     };
-  }, [context, yaml, showDiff]);
+  }, [context, yaml, fill]);
 
   const editor = (
     <Suspense fallback={<Spinner label="Loading editor" />}>

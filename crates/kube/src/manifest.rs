@@ -1308,11 +1308,10 @@ metadata:
     // -- normalize_for_diff on stringData --------------------------------------
 
     #[test]
-    fn normalize_for_diff_does_not_touch_string_data_key_names() {
-        // redact_secret_data only blanks the `data` map; `stringData` (raw,
-        // un-encoded values) is a distinct field. Document current behavior:
-        // normalize_for_diff still strips noise/status around it, and leaves
-        // stringData values untouched (only `data` is redacted).
+    fn normalize_for_diff_redacts_string_data() {
+        // redact_secret_data blanks BOTH the `data` map and the `stringData`
+        // map so no Secret material leaks through the diff path — only the
+        // keys survive (so the UI can still show which fields changed).
         let mut v: serde_json::Value = serde_yaml::from_str(
             "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n  uid: u\nstringData:\n  password: hunter2\ndata:\n  token: c2VjcmV0\nstatus:\n  phase: Active\n",
         )
@@ -1321,6 +1320,10 @@ metadata:
         assert!(v.get("status").is_none());
         assert!(v["metadata"].get("uid").is_none());
         assert_eq!(v["data"]["token"], "");
-        assert_eq!(v["stringData"]["password"], "hunter2");
+        assert!(v["stringData"]
+            .as_object()
+            .unwrap()
+            .contains_key("password"));
+        assert_eq!(v["stringData"]["password"], "");
     }
 }

@@ -167,13 +167,13 @@ describe("ManifestEditor", () => {
     expect(within(banner).getByTitle(/conflict on cfg/)).toBeDefined();
   });
 
-  it("shows a stale badge when the live resourceVersion differs", async () => {
+  it("shows a stale badge when the live resourceVersion differs, without opening the Changes panel", async () => {
     diffManifestMock.mockResolvedValue({
       documents: [
         { kind: "Deployment", name: "web", namespace: null, exists: true, changed: true, rows: [], currentResourceVersion: "9" },
       ],
     });
-    render(
+    const { container } = render(
       <ManifestEditor
         context="ctx"
         yaml={'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  resourceVersion: "1"\n'}
@@ -182,8 +182,13 @@ describe("ManifestEditor", () => {
         confirm={{ kind: "Deployment", name: "web" }}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+    // The badge must appear WITHOUT clicking "Changes" first — the diff runs
+    // in the background so a concurrently-modified resource is flagged even
+    // while the panel is collapsed.
     expect(await screen.findByText(/changed elsewhere/i, {}, { timeout: 2000 })).toBeDefined();
+    // The panel itself stays collapsed until the user opts in.
+    expect(container.querySelector(".fl-changes-panel")).toBeNull();
+    expect(screen.getByRole("button", { name: "Changes" })).toBeDefined();
   });
 
   it("fill mode: diff pane is hidden by default; Changes reveals a resizable split, Hide changes collapses it", async () => {
