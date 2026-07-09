@@ -12,6 +12,47 @@ use serde::{Deserialize, Serialize};
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
 
+/// Identifying fields of a manifest document.
+#[derive(Debug, Clone)]
+pub struct ResourceRef {
+    pub api_version: String,
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+}
+
+/// Pull the identifying fields from a parsed manifest document.
+pub fn resource_ref(value: &serde_json::Value) -> Option<ResourceRef> {
+    let s = |path: &[&str]| -> Option<String> {
+        let mut cur = value;
+        for key in path {
+            cur = cur.get(key)?;
+        }
+        cur.as_str().map(String::from)
+    };
+    Some(ResourceRef {
+        api_version: s(&["apiVersion"])?,
+        kind: s(&["kind"])?,
+        name: s(&["metadata", "name"])?,
+        namespace: s(&["metadata", "namespace"]),
+    })
+}
+
+/// Split a multi-document YAML string into parsed JSON values, skipping empty
+/// or whitespace/comment-only documents. Single source of truth for apply-all.
+pub fn split_documents(yaml: &str) -> Result<Vec<serde_json::Value>, CapabilityError> {
+    let mut out = Vec::new();
+    for doc in serde_yaml::Deserializer::from_str(yaml) {
+        let value = serde_json::Value::deserialize(doc)
+            .map_err(|e| CapabilityError::Handler(format!("parse yaml: {e}")))?;
+        if value.is_null() {
+            continue;
+        }
+        out.push(value);
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ManifestIn {
     pub context: String,
@@ -448,5 +489,39 @@ mod tests {
         let cap = get_manifest_capability(ClientCache::new(PathBuf::from("/x")));
         assert_eq!(cap.id, "k8s.getManifest");
         assert!(cap.annotations.read_only);
+    }
+
+    #[test]
+    fn splits_multiple_documents_skipping_empty() {
+        let yaml = "\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a
+---
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: b
+";
+        let docs = split_documents(yaml).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["metadata"]["name"], "a");
+        assert_eq!(docs[1]["metadata"]["name"], "b");
+    }
+
+    #[test]
+    fn resource_ref_pulls_identity() {
+        let value: serde_json::Value = serde_yaml::from_str(
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: prod\n",
+        )
+        .unwrap();
+        let r = resource_ref(&value).unwrap();
+        assert_eq!(r.api_version, "apps/v1");
+        assert_eq!(r.kind, "Deployment");
+        assert_eq!(r.name, "web");
+        assert_eq!(r.namespace.as_deref(), Some("prod"));
     }
 }
