@@ -135,14 +135,17 @@ const CLOUD_AUTH_PROVIDERS: &[&str] = &["gcp", "azure", "oidc"];
 /// vind) all use embedded client certs or tokens, never these.
 fn is_cloud_auth(exec_command: Option<&str>, auth_provider: Option<&str>) -> bool {
     if let Some(cmd) = exec_command {
-        // The command may be an absolute path; compare on its basename.
-        let base = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd).trim();
+        // The command may be an absolute path and, on Windows, carry a `.exe`
+        // suffix or mixed case; compare on its lowercased basename.
+        let base = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd).trim().to_ascii_lowercase();
+        let base = base.strip_suffix(".exe").unwrap_or(&base);
         if CLOUD_EXEC_COMMANDS.contains(&base) {
             return true;
         }
     }
     if let Some(provider) = auth_provider {
-        if CLOUD_AUTH_PROVIDERS.contains(&provider.trim()) {
+        let provider = provider.trim().to_ascii_lowercase();
+        if CLOUD_AUTH_PROVIDERS.contains(&provider.as_str()) {
             return true;
         }
     }
@@ -183,10 +186,6 @@ fn host_is_public(server: &str) -> bool {
     {
         return false;
     }
-    // IPv6 loopback.
-    if host == "::1" {
-        return false;
-    }
     // IPv4 ranges.
     if let Some(v4) = parse_ipv4(&host) {
         let [a, b, ..] = v4;
@@ -198,8 +197,21 @@ fn host_is_public(server: &str) -> bool {
             || v4 == [0, 0, 0, 0]; // 0.0.0.0
         return !is_private;
     }
-    // A non-IPv4, non-local hostname (e.g. *.eks.amazonaws.com) is public.
-    // IPv6 non-loopback is also treated as public.
+    // IPv6 ranges, mirroring the IPv4 private handling: loopback (::1),
+    // unspecified (::), unique-local (fc00::/7), and link-local unicast
+    // (fe80::/10) are non-public. (std's is_unique_local/is_unicast_link_local
+    // are still unstable, so match the prefixes on the leading segment.)
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        if v6.is_loopback() || v6.is_unspecified() {
+            return false;
+        }
+        let first = v6.segments()[0];
+        let is_unique_local = (first & 0xfe00) == 0xfc00; // fc00::/7
+        let is_link_local = (first & 0xffc0) == 0xfe80; // fe80::/10
+        return !(is_unique_local || is_link_local);
+    }
+    // A non-IPv4, non-IPv6, non-local hostname (e.g. *.eks.amazonaws.com) is
+    // public.
     true
 }
 
@@ -364,6 +376,13 @@ mod tests {
             Some("gcp"),
         );
         assert_eq!(got, Classification::remote());
+        // Windows kubeconfigs: `.exe` suffix and mixed case still gate.
+        for cmd in ["aws.exe", "AWS", "C:\\bin\\Az.EXE", "gke-gcloud-auth-plugin.exe"] {
+            let got = classify("kind-win", "kind-win", "https://127.0.0.1:6443", Some(cmd), None);
+            assert_eq!(got, Classification::remote(), "exec {cmd} should gate to remote");
+        }
+        let got = classify("kind-x", "kind-x", "https://localhost:6443", None, Some("GCP"));
+        assert_eq!(got, Classification::remote());
     }
 
     #[test]
@@ -398,6 +417,19 @@ mod tests {
         assert!(local("kind-v6", "https://[::1]:6443").is_local);
         assert_eq!(
             local("kind-v6", "https://[2001:db8::1]:6443"),
+            Classification::remote()
+        );
+    }
+
+    #[test]
+    fn ipv6_private_ranges_are_not_public() {
+        // Unique-local (fc00::/7) and link-local (fe80::/10) mirror the IPv4
+        // private ranges: a local-looking name over them stays local.
+        assert!(local("kind-ula", "https://[fd12:3456::1]:6443").is_local);
+        assert!(local("kind-ll", "https://[fe80::1]:6443").is_local);
+        // A global-unicast v6 address still demotes a local-looking name.
+        assert_eq!(
+            local("kind-gua", "https://[2606:4700::1111]:6443"),
             Classification::remote()
         );
     }

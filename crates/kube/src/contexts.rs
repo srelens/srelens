@@ -150,7 +150,8 @@ mod tests {
     #[tokio::test]
     async fn classifies_local_and_remote_contexts() {
         let dir = std::env::temp_dir();
-        let path = dir.join("srelens-classify-kubeconfig.yaml");
+        // Unique per process so concurrent test runs don't collide on the path.
+        let path = dir.join(format!("srelens-classify-kubeconfig-{}.yaml", std::process::id()));
         // A local kind cluster (client-cert auth) and a managed EKS cluster
         // (aws exec plugin) side by side.
         tokio::fs::write(
