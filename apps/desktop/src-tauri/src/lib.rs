@@ -147,7 +147,10 @@ async fn watch_kubeconfig_files(app_handle: tauri::AppHandle, cache: std::sync::
     // Initialize the map with current files
     let initial_paths = cache.paths().await;
     for path in initial_paths {
-        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let modified = tokio::fs::metadata(&path)
+            .await
+            .and_then(|m| m.modified())
+            .ok();
         last_modified.insert(path, modified);
     }
 
@@ -159,7 +162,10 @@ async fn watch_kubeconfig_files(app_handle: tauri::AppHandle, cache: std::sync::
 
         let mut next_modified = HashMap::new();
         for path in current_paths {
-            let current_mod = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let current_mod = tokio::fs::metadata(&path)
+                .await
+                .and_then(|m| m.modified())
+                .ok();
 
             if let Some(prev) = last_modified.get(&path) {
                 if *prev != current_mod {

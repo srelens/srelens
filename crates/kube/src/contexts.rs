@@ -108,10 +108,10 @@ pub fn delete_context_capability(cache: Arc<ClientCache>) -> Capability {
                 let mut found = false;
 
                 for path in paths {
-                    if !path.exists() {
+                    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
                         continue;
                     }
-                    let content = match std::fs::read_to_string(&path) {
+                    let content = match tokio::fs::read_to_string(&path).await {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
@@ -203,21 +203,24 @@ pub fn delete_context_capability(cache: Arc<ClientCache>) -> Capability {
                                         .and_then(|f| f.to_str())
                                         .unwrap_or("kubeconfig")
                                 ));
-                                std::fs::write(&tmp, &updated_yaml)
+                                tokio::fs::write(&tmp, &updated_yaml)
+                                    .await
                                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                                 #[cfg(unix)]
                                 {
                                     use std::os::unix::fs::PermissionsExt;
-                                    if let Ok(meta) = std::fs::metadata(&path) {
-                                        let _ = std::fs::set_permissions(
+                                    if let Ok(meta) = tokio::fs::metadata(&path).await {
+                                        let _ = tokio::fs::set_permissions(
                                             &tmp,
                                             std::fs::Permissions::from_mode(
                                                 meta.permissions().mode(),
                                             ),
-                                        );
+                                        )
+                                        .await;
                                     }
                                 }
-                                std::fs::rename(&tmp, &path)
+                                tokio::fs::rename(&tmp, &path)
+                                    .await
                                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
 
                                 found = true;
