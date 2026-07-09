@@ -21,7 +21,7 @@ import {
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { yaml } from "@codemirror/lang-yaml";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
-import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { autocompletion, completionKeymap, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { parseDocument } from "yaml";
 import { tags as t } from "@lezer/highlight";
 import type { SchemaBundle } from "../lib/schema";
@@ -162,13 +162,41 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
     },
     ".cm-panels": { backgroundColor: "var(--fl-color-surface)", color: "var(--fl-color-text)" },
     ".cm-searchMatch": { backgroundColor: "rgba(210, 153, 34, 0.3)" },
+    ".cm-tooltip": { maxWidth: "480px" },
     ".cm-tooltip.cm-tooltip-lint": {
       backgroundColor: "var(--fl-color-surface)",
       border: "1px solid var(--fl-color-border)",
       borderRadius: "var(--fl-radius-md)",
+      boxShadow: "0 4px 16px rgba(0, 0, 0, 0.18)",
+      color: "var(--fl-color-text)",
+      maxWidth: "480px",
+    },
+    ".cm-diagnostic": {
+      padding: "6px 10px",
+      whiteSpace: "normal",
+      maxHeight: "240px",
+      overflowY: "auto",
+      fontSize: "12px",
+      lineHeight: "1.45",
+    },
+    ".cm-diagnostic-error": { borderLeft: "3px solid var(--fl-color-danger)" },
+    ".cm-tooltip.cm-tooltip-autocomplete": {
+      backgroundColor: "var(--fl-color-surface)",
+      border: "1px solid var(--fl-color-border)",
+      borderRadius: "var(--fl-radius-md)",
+      boxShadow: "0 4px 16px rgba(0, 0, 0, 0.18)",
+    },
+    ".cm-tooltip-autocomplete > ul > li": {
+      padding: "2px 8px",
+      fontFamily: "var(--fl-font-mono)",
+      fontSize: "12px",
       color: "var(--fl-color-text)",
     },
-    ".cm-diagnostic": { padding: "3px 8px" },
+    ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
+      backgroundColor: "var(--fl-color-accent)",
+      color: "#fff",
+    },
+    ".cm-completionDetail": { color: "var(--fl-color-text-muted)", fontStyle: "italic", marginLeft: "6px" },
     ".cm-lint-marker": { width: "0.9em", height: "0.9em" },
   });
 }
@@ -242,7 +270,7 @@ export function CodeEditor({
       indentOnInput(),
       bracketMatching(),
       highlightSelectionMatches(),
-      keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
+      keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
       editorTheme(minHeight, maxHeight, fill),
       syntaxHighlighting(highlightStyle),
       EditorView.editable.of(!readOnly),
