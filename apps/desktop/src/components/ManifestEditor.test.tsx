@@ -182,6 +182,35 @@ describe("ManifestEditor", () => {
         confirm={{ kind: "Deployment", name: "web" }}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "Changes" }));
     expect(await screen.findByText(/changed elsewhere/i, {}, { timeout: 2000 })).toBeDefined();
+  });
+
+  it("fill mode: diff pane is hidden by default; Changes reveals a resizable split, Hide changes collapses it", async () => {
+    const { container } = render(
+      <ManifestEditor
+        context="ctx"
+        yaml={"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n"}
+        onYamlChange={() => {}}
+        fill
+      />,
+    );
+    // Hidden by default: full-width editor, no diff content, no resize handle.
+    expect(screen.queryByText("No changes")).toBeNull();
+    expect(container.querySelector(".fl-changes-panel__resize")).toBeNull();
+    expect(container.querySelector(".fl-changes-panel")).toBeNull();
+    expect(screen.getByRole("button", { name: "Changes" })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Changes" }));
+    await waitFor(() => expect(diffManifestMock).toHaveBeenCalled());
+    expect(await screen.findByText("No changes")).toBeDefined();
+    expect(container.querySelector(".fl-changes-panel__resize")).not.toBeNull();
+    expect(container.querySelector(".fl-changes-panel")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Hide changes" })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide changes" }));
+    expect(screen.queryByText("No changes")).toBeNull();
+    expect(container.querySelector(".fl-changes-panel__resize")).toBeNull();
+    expect(container.querySelector(".fl-changes-panel")).toBeNull();
   });
 });

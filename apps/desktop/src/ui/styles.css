@@ -3976,3 +3976,31 @@ body {
 .fl-apply-conflict__item { margin: 0; }
 .fl-apply-stale { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--fl-color-warning, #f59e0b) 20%, transparent); }
 .fl-changes-panel { padding: 4px 0; }
+.fl-changes-panel__resize {
+  position: relative;
+  flex: 0 0 8px;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+}
+.fl-changes-panel__resize:hover {
+  background: transparent;
+}
+.fl-changes-panel__resize::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 2px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.45);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.fl-changes-panel__resize:hover::after {
+  background: rgba(128, 128, 128, 0.65);
+  opacity: 1;
+}

@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState } from "react";
+import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { CircleCheck, Undo2, Upload } from "lucide-react";
 import {
   applyManifest,
@@ -69,8 +69,44 @@ export function ManifestEditor({
   const [conflictDocs, setConflictDocs] = useState<ApplyDoc[] | null>(null);
   const [diffDocs, setDiffDocs] = useState<DiffDoc[] | null>(null);
   const [diffing, setDiffing] = useState(false);
-  const [showDiff, setShowDiff] = useState(fill);
+  const [showDiff, setShowDiff] = useState(false);
   const loadedRvRef = React.useRef<string | null>(null);
+  const diffHandleRef = useRef<HTMLDivElement>(null);
+  const [diffWidth, setDiffWidth] = useState(480);
+  const diffStartX = useRef(0);
+  const diffStartW = useRef(0);
+  const diffWidthRef = useRef(diffWidth);
+  diffWidthRef.current = diffWidth;
+
+  useEffect(() => {
+    if (!showDiff) return;
+    const handle = diffHandleRef.current;
+    if (!handle) return;
+    function move(e: MouseEvent) {
+      // Divider sits on the LEFT edge of the diff pane: dragging left grows it.
+      setDiffWidth(Math.max(300, Math.min(1100, diffStartW.current - (e.clientX - diffStartX.current))));
+    }
+    function up() {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.userSelect = "";
+    }
+    function down(e: MouseEvent) {
+      e.preventDefault();
+      diffStartX.current = e.clientX;
+      diffStartW.current = diffWidthRef.current;
+      document.body.style.userSelect = "none";
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    }
+    handle.addEventListener("mousedown", down);
+    return () => {
+      handle.removeEventListener("mousedown", down);
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.userSelect = "";
+    };
+  }, [showDiff]);
 
   // Capture the resourceVersion of the first loaded manifest, for stale detection.
   React.useEffect(() => {
@@ -262,15 +298,21 @@ export function ManifestEditor({
             <div className="absolute inset-0">{editor}</div>
           </div>
           {showDiff && (
-            <div className="fl-changes-panel min-h-0 w-1/2 overflow-auto border-l border-border">
-              {diffing && !diffDocs ? (
-                <Spinner label="Computing diff" />
-              ) : diffDocs && diffDocs.length > 0 ? (
-                diffDocs.map((d, i) => <DiffView key={`${d.kind}/${d.name}/${i}`} doc={d} />)
-              ) : (
-                <p className="fl-diff__empty">No changes</p>
-              )}
-            </div>
+            <>
+              <div className="fl-changes-panel__resize" ref={diffHandleRef} aria-hidden="true" />
+              <div
+                className="fl-changes-panel min-h-0 shrink-0 overflow-auto border-l border-border"
+                style={{ width: diffWidth }}
+              >
+                {diffing && !diffDocs ? (
+                  <Spinner label="Computing diff" />
+                ) : diffDocs && diffDocs.length > 0 ? (
+                  diffDocs.map((d, i) => <DiffView key={`${d.kind}/${d.name}/${i}`} doc={d} />)
+                ) : (
+                  <p className="fl-diff__empty">No changes</p>
+                )}
+              </div>
+            </>
           )}
         </div>
         {confirmDialog}
