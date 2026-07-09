@@ -643,6 +643,13 @@ body {
   position: relative;
   border-radius: var(--fl-radius-md);
 }
+.fl-hotbar__divider {
+  width: 24px;
+  height: 1px;
+  margin: 4px auto;
+  flex: 0 0 auto;
+  background: var(--fl-color-border-faint);
+}
 .fl-hotbar__item--active::before {
   content: "";
   position: absolute;
@@ -3853,6 +3860,47 @@ body {
   justify-content: space-between;
   color: var(--fl-color-text-muted);
   font-size: 11px;
+}
+.fl-landing__context-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fl-landing__context-group + .fl-landing__context-group {
+  margin-top: 14px;
+}
+.fl-landing__context-group-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 2px 2px;
+  color: var(--fl-color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.fl-landing__context-group-count {
+  display: inline-flex;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--fl-color-surface-alt);
+  color: var(--fl-color-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.fl-landing__context-badge {
+  text-transform: lowercase;
+}
+.fl-landing__current-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .fl-landing__capabilities {
   display: grid;

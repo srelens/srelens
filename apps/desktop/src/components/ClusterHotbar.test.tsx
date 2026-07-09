@@ -40,6 +40,29 @@ describe("ClusterHotbar", () => {
     expect(onOpenContext).toHaveBeenCalledWith("prod");
   });
 
+  it("separates local clusters from remote ones with a divider", async () => {
+    listContextsMock.mockResolvedValue({
+      contexts: [
+        { name: "prod", cluster: "p", server: "s", isCurrent: false },
+        { name: "kind-dev", cluster: "k", server: "s", isCurrent: true, isLocal: true, provider: "kind" },
+      ],
+    });
+    render(
+      <ClusterHotbar
+        openContext="kind-dev"
+        onOpenContext={() => {}}
+        theme={theme}
+        onToggleTheme={() => {}}
+        onOpenSettings={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("kind-dev (local)")).toBeDefined());
+    expect(screen.getByRole("separator", { name: "Local clusters" })).toBeDefined();
+    // Remote clusters keep their plain label.
+    expect(screen.getByLabelText("prod")).toBeDefined();
+  });
+
   it("toggles the theme", async () => {
     listContextsMock.mockResolvedValue({ contexts: [] });
     const onToggleTheme = vi.fn();

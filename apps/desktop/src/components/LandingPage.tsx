@@ -78,6 +78,53 @@ export function LandingPage({
 
   const contextCount = contexts?.length ?? 0;
 
+  const localContexts = filteredContexts.filter((context) => context.isLocal);
+  const remoteContexts = filteredContexts.filter((context) => !context.isLocal);
+  // Only split into labelled sections when both kinds are present; a single
+  // group renders as a plain list, exactly as before.
+  const grouped = localContexts.length > 0 && remoteContexts.length > 0;
+
+  const renderRow = (context: ClusterContext) => (
+    <button
+      key={context.name}
+      type="button"
+      className="fl-landing__context-row"
+      onClick={() => onOpenContext(context.name)}
+      aria-label={`Open context ${context.name}`}
+    >
+      <span className="fl-landing__context-main">
+        <ContextAvatar
+          context={context.name}
+          profile={contextProfiles[context.name]}
+          className="fl-landing__context-list-avatar"
+        />
+        <span>
+          <strong>{contextDisplayName(context.name, contextProfiles[context.name])}</strong>
+          <small>{context.cluster}</small>
+        </span>
+      </span>
+      <span className="fl-landing__context-action" aria-hidden="true">
+        {context.isLocal && (
+          <Badge variant="outline" className="fl-landing__context-badge">
+            {context.provider ?? "local"}
+          </Badge>
+        )}
+        {context.isCurrent && <small>Current</small>}
+        <ArrowRight />
+      </span>
+    </button>
+  );
+
+  const renderGroup = (label: string, items: ClusterContext[]) => (
+    <div className="fl-landing__context-group" key={label}>
+      <p className="fl-landing__context-group-label">
+        <span>{label}</span>
+        <span className="fl-landing__context-group-count">{items.length}</span>
+      </p>
+      {items.map(renderRow)}
+    </div>
+  );
+
   return (
     <div className="fl-landing">
       <div className="fl-landing__frame">
@@ -117,7 +164,12 @@ export function LandingPage({
                 <CardDescription>Continue from your active kubeconfig context.</CardDescription>
                 {currentContext && (
                   <CardAction>
-                    <Badge variant="secondary">Current</Badge>
+                    <span className="fl-landing__current-badges">
+                      {currentContext.isLocal && (
+                        <Badge variant="outline">{currentContext.provider ?? "local"}</Badge>
+                      )}
+                      <Badge variant="secondary">Current</Badge>
+                    </span>
                   </CardAction>
                 )}
               </CardHeader>
@@ -180,34 +232,15 @@ export function LandingPage({
                   <p className="fl-landing__empty">Reading kubeconfig…</p>
                 ) : error ? (
                   <p className="fl-landing__empty">Unable to load kube contexts.</p>
-                ) : filteredContexts.length > 0 ? (
-                  filteredContexts.map((context) => (
-                    <button
-                      key={context.name}
-                      type="button"
-                      className="fl-landing__context-row"
-                      onClick={() => onOpenContext(context.name)}
-                      aria-label={`Open context ${context.name}`}
-                    >
-                      <span className="fl-landing__context-main">
-                        <ContextAvatar
-                          context={context.name}
-                          profile={contextProfiles[context.name]}
-                          className="fl-landing__context-list-avatar"
-                        />
-                        <span>
-                          <strong>{contextDisplayName(context.name, contextProfiles[context.name])}</strong>
-                          <small>{context.cluster}</small>
-                        </span>
-                      </span>
-                      <span className="fl-landing__context-action" aria-hidden="true">
-                        {context.isCurrent && <small>Current</small>}
-                        <ArrowRight />
-                      </span>
-                    </button>
-                  ))
-                ) : (
+                ) : filteredContexts.length === 0 ? (
                   <p className="fl-landing__empty">No contexts match this filter.</p>
+                ) : grouped ? (
+                  <>
+                    {renderGroup("Local", localContexts)}
+                    {renderGroup("Remote", remoteContexts)}
+                  </>
+                ) : (
+                  filteredContexts.map(renderRow)
                 )}
               </div>
             </CardContent>

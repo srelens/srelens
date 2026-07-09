@@ -41,6 +41,35 @@ describe("LandingPage", () => {
     expect(onOpenContext).toHaveBeenCalledWith("production-eu");
   });
 
+  it("splits local and remote contexts into groups with a provider badge", async () => {
+    listContexts.mockResolvedValue({
+      contexts: [
+        {
+          name: "kind-dev",
+          cluster: "kind-dev",
+          server: "https://127.0.0.1:6443",
+          isCurrent: false,
+          isLocal: true,
+          provider: "kind",
+        },
+        {
+          name: "production-eu",
+          cluster: "prod-eu",
+          server: "https://prod.example.com",
+          isCurrent: true,
+        },
+      ],
+    });
+
+    render(<LandingPage onOpenContext={vi.fn()} onOpenSettings={vi.fn()} />);
+    await screen.findByRole("button", { name: "Open context kind-dev" });
+
+    // Both groups are labelled, and the local row carries its provider badge.
+    expect(screen.getByText("Local")).toBeDefined();
+    expect(screen.getByText("Remote")).toBeDefined();
+    expect(screen.getByText("kind")).toBeDefined();
+  });
+
   it("opens workspace preferences from the masthead", async () => {
     listContexts.mockResolvedValue({ contexts: [] });
     const onOpenSettings = vi.fn();
