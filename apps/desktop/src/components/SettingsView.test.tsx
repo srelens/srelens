@@ -329,7 +329,6 @@ describe("SettingsView", () => {
 
   it("shows a delete context button and triggers onDeleteContext on click", async () => {
     const onDeleteContext = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(
       <SettingsView
@@ -355,7 +354,46 @@ describe("SettingsView", () => {
     const removeButton = await screen.findByRole("button", { name: "Remove context" });
     fireEvent.click(removeButton);
 
-    expect(window.confirm).toHaveBeenCalledWith('Are you sure you want to remove context "prod-eu"? This will modify the kubeconfig file.');
-    expect(onDeleteContext).toHaveBeenCalledWith("prod-eu");
+    const confirmButton = await screen.findByRole("button", { name: "Remove" });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(onDeleteContext).toHaveBeenCalledWith("prod-eu"));
+  });
+
+  it("opens a right-click menu on a context row and confirms removal from there", async () => {
+    const onDeleteContext = vi.fn().mockResolvedValue(undefined);
+
+    const { container } = render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+        onDeleteContext={onDeleteContext}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await screen.findByText("Context identity");
+
+    const row = container.querySelector<HTMLButtonElement>('button[data-context-name="staging"]')!;
+    fireEvent.contextMenu(row);
+
+    const menuRemove = await screen.findByText("Remove context", { selector: '[data-slot="context-menu-item"]' });
+    fireEvent.click(menuRemove);
+
+    const confirmButton = await screen.findByRole("button", { name: "Remove" });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(onDeleteContext).toHaveBeenCalledWith("staging"));
   });
 });

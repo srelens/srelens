@@ -29,12 +29,21 @@ import {
   SectionPanel,
   TextInput,
   Button,
+  ConfirmDialog,
   THEME_OPTIONS,
   type Theme,
   type ThemeMode,
   type ThemeName,
 } from "../ui";
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from "@/components/ui/context-menu";
 import { listContexts, deleteContext, type ClusterContext } from "../lib/clusters";
+import { notify } from "../lib/notify";
 import {
   DEFAULT_WORKSPACE_LAYOUT,
   REQUEST_TIMEOUT,
@@ -136,6 +145,8 @@ export function SettingsView({
   const [internalError, setInternalError] = useState("");
   const [contextQuery, setContextQuery] = useState("");
   const [selectedContextName, setSelectedContextName] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [logoError, setLogoError] = useState("");
   const [kubeconfigError, setKubeconfigError] = useState("");
   const [draggedContextName, setDraggedContextName] = useState<string | null>(null);
@@ -218,25 +229,26 @@ export function SettingsView({
   const contexts = passedContexts !== null ? passedContexts : internalContexts;
   const contextError = passedContexts !== null ? contextsError : internalError;
 
-  const handleDeleteContext = async (name: string) => {
-    if (!window.confirm(`Are you sure you want to remove context "${name}"? This will modify the kubeconfig file.`)) {
-      return;
-    }
-    if (onDeleteContext) {
-      await onDeleteContext(name);
-      setSelectedContextName(null);
-    } else {
-      try {
+  const confirmDeleteContext = async () => {
+    const name = pendingDelete;
+    if (!name) return;
+    setDeleteBusy(true);
+    try {
+      if (onDeleteContext) {
+        await onDeleteContext(name);
+      } else {
         await deleteContext(name);
         resetContext(name);
         onContextOrderChange(contextOrder.filter((item) => item !== name));
-        void listContexts(kubeconfigFiles).then((outcome) => {
-          setInternalContexts(outcome.contexts ?? []);
-          setSelectedContextName(null);
-        });
-      } catch (e) {
-        alert(`Failed to delete context: ${e}`);
+        const outcome = await listContexts(kubeconfigFiles);
+        setInternalContexts(outcome.contexts ?? []);
       }
+      setSelectedContextName(null);
+      setPendingDelete(null);
+    } catch (e) {
+      notify.error("Failed to remove context", String(e));
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -610,34 +622,44 @@ export function SettingsView({
                       {filteredContexts.map((context) => {
                         const profile = contextProfiles[context.name] ?? {};
                         return (
-                          <button
-                            key={context.name}
-                            type="button"
-                            className={[
-                              selectedContext?.name === context.name ? "is-active" : "",
-                              draggedContextName === context.name ? "is-dragging" : "",
-                              dropTargetName === context.name ? "is-drop-target" : "",
-                            ].filter(Boolean).join(" ")}
-                            data-context-name={context.name}
-                            onClick={() => setSelectedContextName(context.name)}
-                          >
-                            <ContextAvatar context={context.name} profile={profile} className="fl-settings-context-avatar" />
-                            <span>
-                              <strong>{contextDisplayName(context.name, profile)}</strong>
-                              <small>{context.name}</small>
-                            </span>
-                            {context.isCurrent && <i title="Current context" />}
-                            <span
-                              className="fl-context-manager__grip"
-                              title="Drag to reorder"
-                              onPointerDown={(event) => beginPointerContextDrag(event, context.name)}
-                              onPointerMove={updatePointerContextDrag}
-                              onPointerUp={finishPointerContextDrag}
-                              onPointerCancel={finishPointerContextDrag}
-                            >
-                              <GripVertical aria-hidden="true" />
-                            </span>
-                          </button>
+                          <ContextMenu key={context.name}>
+                            <ContextMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className={[
+                                  selectedContext?.name === context.name ? "is-active" : "",
+                                  draggedContextName === context.name ? "is-dragging" : "",
+                                  dropTargetName === context.name ? "is-drop-target" : "",
+                                ].filter(Boolean).join(" ")}
+                                data-context-name={context.name}
+                                onClick={() => setSelectedContextName(context.name)}
+                              >
+                                <ContextAvatar context={context.name} profile={profile} className="fl-settings-context-avatar" />
+                                <span>
+                                  <strong>{contextDisplayName(context.name, profile)}</strong>
+                                  <small>{context.name}</small>
+                                </span>
+                                {context.isCurrent && <i title="Current context" />}
+                                <span
+                                  className="fl-context-manager__grip"
+                                  title="Drag to reorder"
+                                  onPointerDown={(event) => beginPointerContextDrag(event, context.name)}
+                                  onPointerMove={updatePointerContextDrag}
+                                  onPointerUp={finishPointerContextDrag}
+                                  onPointerCancel={finishPointerContextDrag}
+                                >
+                                  <GripVertical aria-hidden="true" />
+                                </span>
+                              </button>
+                            </ContextMenuTrigger>
+                            <ContextMenuContent>
+                              <ContextMenuItem onSelect={() => resetContext(context.name)}>Reset identity</ContextMenuItem>
+                              <ContextMenuSeparator />
+                              <ContextMenuItem variant="destructive" onSelect={() => setPendingDelete(context.name)}>
+                                Remove context
+                              </ContextMenuItem>
+                            </ContextMenuContent>
+                          </ContextMenu>
                         );
                       })}
                       {filteredContexts.length === 0 && <p>No matching contexts</p>}
@@ -806,7 +828,7 @@ export function SettingsView({
                           variant="ghost"
                           size="sm"
                           className="hover:text-destructive hover:bg-destructive/10 text-muted-foreground"
-                          onClick={() => void handleDeleteContext(selectedContext.name)}
+                          onClick={() => setPendingDelete(selectedContext.name)}
                         >
                           <Trash2 data-icon="inline-start" /> Remove context
                         </Button>
@@ -901,6 +923,22 @@ export function SettingsView({
           )}
         </div>
       </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Remove context?"
+          message={
+            <p style={{ marginTop: 0 }}>
+              Remove <code>{pendingDelete}</code> from its kubeconfig file? This modifies the kubeconfig on disk.
+            </p>
+          }
+          confirmLabel="Remove"
+          danger
+          busy={deleteBusy}
+          onConfirm={() => void confirmDeleteContext()}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </PageShell>
   );
 }

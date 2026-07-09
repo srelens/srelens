@@ -151,7 +151,7 @@ export function App() {
       // Refresh list
       refreshContexts();
     } catch (e) {
-      alert(`Failed to delete context: ${e}`);
+      notify.error("Failed to remove context", String(e));
     }
   };
 
