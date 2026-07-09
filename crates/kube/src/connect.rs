@@ -78,6 +78,37 @@ pub fn validate_kubeconfig_yaml(yaml: &str) -> Result<usize, String> {
     Ok(config.contexts.len())
 }
 
+/// Build a standalone kubeconfig (YAML) containing ONLY `context` plus the one
+/// cluster and user it references, with `current-context` pinned to it.
+///
+/// Used to lock the in-app terminal to a single cluster: pointing `KUBECONFIG`
+/// at this file means `kubectl config get-contexts` lists just that context and
+/// `use-context` can't switch to any other.
+pub fn single_context_kubeconfig_yaml(paths: &[PathBuf], context: &str) -> Result<String, String> {
+    let mut config = load_kubeconfigs(paths)?;
+    let named = config
+        .contexts
+        .iter()
+        .find(|c| c.name == context)
+        .ok_or_else(|| format!("context '{context}' not found in kubeconfig"))?;
+    let inner = named
+        .context
+        .clone()
+        .ok_or_else(|| format!("context '{context}' has no cluster/user"))?;
+
+    config.contexts.retain(|c| c.name == context);
+    config.clusters.retain(|c| c.name == inner.cluster);
+    config.auth_infos.retain(|a| a.name == inner.user);
+    config.current_context = Some(context.to_string());
+    if config.kind.is_none() {
+        config.kind = Some("Config".to_string());
+    }
+    if config.api_version.is_none() {
+        config.api_version = Some("v1".to_string());
+    }
+    serde_yaml::to_string(&config).map_err(|e| e.to_string())
+}
+
 pub(crate) async fn build_client(paths: &[PathBuf], context: &str) -> Result<Client, String> {
     let kubeconfig = load_kubeconfigs(paths)?;
     let options = KubeConfigOptions {
@@ -167,6 +198,33 @@ mod tests {
         assert_eq!(request_timeout_secs(), 20);
         // Restore the default so other tests see a known value.
         set_request_timeout_secs(DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn single_context_kubeconfig_keeps_only_the_named_context() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("srelens-single-context-test.yaml");
+        std::fs::write(
+            &path,
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx-a\nclusters:\n  - name: cluster-a\n    cluster: { server: https://a:6443 }\n  - name: cluster-b\n    cluster: { server: https://b:6443 }\nusers:\n  - name: user-a\n    user: {}\n  - name: user-b\n    user: {}\ncontexts:\n  - name: ctx-a\n    context: { cluster: cluster-a, user: user-a }\n  - name: ctx-b\n    context: { cluster: cluster-b, user: user-b }\n",
+        )
+        .unwrap();
+
+        let yaml = single_context_kubeconfig_yaml(&[path.clone()], "ctx-b").unwrap();
+        let locked = Kubeconfig::from_yaml(&yaml).unwrap();
+
+        // Only ctx-b (and its cluster/user) survive, and it's the current context.
+        assert_eq!(locked.current_context.as_deref(), Some("ctx-b"));
+        assert_eq!(locked.contexts.len(), 1);
+        assert_eq!(locked.contexts[0].name, "ctx-b");
+        assert_eq!(locked.clusters.len(), 1);
+        assert_eq!(locked.clusters[0].name, "cluster-b");
+        assert_eq!(locked.auth_infos.len(), 1);
+        assert_eq!(locked.auth_infos[0].name, "user-b");
+
+        // A missing context is an error, not a full config.
+        assert!(single_context_kubeconfig_yaml(&[path.clone()], "nope").is_err());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

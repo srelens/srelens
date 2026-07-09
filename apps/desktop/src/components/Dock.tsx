@@ -1,9 +1,10 @@
 import React, { useEffect, useRef } from "react";
-import { Logs, SquareTerminal, X } from "lucide-react";
+import { Logs, Plus, SquareTerminal, X } from "lucide-react";
 import { PodTerminal } from "./PodTerminal";
+import { LocalTerminal } from "./LocalTerminal";
 import { LogsView, type LogsSource } from "./LogsView";
 
-export type DockKind = "terminal" | "logs";
+export type DockKind = "terminal" | "logs" | "shell";
 
 export interface DockSession {
   id: number;
@@ -16,10 +17,13 @@ export interface DockSession {
   container?: string;
   /** Present for workload (e.g. Deployment) logs that span many pods. */
   workload?: { kind: string; name: string };
+  /** Extra kubeconfig files, for a local `shell` terminal scoped to the context. */
+  kubeconfigFiles?: string[];
 }
 
-/** Tab/session label: the pod name, or the workload kind/name. */
+/** Tab/session label: the pod name, the workload kind/name, or the context for a shell. */
 function sessionLabel(s: DockSession): string {
+  if (s.kind === "shell") return `kubectl · ${s.context}`;
   if (s.pod) return s.pod;
   if (s.workload) return `${s.workload.kind}/${s.workload.name}`;
   return "session";
@@ -37,6 +41,7 @@ export function Dock({
   onCloseTab,
   onClose,
   onResize,
+  onNewTerminal,
 }: {
   sessions: DockSession[];
   activeId: number | null;
@@ -45,8 +50,9 @@ export function Dock({
   onCloseTab: (id: number) => void;
   onClose: () => void;
   onResize: (height: number) => void;
+  /** Open another terminal for the active context (shown as a "+" in the tab bar). */
+  onNewTerminal?: () => void;
 }) {
-  const active = sessions.find((s) => s.id === activeId) ?? null;
   const startY = useRef(0);
   const startH = useRef(0);
   const heightRef = useRef(height);
@@ -88,58 +94,84 @@ export function Dock({
         <span className="fl-dock__grip" />
       </div>
       <div className="fl-dock__tabs">
-        {sessions.map((s) => (
-          <div
-            key={s.id}
-            role="tab"
-            aria-selected={s.id === activeId}
-            className={`fl-dock__tab${s.id === activeId ? " fl-dock__tab--active" : ""}`}
-            onClick={() => onActivate(s.id)}
-          >
-            <span>
-              {s.kind === "terminal" ? <SquareTerminal aria-hidden="true" /> : <Logs aria-hidden="true" />}
-              {sessionLabel(s)}
-            </span>
-            <button
-              className="fl-dock__tab-close"
-              aria-label={`Close ${sessionLabel(s)} ${s.kind}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onCloseTab(s.id);
-              }}
+        <div className="fl-dock__tablist" role="tablist">
+          {sessions.map((s) => (
+            <div
+              key={s.id}
+              role="tab"
+              aria-selected={s.id === activeId}
+              title={sessionLabel(s)}
+              className={`fl-dock__tab${s.id === activeId ? " fl-dock__tab--active" : ""}`}
+              onClick={() => onActivate(s.id)}
             >
-              <X aria-hidden="true" />
-            </button>
-          </div>
-        ))}
-        <div className="fl-dock__spacer" />
+              <span className="fl-dock__tab-main">
+                {s.kind === "terminal" || s.kind === "shell" ? (
+                  <SquareTerminal aria-hidden="true" />
+                ) : (
+                  <Logs aria-hidden="true" />
+                )}
+                <span className="fl-dock__tab-label">{sessionLabel(s)}</span>
+              </span>
+              <button
+                className="fl-dock__tab-close"
+                aria-label={`Close ${sessionLabel(s)} ${s.kind}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCloseTab(s.id);
+                }}
+              >
+                <X aria-hidden="true" />
+              </button>
+            </div>
+          ))}
+        </div>
+        {onNewTerminal && (
+          <button
+            className="fl-dock__new"
+            aria-label="New terminal"
+            title="New terminal (same context)"
+            onClick={onNewTerminal}
+          >
+            <Plus aria-hidden="true" />
+          </button>
+        )}
         <button className="fl-dock__close" aria-label="Close dock" onClick={onClose}>
           <X aria-hidden="true" />
         </button>
       </div>
       <div className="fl-dock__body">
-        {active &&
-          (active.kind === "terminal" && active.pod ? (
-            <PodTerminal
-              key={active.id}
-              context={active.context}
-              namespace={active.namespace}
-              pod={active.pod}
-              container={active.container}
-            />
-          ) : (
-            <LogsView
-              key={active.id}
-              context={active.context}
-              namespace={active.namespace}
-              initialContainer={active.container}
-              source={
-                (active.pod
-                  ? { type: "pod", pod: active.pod }
-                  : { type: "workload", kind: active.workload!.kind, name: active.workload!.name }) as LogsSource
-              }
-            />
-          ))}
+        {/* Every session stays mounted; only the active one is shown. Unmounting
+            an inactive tab would tear down its shell/log stream and lose the
+            terminal scrollback, so we hide rather than remove. */}
+        {sessions.map((s) => (
+          <div
+            key={s.id}
+            className="fl-dock__pane"
+            style={{ display: s.id === activeId ? "block" : "none" }}
+          >
+            {s.kind === "shell" ? (
+              <LocalTerminal context={s.context} kubeconfigFiles={s.kubeconfigFiles ?? []} />
+            ) : s.kind === "terminal" && s.pod ? (
+              <PodTerminal
+                context={s.context}
+                namespace={s.namespace}
+                pod={s.pod}
+                container={s.container}
+              />
+            ) : (
+              <LogsView
+                context={s.context}
+                namespace={s.namespace}
+                initialContainer={s.container}
+                source={
+                  (s.pod
+                    ? { type: "pod", pod: s.pod }
+                    : { type: "workload", kind: s.workload!.kind, name: s.workload!.name }) as LogsSource
+                }
+              />
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );

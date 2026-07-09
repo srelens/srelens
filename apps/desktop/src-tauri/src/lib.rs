@@ -6,6 +6,7 @@ mod forward;
 mod logs;
 mod mcp;
 mod settings;
+mod terminal;
 mod updater;
 mod watch;
 
@@ -20,6 +21,7 @@ use mcp::{
     McpHttpManager,
 };
 use settings::{get_request_timeout, set_request_timeout};
+use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize, TerminalManager};
 use updater::{update_check, update_install};
 use watch::{start_resource_watch, stop_watch, WatchManager};
 
@@ -173,6 +175,7 @@ pub fn run() {
         .manage(ForwardManager::new(cache.clone()))
         .manage(McpHttpManager::new(cache.clone()))
         .manage(LogStreamManager::new(cache))
+        .manage(TerminalManager::new())
         .invoke_handler(tauri::generate_handler![
             invoke_capability,
             start_resource_watch,
@@ -195,7 +198,11 @@ pub fn run() {
             mcp_http_stop,
             mcp_http_status,
             install_srelens_cli,
-            srelens_cli_status
+            srelens_cli_status,
+            start_terminal,
+            terminal_input,
+            terminal_resize,
+            terminal_close
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

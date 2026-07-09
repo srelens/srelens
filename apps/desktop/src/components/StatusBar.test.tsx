@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 
 // Usage polls metrics; stub it so the status-bar tests stay focused.
@@ -24,5 +24,15 @@ describe("StatusBar", () => {
   it("uses the singular for a single tab", () => {
     render(<StatusBar activeCluster="dev" tabCount={1} />);
     expect(screen.getByText("1 tab")).toBeDefined();
+  });
+
+  it("offers a terminal launcher only when a handler is provided", () => {
+    const onOpenTerminal = vi.fn();
+    const { rerender } = render(<StatusBar activeCluster="dev" tabCount={1} />);
+    expect(screen.queryByRole("button", { name: "Open kubectl terminal" })).toBeNull();
+
+    rerender(<StatusBar activeCluster="dev" tabCount={1} onOpenTerminal={onOpenTerminal} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open kubectl terminal" }));
+    expect(onOpenTerminal).toHaveBeenCalledTimes(1);
   });
 });

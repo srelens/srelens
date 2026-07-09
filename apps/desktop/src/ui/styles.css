@@ -860,6 +860,17 @@ body {
   height: 32px;
   border-bottom: 1px solid var(--fl-color-border);
 }
+/* Tabs scroll horizontally so many long-named terminals never break layout;
+   the +/close buttons stay pinned to the right of this scroll area. */
+.fl-dock__tablist {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
 .fl-dock__tab {
   display: inline-flex;
   align-items: center;
@@ -870,6 +881,23 @@ body {
   border-right: 1px solid var(--fl-color-border);
   font-size: 13px;
   background: transparent;
+  flex: 0 0 auto;
+  max-width: 240px;
+}
+.fl-dock__tab-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.fl-dock__tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-dock__new,
+.fl-dock__close {
+  flex: 0 0 auto;
 }
 .fl-dock__tab--active {
   background: var(--fl-dock-tab-active);
@@ -918,7 +946,23 @@ body {
   padding: 0 2px;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
+.fl-dock__new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 0 8px;
+}
+.fl-dock__new svg {
+  width: 15px;
+  height: 15px;
+}
 .fl-dock__tab-close:hover,
+.fl-dock__new:hover,
 .fl-dock__close:hover {
   opacity: 1;
 }
@@ -945,6 +989,11 @@ body {
   min-height: 0;
   background: var(--fl-color-bg);
   overflow: hidden;
+  position: relative;
+}
+.fl-dock__pane {
+  height: 100%;
+  width: 100%;
 }
 .fl-sidebar__cluster {
   display: flex;

@@ -44,10 +44,14 @@ describe("Dock", () => {
     expect(screen.getByTestId("terminal").textContent).toBe("web-1");
   });
 
-  it("renders the logs view when a logs tab is active", () => {
+  it("keeps every session mounted and shows only the active one", () => {
     renderDock({ activeId: 2 });
+    // Both panes are mounted (so terminals/streams survive tab switches)…
     expect(screen.getByTestId("logs").textContent).toBe("web-2");
-    expect(screen.queryByTestId("terminal")).toBeNull();
+    expect(screen.getByTestId("terminal").textContent).toBe("web-1");
+    // …but only the active session's pane is displayed.
+    expect((screen.getByTestId("logs").parentElement as HTMLElement).style.display).toBe("block");
+    expect((screen.getByTestId("terminal").parentElement as HTMLElement).style.display).toBe("none");
   });
 
   it("activates a tab on click", () => {
@@ -62,5 +66,36 @@ describe("Dock", () => {
     expect(props.onCloseTab).toHaveBeenCalledWith(1);
     fireEvent.click(screen.getByLabelText("Close dock"));
     expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it("shows a New terminal button only when a handler is given", () => {
+    const { rerender } = render(
+      <Dock
+        sessions={sessions}
+        activeId={1}
+        height={300}
+        onActivate={vi.fn()}
+        onCloseTab={vi.fn()}
+        onClose={vi.fn()}
+        onResize={vi.fn()}
+      />,
+    );
+    expect(screen.queryByLabelText("New terminal")).toBeNull();
+
+    const onNewTerminal = vi.fn();
+    rerender(
+      <Dock
+        sessions={sessions}
+        activeId={1}
+        height={300}
+        onActivate={vi.fn()}
+        onCloseTab={vi.fn()}
+        onClose={vi.fn()}
+        onResize={vi.fn()}
+        onNewTerminal={onNewTerminal}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("New terminal"));
+    expect(onNewTerminal).toHaveBeenCalledTimes(1);
   });
 });

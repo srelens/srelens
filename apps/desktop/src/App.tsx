@@ -376,6 +376,7 @@ export function App() {
       pod?: string;
       container?: string;
       workload?: { kind: string; name: string };
+      kubeconfigFiles?: string[];
     },
   ) {
     const id = dockIdRef.current++;
@@ -546,6 +547,17 @@ export function App() {
                     onCloseTab={closeDockTab}
                     onClose={closeDock}
                     onResize={setDockHeight}
+                    onNewTerminal={(() => {
+                      // "+" opens another terminal for the active shell's context,
+                      // falling back to the connected cluster.
+                      const active = dockSessions.find((s) => s.id === activeDock);
+                      const ctx = active?.kind === "shell" ? active.context : activeCluster;
+                      const files =
+                        active?.kind === "shell" ? active.kubeconfigFiles ?? kubeconfigFiles : kubeconfigFiles;
+                      return ctx
+                        ? () => openDock("shell", { context: ctx, namespace: "", kubeconfigFiles: files })
+                        : undefined;
+                    })()}
                   />
                 )}
               </>
@@ -567,6 +579,12 @@ export function App() {
           activeTab ? (activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
         }
         tabCount={tabs.length}
+        onOpenTerminal={
+          activeCluster
+            ? () =>
+                openDock("shell", { context: activeCluster, namespace: "", kubeconfigFiles })
+            : undefined
+        }
       />
       <CommandPalette
         open={paletteOpen}
