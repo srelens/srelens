@@ -157,6 +157,28 @@ jobs:
             build-essential \
             curl wget file
 
+      # The AppImage must NOT bundle libwayland-*: they're part of the platform
+      # ABI (they must match the host compositor/Mesa), and shipping the build
+      # machine's copies makes eglGetDisplay() fail with EGL_BAD_PARAMETER on
+      # any host with a newer Mesa — a blank window on launch (#111).
+      #
+      # tauri-bundler passes no exclude flags to linuxdeploy, but linuxdeploy
+      # reads exclude globs from $LINUXDEPLOY_EXCLUDED_LIBRARIES — an env var
+      # that exists since linuxdeploy 2025-08, while the build tauri-bundler
+      # pins was built 2024-07. The bundler skips its own download when the
+      # tools cache is already populated, so seed it with a current build,
+      # pinned by checksum (this is a rolling release: when upstream rebuilds
+      # it, the pin breaks loudly — verify the new binary, then update it).
+      - name: Seed linuxdeploy that honors Wayland lib exclusion (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          mkdir -p ~/.cache/tauri
+          curl -fsSL -o ~/.cache/tauri/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          echo "e87ee0815d109282fdda73e34c2361d64d02b0ffaea3674b18f1fd1f6a687dcf  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c - \
+            || { echo "::error::linuxdeploy checksum changed — upstream rebuilt the continuous release; verify it and update the pinned hash"; exit 1; }
+          chmod +x ~/.cache/tauri/linuxdeploy-x86_64.AppImage
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -225,6 +247,9 @@ jobs:
           # in-app updater can verify downloads.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Keep host-ABI Wayland libs out of the AppImage (#111); read by the
+          # seeded linuxdeploy, ignored everywhere else.
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-*"
           # Apple signing env (APPLE_CERTIFICATE etc.) is exported to
           # GITHUB_ENV by the step above only when signing is enabled —
           # defining the variables empty here would trigger Tauri's signing
@@ -242,6 +267,21 @@ jobs:
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
           includeUpdaterJson: false
+
+      # Regression tripwire for #111: fail the build if the AppImage bundles
+      # host-ABI Wayland libs. The updater-manifest job requires this job to
+      # succeed, so a bad AppImage can never be offered to updaters.
+      - name: Assert AppImage bundles no Wayland libs (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          app=$(ls target/release/bundle/appimage/*.AppImage)
+          "$app" --appimage-extract > /dev/null
+          if found=$(find squashfs-root -name 'libwayland-*' | grep .); then
+            echo "::error::AppImage bundles Wayland platform libs — blank window on newer Mesa (#111):"
+            echo "$found"
+            exit 1
+          fi
+          echo "OK: no libwayland-* in the AppImage"
 
   # Dev only: fill the pre-release body with a recent-commit list and keep the
   # Releases page tidy. Stable (main) notes come from the version job.
