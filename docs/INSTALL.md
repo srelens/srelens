@@ -35,6 +35,14 @@ Requires a WebKitGTK runtime (`webkit2gtk-4.1`); the deb/rpm pull it in
 automatically. The in-app updater applies to the **AppImage** build; update
 deb/rpm installs by downloading the new package.
 
+The AppImage deliberately does **not** bundle the Wayland client libraries
+(`libwayland-client/cursor/egl/server`) — bundling them breaks EGL on hosts with
+a newer Mesa, which opened a blank window on rolling distros (#111). They come
+from the host instead. Any desktop that can run GTK apps already has them; on a
+stripped-down image without them, install your distribution's `libwayland`
+runtime packages (Debian/Ubuntu: `libwayland-client0`, `libwayland-cursor0`,
+`libwayland-egl1`, `libwayland-server0`).
+
 ### Verifying Linux downloads (optional)
 
 Each Linux asset ships a Tauri updater signature (`.sig`). GPG signatures for

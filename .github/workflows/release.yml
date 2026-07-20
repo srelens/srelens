@@ -117,6 +117,20 @@ jobs:
       # Apple secret set is present; with anything less the build stays
       # unsigned rather than failing on a partial configuration.
       ENABLE_MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      # Libraries the AppImage must NOT bundle (#111) — see the seed step below.
+      # Single source of truth: the build passes this to linuxdeploy, and the
+      # post-build assert greps for the same pattern. Keep them in lockstep.
+      APPIMAGE_EXCLUDED_LIBS: "libwayland-*"
+      # Immutable linuxdeploy release (NOT the rolling `continuous` tag, whose
+      # asset is rebuilt by a monthly upstream cron and would break this pin —
+      # and every release with it — without a single upstream commit).
+      #
+      # Bumping this adopts upstream's baked-in excludelist wholesale, which can
+      # silently stop bundling libraries beyond the ones named here (it already
+      # covers libwayland-client and libpipewire-0.3). Diff that list before
+      # moving the pin; the assert below only guards the Wayland case.
+      LINUXDEPLOY_RELEASE: "1-alpha-20251107-1"
+      LINUXDEPLOY_SHA256: "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
     strategy:
       fail-fast: false
       matrix:
@@ -143,7 +157,7 @@ jobs:
 
       # Tauri v2 build dependencies.
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -160,23 +174,32 @@ jobs:
       # The AppImage must NOT bundle libwayland-*: they're part of the platform
       # ABI (they must match the host compositor/Mesa), and shipping the build
       # machine's copies makes eglGetDisplay() fail with EGL_BAD_PARAMETER on
-      # any host with a newer Mesa — a blank window on launch (#111).
+      # any host with a newer Mesa — a blank window on launch (#111). The libs
+      # then come from the host, which every GTK-capable desktop already has
+      # (libgdk-3/libwebkit2gtk link them directly); the AppImage community
+      # excludelist treats libwayland-client the same way.
       #
       # tauri-bundler passes no exclude flags to linuxdeploy, but linuxdeploy
-      # reads exclude globs from $LINUXDEPLOY_EXCLUDED_LIBRARIES — an env var
-      # that exists since linuxdeploy 2025-08, while the build tauri-bundler
-      # pins was built 2024-07. The bundler skips its own download when the
-      # tools cache is already populated, so seed it with a current build,
-      # pinned by checksum (this is a rolling release: when upstream rebuilds
-      # it, the pin breaks loudly — verify the new binary, then update it).
+      # reads exclude globs from $LINUXDEPLOY_EXCLUDED_LIBRARIES — added
+      # upstream in 2025-08, newer than the 2024-07 linuxdeploy tauri-bundler
+      # mirrors. The bundler skips its own download when the tools cache is
+      # already populated (it checks existence only, no checksum), so seed the
+      # cache with a pinned immutable release.
+      #
+      # If a future tauri-bundler changes that cache path or filename, the seed
+      # is silently ignored, the old linuxdeploy runs, and the assert step below
+      # fails the build — loudly, before anything is published. The documented
+      # escape hatch is TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE, which
+      # redirects the bundler's own tool downloads (it would then also need to
+      # serve AppRun-<arch>). Remove this step entirely once tauri-bundler
+      # mirrors a linuxdeploy >= 2025-08 or exposes an exclusion config.
       - name: Seed linuxdeploy that honors Wayland lib exclusion (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           mkdir -p ~/.cache/tauri
-          curl -fsSL -o ~/.cache/tauri/linuxdeploy-x86_64.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          echo "e87ee0815d109282fdda73e34c2361d64d02b0ffaea3674b18f1fd1f6a687dcf  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c - \
-            || { echo "::error::linuxdeploy checksum changed — upstream rebuilt the continuous release; verify it and update the pinned hash"; exit 1; }
+          curl -fsSL --retry 3 --retry-all-errors -o ~/.cache/tauri/linuxdeploy-x86_64.AppImage \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_RELEASE}/linuxdeploy-x86_64.AppImage"
+          echo "${LINUXDEPLOY_SHA256}  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c -
           chmod +x ~/.cache/tauri/linuxdeploy-x86_64.AppImage
 
       - uses: pnpm/action-setup@v4
@@ -249,7 +272,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Keep host-ABI Wayland libs out of the AppImage (#111); read by the
           # seeded linuxdeploy, ignored everywhere else.
-          LINUXDEPLOY_EXCLUDED_LIBRARIES: "libwayland-*"
+          LINUXDEPLOY_EXCLUDED_LIBRARIES: ${{ env.APPIMAGE_EXCLUDED_LIBS }}
           # Apple signing env (APPLE_CERTIFICATE etc.) is exported to
           # GITHUB_ENV by the step above only when signing is enabled —
           # defining the variables empty here would trigger Tauri's signing
@@ -262,6 +285,18 @@ jobs:
           # placeholder filled in by the release-notes job.
           releaseBody: ${{ needs.version.outputs.notes || 'Generating release notes…' }}
           prerelease: ${{ github.ref_name != 'main' }}
+          # On main, publish as a DRAFT: assets upload here, but a draft never
+          # resolves as `releases/latest` — which is exactly where every stable
+          # install looks for latest.json. Without this, a leg that fails AFTER
+          # uploading (a failed assert, a broken matrix leg) leaves a public
+          # release that `latest` points at but that carries no manifest,
+          # 404ing the update check for the whole install base. The
+          # publish-release job flips the draft once the pipeline is green.
+          #
+          # Dev stays non-draft: pre-releases are already excluded from
+          # `releases/latest`, and the dev-channel manifest published by
+          # updater-manifest must point at assets that are live immediately.
+          releaseDraft: ${{ github.ref_name == 'main' }}
           args: ${{ matrix.args }}
           # Each matrix job uploads its own binaries + signatures, but NOT
           # latest.json — parallel jobs would race on that single asset. The
@@ -269,19 +304,26 @@ jobs:
           includeUpdaterJson: false
 
       # Regression tripwire for #111: fail the build if the AppImage bundles
-      # host-ABI Wayland libs. The updater-manifest job requires this job to
-      # succeed, so a bad AppImage can never be offered to updaters.
+      # host-ABI Wayland libs. The release is still a draft at this point, so
+      # failing here keeps a bad AppImage from ever becoming publicly
+      # downloadable or reaching the updater.
       - name: Assert AppImage bundles no Wayland libs (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
-          app=$(ls target/release/bundle/appimage/*.AppImage)
-          "$app" --appimage-extract > /dev/null
-          if found=$(find squashfs-root -name 'libwayland-*' | grep .); then
+          shopt -s nullglob
+          apps=(target/release/bundle/appimage/*.AppImage)
+          if [ ${#apps[@]} -ne 1 ]; then
+            echo "::error::expected exactly one built AppImage, found ${#apps[@]}: ${apps[*]}"
+            exit 1
+          fi
+          "${apps[0]}" --appimage-extract > /dev/null
+          found=$(find squashfs-root -name "$APPIMAGE_EXCLUDED_LIBS")
+          if [ -n "$found" ]; then
             echo "::error::AppImage bundles Wayland platform libs — blank window on newer Mesa (#111):"
             echo "$found"
             exit 1
           fi
-          echo "OK: no libwayland-* in the AppImage"
+          echo "OK: no $APPIMAGE_EXCLUDED_LIBS in the AppImage"
 
   # Dev only: fill the pre-release body with a recent-commit list and keep the
   # Releases page tidy. Stable (main) notes come from the version job.
@@ -406,22 +448,45 @@ jobs:
             gh release upload "$TAG" --repo "${{ github.repository }}" *.asc --clobber
           fi
 
+  # Stable only (dev never drafts — see releaseDraft above). Flip the draft once
+  # the whole pipeline is green: every matrix leg built and passed its asserts,
+  # latest.json is attached, and GPG signing (when enabled) is done. A failed
+  # run leaves an invisible draft to delete instead of a public, `latest`-
+  # resolving release with no manifest behind it.
+  publish-release:
+    needs: [version, build, updater-manifest, sign-artifacts]
+    if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.version.outputs.release == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "srelens-v${{ needs.version.outputs.version }}" \
+            --repo "${{ github.repository }}" --draft=false
+
   # Arch / CachyOS / Manjaro install path. Deliberately STABLE-ONLY: AUR users
   # expect released versions, and an Arch `pkgver` cannot carry the `-<run>`
   # suffix that dev pre-release tags use.
   #
-  # This also sidesteps a real bug class: the AppImage vendors libwayland-*, which
-  # the host's newer Mesa then resolves against, breaking EGL and yielding a blank
-  # window. A -bin package linking the SYSTEM webkit2gtk/gtk3/wayland/mesa cannot
-  # hit that. See packaging/aur/README.md.
+  # A -bin package linking the SYSTEM webkit2gtk/gtk3/wayland/mesa also can't hit
+  # the bundled-library class of bug that #111 was: releases up to 0.2.1 vendored
+  # libwayland-* in the AppImage and opened a blank window on newer Mesa. The
+  # build job now excludes those libs and asserts it, so the AppImage is no
+  # longer affected either. See packaging/aur/README.md.
   #
   # Requires (one-time, see packaging/aur/README.md): the srelens-bin name claimed
   # on the AUR, plus AUR_USERNAME / AUR_EMAIL / AUR_SSH_PRIVATE_KEY secrets. The
   # job no-ops when the key isn't configured, so it can land before that's done.
   aur:
     name: publish AUR (srelens-bin)
-    needs: [version, build]
-    if: ${{ github.ref_name == 'main' && needs.build.result == 'success' && needs.version.outputs.release == 'true' }}
+    # Also needs publish-release: updpkgsums fetches the release assets over
+    # plain HTTPS, which only works once the release is out of draft.
+    needs: [version, build, publish-release]
+    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
     # Do the AUR push ourselves rather than via a third-party action: an AUR
     # PKGBUILD executes arbitrary code on a user's machine at build time, so

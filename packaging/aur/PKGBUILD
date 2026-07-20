@@ -6,9 +6,10 @@
 # of platform libraries (GTK, and — via linuxdeploy — libwayland-*), which then
 # get loaded ahead of the system's. On a rolling distro with a much newer Mesa,
 # the host's EGL resolves against those stale bundled Wayland libs, eglGetDisplay()
-# fails, and the app opens a blank window with no error. Linking against the
-# system's own webkit2gtk/gtk3/wayland/mesa makes that whole class of failure
-# impossible, which is exactly what this package does.
+# fails, and the app opens a blank window with no error (#111; affected releases
+# up to 0.2.1 — later AppImages exclude those libs). Linking against the system's
+# own webkit2gtk/gtk3/wayland/mesa makes that whole class of failure impossible,
+# which is exactly what this package does.
 #
 # CI renders pkgver and the checksums on each stable release; see packaging/aur/README.md.
 

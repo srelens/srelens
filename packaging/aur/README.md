@@ -8,12 +8,14 @@ paru -S srelens-bin     # or: yay -S srelens-bin
 
 ## Why this channel exists
 
-The AppImage vendors its own copies of platform libraries — including
-`libwayland-{client,cursor,egl,server}` — and loads them ahead of the system's.
-On a rolling distro with a much newer Mesa, the host's EGL then resolves against
-those stale bundled Wayland libs, `eglGetDisplay()` fails with `EGL_BAD_PARAMETER`,
-and srelens opens a **blank window with no error** (#111, first reported on
-CachyOS + GNOME).
+An AppImage vendors its own copies of platform libraries and loads them ahead of
+the system's. Releases **up to 0.2.1** bundled `libwayland-{client,cursor,egl,server}`
+that way, so on a rolling distro with a much newer Mesa the host's EGL resolved
+against those stale libs, `eglGetDisplay()` failed with `EGL_BAD_PARAMETER`, and
+srelens opened a **blank window with no error** (#111, first reported on
+CachyOS + GNOME). Later AppImages exclude those libs and CI asserts they stay
+out, so the AppImage is no longer affected — but it remains a *class* of bug that
+bundling invites and this package cannot have.
 
 This package links the system's own `webkit2gtk-4.1` / `gtk3` / wayland / Mesa,
 so that entire class of failure is *structurally impossible* rather than patched
@@ -28,7 +30,7 @@ around.
   `webkit2gtk-4.1` (which supplies javascriptcore + libsoup3) and `gtk3` (which
   pulls cairo/gdk-pixbuf/glib/dbus). Note the binary never links `libwayland`
   directly — it arrives transitively via GTK/Mesa, which is exactly why the
-  AppImage bundling it was both unnecessary and harmful.
+  AppImage bundling it was both unnecessary and harmful (fixed since 0.2.1).
 - **`kubectl` and `helm` are `optdepends`, not `depends`.** srelens deliberately
   drives whatever toolchain is already on your machine rather than bundling one;
   hard-requiring them would contradict that design.
