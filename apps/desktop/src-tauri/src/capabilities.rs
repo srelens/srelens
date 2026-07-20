@@ -58,6 +58,12 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
         cache.clone(),
     ));
 
+    reg.register(srelens_kube::toolbox::diagnose_context_capability(
+        default_kubeconfig_paths(),
+        srelens_kube::toolbox::SearchPaths::from_env(),
+        |path| path.is_file(),
+    ));
+
     reg.register(srelens_kube::connect::cluster_info_capability(
         cache.clone(),
     ));

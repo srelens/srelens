@@ -8,10 +8,14 @@
 //! them (cloud CLIs). Resolution of those requirements against the app's PATH
 //! is a separate step; this half is pure string work and fully unit-tested.
 
+use crate::connect::load_kubeconfigs;
 use crate::helm_cli::resolve_on_path;
 use crate::kubeconfig::KubeError;
-use serde::Deserialize;
-use std::path::Path;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// What kind of tool a requirement is — decides whether srelens can fix it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +253,222 @@ pub fn diagnose(
         })
         .collect();
     DiagnosisReport { context: ctx.context.clone(), items }
+}
+
+impl SearchPaths {
+    /// Build from the process environment: the app PATH (already resolved by
+    /// `fix-path-env` at startup) with the managed dirs `~/.srelens/bin` and
+    /// `~/.krew/bin` prepended, plus common system locations that back the
+    /// "present but not on the app PATH" check.
+    pub fn from_env() -> SearchPaths {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let managed = [
+            PathBuf::from(&home).join(".srelens/bin"),
+            PathBuf::from(&home).join(".krew/bin"),
+        ];
+        let app_dirs = managed.iter().cloned().chain(std::env::split_paths(&path));
+        let system_dirs = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+            .iter()
+            .map(PathBuf::from)
+            .chain(std::iter::once(PathBuf::from(&home).join(".local/bin")));
+        SearchPaths {
+            app_path: join_paths(app_dirs),
+            system_path: join_paths(system_dirs),
+        }
+    }
+}
+
+fn join_paths(dirs: impl IntoIterator<Item = PathBuf>) -> String {
+    std::env::join_paths(dirs)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiagnoseContextIn {
+    /// The kube context to diagnose.
+    pub context: String,
+}
+
+/// One requirement's status, flattened for the UI and MCP.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RequirementStatusDto {
+    pub binary: String,
+    /// `kubectl` | `krew-plugin` | `external`.
+    pub kind: String,
+    /// The krew plugin name when `kind == krew-plugin`.
+    pub plugin: Option<String>,
+    /// Whether srelens can install it (kubectl or a krew plugin).
+    pub installable: bool,
+    /// `found` | `not-on-app-path` | `missing`.
+    pub status: String,
+    pub path: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiagnoseContextOut {
+    pub context: String,
+    /// Empty when the context needs no external tools (healthy).
+    pub items: Vec<RequirementStatusDto>,
+}
+
+fn kind_fields(kind: &RequirementKind) -> (&'static str, Option<String>, bool) {
+    match kind {
+        RequirementKind::Kubectl => ("kubectl", None, true),
+        RequirementKind::KrewPlugin { plugin } => ("krew-plugin", Some(plugin.clone()), true),
+        RequirementKind::External => ("external", None, false),
+    }
+}
+
+fn status_fields(res: Resolution) -> (&'static str, Option<String>, Option<String>) {
+    match res {
+        Resolution::Found { path, version } => ("found", Some(path), version),
+        Resolution::NotOnAppPath { path } => ("not-on-app-path", Some(path), None),
+        Resolution::Missing => ("missing", None, None),
+    }
+}
+
+/// Read-only capability: diagnose one context's exec-auth tool requirements.
+/// The resolution environment (`search`, `is_file`) is injected so it's
+/// deterministic under test; production supplies [`SearchPaths::from_env`] and a
+/// real filesystem check.
+pub fn diagnose_context_capability(
+    kubeconfig_paths: Vec<PathBuf>,
+    search: SearchPaths,
+    is_file: impl Fn(&Path) -> bool + Send + Sync + 'static,
+) -> Capability {
+    let search = Arc::new(search);
+    let is_file = Arc::new(is_file);
+    Capability::typed::<DiagnoseContextIn, DiagnoseContextOut, _, _>(
+        "toolbox.diagnoseContext",
+        "diagnose a kube context's exec-auth tool requirements: which external \
+         tools it needs and whether each is installed, off the app PATH, or missing",
+        Annotations::READ_ONLY,
+        move |input: DiagnoseContextIn| {
+            let paths = kubeconfig_paths.clone();
+            let search = search.clone();
+            let is_file = is_file.clone();
+            async move {
+                let merged = load_kubeconfigs(&paths).map_err(CapabilityError::Handler)?;
+                let yaml = serde_yaml::to_string(&merged)
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let all = context_requirements(&yaml)
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let ctx = all
+                    .into_iter()
+                    .find(|c| c.context == input.context)
+                    .ok_or_else(|| {
+                        CapabilityError::InvalidInput(format!("unknown context: {}", input.context))
+                    })?;
+                // Version probing (a subprocess) lands with the install
+                // capabilities; None for now keeps this read pure.
+                let report = diagnose(&ctx, &search, &|p| is_file(p), &|_p| None);
+                let items = report
+                    .items
+                    .into_iter()
+                    .map(|item| {
+                        let (kind, plugin, installable) = kind_fields(&item.requirement.kind);
+                        let (status, path, version) = status_fields(item.resolution);
+                        RequirementStatusDto {
+                            binary: item.requirement.binary,
+                            kind: kind.to_string(),
+                            plugin,
+                            installable,
+                            status: status.to_string(),
+                            path,
+                            version,
+                        }
+                    })
+                    .collect();
+                Ok(DiagnoseContextOut { context: report.context, items })
+            }
+        },
+    )
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use serde_json::json;
+    use srelens_capability::Registry;
+
+    /// Write a kubeconfig with an oidc-login exec context to a temp file.
+    fn kubeconfig_with_oidc(dir: &Path) -> PathBuf {
+        let path = dir.join("config");
+        std::fs::write(
+            &path,
+            r#"
+apiVersion: v1
+kind: Config
+clusters:
+  - name: c
+    cluster: { server: https://x }
+contexts:
+  - name: dev
+    context: { cluster: c, user: oidc }
+users:
+  - name: oidc
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1beta1
+        command: kubectl
+        args: ["oidc-login", "get-token"]
+"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn diagnoses_a_context_reporting_found_kubectl_and_missing_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let kubeconfig = kubeconfig_with_oidc(dir.path());
+        // A bin dir holding kubectl but not the plugin.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("kubectl"), b"#!/bin/sh\n").unwrap();
+        let search = SearchPaths {
+            app_path: bin.to_string_lossy().into_owned(),
+            system_path: String::new(),
+        };
+
+        let mut reg = Registry::new();
+        reg.register(diagnose_context_capability(vec![kubeconfig], search, |p| p.is_file()));
+        let out = reg
+            .invoke("toolbox.diagnoseContext", json!({ "context": "dev" }))
+            .await
+            .unwrap();
+
+        assert_eq!(out["context"], "dev");
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["kind"], "kubectl");
+        assert_eq!(items[0]["status"], "found");
+        assert!(items[0]["path"].as_str().unwrap().ends_with("/kubectl"));
+        assert_eq!(items[1]["kind"], "krew-plugin");
+        assert_eq!(items[1]["plugin"], "oidc-login");
+        assert_eq!(items[1]["status"], "missing");
+        assert_eq!(items[1]["installable"], true);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_context_is_an_input_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let kubeconfig = kubeconfig_with_oidc(dir.path());
+        let mut reg = Registry::new();
+        reg.register(diagnose_context_capability(
+            vec![kubeconfig],
+            SearchPaths { app_path: String::new(), system_path: String::new() },
+            |p| p.is_file(),
+        ));
+        let err = reg
+            .invoke("toolbox.diagnoseContext", json!({ "context": "nope" }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("unknown context"));
+    }
 }
 
 #[cfg(test)]
