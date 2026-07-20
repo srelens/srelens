@@ -632,6 +632,15 @@ async fn run_suite() {
         "listContexts must include {ctx}"
     );
 
+    // The kind context authenticates with a client cert (no exec-auth), so it
+    // has no external tool requirements — a healthy, empty diagnosis.
+    let out = h.ok("toolbox.diagnoseContext", json!({ "context": ctx })).await;
+    assert_eq!(out["context"], ctx);
+    assert!(
+        out["items"].as_array().unwrap().is_empty(),
+        "kind context should need no exec-auth tools: {out}"
+    );
+
     let out = h.ok("k8s.clusterInfo", json!({ "context": ctx })).await;
     assert_eq!(out["reachable"], true, "cluster must be reachable: {out}");
     assert!(out["version"].as_str().is_some());
