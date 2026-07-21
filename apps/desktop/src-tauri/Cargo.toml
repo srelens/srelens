@@ -30,7 +30,12 @@ srelens-mcp = { path = "../../../crates/mcp" }
 srelens-kube = { path = "../../../crates/kube" }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
 # Blocking HTTP for Toolbox tool downloads (run inside spawn_blocking).
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
+# rustls-no-provider matches tauri-plugin-updater's reqwest so no second TLS
+# crypto provider (aws-lc-rs) enters the tree — the workspace standardises on
+# ring via kube-client, and rustls only auto-selects it while it's the sole
+# provider. default-tls here pulls rustls-platform-verifier -> aws-lc-rs,
+# giving two providers and a runtime "could not determine CryptoProvider" panic.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 # Local pseudo-terminal for the in-app kubectl shell (spawns the user's login shell).
 portable-pty = "0.8"
 
