@@ -651,6 +651,15 @@ async fn run_suite() {
         "kind context should need no exec-auth tools: {out}"
     );
 
+    // Tool inventory: kubectl and helm are on PATH in this suite (per the
+    // module docstring), so status must find kubectl installed with a version.
+    let out = h.ok("toolbox.status", json!({})).await;
+    let tools = out["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 3, "kubectl/krew/helm: {out}");
+    let kubectl = tools.iter().find(|t| t["name"] == "kubectl").unwrap();
+    assert_eq!(kubectl["installed"], true, "kubectl must be on PATH here: {out}");
+    assert!(kubectl["version"].as_str().is_some(), "kubectl version should resolve: {out}");
+
     let out = h.ok("k8s.clusterInfo", json!({ "context": ctx })).await;
     assert_eq!(out["reachable"], true, "cluster must be reachable: {out}");
     assert!(out["version"].as_str().is_some());

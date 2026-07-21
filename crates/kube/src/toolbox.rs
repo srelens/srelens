@@ -399,6 +399,121 @@ pub fn srelens_bin_dir() -> PathBuf {
     PathBuf::from(home).join(".srelens").join("bin")
 }
 
+/// Where krew installs its shim (`kubectl-krew`) and plugin binaries.
+pub fn krew_bin_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".krew").join("bin")
+}
+
+/// The tools srelens can manage, in display order.
+const MANAGED_TOOLS: [&str; 3] = ["kubectl", "krew", "helm"];
+
+/// One managed tool's inventory entry for the Toolbox "Tools" section.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ToolStatusDto {
+    pub name: String,
+    pub installed: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    /// `managed` (srelens installed it under a managed dir) or `system`.
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct StatusOut {
+    pub tools: Vec<ToolStatusDto>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct StatusIn {}
+
+/// Extract the first `vMAJOR.MINOR.PATCH` token from a tool's version output.
+/// kubectl/krew/helm each wrap the version in different surrounding text (plain
+/// "Client Version: v1.30.2", JSON `"gitVersion":"v1.30.2"`, or "v3.16.2+g…"),
+/// so we scan for the first well-formed semver rather than parse each format.
+pub fn first_semver(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] != b'v' || i + 1 >= bytes.len() || !bytes[i + 1].is_ascii_digit() {
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'.') {
+            j += 1;
+        }
+        let parts: Vec<&str> = text[start..j].split('.').collect();
+        if parts.len() >= 3 && parts[..3].iter().all(|p| !p.is_empty()) {
+            return Some(format!("v{}.{}.{}", parts[0], parts[1], parts[2]));
+        }
+    }
+    None
+}
+
+/// `managed` when the resolved binary lives under one of the srelens-managed
+/// dirs (`~/.srelens/bin`, `~/.krew/bin`), else `system`.
+fn tool_source(path: &Path, managed_dirs: &[PathBuf]) -> &'static str {
+    if managed_dirs.iter().any(|dir| path.starts_with(dir)) {
+        "managed"
+    } else {
+        "system"
+    }
+}
+
+/// Read-only capability: inventory the managed CLI toolchain (kubectl, krew,
+/// helm) — whether each is installed, where, its version, and whether srelens
+/// manages it. The resolution environment is injected so it's deterministic
+/// under test; production supplies [`SearchPaths::from_env`], a real filesystem
+/// check, and a per-tool version probe.
+pub fn status_capability(
+    search: SearchPaths,
+    managed_dirs: Vec<PathBuf>,
+    is_file: impl Fn(&Path) -> bool + Send + Sync + 'static,
+    version_of: impl Fn(&str, &Path) -> Option<String> + Send + Sync + 'static,
+) -> Capability {
+    let search = Arc::new(search);
+    let managed_dirs = Arc::new(managed_dirs);
+    let is_file = Arc::new(is_file);
+    let version_of = Arc::new(version_of);
+    Capability::typed::<StatusIn, StatusOut, _, _>(
+        "toolbox.status",
+        "inventory the managed CLI toolchain (kubectl, krew, helm): whether each \
+         is installed, its path and version, and whether srelens manages it",
+        Annotations::READ_ONLY,
+        move |_input: StatusIn| {
+            let search = search.clone();
+            let managed_dirs = managed_dirs.clone();
+            let is_file = is_file.clone();
+            let version_of = version_of.clone();
+            async move {
+                let tools = MANAGED_TOOLS
+                    .iter()
+                    .map(|&name| match locate(name, &search, &|p| is_file(p)) {
+                        Some(found) => {
+                            let path = Path::new(&found.path);
+                            ToolStatusDto {
+                                name: name.to_string(),
+                                installed: true,
+                                version: version_of(name, path),
+                                source: Some(tool_source(path, &managed_dirs).to_string()),
+                                path: Some(found.path),
+                            }
+                        }
+                        None => ToolStatusDto {
+                            name: name.to_string(),
+                            installed: false,
+                            path: None,
+                            version: None,
+                            source: None,
+                        },
+                    })
+                    .collect();
+                Ok(StatusOut { tools })
+            }
+        },
+    )
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct InstallKubectlIn {}
 
@@ -663,6 +778,59 @@ users:
     }
 
     #[tokio::test]
+    async fn status_inventories_installed_and_missing_managed_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join(".srelens/bin");
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join("kubectl"), b"#!/bin/sh\n").unwrap();
+
+        let cap = status_capability(
+            SearchPaths { app_path: managed.to_string_lossy().into_owned(), system_path: String::new() },
+            vec![managed.clone()],
+            |p| p.is_file(),
+            |name, _p| (name == "kubectl").then(|| "v1.30.2".to_string()),
+        );
+        let mut reg = Registry::new();
+        reg.register(cap);
+        let out = reg.invoke("toolbox.status", json!({})).await.unwrap();
+
+        let tools = out["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        let kubectl = &tools[0];
+        assert_eq!(kubectl["name"], "kubectl");
+        assert_eq!(kubectl["installed"], true);
+        assert_eq!(kubectl["source"], "managed");
+        assert_eq!(kubectl["version"], "v1.30.2");
+        assert!(kubectl["path"].as_str().unwrap().ends_with("/kubectl"));
+        // krew + helm absent.
+        assert_eq!(tools[1]["installed"], false);
+        assert_eq!(tools[1]["version"], serde_json::Value::Null);
+        assert_eq!(tools[2]["installed"], false);
+    }
+
+    #[tokio::test]
+    async fn status_classifies_a_tool_outside_managed_dirs_as_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let sysbin = dir.path().join("usr/local/bin");
+        std::fs::create_dir_all(&sysbin).unwrap();
+        std::fs::write(sysbin.join("helm"), b"#!/bin/sh\n").unwrap();
+
+        let cap = status_capability(
+            SearchPaths { app_path: sysbin.to_string_lossy().into_owned(), system_path: String::new() },
+            vec![dir.path().join(".srelens/bin")], // managed dir, not where helm lives
+            |p| p.is_file(),
+            |_name, _p| None,
+        );
+        let mut reg = Registry::new();
+        reg.register(cap);
+        let out = reg.invoke("toolbox.status", json!({})).await.unwrap();
+        let helm = &out["tools"][2];
+        assert_eq!(helm["name"], "helm");
+        assert_eq!(helm["installed"], true);
+        assert_eq!(helm["source"], "system");
+    }
+
+    #[tokio::test]
     async fn install_kubectl_surfaces_a_checksum_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let install_dir = dir.path().join("bin");
@@ -678,6 +846,29 @@ users:
         let err = reg.invoke("toolbox.installKubectl", json!({})).await.unwrap_err();
         assert!(format!("{err:?}").to_lowercase().contains("checksum"));
         assert!(!plan.target.exists());
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::first_semver;
+
+    #[test]
+    fn extracts_the_first_semver_across_tool_output_shapes() {
+        assert_eq!(first_semver("Client Version: v1.30.2").as_deref(), Some("v1.30.2"));
+        assert_eq!(first_semver("v3.16.2+g4f50ac1").as_deref(), Some("v3.16.2"));
+        assert_eq!(
+            first_semver(r#"{"clientVersion":{"gitVersion":"v1.30.2","major":"1"}}"#).as_deref(),
+            Some("v1.30.2"),
+        );
+        assert_eq!(first_semver("GitTag           v0.4.4").as_deref(), Some("v0.4.4"));
+    }
+
+    #[test]
+    fn returns_none_without_a_semver() {
+        assert_eq!(first_semver("no version here"), None);
+        assert_eq!(first_semver("v1.2"), None); // needs three components
+        assert_eq!(first_semver(""), None);
     }
 }
 

@@ -51,6 +51,20 @@ fn http_get(url: &str) -> Result<Vec<u8>, srelens_kube::toolbox_install::Install
         .map_err(|e| InstallError::Download(e.to_string()))
 }
 
+/// Probe a managed tool's version by running it and scanning for a semver.
+/// Each tool prints its version differently, so we pass tool-specific flags and
+/// let `first_semver` pull the `vX.Y.Z` out of whatever text comes back.
+fn tool_version(name: &str, path: &std::path::Path) -> Option<String> {
+    let args: &[&str] = match name {
+        "kubectl" => &["version", "--client", "-o", "json"],
+        "helm" => &["version", "--short"],
+        _ => &["version"], // krew and any future tool
+    };
+    let output = std::process::Command::new(path).args(args).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    srelens_kube::toolbox::first_semver(&text)
+}
+
 /// Build the registry with a freshly-created client cache. Used by the MCP
 /// stdio binary, which doesn't need to share the cache with watch tasks.
 pub fn build_registry() -> Registry {
@@ -88,6 +102,15 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
     reg.register(srelens_kube::toolbox::install_helm_capability(
         srelens_kube::toolbox::srelens_bin_dir(),
         http_get,
+    ));
+    reg.register(srelens_kube::toolbox::status_capability(
+        srelens_kube::toolbox::SearchPaths::from_env(),
+        vec![
+            srelens_kube::toolbox::srelens_bin_dir(),
+            srelens_kube::toolbox::krew_bin_dir(),
+        ],
+        |path| path.is_file(),
+        tool_version,
     ));
 
     reg.register(srelens_kube::connect::cluster_info_capability(
