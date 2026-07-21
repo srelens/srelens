@@ -160,6 +160,11 @@ const EXCLUDED: &[(&str, &str)] = &[
         "downloads a real release tarball from get.helm.sh and writes to ~/.srelens/bin; \
          covered by unit tests with an injected fetch instead of hitting the network in CI",
     ),
+    (
+        "toolbox.installKrew",
+        "downloads krew from GitHub and runs its bootstrap subprocess to populate ~/.krew; \
+         covered by unit tests with an injected fetch and command runner instead of the network in CI",
+    ),
 ];
 
 fn deadline(secs: u64) -> Instant {

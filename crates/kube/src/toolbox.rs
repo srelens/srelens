@@ -389,8 +389,9 @@ pub fn diagnose_context_capability(
 }
 
 use crate::toolbox_install::{
-    helm_install, install_binary, install_from_targz, kubectl_install, parse_github_latest_tag,
-    InstallError, Platform, HELM_LATEST_RELEASE_URL, KUBECTL_STABLE_URL,
+    helm_install, install_binary, install_from_targz, install_krew, krew_archive, kubectl_install,
+    parse_github_latest_tag, InstallError, Platform, HELM_LATEST_RELEASE_URL,
+    KREW_LATEST_RELEASE_URL, KUBECTL_STABLE_URL,
 };
 
 /// The directory srelens installs managed tools into: `~/.srelens/bin`.
@@ -607,6 +608,47 @@ where
     )
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct InstallKrewIn {}
+
+/// Confirm-gated capability: download the latest krew, verify it, and run its
+/// self-bootstrap (`krew install krew`) to populate `~/.krew`. `fetch` (blocking
+/// HTTP) and `run` (executes the bootstrap command) are injected; production
+/// supplies a reqwest GET and a `std::process::Command` runner.
+pub fn install_krew_capability<F, R>(staging_dir: PathBuf, fetch: F, run: R) -> Capability
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError> + Send + Sync + Clone + 'static,
+    R: Fn(&Path, &[&str]) -> Result<(), InstallError> + Send + Sync + Clone + 'static,
+{
+    Capability::typed::<InstallKrewIn, InstallToolOut, _, _>(
+        "toolbox.installKrew",
+        "download the latest krew, verify it, and bootstrap it into ~/.krew \
+         (the engine for kubectl plugin installs)",
+        Annotations::MUTATING,
+        move |_input: InstallKrewIn| {
+            let staging_dir = staging_dir.clone();
+            let fetch = fetch.clone();
+            let run = run.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let platform = Platform::current().map_err(to_handler)?;
+                    let body = fetch(KREW_LATEST_RELEASE_URL).map_err(to_handler)?;
+                    let version = parse_github_latest_tag(&body).map_err(to_handler)?;
+                    let plan = krew_archive(&version, &platform, &staging_dir);
+                    install_krew(&plan, &fetch, &run).map_err(to_handler)?;
+                    Ok(InstallToolOut {
+                        tool: "krew".to_string(),
+                        version,
+                        path: krew_bin_dir().join("kubectl-krew").to_string_lossy().into_owned(),
+                    })
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod capability_tests {
     use super::*;
@@ -774,6 +816,45 @@ users:
     #[tokio::test]
     async fn install_helm_is_confirm_gated() {
         let cap = install_helm_capability(PathBuf::from("/tmp/x"), net(vec![]));
+        assert!(cap.annotations.requires_confirm);
+    }
+
+    #[tokio::test]
+    async fn install_krew_resolves_downloads_and_bootstraps() {
+        let dir = tempfile::tempdir().unwrap();
+        let platform = Platform::current().unwrap();
+        let plan = krew_archive("v9.9.9", &platform, dir.path());
+        let archive = make_targz(&[(format!("./{}", plan.member).as_str(), b"#!/bin/sh\n")]);
+        let fetch = net(vec![
+            (KREW_LATEST_RELEASE_URL.to_string(), br#"{"tag_name":"v9.9.9"}"#.to_vec()),
+            (plan.sha256_url.clone(), sha256_hex(&archive).into_bytes()),
+            (plan.archive_url.clone(), archive),
+        ]);
+        let bootstrapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = bootstrapped.clone();
+        let run = move |_bin: &Path, args: &[&str]| {
+            assert_eq!(args, ["install", "krew"]);
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+
+        let mut reg = Registry::new();
+        reg.register(install_krew_capability(dir.path().to_path_buf(), fetch, run));
+        let out = reg.invoke("toolbox.installKrew", json!({})).await.unwrap();
+
+        assert_eq!(out["tool"], "krew");
+        assert_eq!(out["version"], "v9.9.9");
+        assert!(out["path"].as_str().unwrap().ends_with("kubectl-krew"));
+        assert!(bootstrapped.load(std::sync::atomic::Ordering::SeqCst), "krew bootstrap ran");
+    }
+
+    #[tokio::test]
+    async fn install_krew_is_confirm_gated() {
+        let cap = install_krew_capability(
+            PathBuf::from("/tmp/x"),
+            net(vec![]),
+            |_b: &Path, _a: &[&str]| Ok(()),
+        );
         assert!(cap.annotations.requires_confirm);
     }
 

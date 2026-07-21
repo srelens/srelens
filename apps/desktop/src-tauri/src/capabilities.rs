@@ -51,6 +51,24 @@ fn http_get(url: &str) -> Result<Vec<u8>, srelens_kube::toolbox_install::Install
         .map_err(|e| InstallError::Download(e.to_string()))
 }
 
+/// Run a managed tool with args, mapping a non-zero exit (with stderr) to a
+/// retryable error. Used for krew's self-bootstrap; called inside spawn_blocking.
+fn run_tool(
+    bin: &std::path::Path,
+    args: &[&str],
+) -> Result<(), srelens_kube::toolbox_install::InstallError> {
+    use srelens_kube::toolbox_install::InstallError;
+    let output = std::process::Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|e| InstallError::Download(e.to_string()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(InstallError::Download(String::from_utf8_lossy(&output.stderr).into_owned()))
+    }
+}
+
 /// Probe a managed tool's version by running it and scanning for a semver.
 /// Each tool prints its version differently, so we pass tool-specific flags and
 /// let `first_semver` pull the `vX.Y.Z` out of whatever text comes back.
@@ -102,6 +120,11 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
     reg.register(srelens_kube::toolbox::install_helm_capability(
         srelens_kube::toolbox::srelens_bin_dir(),
         http_get,
+    ));
+    reg.register(srelens_kube::toolbox::install_krew_capability(
+        std::env::temp_dir(),
+        http_get,
+        run_tool,
     ));
     reg.register(srelens_kube::toolbox::status_capability(
         srelens_kube::toolbox::SearchPaths::from_env(),
