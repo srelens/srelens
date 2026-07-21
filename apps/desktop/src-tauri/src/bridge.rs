@@ -18,5 +18,11 @@ pub async fn invoke_capability(
     input: Value,
     registry: State<'_, AppRegistry>,
 ) -> Result<Value, String> {
-    registry.0.invoke(&id, input).await.map_err(|e| e.to_string())
+    registry.0.invoke(&id, input).await.map_err(|e| {
+        // Surface capability failures (connection timeouts, denied RBAC, bad
+        // input) to the application log for post-hoc diagnosis.
+        let message = e.to_string();
+        log::warn!("capability '{id}' failed: {message}");
+        message
+    })
 }

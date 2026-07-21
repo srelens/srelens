@@ -1,3 +1,4 @@
+mod app_log;
 mod appimage;
 mod bridge;
 pub mod capabilities;
@@ -13,6 +14,7 @@ mod toolbox;
 mod updater;
 mod watch;
 
+use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppRegistry};
 use exec::{exec_close, exec_input, start_pod_exec, ExecManager};
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
@@ -220,13 +222,31 @@ pub fn run() {
     let watcher_cache = cache.clone();
     builder
         .setup(move |app| {
+            // Application logging: always write a rotating file to the OS log
+            // directory so the Settings "Application logs" view (and post-hoc
+            // debugging of a shipped build) has something to read; mirror to
+            // stdout in dev for convenience.
+            let mut log_targets = vec![tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::LogDir { file_name: Some("srelens".into()) },
+            )];
             if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+                log_targets.push(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ));
             }
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    // Keep noisy transport crates out of the file so it stays
+                    // readable for triage.
+                    .level_for("hyper", log::LevelFilter::Warn)
+                    .level_for("rustls", log::LevelFilter::Warn)
+                    .max_file_size(5_000_000)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                    .targets(log_targets)
+                    .build(),
+            )?;
+            log::info!("srelens {} starting", env!("CARGO_PKG_VERSION"));
             #[cfg(desktop)]
             size_main_window(app);
             #[cfg(target_os = "macos")]
@@ -283,7 +303,10 @@ pub fn run() {
             terminal_resize,
             terminal_close,
             start_helm_op,
-            helm_op_close
+            helm_op_close,
+            read_app_log,
+            app_log_path,
+            reveal_app_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

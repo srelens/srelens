@@ -21,6 +21,7 @@ import {
   GripVertical,
   ClipboardPaste,
   Plug,
+  ScrollText,
   Trash2,
 } from "lucide-react";
 import {
@@ -60,6 +61,7 @@ import {
 import { updateRequestTimeout } from "../lib/requestTimeout";
 import { ContextAvatar, CONTEXT_LOGO_OPTIONS } from "./ContextAvatar";
 import { McpSettingsSection } from "./McpSettingsSection";
+import { AppLogView } from "./AppLogView";
 import { pickKubeconfigFiles, savePastedKubeconfig } from "../lib/files";
 import { checkForUpdate, installUpdate, type UpdateMeta } from "../lib/updater";
 import { appVersion, relaunchApp } from "../transport/transport";
@@ -70,7 +72,7 @@ const MODE_OPTIONS: Array<{ mode: ThemeMode; label: string; description: string;
   { mode: "system", label: "System", description: "Follow the OS appearance", icon: Monitor },
 ];
 
-export type SettingsSection = "appearance" | "layout" | "kubernetes" | "contexts" | "mcp" | "updates";
+export type SettingsSection = "appearance" | "layout" | "kubernetes" | "contexts" | "mcp" | "logs" | "updates";
 
 type UpdatePhase =
   | { phase: "idle" }
@@ -97,6 +99,7 @@ const SETTINGS_SECTIONS: Array<{
   { id: "kubernetes", label: "Kubernetes", description: "Workspace defaults", icon: Network },
   { id: "contexts", label: "Contexts", description: "Names, logos and colors", icon: Boxes },
   { id: "mcp", label: "MCP", description: "Agent access and client config", icon: Plug },
+  { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
 
@@ -846,6 +849,15 @@ export function SettingsView({
               description="Expose srelens to agents and MCP clients, and get ready-to-paste client config."
             >
               <McpSettingsSection />
+            </SectionPanel>
+          )}
+
+          {section === "logs" && (
+            <SectionPanel
+              title="Application logs"
+              description="srelens's own log file — for diagnosing connection failures, permission errors, and other issues after they happen."
+            >
+              <AppLogView />
             </SectionPanel>
           )}
 
