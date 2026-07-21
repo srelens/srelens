@@ -93,6 +93,16 @@ The automation cannot run until a human claims the package name on the AUR:
    - `AUR_USERNAME` — your AUR account name
    - `AUR_EMAIL` — the email on that account
    - `AUR_SSH_PRIVATE_KEY` — the private half of the key from step 1
+   - `AUR_KNOWN_HOSTS` — AUR's SSH host keys, so the publish job can verify the
+     server before cloning. These are the server's *public* host keys (not a
+     secret in the cryptographic sense); the secret just keeps them out of the
+     workflow. Generate the value with:
+     ```
+     ssh-keyscan -t ed25519,rsa aur.archlinux.org
+     ```
+     and confirm the fingerprints match AUR's published ones (`ssh-keygen -lf`)
+     — currently ED25519 `SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4`,
+     RSA `SHA256:5s5cIyReIfNNVGRFdDbe3hdYiI5OelHGpw2rOUud3Q8` — before pasting.
 
 The current stable release is **`srelens-v0.2.0`**, so the initial import can be
 done against it today (the PKGBUILD builds cleanly against its published `.deb`).
