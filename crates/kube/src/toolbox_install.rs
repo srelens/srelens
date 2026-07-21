@@ -210,6 +210,40 @@ pub fn install_from_targz(
     write_binary(&plan.target, &bytes)
 }
 
+/// GitHub API endpoint for krew's latest release.
+pub const KREW_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/kubernetes-sigs/krew/releases/latest";
+
+/// Plan a krew download for `version` into `staging_dir`. Unlike kubectl/helm,
+/// the extracted binary is transient: it's run once to bootstrap krew into
+/// `~/.krew`, not kept as the installed tool. The tar member is `krew-<os>_<arch>`.
+pub fn krew_archive(version: &str, platform: &Platform, staging_dir: &Path) -> ArchiveInstall {
+    let ext = if platform.os == "windows" { ".exe" } else { "" };
+    let member = format!("krew-{}_{}{ext}", platform.os, platform.arch);
+    let archive_url = format!(
+        "https://github.com/kubernetes-sigs/krew/releases/download/{version}/{member}.tar.gz"
+    );
+    ArchiveInstall {
+        sha256_url: format!("{archive_url}.sha256"),
+        target: staging_dir.join(&member),
+        member,
+        archive_url,
+    }
+}
+
+/// Install krew: download + verify + extract the transient binary (via
+/// [`install_from_targz`]), then run it as `<binary> install krew` to bootstrap
+/// krew into `~/.krew`. `run` executes that command (injected for testing);
+/// it must surface a non-zero exit as an error.
+pub fn install_krew<F, R>(plan: &ArchiveInstall, fetch: &F, run: &R) -> Result<(), InstallError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError>,
+    R: Fn(&Path, &[&str]) -> Result<(), InstallError>,
+{
+    let binary = install_from_targz(plan, fetch)?;
+    run(&binary, &["install", "krew"])
+}
+
 /// Read one member's bytes out of a gzip-compressed tar.
 fn extract_member(targz: &[u8], member: &str) -> Result<Vec<u8>, InstallError> {
     use flate2::read::GzDecoder;
@@ -221,7 +255,9 @@ fn extract_member(targz: &[u8], member: &str) -> Result<Vec<u8>, InstallError> {
     for entry in entries {
         let mut entry = entry.map_err(|e| InstallError::BadArchive(e.to_string()))?;
         let path = entry.path().map_err(|e| InstallError::BadArchive(e.to_string()))?;
-        if path.to_string_lossy() == member {
+        // Tars vary on a leading `./` (helm omits it, krew includes it); compare
+        // on the normalized path so a plan's `member` needn't carry the prefix.
+        if path.to_string_lossy().trim_start_matches("./") == member {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf).map_err(|e| InstallError::BadArchive(e.to_string()))?;
             return Ok(buf);
@@ -471,6 +507,76 @@ mod tests {
             Err(InstallError::MemberNotFound { .. })
         ));
         assert!(!plan.target.exists());
+    }
+
+    #[test]
+    fn extract_member_ignores_a_leading_dot_slash() {
+        // krew's tar prefixes members with `./`.
+        let archive = make_targz(&[("./krew-linux_amd64", b"payload")]);
+        assert_eq!(extract_member(&archive, "krew-linux_amd64").unwrap(), b"payload");
+    }
+
+    #[test]
+    fn krew_plan_targets_the_github_release_and_transient_binary() {
+        let staging = std::path::Path::new("/tmp/stage");
+        let p = krew_archive("v0.5.0", &Platform { os: "linux", arch: "amd64" }, staging);
+        assert_eq!(
+            p.archive_url,
+            "https://github.com/kubernetes-sigs/krew/releases/download/v0.5.0/krew-linux_amd64.tar.gz"
+        );
+        assert_eq!(p.sha256_url, format!("{}.sha256", p.archive_url));
+        assert_eq!(p.member, "krew-linux_amd64");
+        assert_eq!(p.target, staging.join("krew-linux_amd64"));
+    }
+
+    #[test]
+    fn install_krew_extracts_then_bootstraps_with_install_krew() {
+        use std::cell::RefCell;
+        let dir = tempfile::tempdir().unwrap();
+        let plan = krew_archive("v0.5.0", &Platform { os: "linux", arch: "amd64" }, dir.path());
+        let payload = b"#!/bin/sh\n";
+        let archive = make_targz(&[(format!("./{}", plan.member).as_str(), payload)]);
+        let fetch = net(&[
+            (plan.sha256_url.as_str(), sha256_hex(&archive).as_bytes()),
+            (plan.archive_url.as_str(), &archive),
+        ]);
+
+        let calls: RefCell<Vec<(String, Vec<String>)>> = RefCell::new(Vec::new());
+        let run = |bin: &Path, args: &[&str]| {
+            calls
+                .borrow_mut()
+                .push((bin.to_string_lossy().into_owned(), args.iter().map(|s| s.to_string()).collect()));
+            Ok(())
+        };
+
+        install_krew(&plan, &fetch, &run).unwrap();
+
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.ends_with("krew-linux_amd64"), "bootstrap ran the extracted binary");
+        assert_eq!(calls[0].1, vec!["install", "krew"]);
+    }
+
+    #[test]
+    fn install_krew_does_not_bootstrap_a_tampered_archive() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let plan = krew_archive("v0.5.0", &Platform { os: "linux", arch: "amd64" }, dir.path());
+        let archive = make_targz(&[(plan.member.as_str(), b"payload")]);
+        let fetch = net(&[
+            (plan.sha256_url.as_str(), sha256_hex(b"other").as_bytes()),
+            (plan.archive_url.as_str(), &archive),
+        ]);
+        let ran = Cell::new(false);
+        let run = |_bin: &Path, _args: &[&str]| {
+            ran.set(true);
+            Ok(())
+        };
+        assert!(matches!(
+            install_krew(&plan, &fetch, &run),
+            Err(InstallError::ChecksumMismatch { .. })
+        ));
+        assert!(!ran.get(), "must not bootstrap when the archive fails verification");
     }
 
     #[test]

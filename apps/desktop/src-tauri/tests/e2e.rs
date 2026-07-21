@@ -160,6 +160,18 @@ const EXCLUDED: &[(&str, &str)] = &[
         "downloads a real release tarball from get.helm.sh and writes to ~/.srelens/bin; \
          covered by unit tests with an injected fetch instead of hitting the network in CI",
     ),
+    (
+        "toolbox.installKrew",
+        "downloads krew from GitHub and runs its bootstrap subprocess to populate ~/.krew; \
+         covered by unit tests with an injected fetch and command runner instead of the network in CI",
+    ),
+    // The plugin ops shell out to kubectl-krew, which isn't installed in the kind
+    // CI image; unit-tested with an injected runner. Real krew + a small-plugin
+    // install is the integration test deferred to the kind-CI work in the spec.
+    ("toolbox.searchPlugins", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
+    ("toolbox.installPlugin", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
+    ("toolbox.upgradePlugin", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
+    ("toolbox.removePlugin", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
 ];
 
 fn deadline(secs: u64) -> Instant {
