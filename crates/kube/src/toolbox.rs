@@ -388,6 +388,71 @@ pub fn diagnose_context_capability(
     )
 }
 
+use crate::toolbox_install::{
+    install_binary, kubectl_install, InstallError, Platform, KUBECTL_STABLE_URL,
+};
+
+/// The directory srelens installs managed tools into: `~/.srelens/bin`.
+pub fn srelens_bin_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".srelens").join("bin")
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct InstallKubectlIn {}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct InstallToolOut {
+    pub tool: String,
+    pub version: String,
+    pub path: String,
+}
+
+fn to_handler(e: InstallError) -> CapabilityError {
+    CapabilityError::Handler(e.to_string())
+}
+
+/// Confirm-gated capability: download the latest stable kubectl into
+/// `~/.srelens/bin`, verified against dl.k8s.io's published checksum. `fetch`
+/// (a blocking HTTP GET) is injected so the capability is testable without a
+/// real network; production supplies a reqwest-backed one at registration.
+pub fn install_kubectl_capability<F>(install_dir: PathBuf, fetch: F) -> Capability
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError> + Send + Sync + Clone + 'static,
+{
+    Capability::typed::<InstallKubectlIn, InstallToolOut, _, _>(
+        "toolbox.installKubectl",
+        "download the latest stable kubectl into ~/.srelens/bin, verified against \
+         the dl.k8s.io checksum",
+        Annotations::MUTATING,
+        move |_input: InstallKubectlIn| {
+            let install_dir = install_dir.clone();
+            let fetch = fetch.clone();
+            async move {
+                // The install does blocking HTTP + filesystem work; keep it off
+                // the async runtime.
+                tokio::task::spawn_blocking(move || {
+                    let platform = Platform::current().map_err(to_handler)?;
+                    let raw = fetch(KUBECTL_STABLE_URL).map_err(to_handler)?;
+                    let version = std::str::from_utf8(&raw)
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?
+                        .trim()
+                        .to_string();
+                    let plan = kubectl_install(&version, &platform, &install_dir);
+                    let path = install_binary(&plan, &fetch).map_err(to_handler)?;
+                    Ok(InstallToolOut {
+                        tool: "kubectl".to_string(),
+                        version,
+                        path: path.to_string_lossy().into_owned(),
+                    })
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod capability_tests {
     use super::*;
@@ -468,6 +533,70 @@ users:
             .await
             .unwrap_err();
         assert!(format!("{err:?}").contains("unknown context"));
+    }
+
+    use std::collections::HashMap;
+
+    /// A fake blocking HTTP: URL -> bytes. Clone/Send/Sync so it satisfies the
+    /// capability's `fetch` bound.
+    fn net(entries: Vec<(String, Vec<u8>)>) -> impl Fn(&str) -> Result<Vec<u8>, InstallError> + Clone {
+        let map: HashMap<String, Vec<u8>> = entries.into_iter().collect();
+        move |url: &str| {
+            map.get(url).cloned().ok_or_else(|| InstallError::Download(format!("404 {url}")))
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    #[tokio::test]
+    async fn install_kubectl_resolves_stable_downloads_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("bin");
+        let platform = Platform::current().unwrap();
+        let plan = kubectl_install("v9.9.9", &platform, &install_dir);
+        let payload = b"#!/bin/sh\necho kubectl\n";
+        let fetch = net(vec![
+            (KUBECTL_STABLE_URL.to_string(), b"v9.9.9\n".to_vec()),
+            (plan.sha256_url.clone(), sha256_hex(payload).into_bytes()),
+            (plan.binary_url.clone(), payload.to_vec()),
+        ]);
+
+        let mut reg = Registry::new();
+        reg.register(install_kubectl_capability(install_dir, fetch));
+        let out = reg.invoke("toolbox.installKubectl", json!({})).await.unwrap();
+
+        assert_eq!(out["tool"], "kubectl");
+        assert_eq!(out["version"], "v9.9.9");
+        let installed = out["path"].as_str().unwrap();
+        assert_eq!(std::fs::read(installed).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn install_kubectl_is_confirm_gated() {
+        let cap = install_kubectl_capability(PathBuf::from("/tmp/x"), net(vec![]));
+        assert!(cap.annotations.requires_confirm, "installs must require consent");
+        assert!(!cap.annotations.read_only);
+    }
+
+    #[tokio::test]
+    async fn install_kubectl_surfaces_a_checksum_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("bin");
+        let platform = Platform::current().unwrap();
+        let plan = kubectl_install("v9.9.9", &platform, &install_dir);
+        let fetch = net(vec![
+            (KUBECTL_STABLE_URL.to_string(), b"v9.9.9".to_vec()),
+            (plan.sha256_url.clone(), sha256_hex(b"expected").into_bytes()),
+            (plan.binary_url.clone(), b"tampered".to_vec()),
+        ]);
+        let mut reg = Registry::new();
+        reg.register(install_kubectl_capability(install_dir.clone(), fetch));
+        let err = reg.invoke("toolbox.installKubectl", json!({})).await.unwrap_err();
+        assert!(format!("{err:?}").to_lowercase().contains("checksum"));
+        assert!(!plan.target.exists());
     }
 }
 

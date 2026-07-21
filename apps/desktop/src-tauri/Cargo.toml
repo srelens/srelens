@@ -29,6 +29,8 @@ srelens-capability = { path = "../../../crates/capability" }
 srelens-mcp = { path = "../../../crates/mcp" }
 srelens-kube = { path = "../../../crates/kube" }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
+# Blocking HTTP for Toolbox tool downloads (run inside spawn_blocking).
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
 # Local pseudo-terminal for the in-app kubectl shell (spawns the user's login shell).
 portable-pty = "0.8"
 

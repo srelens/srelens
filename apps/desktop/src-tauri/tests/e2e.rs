@@ -147,10 +147,13 @@ impl Harness {
 }
 
 /// Capabilities genuinely excluded from this suite, with a written reason.
-/// Kept empty: every one of the 69 registered capabilities as of #27 is
-/// exercised below. A capability registered later with no case here fails
-/// the coverage assertion at the end of `full_capability_suite`.
-const EXCLUDED: &[(&str, &str)] = &[];
+/// A capability registered later with no case here fails the coverage
+/// assertion at the end of `full_capability_suite`.
+const EXCLUDED: &[(&str, &str)] = &[(
+    "toolbox.installKubectl",
+    "downloads a real ~50MB binary from dl.k8s.io and writes to ~/.srelens/bin; \
+     covered by unit tests with an injected fetch instead of hitting the network in CI",
+)];
 
 fn deadline(secs: u64) -> Instant {
     Instant::now() + Duration::from_secs(secs)
