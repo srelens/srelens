@@ -14,7 +14,7 @@ import {
   Spinner,
   StatusMeter,
 } from "../ui";
-import { describeError } from "../lib/errors";
+import { describeError, isExecAuthError } from "../lib/errors";
 import type { ResourceKind } from "./ResourceBrowser";
 
 interface Stats {
@@ -121,9 +121,12 @@ function percent(part: number, total: number) {
 export function ClusterOverview({
   context,
   onOpenView,
+  onDiagnose,
 }: {
   context: string;
   onOpenView?: (kind: ResourceKind) => void;
+  /** Open the Toolbox to diagnose this context (shown on exec-auth errors). */
+  onDiagnose?: () => void;
 }) {
   const initialSnapshot = overviewCache.get(context);
   const [stats, setStats] = useState<Stats | null>(() => initialSnapshot?.stats ?? null);
@@ -177,7 +180,18 @@ export function ClusterOverview({
 
   if (error && !stats) {
     const friendly = describeError(error);
-    return <ErrorState title={friendly.title} detail={friendly.detail} onRetry={refresh} />;
+    return (
+      <ErrorState
+        title={friendly.title}
+        detail={friendly.detail}
+        onRetry={refresh}
+        action={
+          onDiagnose && isExecAuthError(error)
+            ? { label: "Diagnose in Toolbox", onClick: onDiagnose }
+            : undefined
+        }
+      />
+    );
   }
   if (!stats) return <Spinner label="Loading overview" />;
 

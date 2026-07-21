@@ -2314,6 +2314,131 @@ body {
   font-size: 13px;
   line-height: 1.5;
 }
+.fl-error-state__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* --- Toolbox page --- */
+.fl-toolbox {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  overflow: auto;
+  min-height: 0;
+}
+.fl-toolbox-error {
+  margin: 0;
+  color: var(--fl-color-danger, #dc2626);
+  font-size: 13px;
+}
+.fl-toolbox-empty {
+  margin: 0;
+  color: var(--fl-color-text-muted);
+  font-size: 13px;
+}
+.fl-toolbox-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.fl-toolbox-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--fl-color-border);
+  border-radius: 10px;
+  background: var(--fl-color-surface, transparent);
+}
+.fl-toolbox-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fl-toolbox-card__head strong {
+  font-size: 14px;
+  text-transform: capitalize;
+}
+.fl-toolbox-card__meta {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fl-color-text-muted);
+}
+.fl-toolbox-card__path {
+  color: var(--fl-color-text-muted);
+  font-size: 11px;
+  word-break: break-all;
+}
+.fl-toolbox-search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.fl-toolbox-search > :first-child {
+  flex: 1;
+}
+.fl-toolbox-plugins {
+  width: 100%;
+  border-collapse: collapse;
+}
+.fl-toolbox-plugins td {
+  padding: 8px 0;
+  border-top: 1px solid var(--fl-color-border);
+  vertical-align: middle;
+}
+.fl-toolbox-plugins td strong {
+  display: block;
+  font-size: 13px;
+}
+.fl-toolbox-plugins td small {
+  color: var(--fl-color-text-muted);
+  font-size: 12px;
+}
+.fl-toolbox-plugins__action {
+  text-align: right;
+  white-space: nowrap;
+}
+.fl-toolbox-contexts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fl-toolbox-context {
+  border: 1px solid var(--fl-color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.fl-toolbox-context__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.fl-toolbox-reqs {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fl-toolbox-req {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.fl-toolbox-req__hint {
+  color: var(--fl-color-text-muted);
+}
 
 .fl-settings-page {
   overflow: hidden;

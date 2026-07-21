@@ -3,8 +3,26 @@ import {
   cleanErrorMessage,
   describeError,
   describeForbidden,
+  isExecAuthError,
   serviceAccountNamespace,
 } from "./errors";
+
+describe("isExecAuthError", () => {
+  it("matches exec credential plugin failures", () => {
+    expect(isExecAuthError("unable to run auth exec: no such file or directory")).toBe(true);
+    expect(isExecAuthError('exec: "kubectl-oidc_login": executable file not found in $PATH')).toBe(true);
+    expect(isExecAuthError("getting credentials: exec plugin failed")).toBe(true);
+  });
+  it("does not match unrelated errors", () => {
+    expect(isExecAuthError("connection refused")).toBe(false);
+    expect(isExecAuthError("Unauthorized")).toBe(false);
+  });
+  it("describeError surfaces the auth-plugin message", () => {
+    expect(describeError("unable to run auth exec: executable not found").title).toBe(
+      "Auth plugin couldn't run",
+    );
+  });
+});
 
 describe("cleanErrorMessage", () => {
   it("strips the internal handler-error prefix", () => {

@@ -54,10 +54,29 @@ export function serviceAccountNamespace(error: string): string | null {
   return m ? m[1] : null;
 }
 
+/** True when an error looks like an exec-auth credential plugin failing to run
+ *  (a missing kubectl-oidc_login / aws / gke-gcloud-auth-plugin, etc.) — the
+ *  case the Toolbox diagnoses and can often fix. */
+export function isExecAuthError(input: unknown): boolean {
+  const lower = cleanErrorMessage(input).toLowerCase();
+  return /auth exec|exec plugin|getting credentials|executable .* not found|exec: .*not found|no such file or directory/.test(
+    lower,
+  );
+}
+
 /** Classify a raw error into a friendly, actionable message. */
 export function describeError(input: unknown): FriendlyError {
   const raw = cleanErrorMessage(input);
   const lower = raw.toLowerCase();
+
+  if (isExecAuthError(raw)) {
+    return {
+      title: "Auth plugin couldn't run",
+      detail:
+        "This context authenticates through an exec credential plugin (e.g. kubectl-oidc_login, aws, or gke-gcloud-auth-plugin) that couldn't be found or run. Open the Toolbox to see exactly which tool is missing and install it.",
+      raw,
+    };
+  }
 
   if (/timed out|timeout|deadline exceeded/.test(lower)) {
     return {

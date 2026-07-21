@@ -17,6 +17,7 @@ import { HelmReleasesView } from "./components/HelmReleasesView";
 import { NewResourceEditor } from "./components/NewResourceEditor";
 import { EditResourceTab } from "./components/EditResourceTab";
 import { SettingsView } from "./components/SettingsView";
+import { ToolboxView } from "./components/ToolboxView";
 import { CommandPalette } from "./components/CommandPalette";
 import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
@@ -96,6 +97,8 @@ export function App() {
   // nonce bumps to remount SettingsView at the requested section when asked.
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("appearance");
   const [settingsSectionNonce, setSettingsSectionNonce] = useState(0);
+  // The context to pre-diagnose when the Toolbox opens via a "Diagnose" deep-link.
+  const [toolboxContext, setToolboxContext] = useState<string | null>(null);
 
   const [contexts, setContexts] = useState<ClusterContext[] | null>(null);
   const [contextsError, setContextsError] = useState("");
@@ -275,6 +278,10 @@ export function App() {
       openSettings();
       return;
     }
+    if (kind === "toolbox") {
+      openToolbox();
+      return;
+    }
     const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
     if (existing) {
       setActiveTabId(existing.id);
@@ -301,6 +308,22 @@ export function App() {
     }
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster: null, kind: "settings" }]);
+    setActiveTabId(id);
+    setQuery("");
+  }
+
+  /** Open (or focus) the single workspace-level Toolbox tab. When `context` is
+   *  given (from a "Diagnose in Toolbox" deep-link), that context is
+   *  pre-diagnosed in the health section. */
+  function openToolbox(context?: string) {
+    setToolboxContext(context ?? null);
+    const existing = tabs.find((t) => t.kind === "toolbox" && !t.cluster);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabIdRef.current++;
+    setTabs((ts) => [...ts, { id, cluster: null, kind: "toolbox" }]);
     setActiveTabId(id);
     setQuery("");
   }
@@ -484,6 +507,7 @@ export function App() {
         theme={theme}
         onToggleTheme={toggleThemeMode}
         onOpenSettings={openSettings}
+        onOpenToolbox={openToolbox}
         contextProfiles={contextProfiles}
         kubeconfigFiles={kubeconfigFiles}
         contextOrder={contextOrder}
@@ -538,6 +562,8 @@ export function App() {
                       contextsError={contextsError}
                       onDeleteContext={handleDeleteContext}
                     />
+                  ) : activeKind === "toolbox" ? (
+                    <ToolboxView key={activeTab.id} initialContext={toolboxContext} />
                   ) : activeTab.crd && activeCluster ? (
                     <CustomResourceBrowser
                       key={activeTab.id}
@@ -553,6 +579,7 @@ export function App() {
                         key={activeTab.id}
                         context={activeCluster}
                         onOpenView={(kind) => openView(activeCluster, kind)}
+                        onDiagnose={() => openToolbox(activeCluster)}
                       />
                     </div>
                   ) : activeCluster && activeKind === "portforwards" ? (
@@ -674,7 +701,13 @@ export function App() {
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
         context={activeCluster}
-        onOpenView={(kind) => (kind === "settings" ? openSettings() : activeCluster && openView(activeCluster, kind))}
+        onOpenView={(kind) =>
+          kind === "settings"
+            ? openSettings()
+            : kind === "toolbox"
+              ? openToolbox()
+              : activeCluster && openView(activeCluster, kind)
+        }
         onOpenResource={openResource}
         onOpenCrd={(crd) => activeCluster && openCrdView(activeCluster, crd)}
       />

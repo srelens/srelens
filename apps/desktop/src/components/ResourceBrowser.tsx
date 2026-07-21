@@ -117,6 +117,7 @@ export type ResourceKind =
   | "portforwards"
   | "helmreleases"
   | "settings"
+  | "toolbox"
   | "newresource"
   | "editresource";
 
@@ -160,6 +161,7 @@ export const RESOURCE_LABELS: Record<ResourceKind, string> = {
   portforwards: "Port Forwards",
   helmreleases: "Helm Releases",
   settings: "Settings",
+  toolbox: "Toolbox",
   newresource: "New Resource",
   editresource: "Edit Resource",
 };
@@ -204,6 +206,7 @@ export const K8S_KIND: Record<ResourceKind, string> = {
   portforwards: "",
   helmreleases: "",
   settings: "",
+  toolbox: "",
   newresource: "",
   editresource: "",
 };

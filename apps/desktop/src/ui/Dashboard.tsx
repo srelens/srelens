@@ -126,21 +126,33 @@ export function ErrorState({
   detail,
   onRetry,
   retryLabel = "Retry",
+  action,
 }: {
   title: React.ReactNode;
   detail?: React.ReactNode;
   onRetry?: () => void;
   retryLabel?: string;
+  /** An optional secondary action (e.g. "Diagnose in Toolbox"). */
+  action?: { label: string; onClick: () => void };
 }) {
   return (
     <div className="fl-error-state" role="alert">
       <AlertTriangle className="fl-error-state__icon" aria-hidden />
       <strong className="fl-error-state__title">{title}</strong>
       {detail && <p className="fl-error-state__detail">{detail}</p>}
-      {onRetry && (
-        <Button variant="secondary" size="sm" onClick={onRetry}>
-          {retryLabel}
-        </Button>
+      {(onRetry || action) && (
+        <div className="fl-error-state__actions">
+          {onRetry && (
+            <Button variant="secondary" size="sm" onClick={onRetry}>
+              {retryLabel}
+            </Button>
+          )}
+          {action && (
+            <Button variant="secondary" size="sm" onClick={action.onClick}>
+              {action.label}
+            </Button>
+          )}
+        </div>
       )}
     </div>
   );

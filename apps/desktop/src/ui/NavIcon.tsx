@@ -26,6 +26,7 @@ import {
   Server,
   ServerCog,
   Settings,
+  Wrench,
   Shield,
   ShieldCheck,
   ShipWheel,
@@ -78,6 +79,7 @@ const RESOURCE_ICONS: Record<string, LucideIcon> = {
   rolebindings: UserRoundCheck,
   helmreleases: ShipWheel,
   settings: Settings,
+  toolbox: Wrench,
   newresource: FilePlus2,
 };
 
