@@ -1,20 +1,38 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Download, Pause, Play, RefreshCw, WrapText } from "lucide-react";
+import { Clock, Download, DownloadCloud, History, Pause, Play, RefreshCw, WrapText } from "lucide-react";
 import { podLogs, podsForSelector } from "../lib/workloads";
 import { getObject } from "../lib/manifest";
 import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "../lib/logsStream";
 import { saveTextFile } from "../lib/files";
-import { Spinner, Select, IconButton, TextInput } from "../ui";
+import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
 
 /** What a logs view is following: a single pod, or every pod of a workload. */
 export type LogsSource =
   | { type: "pod"; pod: string }
   | { type: "workload"; kind: string; name: string };
 
-/** Sentinel option value meaning "all pods" / "all containers". */
+/** Sentinel option value meaning "all pods" / "all containers" / "all time". */
 const ALL = "__all__";
 /** Cap the live-tail buffer so a chatty stream can't grow without bound. */
 const MAX_LINES = 5000;
+
+/** How many trailing lines to fetch/tail. */
+const TAIL_OPTIONS = [100, 200, 500, 1000, 5000];
+/** `sinceSeconds` windows; `ALL` omits the bound entirely. */
+const SINCE_OPTIONS: { value: string; label: string; seconds?: number }[] = [
+  { value: ALL, label: "All time" },
+  { value: "300", label: "Last 5m", seconds: 300 },
+  { value: "900", label: "Last 15m", seconds: 900 },
+  { value: "3600", label: "Last 1h", seconds: 3600 },
+  { value: "21600", label: "Last 6h", seconds: 21600 },
+];
+
+/** One buffered log line, keeping its source tag separate so it can be coloured. */
+interface LogEntry {
+  /** Source tag ("pod/container"); empty for a single target. */
+  source: string;
+  line: string;
+}
 
 /** Classify a klog-style line (I/W/E0629 …) for colourising. */
 function lineLevel(line: string): "error" | "warn" | "info" | "plain" {
@@ -31,11 +49,50 @@ const LEVEL_CLASS: Record<string, string> = {
   plain: "text-foreground/80",
 };
 
+/** A compact toolbar toggle with a pressed state (previous/timestamps modes). */
+function ToggleButton({
+  icon: Icon,
+  label,
+  text,
+  active,
+  onClick,
+  disabled,
+  title,
+}: {
+  icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+  label: string;
+  text: string;
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={active}
+      title={title ?? label}
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors disabled:opacity-40 ${
+        active
+          ? "bg-primary/15 text-primary"
+          : "text-muted-foreground hover:bg-accent hover:text-foreground"
+      }`}
+    >
+      <Icon className="size-3.5" aria-hidden={true} />
+      {text}
+    </button>
+  );
+}
+
 /**
  * Pod / workload logs in a themed, scrollable panel. Supports picking a single
  * pod or all pods of a workload, a single container or all containers, text
- * search, line-wrap, downloading the buffer, and a live-tail (follow) mode that
- * streams new lines as they arrive.
+ * search, line-wrap, previous-instance (post-crash) logs, timestamps, tail and
+ * since windows, per-source colourising, downloading the buffer or a full
+ * all-containers dump, and a live-tail (follow) mode.
  */
 export function LogsView({
   context,
@@ -58,18 +115,29 @@ export function LogsView({
   const [containersByPod, setContainersByPod] = useState<Record<string, string[]>>({});
   const [pod, setPod] = useState<string>(srcType === "pod" ? srcPod : ALL);
   const [container, setContainer] = useState<string>(initialContainer || ALL);
-  const [lines, setLines] = useState<string[]>([]);
+  const [entries, setEntries] = useState<LogEntry[]>([]);
   const [error, setError] = useState("");
   const [streamError, setStreamError] = useState("");
   const [loading, setLoading] = useState(false);
   const [wrap, setWrap] = useState(false);
   const [follow, setFollow] = useState(false);
+  const [previous, setPrevious] = useState(false);
+  const [timestamps, setTimestamps] = useState(false);
+  const [tailLines, setTailLines] = useState(200);
+  const [sinceValue, setSinceValue] = useState(ALL);
   const [streamStatus, setStreamStatus] = useState<LogStatus | "connecting">("connecting");
   const [search, setSearch] = useState("");
-  const linesRef = useRef<string[]>([]);
+  const [saveError, setSaveError] = useState("");
+  const [savingAll, setSavingAll] = useState(false);
+  const entriesRef = useRef<LogEntry[]>([]);
   const streamRef = useRef<LogStream | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
+
+  const sinceSeconds = useMemo(
+    () => SINCE_OPTIONS.find((o) => o.value === sinceValue)?.seconds,
+    [sinceValue],
+  );
 
   // Discover the candidate pods. For a workload, resolve its selector → pods.
   useEffect(() => {
@@ -147,9 +215,9 @@ export function LogsView({
     return list;
   }, [targetPods, container, containersByPod]);
 
-  const setBuffer = (next: string[]) => {
-    linesRef.current = next;
-    setLines(next);
+  const setBuffer = (next: LogEntry[]) => {
+    entriesRef.current = next;
+    setEntries(next);
   };
 
   // Snapshot fetch (used when not following).
@@ -158,17 +226,23 @@ export function LogsView({
     setLoading(true);
     setError("");
     void (async () => {
-      const collected: string[] = [];
+      const collected: LogEntry[] = [];
       let firstError = "";
       for (const t of targets) {
-        const out = await podLogs(context, namespace, t.pod, undefined, t.container);
+        const out = await podLogs(context, namespace, t.pod, undefined, {
+          container: t.container,
+          previous,
+          timestamps,
+          tailLines,
+          sinceSeconds,
+        });
         if (out.error) {
           if (!firstError) firstError = out.error;
           continue;
         }
         const text = out.logs ?? "";
         if (!text) continue;
-        text.split("\n").forEach((l) => collected.push(t.label && l ? `${t.label} | ${l}` : l));
+        text.split("\n").forEach((l) => collected.push({ source: t.label ?? "", line: l }));
       }
       if (!active) return;
       setBuffer(collected);
@@ -178,7 +252,7 @@ export function LogsView({
     return () => {
       active = false;
     };
-  }, [context, namespace, targets]);
+  }, [context, namespace, targets, previous, timestamps, tailLines, sinceSeconds]);
 
   useEffect(() => {
     if (follow) return;
@@ -204,14 +278,14 @@ export function LogsView({
       namespace,
       targets,
       (sourceTag, line) => {
-        const text = sourceTag ? `${sourceTag} | ${line}` : line;
-        const next = [...linesRef.current, text];
+        const next = [...entriesRef.current, { source: sourceTag, line }];
         if (next.length > MAX_LINES) next.splice(0, next.length - MAX_LINES);
         setBuffer(next);
       },
       (status) => {
         if (!stopped) setStreamStatus(status);
       },
+      { timestamps, sinceSeconds, tailLines },
     ).then((s) => {
       setLoading(false);
       if (stopped) s.stop();
@@ -227,13 +301,15 @@ export function LogsView({
       streamRef.current?.stop();
       streamRef.current = null;
     };
-  }, [follow, context, namespace, targets, targetsReady]);
+  }, [follow, context, namespace, targets, targetsReady, timestamps, sinceSeconds, tailLines]);
 
   const visible = useMemo(() => {
-    if (!search) return lines;
+    if (!search) return entries;
     const q = search.toLowerCase();
-    return lines.filter((l) => l.toLowerCase().includes(q));
-  }, [lines, search]);
+    return entries.filter(
+      (e) => e.line.toLowerCase().includes(q) || e.source.toLowerCase().includes(q),
+    );
+  }, [entries, search]);
 
   useLayoutEffect(() => {
     const viewport = scrollRef.current;
@@ -252,19 +328,59 @@ export function LogsView({
     });
   }
 
+  // Previous-instance logs are terminated-container snapshots — the API can't
+  // follow them, so switching them on drops out of live-tail.
+  function togglePrevious() {
+    setPrevious((current) => {
+      const next = !current;
+      if (next) setFollow(false);
+      return next;
+    });
+  }
+
   function trackScroll() {
     const viewport = scrollRef.current;
     if (!viewport) return;
     autoScrollRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
   }
 
-  const [saveError, setSaveError] = useState("");
+  const flatten = (list: LogEntry[]) =>
+    list.map((e) => (e.source ? `${e.source} | ${e.line}` : e.line)).join("\n");
+
   function download() {
     const base = srcType === "pod" ? srcPod : srcName;
     setSaveError("");
-    void saveTextFile(`${base || "logs"}.log`, lines.join("\n")).catch((e) =>
-      setSaveError(String(e)),
-    );
+    void saveTextFile(`${base || "logs"}.log`, flatten(entries)).catch((e) => setSaveError(String(e)));
+  }
+
+  // Full dump: every container of every in-scope pod, ignoring the container
+  // filter, each section headed `==> pod/container <==` (tail-style).
+  function downloadAll() {
+    const base = srcType === "pod" ? srcPod : srcName;
+    setSaveError("");
+    setSavingAll(true);
+    void (async () => {
+      const parts: string[] = [];
+      for (const p of targetPods) {
+        const discovered = containersByPod[p] ?? [];
+        const containers = discovered.length > 0 ? discovered : [undefined];
+        for (const c of containers) {
+          const out = await podLogs(context, namespace, p, undefined, {
+            container: c,
+            previous,
+            timestamps,
+            tailLines,
+            sinceSeconds,
+          });
+          parts.push(`==> ${p}${c ? `/${c}` : ""} <==`);
+          parts.push(out.error ? `(error: ${out.error})` : out.logs ?? "");
+          parts.push("");
+        }
+      }
+      await saveTextFile(`${base || "logs"}-all.log`, parts.join("\n"));
+    })()
+      .catch((e) => setSaveError(String(e)))
+      .finally(() => setSavingAll(false));
   }
 
   const title = srcType === "pod" ? srcPod : `${srcKind}/${srcName}`;
@@ -295,12 +411,35 @@ export function LogsView({
           />
         )}
 
+        <Select
+          value={String(tailLines)}
+          onValueChange={(v) => setTailLines(Number(v))}
+          options={TAIL_OPTIONS.map((n) => ({ value: String(n), label: `${n} lines` }))}
+          aria-label="Tail lines"
+        />
+
+        <Select
+          value={sinceValue}
+          onValueChange={setSinceValue}
+          options={SINCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+          aria-label="Since"
+        />
+
+        <ToggleButton
+          icon={History}
+          label="Previous instance logs"
+          text="prev"
+          active={previous}
+          onClick={togglePrevious}
+          title="Logs from the previous, crashed instance"
+        />
+
         <div className="relative w-44">
           <TextInput value={search} onValueChange={setSearch} placeholder="Search logs…" aria-label="Search logs" />
         </div>
         {search && (
           <span className="tabular-nums text-muted-foreground">
-            {visible.length}/{lines.length}
+            {visible.length}/{entries.length}
           </span>
         )}
 
@@ -318,14 +457,31 @@ export function LogsView({
               live
             </span>
           )}
+          <ToggleButton
+            icon={Clock}
+            label="Timestamps"
+            text="ts"
+            active={timestamps}
+            onClick={() => setTimestamps((t) => !t)}
+            title="Prefix each line with a timestamp"
+          />
           <IconButton
             icon={follow ? Pause : Play}
             label={follow ? "Pause live tail" : "Live tail"}
             onClick={toggleFollow}
+            disabled={previous}
+            title={previous ? "Live tail is unavailable for previous logs" : undefined}
           />
           <IconButton icon={WrapText} label={wrap ? "Disable wrap" : "Wrap lines"} onClick={() => setWrap((w) => !w)} />
           {saveError && <span className="text-red-600 dark:text-red-400">save failed</span>}
-          <IconButton icon={Download} label="Download" onClick={download} disabled={lines.length === 0} />
+          <IconButton icon={Download} label="Download" onClick={download} disabled={entries.length === 0} />
+          <IconButton
+            icon={DownloadCloud}
+            label="Download all containers"
+            onClick={downloadAll}
+            disabled={savingAll || targetPods.length === 0}
+            title="Download every container's logs for the in-scope pods"
+          />
           <IconButton icon={RefreshCw} label="Refresh" onClick={() => load()} disabled={follow || loading} />
         </div>
       </div>
@@ -342,9 +498,14 @@ export function LogsView({
           <div className="p-3 text-red-600 dark:text-red-400">Error: {streamError || error}</div>
         ) : visible.length > 0 ? (
           <div className={wrap ? "whitespace-pre-wrap break-all p-2" : "min-w-max p-2"}>
-            {visible.map((line, i) => (
-              <div key={i} className={LEVEL_CLASS[lineLevel(line)]}>
-                {line || " "}
+            {visible.map((e, i) => (
+              <div key={i} className={LEVEL_CLASS[lineLevel(e.line)]}>
+                {e.source && (
+                  <span className="font-medium" style={{ color: avatarColor(e.source) }}>
+                    {e.source} |{" "}
+                  </span>
+                )}
+                {e.line || " "}
               </div>
             ))}
           </div>

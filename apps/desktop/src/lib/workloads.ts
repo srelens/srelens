@@ -202,20 +202,40 @@ export async function evictPod(
   }
 }
 
+/** Options for a one-shot log fetch beyond the pod itself. */
+export interface PodLogsOptions {
+  /** Container name (defaults to the pod's only/first container). */
+  container?: string;
+  /** Logs from the previous, terminated instance (post-crash triage). */
+  previous?: boolean;
+  /** Prefix each line with an RFC 3339 timestamp. */
+  timestamps?: boolean;
+  /** Only lines newer than this many seconds ago. */
+  sinceSeconds?: number;
+  /** Number of trailing lines to return. */
+  tailLines?: number;
+}
+
 /** Fetch recent logs for a pod (optionally a specific container) via `k8s.podLogs`. */
 export async function podLogs(
   context: string,
   namespace: string,
   pod: string,
   invoke: Invoker = invokeCapability,
-  container?: string,
+  options: PodLogsOptions = {},
 ): Promise<LogsOutcome> {
+  const { container, previous, timestamps, sinceSeconds, tailLines } = options;
   try {
+    // `k8s.podLogs` deserialises snake_case field names (no serde rename).
     const out = await invoke<{ logs: string }>("k8s.podLogs", {
       context,
       namespace,
       pod,
       ...(container ? { container } : {}),
+      ...(previous ? { previous: true } : {}),
+      ...(timestamps ? { timestamps: true } : {}),
+      ...(sinceSeconds != null ? { since_seconds: sinceSeconds } : {}),
+      ...(tailLines != null ? { tail_lines: tailLines } : {}),
     });
     return { logs: out.logs };
   } catch (e) {

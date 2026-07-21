@@ -15,6 +15,43 @@ use crate::connect::request_timeout;
 
 const DEFAULT_TAIL_LINES: i64 = 200;
 
+/// Per-stream options beyond the target itself: how much history to tail, an
+/// optional `sinceSeconds` window, and whether to prefix each line with an RFC
+/// 3339 timestamp. `Copy` so the resilient loop can tweak it per reconnect.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamOpts {
+    pub tail_lines: i64,
+    pub since_seconds: Option<i64>,
+    pub timestamps: bool,
+}
+
+impl Default for StreamOpts {
+    fn default() -> Self {
+        Self { tail_lines: DEFAULT_TAIL_LINES, since_seconds: None, timestamps: false }
+    }
+}
+
+/// Build the kube `LogParams` for a target + options. Pure, so the mapping
+/// (follow, tail, since, timestamps, previous) is unit-tested.
+pub fn build_log_params(
+    container: Option<String>,
+    follow: bool,
+    tail_lines: Option<i64>,
+    since_seconds: Option<i64>,
+    timestamps: bool,
+    previous: bool,
+) -> LogParams {
+    LogParams {
+        container,
+        follow,
+        tail_lines,
+        since_seconds,
+        timestamps,
+        previous,
+        ..Default::default()
+    }
+}
+
 /// Follow a pod/container's logs, invoking `on_line` for each line as it
 /// arrives. Runs until the stream closes (pod exits) or the task is aborted.
 /// Tauri-agnostic so the streaming logic stays reusable.
@@ -24,7 +61,7 @@ pub async fn stream_pod_logs<F, G>(
     namespace: String,
     pod: String,
     container: Option<String>,
-    tail_lines: i64,
+    opts: StreamOpts,
     mut on_line: F,
     mut on_connected: G,
 ) -> Result<(), String>
@@ -34,12 +71,14 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Pod> = Api::namespaced(client, &namespace);
-    let params = LogParams {
+    let params = build_log_params(
         container,
-        follow: true,
-        tail_lines: Some(tail_lines),
-        ..Default::default()
-    };
+        true,
+        Some(opts.tail_lines),
+        opts.since_seconds,
+        opts.timestamps,
+        false,
+    );
     let reader = tokio::time::timeout(request_timeout(), api.log_stream(&pod, &params))
         .await
         .map_err(|_| "open log stream timed out".to_string())?
@@ -66,7 +105,7 @@ pub async fn stream_pod_logs_resilient<F, G>(
     namespace: String,
     pod: String,
     container: Option<String>,
-    tail_lines: i64,
+    opts: StreamOpts,
     mut on_line: F,
     mut on_status: G,
 ) where
@@ -75,14 +114,20 @@ pub async fn stream_pod_logs_resilient<F, G>(
 {
     let mut first = true;
     loop {
-        let tail = if first { tail_lines } else { 0 };
+        // First connect honors tail + since; reconnects tail 0 with no `since`
+        // so we don't re-print history, but keep the timestamps preference.
+        let connect_opts = if first {
+            opts
+        } else {
+            StreamOpts { tail_lines: 0, since_seconds: None, timestamps: opts.timestamps }
+        };
         let _ = stream_pod_logs(
             cache.clone(),
             context.clone(),
             namespace.clone(),
             pod.clone(),
             container.clone(),
-            tail,
+            connect_opts,
             |line| on_line(line),
             || on_status("live"),
         )
@@ -105,6 +150,15 @@ pub struct PodLogsIn {
     /// Number of trailing lines to return (default 200).
     #[serde(default)]
     pub tail_lines: Option<i64>,
+    /// Logs from the previous, terminated instance (post-crash triage).
+    #[serde(default)]
+    pub previous: bool,
+    /// Prefix each line with an RFC 3339 timestamp.
+    #[serde(default)]
+    pub timestamps: bool,
+    /// Only logs newer than this many seconds ago.
+    #[serde(default)]
+    pub since_seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -126,11 +180,14 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(CapabilityError::Handler)?;
                 let api: Api<Pod> = Api::namespaced(client, &input.namespace);
-                let params = LogParams {
-                    container: input.container.clone(),
-                    tail_lines: Some(input.tail_lines.unwrap_or(DEFAULT_TAIL_LINES)),
-                    ..Default::default()
-                };
+                let params = build_log_params(
+                    input.container.clone(),
+                    false,
+                    Some(input.tail_lines.unwrap_or(DEFAULT_TAIL_LINES)),
+                    input.since_seconds,
+                    input.timestamps,
+                    input.previous,
+                );
                 let logs = tokio::time::timeout(request_timeout(), api.logs(&input.pod, &params))
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch logs timed out".into()))?
@@ -151,5 +208,27 @@ mod tests {
         let cap = pod_logs_capability(ClientCache::new(PathBuf::from("/x")));
         assert_eq!(cap.id, "k8s.podLogs");
         assert!(cap.annotations.read_only);
+    }
+
+    #[test]
+    fn build_log_params_maps_all_options() {
+        let p = build_log_params(Some("app".into()), false, Some(500), Some(300), true, true);
+        assert_eq!(p.container.as_deref(), Some("app"));
+        assert!(!p.follow);
+        assert_eq!(p.tail_lines, Some(500));
+        assert_eq!(p.since_seconds, Some(300));
+        assert!(p.timestamps);
+        assert!(p.previous);
+    }
+
+    #[test]
+    fn stream_opts_default_tails_and_omits_extras() {
+        let o = StreamOpts::default();
+        assert_eq!(o.tail_lines, DEFAULT_TAIL_LINES);
+        assert_eq!(o.since_seconds, None);
+        assert!(!o.timestamps);
+        // The streaming params always follow and are never `previous`.
+        let p = build_log_params(None, true, Some(o.tail_lines), o.since_seconds, o.timestamps, false);
+        assert!(p.follow && !p.previous);
     }
 }

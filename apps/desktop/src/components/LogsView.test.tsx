@@ -43,7 +43,13 @@ describe("LogsView", () => {
     render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
     await waitFor(() => expect(screen.getByText(/line two/)).toBeDefined());
     await waitFor(() =>
-      expect(podLogsMock).toHaveBeenCalledWith("kind-dev", "default", "web-1", undefined, "app"),
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-1",
+        undefined,
+        expect.objectContaining({ container: "app" }),
+      ),
     );
   });
 
@@ -79,10 +85,22 @@ describe("LogsView", () => {
     // A pod picker appears with an "all pods" option, and logs are fetched per pod.
     expect(await screen.findByRole("combobox", { name: "Pod" })).toBeDefined();
     await waitFor(() =>
-      expect(podLogsMock).toHaveBeenCalledWith("kind-dev", "default", "web-1", undefined, "app"),
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-1",
+        undefined,
+        expect.objectContaining({ container: "app" }),
+      ),
     );
     await waitFor(() =>
-      expect(podLogsMock).toHaveBeenCalledWith("kind-dev", "default", "web-2", undefined, "app"),
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-2",
+        undefined,
+        expect.objectContaining({ container: "app" }),
+      ),
     );
   });
 
@@ -147,6 +165,7 @@ describe("LogsView", () => {
         [{ pod: "web-1", container: "app", label: "" }],
         expect.any(Function),
         expect.any(Function),
+        expect.objectContaining({ tailLines: 200 }),
       ),
     );
   });
@@ -192,7 +211,70 @@ describe("LogsView", () => {
     await userEvent.click(screen.getByRole("combobox", { name: "Container" }));
     await userEvent.click(await screen.findByRole("option", { name: "sidecar" }));
     await waitFor(() =>
-      expect(podLogsMock).toHaveBeenCalledWith("kind-dev", "default", "web-1", undefined, "sidecar"),
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-1",
+        undefined,
+        expect.objectContaining({ container: "sidecar" }),
+      ),
     );
+  });
+
+  it("fetches previous-instance logs and disables live tail when enabled", async () => {
+    podLogsMock.mockResolvedValue({ logs: "old crash line" });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await waitFor(() => expect(screen.getByText("old crash line")).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous instance logs" }));
+    await waitFor(() =>
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-1",
+        undefined,
+        expect.objectContaining({ previous: true }),
+      ),
+    );
+    // Previous logs are a terminated-container snapshot; the API can't follow.
+    expect((screen.getByRole("button", { name: "Live tail" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("threads the timestamps option through on toggle", async () => {
+    podLogsMock.mockResolvedValue({ logs: "l1" });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await waitFor(() => expect(screen.getByText("l1")).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: "Timestamps" }));
+    await waitFor(() =>
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-1",
+        undefined,
+        expect.objectContaining({ timestamps: true }),
+      ),
+    );
+  });
+
+  it("downloads a full all-containers dump with per-container headers", async () => {
+    getObjectMock.mockResolvedValue({
+      object: { spec: { containers: [{ name: "app" }, { name: "sidecar" }] } },
+    });
+    podLogsMock.mockImplementation((_c: string, _n: string, _p: string, _i: unknown, opts: { container?: string }) =>
+      Promise.resolve({ logs: `${opts.container} logs` }),
+    );
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Container" })).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: "Download all containers" }));
+    await waitFor(() =>
+      expect(saveTextFileMock).toHaveBeenCalledWith(
+        "web-1-all.log",
+        expect.stringContaining("==> web-1/app <=="),
+      ),
+    );
+    expect(saveTextFileMock.mock.calls[0][1]).toContain("==> web-1/sidecar <==");
+    expect(saveTextFileMock.mock.calls[0][1]).toContain("sidecar logs");
   });
 });

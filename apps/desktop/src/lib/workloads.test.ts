@@ -62,6 +62,38 @@ describe("podLogs", () => {
     expect(outcome.logs).toContain("line2");
   });
 
+  it("threads container and log options through as snake_case keys", async () => {
+    const invoke = vi.fn().mockResolvedValue({ logs: "" });
+    await podLogs("kind-dev", "default", "web-1", invoke, {
+      container: "app",
+      previous: true,
+      timestamps: true,
+      sinceSeconds: 300,
+      tailLines: 500,
+    });
+    expect(invoke).toHaveBeenCalledWith("k8s.podLogs", {
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+      container: "app",
+      previous: true,
+      timestamps: true,
+      since_seconds: 300,
+      tail_lines: 500,
+    });
+  });
+
+  it("omits options that are falsy or unset", async () => {
+    const invoke = vi.fn().mockResolvedValue({ logs: "" });
+    await podLogs("kind-dev", "default", "web-1", invoke, { container: "app", previous: false });
+    expect(invoke).toHaveBeenCalledWith("k8s.podLogs", {
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+      container: "app",
+    });
+  });
+
   it("normalises errors", async () => {
     const outcome = await podLogs("x", "default", "p", () =>
       Promise.reject(new Error("container not found")),

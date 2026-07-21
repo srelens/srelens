@@ -15,6 +15,16 @@ export interface LogStream {
 /** Connection health of a live-tail stream. */
 export type LogStatus = "live" | "reconnecting";
 
+/** Per-stream options: how much history to tail and whether to timestamp. */
+export interface LogStreamOptions {
+  /** Prefix each line with an RFC 3339 timestamp. */
+  timestamps?: boolean;
+  /** On the first connect, only lines newer than this many seconds ago. */
+  sinceSeconds?: number;
+  /** On the first connect, how many trailing lines to tail. */
+  tailLines?: number;
+}
+
 // Monotonic id so each stream gets a unique channel.
 let streamSeq = 0;
 
@@ -31,6 +41,7 @@ export async function startLogStream(
   targets: LogTarget[],
   onLine: (source: string, line: string) => void,
   onStatus?: (status: LogStatus) => void,
+  options: LogStreamOptions = {},
 ): Promise<LogStream> {
   if (targets.length === 0) throw new Error("cannot start live logs without a pod target");
   const channel = `logs:line:${++streamSeq}`;
@@ -44,10 +55,14 @@ export async function startLogStream(
     }
   });
   try {
+    // Tauri maps these camelCase args to the command's snake_case params.
     await invokeCommand("start_log_stream", {
       context,
       namespace,
       channel,
+      timestamps: options.timestamps ?? false,
+      sinceSeconds: options.sinceSeconds ?? null,
+      tailLines: options.tailLines ?? null,
       targets: targets.map((t) => ({
         pod: t.pod,
         container: t.container ?? null,

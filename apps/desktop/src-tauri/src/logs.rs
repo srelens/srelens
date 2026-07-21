@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use srelens_kube::client_cache::ClientCache;
-use srelens_kube::logs::stream_pod_logs_resilient;
+use srelens_kube::logs::{stream_pod_logs_resilient, StreamOpts};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::task::JoinHandle;
@@ -64,11 +64,15 @@ impl LogStreamManager {
 /// caller-provided `channel`. The WebView subscribes to `channel` first, then
 /// invokes this, so the initial tail lines can't race ahead of the listener.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_log_stream(
     context: String,
     namespace: String,
     targets: Vec<LogTarget>,
     channel: String,
+    timestamps: Option<bool>,
+    since_seconds: Option<i64>,
+    tail_lines: Option<i64>,
     app: AppHandle,
     manager: State<'_, LogStreamManager>,
 ) -> Result<(), String> {
@@ -76,6 +80,11 @@ pub async fn start_log_stream(
         return Err("cannot start live logs without a pod target".into());
     }
     manager.abort(&channel);
+    let opts = StreamOpts {
+        tail_lines: tail_lines.unwrap_or(STREAM_TAIL_LINES),
+        since_seconds,
+        timestamps: timestamps.unwrap_or(false),
+    };
 
     let handles = targets
         .into_iter()
@@ -95,7 +104,7 @@ pub async fn start_log_stream(
                     namespace,
                     t.pod,
                     t.container,
-                    STREAM_TAIL_LINES,
+                    opts,
                     move |line| {
                         let _ = line_app.emit(
                             &line_channel,
