@@ -13,6 +13,10 @@ impl Annotations {
         Self { read_only: true, destructive: false, requires_confirm: false, sensitive: false };
     pub const DESTRUCTIVE: Self =
         Self { read_only: false, destructive: true, requires_confirm: true, sensitive: false };
+    /// A change that isn't destructive but still needs user consent (e.g.
+    /// installing a tool): confirm-gated, not flagged destructive.
+    pub const MUTATING: Self =
+        Self { read_only: false, destructive: false, requires_confirm: true, sensitive: false };
     /// A read that returns sensitive material — gateable by consent policy.
     pub const SENSITIVE_READ: Self =
         Self { read_only: true, destructive: false, requires_confirm: false, sensitive: true };

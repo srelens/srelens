@@ -33,6 +33,24 @@ pub fn default_kubeconfig_path() -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Blocking HTTP GET for Toolbox tool downloads. Called only from inside
+/// `spawn_blocking` (the install capabilities), so blocking here is fine. A
+/// non-2xx or transport error maps to the retryable `Download` variant.
+fn http_get(url: &str) -> Result<Vec<u8>, srelens_kube::toolbox_install::InstallError> {
+    use srelens_kube::toolbox_install::InstallError;
+    let resp = reqwest::blocking::Client::builder()
+        .user_agent(concat!("srelens/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .and_then(|client| client.get(url).send())
+        .map_err(|e| InstallError::Download(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(InstallError::Download(format!("{} for {url}", resp.status())));
+    }
+    resp.bytes()
+        .map(|b| b.to_vec())
+        .map_err(|e| InstallError::Download(e.to_string()))
+}
+
 /// Build the registry with a freshly-created client cache. Used by the MCP
 /// stdio binary, which doesn't need to share the cache with watch tasks.
 pub fn build_registry() -> Registry {
@@ -62,6 +80,10 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
         default_kubeconfig_paths(),
         srelens_kube::toolbox::SearchPaths::from_env(),
         |path| path.is_file(),
+    ));
+    reg.register(srelens_kube::toolbox::install_kubectl_capability(
+        srelens_kube::toolbox::srelens_bin_dir(),
+        http_get,
     ));
 
     reg.register(srelens_kube::connect::cluster_info_capability(
