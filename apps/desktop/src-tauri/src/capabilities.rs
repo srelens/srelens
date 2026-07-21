@@ -85,6 +85,10 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
         srelens_kube::toolbox::srelens_bin_dir(),
         http_get,
     ));
+    reg.register(srelens_kube::toolbox::install_helm_capability(
+        srelens_kube::toolbox::srelens_bin_dir(),
+        http_get,
+    ));
 
     reg.register(srelens_kube::connect::cluster_info_capability(
         cache.clone(),

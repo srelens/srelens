@@ -389,7 +389,8 @@ pub fn diagnose_context_capability(
 }
 
 use crate::toolbox_install::{
-    install_binary, kubectl_install, InstallError, Platform, KUBECTL_STABLE_URL,
+    helm_install, install_binary, install_from_targz, kubectl_install, parse_github_latest_tag,
+    InstallError, Platform, HELM_LATEST_RELEASE_URL, KUBECTL_STABLE_URL,
 };
 
 /// The directory srelens installs managed tools into: `~/.srelens/bin`.
@@ -442,6 +443,44 @@ where
                     let path = install_binary(&plan, &fetch).map_err(to_handler)?;
                     Ok(InstallToolOut {
                         tool: "kubectl".to_string(),
+                        version,
+                        path: path.to_string_lossy().into_owned(),
+                    })
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            }
+        },
+    )
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct InstallHelmIn {}
+
+/// Confirm-gated capability: download the latest helm release into
+/// `~/.srelens/bin`, verified against helm's published checksum. Version is
+/// resolved from GitHub's latest-release API (helm has no `stable.txt`).
+pub fn install_helm_capability<F>(install_dir: PathBuf, fetch: F) -> Capability
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError> + Send + Sync + Clone + 'static,
+{
+    Capability::typed::<InstallHelmIn, InstallToolOut, _, _>(
+        "toolbox.installHelm",
+        "download the latest helm release into ~/.srelens/bin, verified against \
+         its published checksum",
+        Annotations::MUTATING,
+        move |_input: InstallHelmIn| {
+            let install_dir = install_dir.clone();
+            let fetch = fetch.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let platform = Platform::current().map_err(to_handler)?;
+                    let body = fetch(HELM_LATEST_RELEASE_URL).map_err(to_handler)?;
+                    let version = parse_github_latest_tag(&body).map_err(to_handler)?;
+                    let plan = helm_install(&version, &platform, &install_dir);
+                    let path = install_from_targz(&plan, &fetch).map_err(to_handler)?;
+                    Ok(InstallToolOut {
+                        tool: "helm".to_string(),
                         version,
                         path: path.to_string_lossy().into_owned(),
                     })
@@ -579,6 +618,48 @@ users:
         let cap = install_kubectl_capability(PathBuf::from("/tmp/x"), net(vec![]));
         assert!(cap.annotations.requires_confirm, "installs must require consent");
         assert!(!cap.annotations.read_only);
+    }
+
+    fn make_targz(members: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::{write::GzEncoder, Compression};
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for (name, bytes) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, *bytes).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn install_helm_resolves_latest_downloads_and_extracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("bin");
+        let platform = Platform::current().unwrap();
+        let plan = helm_install("v9.9.9", &platform, &install_dir);
+        let payload = b"#!/bin/sh\necho helm\n";
+        let archive = make_targz(&[(plan.member.as_str(), payload)]);
+        let fetch = net(vec![
+            (HELM_LATEST_RELEASE_URL.to_string(), br#"{"tag_name":"v9.9.9"}"#.to_vec()),
+            (plan.sha256_url.clone(), sha256_hex(&archive).into_bytes()),
+            (plan.archive_url.clone(), archive),
+        ]);
+
+        let mut reg = Registry::new();
+        reg.register(install_helm_capability(install_dir, fetch));
+        let out = reg.invoke("toolbox.installHelm", json!({})).await.unwrap();
+
+        assert_eq!(out["tool"], "helm");
+        assert_eq!(out["version"], "v9.9.9");
+        assert_eq!(std::fs::read(out["path"].as_str().unwrap()).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn install_helm_is_confirm_gated() {
+        let cap = install_helm_capability(PathBuf::from("/tmp/x"), net(vec![]));
+        assert!(cap.annotations.requires_confirm);
     }
 
     #[tokio::test]
