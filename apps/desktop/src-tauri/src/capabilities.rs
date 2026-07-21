@@ -69,6 +69,24 @@ fn run_tool(
     }
 }
 
+/// Run `kubectl-krew` with args, returning stdout (or stderr as an error).
+/// Prefers the krew shim under `~/.krew/bin`, falling back to PATH. Called
+/// inside spawn_blocking by the plugin capabilities.
+fn run_krew(args: &[&str]) -> Result<String, srelens_kube::toolbox_install::InstallError> {
+    use srelens_kube::toolbox_install::InstallError;
+    let shim = srelens_kube::toolbox::krew_bin_dir().join("kubectl-krew");
+    let bin = if shim.is_file() { shim } else { std::path::PathBuf::from("kubectl-krew") };
+    let output = std::process::Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|e| InstallError::Download(e.to_string()))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(InstallError::Download(String::from_utf8_lossy(&output.stderr).into_owned()))
+    }
+}
+
 /// Probe a managed tool's version by running it and scanning for a semver.
 /// Each tool prints its version differently, so we pass tool-specific flags and
 /// let `first_semver` pull the `vX.Y.Z` out of whatever text comes back.
@@ -135,6 +153,10 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
         |path| path.is_file(),
         tool_version,
     ));
+    reg.register(srelens_kube::toolbox::search_plugins_capability(run_krew));
+    reg.register(srelens_kube::toolbox::install_plugin_capability(run_krew));
+    reg.register(srelens_kube::toolbox::upgrade_plugin_capability(run_krew));
+    reg.register(srelens_kube::toolbox::remove_plugin_capability(run_krew));
 
     reg.register(srelens_kube::connect::cluster_info_capability(
         cache.clone(),
