@@ -257,6 +257,38 @@ describe("LogsView", () => {
     );
   });
 
+  it("virtualises a long unwrapped buffer, rendering only a window of rows", async () => {
+    // jsdom reports zero layout, so stub a measurable row/viewport size to make
+    // computeLogWindow window the list instead of rendering everything.
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      height: 16,
+      width: 100,
+      top: 0,
+      left: 0,
+      right: 100,
+      bottom: 16,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const clientHeightSpy = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(320);
+
+    const lines = Array.from({ length: 300 }, (_, i) => `log line ${i}`).join("\n");
+    podLogsMock.mockResolvedValue({ logs: lines });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+
+    // The top of the buffer renders, but far-off-screen lines are windowed out.
+    await waitFor(() => expect(screen.getByText("log line 0")).toBeDefined());
+    await waitFor(() => expect(screen.queryByText("log line 299")).toBeNull());
+    // Only a small window of the 300 buffered lines is in the DOM.
+    expect(screen.getAllByText(/^log line \d+$/).length).toBeLessThan(120);
+
+    rectSpy.mockRestore();
+    clientHeightSpy.mockRestore();
+  });
+
   it("downloads a full all-containers dump with per-container headers", async () => {
     getObjectMock.mockResolvedValue({
       object: { spec: { containers: [{ name: "app" }, { name: "sidecar" }] } },

@@ -5,6 +5,7 @@ import { getObject } from "../lib/manifest";
 import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "../lib/logsStream";
 import { saveTextFile } from "../lib/files";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
+import { computeLogWindow } from "./logWindow";
 
 /** What a logs view is following: a single pod, or every pod of a workload. */
 export type LogsSource =
@@ -132,7 +133,10 @@ export function LogsView({
   const entriesRef = useRef<LogEntry[]>([]);
   const streamRef = useRef<LogStream | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowsRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
+  // Viewport/row metrics driving list virtualisation (see computeLogWindow).
+  const [metrics, setMetrics] = useState({ scrollTop: 0, viewportHeight: 0, rowHeight: 0 });
 
   const sinceSeconds = useMemo(
     () => SINCE_OPTIONS.find((o) => o.value === sinceValue)?.seconds,
@@ -317,6 +321,30 @@ export function LogsView({
     viewport.scrollTop = viewport.scrollHeight;
   }, [visible, follow]);
 
+  // Sample the viewport height and a single row's height so the render can
+  // window the list. Re-measures on resize and whenever the buffer size or wrap
+  // mode changes (which can change row height). Degrades to 0 in jsdom (no
+  // layout), which computeLogWindow treats as "render everything".
+  const measure = useCallback(() => {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    const firstRow = rowsRef.current?.querySelector<HTMLElement>("[data-log-row]");
+    setMetrics({
+      scrollTop: viewport.scrollTop,
+      viewportHeight: viewport.clientHeight,
+      rowHeight: firstRow ? firstRow.getBoundingClientRect().height : 0,
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    measure();
+    const viewport = scrollRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [measure, visible.length, wrap]);
+
   function toggleFollow() {
     setFollow((current) => {
       const next = !current;
@@ -342,6 +370,8 @@ export function LogsView({
     const viewport = scrollRef.current;
     if (!viewport) return;
     autoScrollRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
+    // Keep the virtualisation window in step with the scroll position.
+    setMetrics((m) => ({ ...m, scrollTop: viewport.scrollTop, viewportHeight: viewport.clientHeight }));
   }
 
   const flatten = (list: LogEntry[]) =>
@@ -384,6 +414,17 @@ export function LogsView({
   }
 
   const title = srcType === "pod" ? srcPod : `${srcKind}/${srcName}`;
+
+  // Only render the on-screen slice of a long, unwrapped buffer (fixed-height
+  // rows); wrapped or short buffers render in full.
+  const win = computeLogWindow({
+    total: visible.length,
+    scrollTop: metrics.scrollTop,
+    viewportHeight: metrics.viewportHeight,
+    rowHeight: metrics.rowHeight,
+    wrap,
+  });
+  const windowRows = win.virtualized ? visible.slice(win.start, win.end) : visible;
 
   return (
     <div className="flex h-full flex-col bg-card text-card-foreground">
@@ -497,17 +538,22 @@ export function LogsView({
         {streamError || error ? (
           <div className="p-3 text-red-600 dark:text-red-400">Error: {streamError || error}</div>
         ) : visible.length > 0 ? (
-          <div className={wrap ? "whitespace-pre-wrap break-all p-2" : "min-w-max p-2"}>
-            {visible.map((e, i) => (
-              <div key={i} className={LEVEL_CLASS[lineLevel(e.line)]}>
-                {e.source && (
-                  <span className="font-medium" style={{ color: avatarColor(e.source) }}>
-                    {e.source} |{" "}
-                  </span>
-                )}
-                {e.line || " "}
-              </div>
-            ))}
+          <div ref={rowsRef} className={wrap ? "whitespace-pre-wrap break-all p-2" : "min-w-max p-2"}>
+            {win.topPad > 0 && <div style={{ height: win.topPad }} aria-hidden="true" />}
+            {windowRows.map((e, i) => {
+              const idx = win.start + i;
+              return (
+                <div key={idx} data-log-row className={LEVEL_CLASS[lineLevel(e.line)]}>
+                  {e.source && (
+                    <span className="font-medium" style={{ color: avatarColor(e.source) }}>
+                      {e.source} |{" "}
+                    </span>
+                  )}
+                  {e.line || " "}
+                </div>
+              );
+            })}
+            {win.bottomPad > 0 && <div style={{ height: win.bottomPad }} aria-hidden="true" />}
           </div>
         ) : (
           <div className="p-3 text-muted-foreground">
