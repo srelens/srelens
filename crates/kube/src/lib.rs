@@ -96,6 +96,7 @@ pub mod client_cache;
 pub mod cluster;
 pub mod crds;
 pub mod connect;
+pub mod context_resolve;
 pub mod debug;
 pub mod contexts;
 pub mod configmaps;

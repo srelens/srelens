@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::client_cache::ClientCache;
-use crate::connect::load_kubeconfigs;
+use crate::context_resolve::{resolve_context, resolve_contexts};
 use crate::local_cluster::classify;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -67,38 +67,38 @@ pub fn list_contexts_capability(cache: Arc<ClientCache>, default_paths: Vec<Path
                     }
                     cache.set_paths(paths).await;
                 }
-                let config = load_kubeconfigs(&cache.paths().await)
-                    .map_err(CapabilityError::Handler)?;
-                let current = config.current_context.unwrap_or_default();
-                let clusters = config.clusters;
-                let auth_infos = config.auth_infos;
-                let contexts = config.contexts.into_iter().map(|named| {
-                    let context = named.context.unwrap_or_default();
-                    let cluster_name = context.cluster;
-                    let user_name = context.user;
-                    let server = clusters.iter()
-                        .find(|cluster| cluster.name == cluster_name)
-                        .and_then(|cluster| cluster.cluster.as_ref())
-                        .and_then(|cluster| cluster.server.clone())
-                        .unwrap_or_default();
-                    // Resolve the user's auth to gate cloud/managed clusters out
-                    // of the "local" bucket (see local_cluster::classify).
-                    let auth = auth_infos.iter()
-                        .find(|entry| entry.name == user_name)
-                        .and_then(|entry| entry.auth_info.as_ref());
-                    let exec_command = auth
-                        .and_then(|info| info.exec.as_ref())
-                        .and_then(|exec| exec.command.as_deref());
-                    let auth_provider = auth
-                        .and_then(|info| info.auth_provider.as_ref())
-                        .map(|provider| provider.name.as_str());
-                    let class = classify(&named.name, &cluster_name, &server, exec_command, auth_provider);
+                // Enumerate every context across all files with duplicate-name
+                // disambiguation, so contexts that share a name (e.g. `default`
+                // across per-cluster kubeconfigs) are all visible and each
+                // resolves to its own file — kube-rs merge would drop them.
+                let paths = cache.paths().await;
+                let resolved = resolve_contexts(&paths);
+                // Resilient to a bad additional file. An empty result is only an
+                // error when *no* kubeconfig could be read at all; a readable file
+                // with zero contexts (e.g. after deleting the last one) is fine.
+                if resolved.is_empty()
+                    && !paths.iter().any(|path| kube::config::Kubeconfig::read_from(path).is_ok())
+                {
+                    return Err(CapabilityError::Handler(
+                        "no kubeconfig contexts could be read".to_string(),
+                    ));
+                }
+                let contexts = resolved.into_iter().map(|rc| {
+                    // Classify on the raw in-file name (the disambiguating prefix
+                    // is a file stem, not a signal of local/remote).
+                    let class = classify(
+                        &rc.original_name,
+                        &rc.cluster,
+                        &rc.server,
+                        rc.exec_command.as_deref(),
+                        rc.auth_provider.as_deref(),
+                    );
                     ContextDto {
-                        is_current: named.name == current,
-                        name: named.name,
-                        cluster: cluster_name,
-                        server,
-                        namespace: context.namespace.clone().unwrap_or_default(),
+                        is_current: rc.is_current,
+                        name: rc.display_name,
+                        cluster: rc.cluster,
+                        server: rc.server,
+                        namespace: rc.namespace,
                         is_local: class.is_local,
                         provider: class.provider.map(|provider| provider.as_str().to_string()),
                     }
@@ -135,11 +135,18 @@ pub fn delete_context_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: DeleteContextIn| {
             let cache = cache.clone();
             async move {
-                let context_name = input.context;
                 let paths = cache.paths().await;
+                // Map the display name back to its owning file + in-file name, so
+                // a disambiguated duplicate (`kube_prod/default`) deletes the right
+                // context and only from its own file — never a same-named sibling.
+                let resolved = resolve_context(&paths, &input.context);
+                let (context_name, scan_paths): (String, Vec<PathBuf>) = match resolved {
+                    Some(target) => (target.original_name, vec![target.source]),
+                    None => (input.context, paths),
+                };
                 let mut found = false;
 
-                for path in paths {
+                for path in scan_paths {
                     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
                         continue;
                     }

@@ -8,7 +8,7 @@
 //! them (cloud CLIs). Resolution of those requirements against the app's PATH
 //! is a separate step; this half is pure string work and fully unit-tested.
 
-use crate::connect::load_kubeconfigs;
+use crate::context_resolve::resolve_context;
 use crate::helm_cli::resolve_on_path;
 use crate::kubeconfig::KubeError;
 use schemars::JsonSchema;
@@ -351,14 +351,21 @@ pub fn diagnose_context_capability(
             let search = search.clone();
             let is_file = is_file.clone();
             async move {
-                let merged = load_kubeconfigs(&paths).map_err(CapabilityError::Handler)?;
-                let yaml = serde_yaml::to_string(&merged)
+                // Resolve the (possibly disambiguated) display name to its owning
+                // file so a duplicate-named context diagnoses against its own
+                // kubeconfig rather than the first-merged one.
+                let resolved = resolve_context(&paths, &input.context).ok_or_else(|| {
+                    CapabilityError::InvalidInput(format!("unknown context: {}", input.context))
+                })?;
+                let config = kube::config::Kubeconfig::read_from(&resolved.source)
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let yaml = serde_yaml::to_string(&config)
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 let all = context_requirements(&yaml)
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 let ctx = all
                     .into_iter()
-                    .find(|c| c.context == input.context)
+                    .find(|c| c.context == resolved.original_name)
                     .ok_or_else(|| {
                         CapabilityError::InvalidInput(format!("unknown context: {}", input.context))
                     })?;
