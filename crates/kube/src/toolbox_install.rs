@@ -162,6 +162,22 @@ pub struct ArchiveInstall {
     pub target: PathBuf,
 }
 
+/// GitHub API endpoint for helm's latest release (helm has no `stable.txt`).
+pub const HELM_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/helm/helm/releases/latest";
+
+/// Pull the `tag_name` (e.g. `v3.16.2`) out of a GitHub "latest release" JSON body.
+pub fn parse_github_latest_tag(body: &[u8]) -> Result<String, InstallError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| InstallError::Download(e.to_string()))?;
+    value
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| InstallError::Download("no tag_name in GitHub release response".to_string()))
+}
+
 /// Plan a helm install for `version` (a `vX.Y.Z` tag) into `install_dir`.
 pub fn helm_install(version: &str, platform: &Platform, install_dir: &Path) -> ArchiveInstall {
     let ext = if platform.os == "windows" { ".exe" } else { "" };
@@ -369,6 +385,23 @@ mod tests {
         let plan = kubectl_install("v1.30.2", &Platform { os: "linux", arch: "amd64" }, dir.path());
         let fetch = net(&[]); // nothing resolves
         assert!(matches!(install_binary(&plan, &fetch), Err(InstallError::Download(_))));
+    }
+
+    #[test]
+    fn github_latest_tag_is_parsed_and_bad_bodies_rejected() {
+        assert_eq!(
+            parse_github_latest_tag(br#"{"tag_name":"v3.16.2","name":"Helm"}"#).unwrap(),
+            "v3.16.2"
+        );
+        assert!(matches!(
+            parse_github_latest_tag(br#"{"name":"no tag here"}"#),
+            Err(InstallError::Download(_))
+        ));
+        assert!(matches!(
+            parse_github_latest_tag(br#"{"tag_name":""}"#),
+            Err(InstallError::Download(_))
+        ));
+        assert!(matches!(parse_github_latest_tag(b"not json"), Err(InstallError::Download(_))));
     }
 
     #[test]
