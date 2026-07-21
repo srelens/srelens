@@ -53,7 +53,7 @@ fn http_get(url: &str) -> Result<Vec<u8>, srelens_kube::toolbox_install::Install
 
 /// Run a managed tool with args, mapping a non-zero exit (with stderr) to a
 /// retryable error. Used for krew's self-bootstrap; called inside spawn_blocking.
-fn run_tool(
+pub(crate) fn run_tool(
     bin: &std::path::Path,
     args: &[&str],
 ) -> Result<(), srelens_kube::toolbox_install::InstallError> {

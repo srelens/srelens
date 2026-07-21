@@ -529,6 +529,61 @@ fn to_handler(e: InstallError) -> CapabilityError {
     CapabilityError::Handler(e.to_string())
 }
 
+/// Core kubectl install, shared by the `toolbox.installKubectl` capability and
+/// the streaming Tauri command: resolve the latest stable version, download and
+/// verify, install into `install_dir`. `fetch` is injected — a plain blocking
+/// GET for the capability, or a progress-emitting one for the streaming command.
+pub fn run_kubectl_install<F>(install_dir: &Path, fetch: &F) -> Result<InstallToolOut, InstallError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError>,
+{
+    let platform = Platform::current()?;
+    let raw = fetch(KUBECTL_STABLE_URL)?;
+    let version = std::str::from_utf8(&raw)
+        .map_err(|_| InstallError::Download("kubectl version response was not UTF-8".to_string()))?
+        .trim()
+        .to_string();
+    let plan = kubectl_install(&version, &platform, install_dir);
+    let path = install_binary(&plan, fetch)?;
+    Ok(InstallToolOut { tool: "kubectl".to_string(), version, path: path.to_string_lossy().into_owned() })
+}
+
+/// Core helm install, shared by the capability and the streaming command.
+pub fn run_helm_install<F>(install_dir: &Path, fetch: &F) -> Result<InstallToolOut, InstallError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError>,
+{
+    let platform = Platform::current()?;
+    let body = fetch(HELM_LATEST_RELEASE_URL)?;
+    let version = parse_github_latest_tag(&body)?;
+    let plan = helm_install(&version, &platform, install_dir);
+    let path = install_from_targz(&plan, fetch)?;
+    Ok(InstallToolOut { tool: "helm".to_string(), version, path: path.to_string_lossy().into_owned() })
+}
+
+/// Core krew install (download + verify + bootstrap), shared by the capability
+/// and the streaming command.
+pub fn run_krew_install<F, R>(
+    staging_dir: &Path,
+    fetch: &F,
+    run: &R,
+) -> Result<InstallToolOut, InstallError>
+where
+    F: Fn(&str) -> Result<Vec<u8>, InstallError>,
+    R: Fn(&Path, &[&str]) -> Result<(), InstallError>,
+{
+    let platform = Platform::current()?;
+    let body = fetch(KREW_LATEST_RELEASE_URL)?;
+    let version = parse_github_latest_tag(&body)?;
+    let plan = krew_archive(&version, &platform, staging_dir);
+    install_krew(&plan, fetch, run)?;
+    Ok(InstallToolOut {
+        tool: "krew".to_string(),
+        version,
+        path: krew_bin_dir().join("kubectl-krew").to_string_lossy().into_owned(),
+    })
+}
+
 /// Confirm-gated capability: download the latest stable kubectl into
 /// `~/.srelens/bin`, verified against dl.k8s.io's published checksum. `fetch`
 /// (a blocking HTTP GET) is injected so the capability is testable without a
@@ -549,19 +604,7 @@ where
                 // The install does blocking HTTP + filesystem work; keep it off
                 // the async runtime.
                 tokio::task::spawn_blocking(move || {
-                    let platform = Platform::current().map_err(to_handler)?;
-                    let raw = fetch(KUBECTL_STABLE_URL).map_err(to_handler)?;
-                    let version = std::str::from_utf8(&raw)
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                        .trim()
-                        .to_string();
-                    let plan = kubectl_install(&version, &platform, &install_dir);
-                    let path = install_binary(&plan, &fetch).map_err(to_handler)?;
-                    Ok(InstallToolOut {
-                        tool: "kubectl".to_string(),
-                        version,
-                        path: path.to_string_lossy().into_owned(),
-                    })
+                    run_kubectl_install(&install_dir, &fetch).map_err(to_handler)
                 })
                 .await
                 .map_err(|e| CapabilityError::Handler(e.to_string()))?
@@ -590,16 +633,7 @@ where
             let fetch = fetch.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let platform = Platform::current().map_err(to_handler)?;
-                    let body = fetch(HELM_LATEST_RELEASE_URL).map_err(to_handler)?;
-                    let version = parse_github_latest_tag(&body).map_err(to_handler)?;
-                    let plan = helm_install(&version, &platform, &install_dir);
-                    let path = install_from_targz(&plan, &fetch).map_err(to_handler)?;
-                    Ok(InstallToolOut {
-                        tool: "helm".to_string(),
-                        version,
-                        path: path.to_string_lossy().into_owned(),
-                    })
+                    run_helm_install(&install_dir, &fetch).map_err(to_handler)
                 })
                 .await
                 .map_err(|e| CapabilityError::Handler(e.to_string()))?
@@ -631,16 +665,7 @@ where
             let run = run.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let platform = Platform::current().map_err(to_handler)?;
-                    let body = fetch(KREW_LATEST_RELEASE_URL).map_err(to_handler)?;
-                    let version = parse_github_latest_tag(&body).map_err(to_handler)?;
-                    let plan = krew_archive(&version, &platform, &staging_dir);
-                    install_krew(&plan, &fetch, &run).map_err(to_handler)?;
-                    Ok(InstallToolOut {
-                        tool: "krew".to_string(),
-                        version,
-                        path: krew_bin_dir().join("kubectl-krew").to_string_lossy().into_owned(),
-                    })
+                    run_krew_install(&staging_dir, &fetch, &run).map_err(to_handler)
                 })
                 .await
                 .map_err(|e| CapabilityError::Handler(e.to_string()))?

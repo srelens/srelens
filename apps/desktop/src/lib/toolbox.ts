@@ -1,4 +1,4 @@
-import { invokeCapability, type Invoker } from "../transport/transport";
+import { invokeCapability, invokeCommand, subscribe, type Invoker } from "../transport/transport";
 
 // Types mirror the Rust DTOs in crates/kube/src/toolbox.rs.
 
@@ -96,6 +96,36 @@ export const installHelm = (invoke: Invoker = invokeCapability) =>
 /** Bootstrap krew into ~/.krew. */
 export const installKrew = (invoke: Invoker = invokeCapability) =>
   installTool("toolbox.installKrew", invoke);
+
+interface RawInstallProgress {
+  tool: string;
+  received: number;
+  total: number | null;
+}
+
+/**
+ * Install a managed tool (kubectl / helm / krew) via the streaming
+ * `start_tool_install` command, reporting download progress as a whole percent
+ * (or null while the total size is unknown / during the post-download install).
+ * The same verified install as the capability, with a progress bar.
+ */
+export async function startToolInstall(
+  tool: "kubectl" | "helm" | "krew",
+  onProgress?: (percent: number | null) => void,
+): Promise<Result<InstallResult>> {
+  const dispose = await subscribe("toolbox://progress", (payload) => {
+    const p = payload as RawInstallProgress;
+    if (p.tool !== tool) return;
+    onProgress?.(p.total ? Math.min(100, Math.round((p.received / p.total) * 100)) : null);
+  });
+  try {
+    return { data: await invokeCommand<InstallResult>("start_tool_install", { tool }) };
+  } catch (e) {
+    return { error: String(e) };
+  } finally {
+    dispose();
+  }
+}
 
 const pluginAction = (id: string, plugin: string, invoke: Invoker) =>
   call(() => invoke<PluginActionResult>(id, { plugin }));

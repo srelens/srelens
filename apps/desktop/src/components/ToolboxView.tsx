@@ -5,25 +5,17 @@ import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { listContexts } from "../lib/clusters";
 import {
   diagnoseContext,
-  installHelm,
-  installKrew,
   installKubectl,
   installPlugin,
   removePlugin,
   searchPlugins,
+  startToolInstall,
   toolboxStatus,
   type DiagnosisReport,
-  type InstallResult,
   type Plugin,
   type RequirementStatus,
   type ToolStatus,
 } from "../lib/toolbox";
-
-const TOOL_INSTALLERS: Record<string, () => Promise<{ data?: InstallResult; error?: string }>> = {
-  kubectl: installKubectl,
-  helm: installHelm,
-  krew: installKrew,
-};
 
 const STATUS_KIND: Record<RequirementStatus, "success" | "warning" | "danger"> = {
   found: "success",
@@ -41,6 +33,7 @@ const STATUS_LABEL: Record<RequirementStatus, string> = {
 export function ToolboxView({ initialContext }: { initialContext?: string | null }) {
   const [tools, setTools] = useState<ToolStatus[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
 
   const refreshStatus = async () => {
@@ -58,6 +51,17 @@ export function ToolboxView({ initialContext }: { initialContext?: string | null
     if (r.error) setError(r.error);
     await refreshStatus();
     setBusy(null);
+  };
+
+  // Tools install with a streaming download progress bar.
+  const installTool = async (tool: "kubectl" | "helm" | "krew") => {
+    setBusy(tool);
+    setProgress(null);
+    const r = await startToolInstall(tool, setProgress);
+    if (r.error) setError(r.error);
+    await refreshStatus();
+    setBusy(null);
+    setProgress(null);
   };
 
   return (
@@ -85,9 +89,13 @@ export function ToolboxView({ initialContext }: { initialContext?: string | null
         ) : (
           <div className="fl-toolbox-tools">
             {tools.map((tool) => (
-              <ToolCard key={tool.name} tool={tool} busy={busy === tool.name} onInstall={() =>
-                runInstall(tool.name, TOOL_INSTALLERS[tool.name] ?? (async () => ({})))
-              } />
+              <ToolCard
+                key={tool.name}
+                tool={tool}
+                busy={busy === tool.name}
+                progress={busy === tool.name ? progress : undefined}
+                onInstall={() => installTool(tool.name as "kubectl" | "helm" | "krew")}
+              />
             ))}
           </div>
         )}
@@ -100,7 +108,18 @@ export function ToolboxView({ initialContext }: { initialContext?: string | null
   );
 }
 
-function ToolCard({ tool, busy, onInstall }: { tool: ToolStatus; busy: boolean; onInstall: () => void }) {
+function ToolCard({
+  tool,
+  busy,
+  progress,
+  onInstall,
+}: {
+  tool: ToolStatus;
+  busy: boolean;
+  /** Download percent while installing (null = unknown/finishing), undefined when idle. */
+  progress?: number | null;
+  onInstall: () => void;
+}) {
   return (
     <div className="fl-toolbox-card">
       <div className="fl-toolbox-card__head">
@@ -119,7 +138,9 @@ function ToolCard({ tool, busy, onInstall }: { tool: ToolStatus; busy: boolean; 
         </>
       ) : (
         <>
-          <p className="fl-toolbox-card__meta">Not installed</p>
+          <p className="fl-toolbox-card__meta">
+            {busy ? (progress != null ? `Downloading… ${progress}%` : "Installing…") : "Not installed"}
+          </p>
           <Button onClick={onInstall} disabled={busy} aria-label={`Install ${tool.name}`}>
             {busy ? <Spinner /> : <Download data-icon="inline-start" />} Install
           </Button>

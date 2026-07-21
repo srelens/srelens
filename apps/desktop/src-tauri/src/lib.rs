@@ -9,6 +9,7 @@ mod logs;
 mod mcp;
 mod settings;
 mod terminal;
+mod toolbox;
 mod updater;
 mod watch;
 
@@ -25,6 +26,7 @@ use mcp::{
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
 use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize, TerminalManager};
+use toolbox::start_tool_install;
 use updater::{update_check, update_install};
 use watch::{start_resource_watch, stop_watch, WatchManager};
 
@@ -266,6 +268,7 @@ pub fn run() {
             save_text_file,
             pick_kubeconfig_files,
             save_pasted_kubeconfig,
+            start_tool_install,
             update_check,
             update_install,
             set_request_timeout,

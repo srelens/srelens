@@ -1,4 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
+
+const { invokeCommandMock, subscribeMock } = vi.hoisted(() => ({
+  invokeCommandMock: vi.fn(),
+  subscribeMock: vi.fn(),
+}));
+vi.mock("../transport/transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../transport/transport")>();
+  return { ...actual, invokeCommand: invokeCommandMock, subscribe: subscribeMock };
+});
+
 import {
   toolboxStatus,
   diagnoseContext,
@@ -9,6 +19,7 @@ import {
   installPlugin,
   upgradePlugin,
   removePlugin,
+  startToolInstall,
 } from "./toolbox";
 
 describe("toolbox lib wrappers", () => {
@@ -61,5 +72,28 @@ describe("toolbox lib wrappers", () => {
     const r = await installKrew(invoke);
     expect(r.error).toContain("krew not found");
     expect(r.data).toBeUndefined();
+  });
+
+  it("startToolInstall reports progress as a percent and unsubscribes", async () => {
+    const dispose = vi.fn();
+    let emit: ((payload: unknown) => void) | undefined;
+    subscribeMock.mockImplementation(async (_ch: string, handler: (p: unknown) => void) => {
+      emit = handler;
+      return dispose;
+    });
+    invokeCommandMock.mockImplementation(async () => {
+      emit?.({ tool: "kubectl", received: 50, total: 200 }); // 25%
+      emit?.({ tool: "helm", received: 10, total: 20 }); // ignored — different tool
+      emit?.({ tool: "kubectl", received: 200, total: 200 }); // 100%
+      return { tool: "kubectl", version: "v1.30.2", path: "/p" };
+    });
+
+    const seen: Array<number | null> = [];
+    const r = await startToolInstall("kubectl", (p) => seen.push(p));
+
+    expect(invokeCommandMock).toHaveBeenCalledWith("start_tool_install", { tool: "kubectl" });
+    expect(seen).toEqual([25, 100]);
+    expect(r.data?.version).toBe("v1.30.2");
+    expect(dispose).toHaveBeenCalled();
   });
 });

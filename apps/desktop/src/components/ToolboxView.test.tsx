@@ -5,9 +5,8 @@ const toolbox = vi.hoisted(() => ({
   toolboxStatus: vi.fn(),
   diagnoseContext: vi.fn(),
   searchPlugins: vi.fn(),
+  startToolInstall: vi.fn(),
   installKubectl: vi.fn(),
-  installHelm: vi.fn(),
-  installKrew: vi.fn(),
   installPlugin: vi.fn(),
   removePlugin: vi.fn(),
   upgradePlugin: vi.fn(),
@@ -33,15 +32,18 @@ beforeEach(() => {
 });
 
 describe("ToolboxView", () => {
-  it("lists managed tools with version and source, and installs a missing one", async () => {
-    toolbox.installKrew.mockResolvedValue({ data: { tool: "krew", version: "v0.5.0", path: "/k" } });
+  it("lists managed tools with version and source, and installs a missing one with progress", async () => {
+    toolbox.startToolInstall.mockImplementation(async (_tool: string, onProgress?: (p: number | null) => void) => {
+      onProgress?.(42);
+      return { data: { tool: "krew", version: "v0.5.0", path: "/k" } };
+    });
     render(<ToolboxView />);
 
     expect(await screen.findByText("v1.30.2")).toBeDefined();
     expect(screen.getByText("v3.16.2")).toBeDefined();
-    // krew is missing → its Install button
+    // krew is missing → its Install button, which streams via start_tool_install
     fireEvent.click(screen.getByRole("button", { name: "Install krew" }));
-    await waitFor(() => expect(toolbox.installKrew).toHaveBeenCalled());
+    await waitFor(() => expect(toolbox.startToolInstall).toHaveBeenCalledWith("krew", expect.any(Function)));
     // status is refreshed after install
     await waitFor(() => expect(toolbox.toolboxStatus).toHaveBeenCalledTimes(2));
   });
