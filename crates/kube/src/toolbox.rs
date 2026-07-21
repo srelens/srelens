@@ -649,6 +649,179 @@ where
     )
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchPluginsIn {
+    /// Substring to search the krew index for.
+    pub query: String,
+}
+
+/// One krew index entry.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PluginDto {
+    pub name: String,
+    pub description: String,
+    pub installed: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SearchPluginsOut {
+    pub plugins: Vec<PluginDto>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PluginIn {
+    /// The krew plugin name (e.g. `oidc-login`).
+    pub plugin: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PluginActionOut {
+    pub plugin: String,
+    /// krew's own output from the operation.
+    pub output: String,
+}
+
+/// Parse `kubectl krew search` output — a padded `NAME  DESCRIPTION  INSTALLED`
+/// table — into plugin rows. Lines before the header are skipped.
+pub fn parse_krew_search(stdout: &str) -> Vec<PluginDto> {
+    stdout
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("NAME"))
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(parse_search_row)
+        .collect()
+}
+
+fn parse_search_row(line: &str) -> Option<PluginDto> {
+    let name = line.split_whitespace().next()?.to_string();
+    let installed_token = line.split_whitespace().next_back()?;
+    let installed = installed_token.eq_ignore_ascii_case("yes");
+    // Description is what's between the name and the trailing INSTALLED column.
+    let mid = line.trim();
+    let mid = mid.strip_prefix(&name).unwrap_or(mid).trim_start();
+    let description = mid.strip_suffix(installed_token).unwrap_or(mid).trim().to_string();
+    Some(PluginDto { name, description, installed })
+}
+
+/// Read-only capability: search the krew plugin index. `run` executes
+/// `kubectl-krew <args>` and returns its stdout (injected for testing).
+pub fn search_plugins_capability<R>(run: R) -> Capability
+where
+    R: Fn(&[&str]) -> Result<String, InstallError> + Send + Sync + Clone + 'static,
+{
+    Capability::typed::<SearchPluginsIn, SearchPluginsOut, _, _>(
+        "toolbox.searchPlugins",
+        "search the krew index for kubectl plugins (name, description, installed)",
+        Annotations::READ_ONLY,
+        move |input: SearchPluginsIn| {
+            let run = run.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let out = run(&["search", input.query.as_str()]).map_err(to_handler)?;
+                    Ok(SearchPluginsOut { plugins: parse_krew_search(&out) })
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            }
+        },
+    )
+}
+
+/// Shared builder for the confirm-gated plugin mutations (install / upgrade /
+/// uninstall), which differ only in the krew subcommand.
+fn plugin_action_capability<R>(
+    id: &'static str,
+    summary: &'static str,
+    verb: &'static str,
+    run: R,
+) -> Capability
+where
+    R: Fn(&[&str]) -> Result<String, InstallError> + Send + Sync + Clone + 'static,
+{
+    Capability::typed::<PluginIn, PluginActionOut, _, _>(
+        id,
+        summary,
+        Annotations::MUTATING,
+        move |input: PluginIn| {
+            let run = run.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let output = run(&[verb, input.plugin.as_str()]).map_err(to_handler)?;
+                    Ok(PluginActionOut { plugin: input.plugin, output })
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            }
+        },
+    )
+}
+
+pub fn install_plugin_capability<R>(run: R) -> Capability
+where
+    R: Fn(&[&str]) -> Result<String, InstallError> + Send + Sync + Clone + 'static,
+{
+    plugin_action_capability(
+        "toolbox.installPlugin",
+        "install a kubectl plugin from the krew index",
+        "install",
+        run,
+    )
+}
+
+pub fn upgrade_plugin_capability<R>(run: R) -> Capability
+where
+    R: Fn(&[&str]) -> Result<String, InstallError> + Send + Sync + Clone + 'static,
+{
+    plugin_action_capability(
+        "toolbox.upgradePlugin",
+        "upgrade an installed krew plugin",
+        "upgrade",
+        run,
+    )
+}
+
+pub fn remove_plugin_capability<R>(run: R) -> Capability
+where
+    R: Fn(&[&str]) -> Result<String, InstallError> + Send + Sync + Clone + 'static,
+{
+    plugin_action_capability(
+        "toolbox.removePlugin",
+        "remove an installed krew plugin",
+        "uninstall",
+        run,
+    )
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+NAME            DESCRIPTION                              INSTALLED
+access-matrix   Show an RBAC access matrix               no
+oidc-login      Log in to the cluster via OIDC           yes
+";
+
+    #[test]
+    fn parse_krew_search_reads_name_description_and_installed() {
+        let plugins = parse_krew_search(SAMPLE);
+        assert_eq!(plugins.len(), 2);
+        assert_eq!(plugins[0].name, "access-matrix");
+        assert_eq!(plugins[0].description, "Show an RBAC access matrix");
+        assert!(!plugins[0].installed);
+        assert_eq!(plugins[1].name, "oidc-login");
+        assert_eq!(plugins[1].description, "Log in to the cluster via OIDC");
+        assert!(plugins[1].installed);
+    }
+
+    #[test]
+    fn parse_krew_search_is_empty_without_rows() {
+        assert!(parse_krew_search("").is_empty());
+        assert!(parse_krew_search("NAME  DESCRIPTION  INSTALLED\n").is_empty());
+    }
+}
+
 #[cfg(test)]
 mod capability_tests {
     use super::*;
@@ -856,6 +1029,58 @@ users:
             |_b: &Path, _a: &[&str]| Ok(()),
         );
         assert!(cap.annotations.requires_confirm);
+    }
+
+    #[tokio::test]
+    async fn search_plugins_runs_krew_search_and_parses_results() {
+        let run = |args: &[&str]| {
+            assert_eq!(args, ["search", "oidc"]);
+            Ok("NAME        DESCRIPTION       INSTALLED\noidc-login  OIDC login        yes\n".to_string())
+        };
+        let mut reg = Registry::new();
+        reg.register(search_plugins_capability(run));
+        let out = reg.invoke("toolbox.searchPlugins", json!({ "query": "oidc" })).await.unwrap();
+        let plugins = out["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["name"], "oidc-login");
+        assert_eq!(plugins[0]["installed"], true);
+    }
+
+    #[tokio::test]
+    async fn install_plugin_runs_krew_install_and_is_confirm_gated() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let run = move |args: &[&str]| {
+            sink.lock().unwrap().extend(args.iter().map(|s| s.to_string()));
+            Ok("Installed plugin: oidc-login".to_string())
+        };
+        let cap = install_plugin_capability(run);
+        assert!(cap.annotations.requires_confirm);
+
+        let mut reg = Registry::new();
+        reg.register(cap);
+        let out = reg
+            .invoke("toolbox.installPlugin", json!({ "plugin": "oidc-login" }))
+            .await
+            .unwrap();
+        assert_eq!(out["plugin"], "oidc-login");
+        assert_eq!(*seen.lock().unwrap(), vec!["install", "oidc-login"]);
+    }
+
+    #[tokio::test]
+    async fn remove_plugin_uses_the_uninstall_verb() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let run = move |args: &[&str]| {
+            sink.lock().unwrap().extend(args.iter().map(|s| s.to_string()));
+            Ok(String::new())
+        };
+        let mut reg = Registry::new();
+        reg.register(remove_plugin_capability(run));
+        reg.invoke("toolbox.removePlugin", json!({ "plugin": "oidc-login" })).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["uninstall", "oidc-login"]);
     }
 
     #[tokio::test]
