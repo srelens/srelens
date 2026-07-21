@@ -152,27 +152,23 @@ impl Harness {
 const EXCLUDED: &[(&str, &str)] = &[
     (
         "toolbox.installKubectl",
-        "downloads a real ~50MB binary from dl.k8s.io and writes to ~/.srelens/bin; \
-         covered by unit tests with an injected fetch instead of hitting the network in CI",
+        "downloads a real ~50MB binary from dl.k8s.io; kubectl is already provided by the \
+         CI image, so this is covered by unit tests with an injected fetch rather than the network",
     ),
     (
         "toolbox.installHelm",
-        "downloads a real release tarball from get.helm.sh and writes to ~/.srelens/bin; \
-         covered by unit tests with an injected fetch instead of hitting the network in CI",
+        "downloads a real release tarball from get.helm.sh; helm is already provided by the CI \
+         image, so this is covered by unit tests with an injected fetch rather than the network",
     ),
     (
-        "toolbox.installKrew",
-        "downloads krew from GitHub and runs its bootstrap subprocess to populate ~/.krew; \
-         covered by unit tests with an injected fetch and command runner instead of the network in CI",
+        "toolbox.upgradePlugin",
+        "an upgrade is a no-op on a freshly-installed plugin (already latest); the install/remove \
+         cases below exercise the same kubectl-krew subprocess path",
     ),
-    // The plugin ops shell out to kubectl-krew, which isn't installed in the kind
-    // CI image; unit-tested with an injected runner. Real krew + a small-plugin
-    // install is the integration test deferred to the kind-CI work in the spec.
-    ("toolbox.searchPlugins", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
-    ("toolbox.installPlugin", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
-    ("toolbox.upgradePlugin", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
-    ("toolbox.removePlugin", "requires krew installed (not in the CI image); unit-tested with an injected runner"),
 ];
+// installKrew, searchPlugins, installPlugin and removePlugin are exercised for
+// real in `toolbox_krew_lifecycle` below — the spec's "real krew bootstrap +
+// small-plugin install" integration test.
 
 fn deadline(secs: u64) -> Instant {
     Instant::now() + Duration::from_secs(secs)
@@ -671,6 +667,8 @@ async fn run_suite() {
     let kubectl = tools.iter().find(|t| t["name"] == "kubectl").unwrap();
     assert_eq!(kubectl["installed"], true, "kubectl must be on PATH here: {out}");
     assert!(kubectl["version"].as_str().is_some(), "kubectl version should resolve: {out}");
+
+    toolbox_krew_lifecycle(&mut h).await;
 
     let out = h.ok("k8s.clusterInfo", json!({ "context": ctx })).await;
     assert_eq!(out["reachable"], true, "cluster must be reachable: {out}");
@@ -1726,6 +1724,38 @@ async fn run_suite() {
 /// private temp file, build a SEPARATE `ClientCache`/registry pointing only at
 /// that copy, delete the context from the COPY, and assert the real
 /// kubeconfig is untouched.
+/// The spec's krew integration test: really bootstrap krew from GitHub and run
+/// a small plugin through the full install → search → remove lifecycle, driving
+/// the same `toolbox.*` capabilities the GUI and MCP use. Network-dependent by
+/// nature (that's the point — it proves the real subprocess + download path).
+async fn toolbox_krew_lifecycle(h: &mut Harness) {
+    println!("=== toolbox: krew bootstrap + plugin lifecycle ===");
+    let krew_home = PathBuf::from(std::env::var("HOME").expect("HOME")).join(".krew/bin");
+
+    // Real bootstrap: download krew and run `krew install krew` into ~/.krew.
+    let out = h.ok("toolbox.installKrew", json!({})).await;
+    assert_eq!(out["tool"], "krew");
+    assert!(out["version"].as_str().is_some(), "krew version should resolve: {out}");
+    assert!(krew_home.join("kubectl-krew").exists(), "krew shim should be installed");
+
+    // The index lists `ns` (kubens) — a small, stable plugin.
+    let out = h.ok("toolbox.searchPlugins", json!({ "query": "ns" })).await;
+    assert!(
+        out["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "ns"),
+        "krew index should list ns: {out}",
+    );
+
+    // Install it (its binary lands in ~/.krew/bin), then remove it.
+    let out = h.ok("toolbox.installPlugin", json!({ "plugin": "ns" })).await;
+    assert_eq!(out["plugin"], "ns");
+    assert!(krew_home.join("kubectl-ns").exists(), "kubectl-ns should be installed");
+
+    let out = h.ok("toolbox.removePlugin", json!({ "plugin": "ns" })).await;
+    assert_eq!(out["plugin"], "ns");
+    assert!(!krew_home.join("kubectl-ns").exists(), "kubectl-ns should be removed");
+    println!("krew lifecycle OK");
+}
+
 async fn delete_context_on_a_copy(h: &mut Harness, ctx: &str) {
     let source = kubeconfig_paths()
         .into_iter()
