@@ -122,6 +122,9 @@ impl IdentityProvider for OidcProvider {
         if email.is_empty() {
             return Err("IdP returned no email claim (request the email scope)".into());
         }
+        if claims.email_verified() == Some(false) {
+            return Err("IdP reports the email address is unverified".into());
+        }
         Ok(IdentityClaims {
             iss: claims.issuer().as_str().to_string(),
             sub: claims.subject().as_str().to_string(),

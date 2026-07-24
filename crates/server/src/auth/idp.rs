@@ -56,7 +56,17 @@ const PENDING_CAP: usize = 1000;
 struct Pending {
     nonce: String,
     pkce_verifier: String,
+    binder_hash: String,
     created_at: Instant,
+}
+
+/// A redeemed pending login: the nonce/verifier needed to complete the OIDC
+/// exchange, plus the binder hash to verify against the caller's cookie.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingTaken {
+    pub nonce: String,
+    pub pkce_verifier: String,
+    pub binder_hash: String,
 }
 
 /// In-flight logins keyed by OIDC `state`, held between /auth/login and
@@ -69,7 +79,13 @@ pub struct PendingLogins {
 
 impl PendingLogins {
     /// Returns false (and stores nothing) when the cap is reached.
-    pub fn insert(&self, state: String, nonce: String, pkce_verifier: String) -> bool {
+    pub fn insert(
+        &self,
+        state: String,
+        nonce: String,
+        pkce_verifier: String,
+        binder_hash: String,
+    ) -> bool {
         let mut map = self.inner.lock().unwrap();
         map.retain(|_, p| p.created_at.elapsed() < PENDING_TTL);
         if map.len() >= PENDING_CAP {
@@ -80,6 +96,7 @@ impl PendingLogins {
             Pending {
                 nonce,
                 pkce_verifier,
+                binder_hash,
                 created_at: Instant::now(),
             },
         );
@@ -87,13 +104,17 @@ impl PendingLogins {
     }
 
     /// One-shot: a state can only be redeemed once, and only within the TTL.
-    pub fn take(&self, state: &str) -> Option<(String, String)> {
+    pub fn take(&self, state: &str) -> Option<PendingTaken> {
         let mut map = self.inner.lock().unwrap();
         let pending = map.remove(state)?;
         if pending.created_at.elapsed() >= PENDING_TTL {
             return None;
         }
-        Some((pending.nonce, pending.pkce_verifier))
+        Some(PendingTaken {
+            nonce: pending.nonce,
+            pkce_verifier: pending.pkce_verifier,
+            binder_hash: pending.binder_hash,
+        })
     }
 }
 
@@ -145,8 +166,15 @@ mod tests {
     #[test]
     fn pending_state_is_one_shot() {
         let p = PendingLogins::default();
-        assert!(p.insert("s1".into(), "n".into(), "v".into()));
-        assert_eq!(p.take("s1"), Some(("n".into(), "v".into())));
+        assert!(p.insert("s1".into(), "n".into(), "v".into(), "h".into()));
+        assert_eq!(
+            p.take("s1"),
+            Some(PendingTaken {
+                nonce: "n".into(),
+                pkce_verifier: "v".into(),
+                binder_hash: "h".into(),
+            })
+        );
         assert_eq!(p.take("s1"), None);
         assert_eq!(p.take("unknown"), None);
     }

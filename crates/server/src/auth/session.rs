@@ -18,6 +18,8 @@ pub const COOKIE_NAME: &str = "srelens_session";
 /// Compared case-insensitively by the HTTP layer; axum lowercases names.
 pub const CSRF_HEADER: &str = "x-srelens-csrf";
 
+pub const LOGIN_COOKIE: &str = "srelens_login";
+
 /// The authenticated caller, attached to the request by [`require_session`].
 #[derive(Debug, Clone, Serialize)]
 pub struct UserCtx {
@@ -53,6 +55,20 @@ pub fn set_cookie(token: &str, secure: bool) -> String {
 pub fn clear_cookie(secure: bool) -> String {
     let secure_attr = if secure { "; Secure" } else { "" };
     format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure_attr}")
+}
+
+/// Short-lived cookie binding an in-flight OIDC login to this browser: the
+/// callback only completes when the cookie's hash matches the pending state's
+/// stored hash, so a forwarded callback URL can't log a victim into an
+/// attacker's account.
+pub fn login_cookie(binder: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{LOGIN_COOKIE}={binder}; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=600{secure_attr}")
+}
+
+pub fn clear_login_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{LOGIN_COOKIE}=; Path=/auth; HttpOnly; SameSite=Lax; Max-Age=0{secure_attr}")
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
@@ -133,6 +149,23 @@ mod tests {
         assert!(!set.contains("Secure"));
         assert!(set_cookie("tok", true).contains("; Secure"));
         let clear = clear_cookie(false);
+        assert!(clear.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn login_cookie_scoped_to_auth_path_and_short_lived() {
+        let set = login_cookie("binder123", false);
+        assert!(set.starts_with("srelens_login=binder123; "));
+        assert!(set.contains("Path=/auth"));
+        assert!(set.contains("HttpOnly"));
+        assert!(set.contains("SameSite=Lax"));
+        assert!(set.contains("Max-Age=600"));
+        assert!(!set.contains("Secure"));
+        assert!(login_cookie("b", true).contains("; Secure"));
+
+        let clear = clear_login_cookie(false);
+        assert!(clear.starts_with("srelens_login=; "));
+        assert!(clear.contains("Path=/auth"));
         assert!(clear.contains("Max-Age=0"));
     }
 }
