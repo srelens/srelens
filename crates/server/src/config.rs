@@ -57,7 +57,10 @@ mod tests {
 
     #[test]
     fn default_when_nothing_given() {
-        assert_eq!(resolve_data_dir(None, None), PathBuf::from("./srelens-data"));
+        assert_eq!(
+            resolve_data_dir(None, None),
+            PathBuf::from("./srelens-data")
+        );
     }
 
     #[test]

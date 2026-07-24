@@ -146,13 +146,14 @@ impl Db {
 
     /// Delete every session past either expiry. Returns how many were removed.
     pub async fn purge_expired_sessions(&self, now: i64) -> Result<u64, String> {
-        let result = sqlx::query("DELETE FROM sessions WHERE expires_at < ? OR last_seen_at + ? < ?")
-            .bind(now)
-            .bind(SESSION_IDLE_TTL_SECS)
-            .bind(now)
-            .execute(self.pool())
-            .await
-            .map_err(|e| e.to_string())?;
+        let result =
+            sqlx::query("DELETE FROM sessions WHERE expires_at < ? OR last_seen_at + ? < ?")
+                .bind(now)
+                .bind(SESSION_IDLE_TTL_SECS)
+                .bind(now)
+                .execute(self.pool())
+                .await
+                .map_err(|e| e.to_string())?;
         Ok(result.rows_affected())
     }
 
@@ -225,7 +226,9 @@ impl Db {
             return Ok(None);
         };
         let plain = key.open(&Sealed { ciphertext, nonce })?;
-        String::from_utf8(plain).map(Some).map_err(|e| e.to_string())
+        String::from_utf8(plain)
+            .map(Some)
+            .map_err(|e| e.to_string())
     }
 
     pub async fn delete_kubeconfig(&self, user_id: i64, id: i64) -> Result<bool, String> {
@@ -285,11 +288,20 @@ mod tests {
     #[tokio::test]
     async fn upsert_user_is_stable_by_iss_sub() {
         let db = db().await;
-        let a = db.upsert_user("https://idp", "u1", "a@x", "A", 100).await.unwrap();
-        let b = db.upsert_user("https://idp", "u1", "b@x", "B", 200).await.unwrap();
+        let a = db
+            .upsert_user("https://idp", "u1", "a@x", "A", 100)
+            .await
+            .unwrap();
+        let b = db
+            .upsert_user("https://idp", "u1", "b@x", "B", 200)
+            .await
+            .unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(b.email, "b@x");
-        let other = db.upsert_user("https://idp", "u2", "", "", 100).await.unwrap();
+        let other = db
+            .upsert_user("https://idp", "u2", "", "", 100)
+            .await
+            .unwrap();
         assert_ne!(a.id, other.id);
     }
 
@@ -312,7 +324,11 @@ mod tests {
         assert_eq!(got.id, user.id);
 
         // Unknown token → None.
-        assert!(db.validate_session("deadbeef", 2_000).await.unwrap().is_none());
+        assert!(db
+            .validate_session("deadbeef", 2_000)
+            .await
+            .unwrap()
+            .is_none());
 
         // Revoked → None.
         db.revoke_session(&token).await.unwrap();
@@ -347,12 +363,11 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            db.validate_session(&t3, 1_000 + SESSION_ABSOLUTE_TTL_SECS + 1)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(db
+            .validate_session(&t3, 1_000 + SESSION_ABSOLUTE_TTL_SECS + 1)
+            .await
+            .unwrap()
+            .is_none());
 
         // Purge removes expired rows.
         let removed = db
@@ -384,10 +399,17 @@ mod tests {
 
         // Owner decrypts; the other user resolves nothing.
         assert_eq!(
-            db.get_kubeconfig_yaml(alice.id, id, &k).await.unwrap().unwrap(),
+            db.get_kubeconfig_yaml(alice.id, id, &k)
+                .await
+                .unwrap()
+                .unwrap(),
             "apiVersion: v1"
         );
-        assert!(db.get_kubeconfig_yaml(bob.id, id, &k).await.unwrap().is_none());
+        assert!(db
+            .get_kubeconfig_yaml(bob.id, id, &k)
+            .await
+            .unwrap()
+            .is_none());
 
         // Upsert by (user, name) replaces content, keeps one row.
         let id2 = db

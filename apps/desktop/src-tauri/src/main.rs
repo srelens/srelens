@@ -53,10 +53,7 @@ fn main() {
                 std::process::exit(2);
             }
         }
-        run_serve(
-            addr.as_deref().unwrap_or("127.0.0.1:8080"),
-            data.as_deref(),
-        );
+        run_serve(addr.as_deref().unwrap_or("127.0.0.1:8080"), data.as_deref());
         return;
     }
     // `--mcp-stdio` / `--mcp-http [addr]` run the MCP server instead of the GUI,
@@ -92,15 +89,16 @@ fn run_mcp_http(addr: &str) {
 fn run_serve(addr: &str, data_flag: Option<&str>) {
     let addr: std::net::SocketAddr = addr.parse().expect("invalid serve address");
     let env_data = std::env::var("SRELENS_DATA").ok();
-    let data_dir =
-        srelens_server::config::resolve_data_dir(data_flag, env_data.as_deref());
+    let data_dir = srelens_server::config::resolve_data_dir(data_flag, env_data.as_deref());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime");
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
-        eprintln!("srelens web server listening on http://{addr} (no auth yet — keep this loopback)");
+        eprintln!(
+            "srelens web server listening on http://{addr} (no auth yet — keep this loopback)"
+        );
         eprintln!("srelens data directory: {}", data_dir.display());
         if let Err(e) = srelens_server::serve(
             Arc::new(registry),

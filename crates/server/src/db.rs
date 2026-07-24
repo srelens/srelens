@@ -65,13 +65,12 @@ mod tests {
     async fn migrations_create_all_tables() {
         let db = Db::open_in_memory().await.unwrap();
         for table in ["users", "sessions", "kubeconfigs", "settings"] {
-            let found: Option<(String,)> = sqlx::query_as(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-            )
-            .bind(table)
-            .fetch_optional(db.pool())
-            .await
-            .unwrap();
+            let found: Option<(String,)> =
+                sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+                    .bind(table)
+                    .fetch_optional(db.pool())
+                    .await
+                    .unwrap();
             assert!(found.is_some(), "missing table {table}");
         }
     }
@@ -82,10 +81,12 @@ mod tests {
         let path = tmp.path().join("srelens.db");
         {
             let db = Db::open(&path).await.unwrap();
-            sqlx::query("INSERT INTO users (iss, sub, created_at, last_login_at) VALUES ('i', 's', 1, 1)")
-                .execute(db.pool())
-                .await
-                .unwrap();
+            sqlx::query(
+                "INSERT INTO users (iss, sub, created_at, last_login_at) VALUES ('i', 's', 1, 1)",
+            )
+            .execute(db.pool())
+            .await
+            .unwrap();
         }
         let db = Db::open(&path).await.unwrap(); // migrations are idempotent
         let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")

@@ -31,10 +31,7 @@ impl MasterKey {
 
     fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() != 32 {
-            return Err(format!(
-                "master key must be 32 bytes, got {}",
-                bytes.len()
-            ));
+            return Err(format!("master key must be 32 bytes, got {}", bytes.len()));
         }
         let key = Key::<Aes256Gcm>::from_slice(bytes);
         Ok(Self {
@@ -171,7 +168,10 @@ mod tests {
         assert!(!path.exists());
         let sealed = k.seal(b"via-env").unwrap();
         assert_eq!(
-            MasterKey::from_hex(&hex_key).unwrap().open(&sealed).unwrap(),
+            MasterKey::from_hex(&hex_key)
+                .unwrap()
+                .open(&sealed)
+                .unwrap(),
             b"via-env"
         );
     }

@@ -100,7 +100,7 @@ mod tests {
         sum: i64,
     }
 
-    fn state() -> AppState {
+    async fn state() -> AppState {
         let mut reg = Registry::new();
         reg.register(Capability::read_only(
             "echo",
@@ -116,13 +116,11 @@ mod tests {
         reg.register(Capability::read_only("boom", "always fails", |_| async {
             Err(CapabilityError::Handler("cluster unreachable".into()))
         }));
-        AppState {
-            registry: Arc::new(reg),
-        }
+        AppState::for_tests(Arc::new(reg)).await
     }
 
     async fn post(path: &str, body: Body) -> (StatusCode, Value) {
-        let resp = router(state())
+        let resp = router(state().await)
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -195,7 +193,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_json_content_type_is_415() {
-        let resp = router(state())
+        let resp = router(state().await)
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -219,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_content_type_with_body_is_415() {
-        let resp = router(state())
+        let resp = router(state().await)
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -234,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_body_without_content_type_is_allowed() {
-        let resp = router(state())
+        let resp = router(state().await)
             .oneshot(
                 Request::builder()
                     .method("POST")
