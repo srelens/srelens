@@ -42,9 +42,7 @@ impl AppState {
         AppState {
             registry,
             db: db::Db::open_in_memory().await.expect("in-memory db"),
-            master_key: Arc::new(
-                crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key"),
-            ),
+            master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
             auth: Arc::new(auth::AuthConfig {
                 public_url: "http://127.0.0.1:8080".into(),
                 allowed_email_domains: vec![],
@@ -69,7 +67,10 @@ pub struct ServerConfig {
 /// routes win over the asset fallback.
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
-        .route("/api/capability/:id", axum::routing::post(api::invoke_capability))
+        .route(
+            "/api/capability/:id",
+            axum::routing::post(api::invoke_capability),
+        )
         .route("/api/me", get(auth::session::me))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -81,7 +82,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", get(auth::routes::login))
         .route("/auth/callback", get(auth::routes::callback))
         .route("/auth/logout", axum::routing::post(auth::routes::logout))
-        .route("/auth/dev-login", axum::routing::post(auth::routes::dev_login))
+        .route(
+            "/auth/dev-login",
+            axum::routing::post(auth::routes::dev_login),
+        )
         .merge(api)
         .fallback(get(assets::serve_asset))
         .with_state(state)
@@ -101,9 +105,9 @@ pub async fn serve(registry: Arc<Registry>, config: ServerConfig) -> Result<(), 
     )?;
     let db = db::Db::open(&config.data_dir.join("srelens.db")).await?;
     let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
-        Some(settings) => Arc::new(
-            auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?,
-        ),
+        Some(settings) => {
+            Arc::new(auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?)
+        }
         None => Arc::new(auth::idp::NullIdp),
     };
     let state = AppState {
@@ -170,7 +174,12 @@ mod tests {
         let state = state().await;
         // No CSRF header → 403.
         let resp = router(state.clone())
-            .oneshot(Request::builder().uri("/api/me").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/me")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -188,7 +197,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // Real session → 200 with identity.
         let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
-        let token = state.db.create_session(user.id, crate::unix_now()).await.unwrap();
+        let token = state
+            .db
+            .create_session(user.id, crate::unix_now())
+            .await
+            .unwrap();
         let resp = router(state.clone())
             .oneshot(
                 Request::builder()

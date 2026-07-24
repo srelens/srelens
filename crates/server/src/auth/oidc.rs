@@ -105,7 +105,10 @@ impl IdentityProvider for OidcProvider {
             .id_token()
             .ok_or("IdP returned no ID token")?;
         let claims = id_token
-            .claims(&self.client.id_token_verifier(), &Nonce::new(nonce.to_string()))
+            .claims(
+                &self.client.id_token_verifier(),
+                &Nonce::new(nonce.to_string()),
+            )
             .map_err(|e| format!("ID token verification failed: {e}"))?;
         let email = claims
             .email()

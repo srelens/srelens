@@ -82,7 +82,10 @@ pub async fn require_session(
         Ok(Some(user)) => user,
         Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthenticated"),
         Err(e) => {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, &format!("session lookup failed: {e}"))
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("session lookup failed: {e}"),
+            )
         }
     };
     req.extensions_mut().insert(UserCtx {
@@ -101,7 +104,10 @@ pub async fn me(Extension(user): Extension<UserCtx>) -> Json<UserCtx> {
 /// Helper used by auth routes: response headers carrying a fresh session cookie.
 pub fn session_headers(token: &str, secure: bool) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(SET_COOKIE, set_cookie(token, secure).parse().expect("valid cookie"));
+    headers.insert(
+        SET_COOKIE,
+        set_cookie(token, secure).parse().expect("valid cookie"),
+    );
     headers
 }
 

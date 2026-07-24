@@ -157,7 +157,11 @@ mod tests {
         let begin = idp.begin_login().unwrap();
         assert!(begin.auth_url.contains(&begin.state));
         let claims = idp
-            .complete_login("ok:alice:alice@example.com", &begin.nonce, &begin.pkce_verifier)
+            .complete_login(
+                "ok:alice:alice@example.com",
+                &begin.nonce,
+                &begin.pkce_verifier,
+            )
             .await
             .unwrap();
         assert_eq!(claims.sub, "alice");
@@ -168,7 +172,11 @@ mod tests {
             .is_err());
         // Nonce and verifier mismatch rejection
         assert!(idp
-            .complete_login("ok:alice:alice@example.com", "wrong-nonce", &begin.pkce_verifier)
+            .complete_login(
+                "ok:alice:alice@example.com",
+                "wrong-nonce",
+                &begin.pkce_verifier
+            )
             .await
             .is_err());
         assert!(idp

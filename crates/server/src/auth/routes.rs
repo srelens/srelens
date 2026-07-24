@@ -56,7 +56,14 @@ pub async fn callback(
     if !state.auth.email_domain_allowed(&claims.email) {
         return error(StatusCode::FORBIDDEN, "email domain not allowed");
     }
-    finish_login(&state, &claims.iss, &claims.sub, &claims.email, &claims.display_name).await
+    finish_login(
+        &state,
+        &claims.iss,
+        &claims.sub,
+        &claims.email,
+        &claims.display_name,
+    )
+    .await
 }
 
 /// POST /auth/logout — revoke the session (if any) and clear the cookie.
@@ -103,7 +110,11 @@ async fn finish_login(
     display_name: &str,
 ) -> Response {
     let now = crate::unix_now();
-    let user = match state.db.upsert_user(iss, sub, email, display_name, now).await {
+    let user = match state
+        .db
+        .upsert_user(iss, sub, email, display_name, now)
+        .await
+    {
         Ok(u) => u,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
@@ -138,7 +149,13 @@ mod tests {
 
     fn set_cookie_token(resp: &axum::response::Response) -> String {
         let sc = resp.headers()["set-cookie"].to_str().unwrap();
-        sc.split(';').next().unwrap().split('=').nth(1).unwrap().to_string()
+        sc.split(';')
+            .next()
+            .unwrap()
+            .split('=')
+            .nth(1)
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test]
@@ -222,7 +239,11 @@ mod tests {
     async fn logout_requires_csrf_and_revokes() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
-        let token = state.db.create_session(user.id, crate::unix_now()).await.unwrap();
+        let token = state
+            .db
+            .create_session(user.id, crate::unix_now())
+            .await
+            .unwrap();
 
         // Without CSRF header → 403.
         let resp = router(state.clone())
