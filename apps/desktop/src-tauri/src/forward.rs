@@ -1,46 +1,12 @@
-//! Port-forward bridge: binds a local loopback port, pipes it to a pod (or a
-//! service's backing pod) via kube-rs, and tracks the running forwards so the
-//! WebView can list and stop them.
+//! Tauri adapter for port-forwards: the core lives in
+//! srelens_streams::forward; this module only maps the Tauri command surface.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use srelens_kube::client_cache::ClientCache;
-use srelens_kube::forward;
-use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
-use tokio::task::JoinHandle;
+use srelens_streams::forward::{ForwardInfo, ForwardManager};
+use tauri::{AppHandle, State};
 
-struct Forward {
-    handle: JoinHandle<()>,
-}
-
-/// Tauri-managed state owning running port-forwards (keyed by numeric id).
-pub struct ForwardManager {
-    cache: Arc<ClientCache>,
-    next_id: AtomicU64,
-    forwards: Mutex<HashMap<u64, Forward>>,
-}
-
-impl ForwardManager {
-    pub fn new(cache: Arc<ClientCache>) -> Self {
-        Self {
-            cache,
-            next_id: AtomicU64::new(1),
-            forwards: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-/// What `start_port_forward` returns: the forward's id and the actual local
-/// port it bound to (the OS picks one when the caller passes no preference).
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ForwardInfo {
-    pub id: u64,
-    pub local_port: u16,
-}
+use crate::sink::TauriSink;
 
 /// Start forwarding a local port to a Pod or Service. `kind` is "Pod" or
 /// "Service"; a Service is resolved to a backing pod and target port first.
@@ -57,49 +23,22 @@ pub async fn start_port_forward(
     app: AppHandle,
     manager: State<'_, ForwardManager>,
 ) -> Result<ForwardInfo, String> {
-    let cache = manager.cache.clone();
-
-    // Resolve a Service down to a concrete pod + container port to forward to.
-    let (pod, target_port) = if kind.eq_ignore_ascii_case("service") {
-        forward::resolve_service_target(
-            cache.clone(),
-            &context,
-            &namespace,
-            &name,
-            Some(i32::from(remote_port)),
-        )
-        .await?
-    } else {
-        (name, remote_port)
-    };
-
-    let listener = forward::bind_local(local_port.unwrap_or(0)).await?;
-    let bound = listener.local_addr().map_err(|e| e.to_string())?.port();
-
-    let id = manager.next_id.fetch_add(1, Ordering::SeqCst);
-    let closed_channel = format!("forward:closed:{id}");
-    let handle = tokio::spawn(async move {
-        let result =
-            forward::serve_pod_forward(listener, cache, context, namespace, pod, target_port).await;
-        let _ = app.emit(&closed_channel, result.err());
-    });
-
     manager
-        .forwards
-        .lock()
-        .unwrap()
-        .insert(id, Forward { handle });
-    Ok(ForwardInfo {
-        id,
-        local_port: bound,
-    })
+        .start(
+            Arc::new(TauriSink(app)),
+            context,
+            namespace,
+            kind,
+            name,
+            remote_port,
+            local_port,
+        )
+        .await
 }
 
 /// Stop a port-forward and abort its task.
 #[tauri::command]
 pub async fn stop_port_forward(id: u64, manager: State<'_, ForwardManager>) -> Result<(), String> {
-    if let Some(f) = manager.forwards.lock().unwrap().remove(&id) {
-        f.handle.abort();
-    }
+    manager.stop(id);
     Ok(())
 }

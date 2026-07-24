@@ -3,6 +3,7 @@
 //! [`EventSink`] implemented by the host (Tauri events, WebSocket frames).
 
 pub mod exec;
+pub mod forward;
 pub mod helm;
 pub mod logs;
 pub mod sink;
