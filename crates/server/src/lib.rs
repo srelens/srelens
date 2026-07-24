@@ -100,12 +100,18 @@ pub async fn serve(registry: Arc<Registry>, config: ServerConfig) -> Result<(), 
         &config.data_dir.join("master.key"),
     )?;
     let db = db::Db::open(&config.data_dir.join("srelens.db")).await?;
+    let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
+        Some(settings) => Arc::new(
+            auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?,
+        ),
+        None => Arc::new(auth::idp::NullIdp),
+    };
     let state = AppState {
         registry,
         db,
         master_key: Arc::new(master_key),
         auth: Arc::new(auth_config),
-        idp: Arc::new(auth::idp::NullIdp),
+        idp,
         pending: Arc::new(auth::idp::PendingLogins::default()),
     };
     let listener = tokio::net::TcpListener::bind(config.addr)

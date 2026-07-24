@@ -2,6 +2,7 @@
 //! middleware, and the login/callback/logout routes.
 
 pub mod idp;
+pub mod oidc;
 pub mod routes;
 pub mod session;
 
