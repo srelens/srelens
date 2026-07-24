@@ -17,7 +17,8 @@ mod watch;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppRegistry};
-use exec::{exec_close, exec_input, exec_resize, start_pod_exec, ExecManager};
+use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
+use srelens_streams::exec::ExecManager;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
 use forward::{start_port_forward, stop_port_forward, ForwardManager};
 use helm::{helm_op_close, start_helm_op};

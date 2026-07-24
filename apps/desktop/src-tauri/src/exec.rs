@@ -1,37 +1,12 @@
-//! Interactive exec bridge: spawns kube-rs exec sessions, streams stdout to
-//! the WebView over Tauri events, and forwards stdin from the WebView.
+//! Tauri adapter for in-pod exec: the streaming core lives in
+//! srelens_streams::exec; this module only maps the Tauri command surface.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use srelens_kube::client_cache::ClientCache;
-use tauri::{AppHandle, Emitter, State};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use srelens_streams::exec::{ExecManager, ExecOpts};
+use tauri::{AppHandle, State};
 
-struct Session {
-    handle: JoinHandle<()>,
-    input: mpsc::Sender<String>,
-    resize: mpsc::Sender<(u16, u16)>,
-}
-
-/// Tauri-managed state owning running exec sessions (keyed by numeric id).
-pub struct ExecManager {
-    cache: Arc<ClientCache>,
-    next_id: AtomicU64,
-    sessions: Mutex<HashMap<u64, Session>>,
-}
-
-impl ExecManager {
-    pub fn new(cache: Arc<ClientCache>) -> Self {
-        Self {
-            cache,
-            next_id: AtomicU64::new(1),
-            sessions: Mutex::new(HashMap::new()),
-        }
-    }
-}
+use crate::sink::TauriSink;
 
 /// Open an interactive shell into a pod. Returns the session id; stdout streams
 /// on `exec:out:<id>` and an `exec:exit:<id>` event fires (with an optional
@@ -50,41 +25,21 @@ pub async fn start_pod_exec(
     app: AppHandle,
     manager: State<'_, ExecManager>,
 ) -> Result<u64, String> {
-    let id = manager.next_id.fetch_add(1, Ordering::SeqCst);
-    let (tx, rx) = mpsc::channel::<String>(64);
-    let (resize_tx, resize_rx) = mpsc::channel::<(u16, u16)>(8);
-    let initial_size = cols.zip(rows);
-    let cache = manager.cache.clone();
-    let out_channel = format!("exec:out:{id}");
-    let exit_channel = format!("exec:exit:{id}");
-    let app_out = app.clone();
-
-    let handle = tokio::spawn(async move {
-        let result = srelens_kube::exec::exec_shell(
-            cache,
+    manager
+        .start(
+            Arc::new(TauriSink(app)),
             context,
             namespace,
             pod,
-            container,
-            shell,
-            command,
-            initial_size,
-            resize_rx,
-            move |chunk| {
-                let _ = app_out.emit(&out_channel, chunk);
+            ExecOpts {
+                container,
+                shell,
+                command,
+                cols,
+                rows,
             },
-            rx,
         )
-        .await;
-        let _ = app.emit(&exit_channel, result.err());
-    });
-
-    manager
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(id, Session { handle, input: tx, resize: resize_tx });
-    Ok(id)
+        .await
 }
 
 /// Forward a keystroke / input string to an exec session's stdin.
@@ -94,15 +49,7 @@ pub async fn exec_input(
     data: String,
     manager: State<'_, ExecManager>,
 ) -> Result<(), String> {
-    let sender = manager
-        .sessions
-        .lock()
-        .unwrap()
-        .get(&session)
-        .map(|s| s.input.clone());
-    if let Some(tx) = sender {
-        let _ = tx.send(data).await;
-    }
+    manager.input(session, data).await;
     Ok(())
 }
 
@@ -114,23 +61,13 @@ pub async fn exec_resize(
     rows: u16,
     manager: State<'_, ExecManager>,
 ) -> Result<(), String> {
-    let sender = manager
-        .sessions
-        .lock()
-        .unwrap()
-        .get(&session)
-        .map(|s| s.resize.clone());
-    if let Some(tx) = sender {
-        let _ = tx.send((cols, rows)).await;
-    }
+    manager.resize(session, cols, rows).await;
     Ok(())
 }
 
 /// Close an exec session and abort its task.
 #[tauri::command]
 pub async fn exec_close(session: u64, manager: State<'_, ExecManager>) -> Result<(), String> {
-    if let Some(s) = manager.sessions.lock().unwrap().remove(&session) {
-        s.handle.abort();
-    }
+    manager.close(session);
     Ok(())
 }
