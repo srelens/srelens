@@ -8,6 +8,7 @@ use std::sync::Arc;
 use axum::routing::get;
 use axum::Router;
 use srelens_capability::Registry;
+use srelens_kube::client_cache::ClientCache;
 
 pub mod api;
 pub mod assets;
@@ -16,6 +17,13 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod stores;
+pub mod users;
+
+/// Builds a full capability registry for a (cache, kubeconfig-paths) pair.
+/// The desktop binary supplies this from its capability assembly, keeping
+/// this crate assembly-agnostic.
+pub type RegistryFactory =
+    Arc<dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>) -> Registry + Send + Sync>;
 
 /// Current unix time in seconds — the single clock read for the HTTP edge.
 pub fn unix_now() -> i64 {
@@ -28,7 +36,7 @@ pub fn unix_now() -> i64 {
 /// Shared handler state.
 #[derive(Clone)]
 pub struct AppState {
-    pub registry: Arc<Registry>,
+    pub user_envs: Arc<users::UserEnvs>,
     pub db: db::Db,
     pub master_key: Arc<crypto::MasterKey>,
     pub auth: Arc<auth::AuthConfig>,
@@ -38,9 +46,17 @@ pub struct AppState {
 
 impl AppState {
     /// Test-only convenience: in-memory database, fixed master key, dev auth.
+    /// The factory ignores the (cache, paths) it's given and always returns a
+    /// clone of `registry` — tests don't materialize real kubeconfigs.
     pub async fn for_tests(registry: Arc<Registry>) -> AppState {
+        let factory: RegistryFactory = Arc::new(move |_cache, _paths| (*registry).clone());
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes).expect("random");
+        let data_dir =
+            std::env::temp_dir().join(format!("srelens-state-test-{}", hex::encode(bytes)));
+        std::fs::create_dir_all(&data_dir).expect("test data dir");
         AppState {
-            registry,
+            user_envs: Arc::new(users::UserEnvs::new(factory, data_dir)),
             db: db::Db::open_in_memory().await.expect("in-memory db"),
             master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
             auth: Arc::new(auth::AuthConfig {
@@ -94,7 +110,7 @@ pub fn router(state: AppState) -> Router {
 /// Bind `config.addr` and serve until the process exits. Initializes the data
 /// directory, master key, and database first, so startup fails fast with a
 /// clear message instead of at first request.
-pub async fn serve(registry: Arc<Registry>, config: ServerConfig) -> Result<(), String> {
+pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(), String> {
     let auth_config = auth::AuthConfig::from_env(|k| std::env::var(k).ok())?;
     config::ensure_data_dir(&config.data_dir)
         .map_err(|e| format!("create data dir {}: {e}", config.data_dir.display()))?;
@@ -110,8 +126,11 @@ pub async fn serve(registry: Arc<Registry>, config: ServerConfig) -> Result<(), 
         }
         None => Arc::new(auth::idp::NullIdp),
     };
+    // A crash may have left decrypted kubeconfigs on disk; wipe before we
+    // start materializing anyone's fresh environment.
+    users::UserEnvs::wipe_runtime(&config.data_dir);
     let state = AppState {
-        registry,
+        user_envs: Arc::new(users::UserEnvs::new(factory, config.data_dir.clone())),
         db,
         master_key: Arc::new(master_key),
         auth: Arc::new(auth_config),

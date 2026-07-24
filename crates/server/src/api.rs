@@ -6,10 +6,11 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use serde_json::{json, Value};
 use srelens_capability::CapabilityError;
 
+use crate::auth::session::UserCtx;
 use crate::AppState;
 
 /// Invoke a capability by id. The request body is the capability's input JSON;
@@ -25,6 +26,7 @@ use crate::AppState;
 /// type forces the browser to preflight, and a cross-origin preflight fails.
 pub async fn invoke_capability(
     State(state): State<AppState>,
+    Extension(user): Extension<UserCtx>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
     body: Bytes,
@@ -61,7 +63,35 @@ pub async fn invoke_capability(
         }
     };
 
-    match state.registry.invoke(&id, input).await {
+    let env = match state
+        .user_envs
+        .env_for(&state.db, &state.master_key, user.user_id)
+        .await
+    {
+        Ok(env) => env,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to build user environment: {e}"),
+            );
+        }
+    };
+
+    // Destructive/mutating capabilities must not silently run with a null
+    // ("no-op default") input — force the caller to supply an explicit body.
+    if input.is_null() {
+        match env.registry.get(&id) {
+            Some(cap) if !cap.annotations.read_only => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "input required for non-read-only capability",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    match env.registry.invoke(&id, input).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => {
             let status = match &e {
@@ -116,6 +146,12 @@ mod tests {
         reg.register(Capability::read_only("boom", "always fails", |_| async {
             Err(CapabilityError::Handler("cluster unreachable".into()))
         }));
+        reg.register(Capability::typed::<AddIn, AddOut, _, _>(
+            "danger.add",
+            "non-read-only add",
+            Annotations::DESTRUCTIVE,
+            |i| async move { Ok(AddOut { sum: i.a + i.b }) },
+        ));
         AppState::for_tests(Arc::new(reg)).await
     }
 
@@ -273,6 +309,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn destructive_capability_rejects_null_input() {
+        let (status, body) = post("/api/capability/danger.add", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            json!("input required for non-read-only capability")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_capability_still_accepts_null_input() {
+        let (status, _) = post("/api/capability/echo", Body::empty()).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

@@ -95,13 +95,15 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
         .build()
         .expect("build tokio runtime");
     runtime.block_on(async {
-        let registry = srelens_desktop_lib::build_registry();
+        let factory: srelens_server::RegistryFactory = Arc::new(|cache, paths| {
+            srelens_desktop_lib::build_registry_with_paths(cache, paths)
+        });
         eprintln!(
             "srelens web server listening on http://{addr}"
         );
         eprintln!("srelens data directory: {}", data_dir.display());
         if let Err(e) = srelens_server::serve(
-            Arc::new(registry),
+            factory,
             srelens_server::ServerConfig { addr, data_dir },
         )
         .await
