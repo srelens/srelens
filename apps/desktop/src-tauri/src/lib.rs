@@ -9,6 +9,7 @@ mod helm;
 mod logs;
 mod mcp;
 mod settings;
+mod sink;
 mod terminal;
 mod toolbox;
 mod updater;
@@ -19,7 +20,8 @@ use bridge::{invoke_capability, AppRegistry};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec, ExecManager};
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
 use forward::{start_port_forward, stop_port_forward, ForwardManager};
-use helm::{helm_op_close, start_helm_op, HelmManager};
+use helm::{helm_op_close, start_helm_op};
+use srelens_streams::helm::HelmManager;
 use logs::{start_log_stream, stop_log_stream, LogStreamManager};
 use mcp::{
     install_srelens_cli, mcp_http_start, mcp_http_status, mcp_http_stop, srelens_cli_status,
