@@ -16,11 +16,37 @@ use crate::AppState;
 /// an empty body means null input. Unknown id → 404, invalid input (or a body
 /// that isn't JSON) → 400, handler failure (cluster unreachable, RBAC denial)
 /// → 502. Error bodies are `{"error": "<message>"}`.
+///
+/// Non-empty bodies must carry `Content-Type: application/json` (415 otherwise).
+/// This isn't just input validation: a cross-origin `fetch` with a `text/plain`
+/// body is a CORS "simple request", which browsers send without a preflight —
+/// so without this check any website could invoke capabilities (including
+/// destructive ones) against this loopback server. Requiring the JSON content
+/// type forces the browser to preflight, and a cross-origin preflight fails.
 pub async fn invoke_capability(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !body.is_empty() {
+        let is_json = headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| {
+                v.trim()
+                    .to_ascii_lowercase()
+                    .starts_with("application/json")
+            })
+            .unwrap_or(false);
+        if !is_json {
+            return error_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "content-type must be application/json",
+            );
+        }
+    }
+
     let input: Value = if body.is_empty() {
         Value::Null
     } else {
@@ -165,5 +191,59 @@ mod tests {
         let (status, body) = post("/api/capability/boom", Body::empty()).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"], json!("handler error: cluster unreachable"));
+    }
+
+    #[tokio::test]
+    async fn non_json_content_type_is_415() {
+        let resp = router(state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capability/echo")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("\"hi\""))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["error"],
+            serde_json::json!("content-type must be application/json")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_content_type_with_body_is_415() {
+        let resp = router(state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capability/echo")
+                    .body(Body::from("\"hi\""))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn empty_body_without_content_type_is_allowed() {
+        let resp = router(state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capability/echo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
