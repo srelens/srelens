@@ -4938,6 +4938,7 @@ name = "srelens-server"
 version = "0.0.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "axum",
  "getrandom 0.2.17",
  "hex",
