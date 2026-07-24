@@ -2,6 +2,7 @@
 //! middleware, and the login/callback/logout routes.
 
 pub mod idp;
+pub mod session;
 
 /// OIDC client settings. `Debug` is manual so the client secret can never end
 /// up in logs.

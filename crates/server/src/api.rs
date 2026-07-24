@@ -119,13 +119,31 @@ mod tests {
         AppState::for_tests(Arc::new(reg)).await
     }
 
+    async fn authed_headers(state: &AppState) -> (String, String) {
+        let user = state
+            .db
+            .upsert_user("test-iss", "test-sub", "t@x", "T", 1)
+            .await
+            .unwrap();
+        let token = state
+            .db
+            .create_session(user.id, crate::unix_now())
+            .await
+            .unwrap();
+        (format!("srelens_session={token}"), "1".to_string())
+    }
+
     async fn post(path: &str, body: Body) -> (StatusCode, Value) {
-        let resp = router(state().await)
+        let state = state().await;
+        let (cookie, csrf) = authed_headers(&state).await;
+        let resp = router(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri(path)
                     .header("content-type", "application/json")
+                    .header("cookie", cookie)
+                    .header("x-srelens-csrf", csrf)
                     .body(body)
                     .unwrap(),
             )
@@ -193,12 +211,16 @@ mod tests {
 
     #[tokio::test]
     async fn non_json_content_type_is_415() {
-        let resp = router(state().await)
+        let state = state().await;
+        let (cookie, csrf) = authed_headers(&state).await;
+        let resp = router(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/capability/echo")
                     .header("content-type", "text/plain")
+                    .header("cookie", cookie)
+                    .header("x-srelens-csrf", csrf)
                     .body(Body::from("\"hi\""))
                     .unwrap(),
             )
@@ -217,11 +239,15 @@ mod tests {
 
     #[tokio::test]
     async fn missing_content_type_with_body_is_415() {
-        let resp = router(state().await)
+        let state = state().await;
+        let (cookie, csrf) = authed_headers(&state).await;
+        let resp = router(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/capability/echo")
+                    .header("cookie", cookie)
+                    .header("x-srelens-csrf", csrf)
                     .body(Body::from("\"hi\""))
                     .unwrap(),
             )
@@ -232,16 +258,36 @@ mod tests {
 
     #[tokio::test]
     async fn empty_body_without_content_type_is_allowed() {
-        let resp = router(state().await)
+        let state = state().await;
+        let (cookie, csrf) = authed_headers(&state).await;
+        let resp = router(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/capability/echo")
+                    .header("cookie", cookie)
+                    .header("x-srelens-csrf", csrf)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn capability_requires_session() {
+        let resp = router(state().await)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capability/echo")
+                    .header("x-srelens-csrf", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
