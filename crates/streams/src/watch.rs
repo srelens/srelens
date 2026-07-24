@@ -128,6 +128,14 @@ impl WatchManager {
         self.tasks.lock().unwrap().insert(channel.clone(), handle);
         Ok(channel)
     }
+
+    /// Abort every running watch (used when a user's environment is dropped).
+    pub fn shutdown_all(&self) {
+        let mut tasks = self.tasks.lock().unwrap();
+        for (_, handle) in tasks.drain() {
+            handle.abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +171,24 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("error event never arrived on the sink");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_stops_watches() {
+        let manager = WatchManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink,
+                "c".into(),
+                "n".into(),
+                "pods".into(),
+                "w".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        manager.shutdown_all(); // no panic; subsequent stop is a no-op
+        manager.stop("w");
     }
 }

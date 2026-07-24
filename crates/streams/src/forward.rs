@@ -100,6 +100,15 @@ impl ForwardManager {
             f.handle.abort();
         }
     }
+
+    /// Abort every running port-forward (used when a user's environment is
+    /// dropped).
+    pub fn shutdown_all(&self) {
+        let mut forwards = self.forwards.lock().unwrap();
+        for (_, forward) in forwards.drain() {
+            forward.handle.abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +146,27 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("forward:closed event never arrived");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_aborts_forwards() {
+        let manager = ForwardManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let info = manager
+            .start(
+                sink,
+                "nope".into(),
+                "ns".into(),
+                "Pod".into(),
+                "pod-a".into(),
+                8080,
+                None,
+            )
+            .await
+            .expect("bind succeeds locally");
+
+        manager.shutdown_all(); // no panic; subsequent stop is a no-op
+        assert!(manager.forwards.lock().unwrap().is_empty());
+        manager.stop(info.id);
     }
 }

@@ -209,12 +209,32 @@ impl TerminalManager {
             let _ = std::fs::remove_file(&s.overlay);
         }
     }
+
+    /// Kill every running terminal's child shell and remove its overlay
+    /// kubeconfig (used when a user's environment is dropped). Mirrors
+    /// `close`, applied to every tracked session.
+    pub fn shutdown_all(&self) {
+        let mut sessions = self.sessions.lock().unwrap();
+        for (_, s) in sessions.drain() {
+            let _ = s.child.lock().unwrap().kill();
+            let _ = std::fs::remove_file(&s.overlay);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::TestSink;
+
+    // The overlay kubeconfig path is `srelens-term-<pid>-<session id>`, and
+    // each fresh `TerminalManager`'s session-id counter starts at 1 — so two
+    // managers in this same test binary both spawning their first session
+    // concurrently would race to `create_new` the identical path. Serialize
+    // the tests that spawn a real PTY session to avoid that collision (a
+    // real cross-manager overlay-path collision is out of scope here). An
+    // async mutex is safe to hold across `.await` (unlike `std::sync::Mutex`).
+    static PTY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn fixture_kubeconfig(dir: &std::path::Path) -> PathBuf {
         let path = dir.join("config");
@@ -243,6 +263,7 @@ contexts:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pty_round_trips_output_through_sink() {
+        let _guard = PTY_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let kc = fixture_kubeconfig(dir.path());
         let sink = Arc::new(TestSink::default());
@@ -283,5 +304,41 @@ contexts:
         }
         manager.close(id);
         assert!(seen, "PTY output arrived on the sink");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_kills_children_and_removes_overlay() {
+        let _guard = PTY_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let sink = Arc::new(TestSink::default());
+        let manager = TerminalManager::new();
+        let id = manager
+            .start(
+                sink,
+                "test".into(),
+                vec![kc],
+                "t2".into(),
+                Some(80),
+                Some(24),
+            )
+            .await
+            .expect("terminal starts");
+
+        let overlay = manager
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .expect("session tracked")
+            .overlay
+            .clone();
+        assert!(overlay.exists(), "overlay kubeconfig was written");
+
+        manager.shutdown_all(); // no panic; subsequent close is a no-op
+
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        assert!(!overlay.exists(), "overlay kubeconfig was removed");
+        manager.close(id);
     }
 }

@@ -71,11 +71,23 @@ async fn run_socket(socket: WebSocket, hub: std::sync::Arc<WsHub>, user_id: i64)
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (conn_id, mut out_rx) = hub.register(user_id);
 
-    // Write task: drain the hub's outgoing frames to the client.
+    // Write task: drain the hub's outgoing frames to the client, and send a
+    // keepalive ping every 30s (browsers auto-reply with a matching pong). A
+    // dropped `out_rx` sender — from an overflow-close in the hub — makes
+    // `recv()` return `None`, ending the writer.
     let writer = tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
-            if ws_tx.send(Message::Text(frame)).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                maybe = out_rx.recv() => match maybe {
+                    Some(frame) => {
+                        if ws_tx.send(Message::Text(frame)).await.is_err() { break; }
+                    }
+                    None => break, // hub closed the connection (overflow) → end
+                },
+                _ = ping.tick() => {
+                    if ws_tx.send(Message::Ping(Vec::new())).await.is_err() { break; }
+                }
             }
         }
     });

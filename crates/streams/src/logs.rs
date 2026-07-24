@@ -129,6 +129,17 @@ impl LogStreamManager {
             }
         }
     }
+
+    /// Abort every running log-tail stream (used when a user's environment is
+    /// dropped).
+    pub fn shutdown_all(&self) {
+        let mut streams = self.streams.lock().unwrap();
+        for (_, stream) in streams.drain() {
+            for h in stream.handles {
+                h.abort();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +171,30 @@ mod tests {
     fn stop_unknown_channel_is_noop() {
         let manager = LogStreamManager::new(ClientCache::new_many(vec![]));
         manager.stop("nope");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_stops_streams() {
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink,
+                "ctx".into(),
+                "ns".into(),
+                vec![LogTarget {
+                    pod: "p".into(),
+                    container: None,
+                    label: "p".into(),
+                }],
+                "logs:1".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        manager.shutdown_all(); // no panic; subsequent stop is a no-op
+        manager.stop("logs:1");
     }
 }

@@ -158,6 +158,15 @@ impl HelmManager {
             s.handle.abort();
         }
     }
+
+    /// Abort every running helm operation (used when a user's environment is
+    /// dropped).
+    pub fn shutdown_all(&self) {
+        let mut sessions = self.sessions.lock().unwrap();
+        for (_, session) in sessions.drain() {
+            session.handle.abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +179,24 @@ mod tests {
         let mut got = Vec::new();
         stream_lines(data, |l| got.push(l)).await;
         assert_eq!(got, vec!["first", "second", "third"]);
+    }
+
+    // Constructs a `Session` directly (rather than going through `start`) so
+    // this test doesn't depend on a `helm` binary being on PATH.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_aborts_sessions() {
+        let manager = HelmManager::new();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        });
+        manager
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(1, Session { handle });
+
+        manager.shutdown_all(); // no panic; subsequent close is a no-op
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        manager.close(1);
     }
 }

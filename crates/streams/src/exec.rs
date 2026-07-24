@@ -131,6 +131,15 @@ impl ExecManager {
             s.handle.abort();
         }
     }
+
+    /// Abort every running exec session (used when a user's environment is
+    /// dropped).
+    pub fn shutdown_all(&self) {
+        let mut sessions = self.sessions.lock().unwrap();
+        for (_, session) in sessions.drain() {
+            session.handle.abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +174,25 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("exec:exit event never arrived");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_aborts_sessions() {
+        let manager = ExecManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let id = manager
+            .start(
+                sink,
+                "nope".into(),
+                "ns".into(),
+                "pod-a".into(),
+                ExecOpts::default(),
+            )
+            .await
+            .expect("start allocates a session id");
+
+        manager.shutdown_all(); // no panic; subsequent close is a no-op
+        assert!(manager.sessions.lock().unwrap().is_empty());
+        manager.close(id);
     }
 }

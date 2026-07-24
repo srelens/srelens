@@ -11,9 +11,14 @@ use serde_json::Value;
 use srelens_streams::EventSink;
 use tokio::sync::mpsc;
 
+/// Bound on each connection's outgoing frame queue. A connection whose reader
+/// can't keep up (or has gone away without the read-loop noticing yet) is
+/// dropped rather than let its backlog grow without bound.
+pub const WS_CONN_QUEUE: usize = 256;
+
 struct Conn {
     user_id: i64,
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::Sender<String>,
     subs: Mutex<HashSet<String>>,
 }
 
@@ -48,9 +53,9 @@ impl WsHub {
     }
 
     /// Register a new connection for `user_id`; returns its id and the
-    /// receiver the socket write-loop drains to the client.
-    pub fn register(&self, user_id: i64) -> (u64, mpsc::UnboundedReceiver<String>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// bounded receiver the socket write-loop drains to the client.
+    pub fn register(&self, user_id: i64) -> (u64, mpsc::Receiver<String>) {
+        let (tx, rx) = mpsc::channel(WS_CONN_QUEUE);
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         self.conns.lock().unwrap().insert(
             id,
@@ -67,6 +72,11 @@ impl WsHub {
         self.conns.lock().unwrap().remove(&conn_id);
     }
 
+    /// Whether `conn_id` is still a live, registered connection.
+    pub fn has_connection(&self, conn_id: u64) -> bool {
+        self.conns.lock().unwrap().contains_key(&conn_id)
+    }
+
     pub fn subscribe(&self, conn_id: u64, channel: &str) {
         if let Some(conn) = self.conns.lock().unwrap().get(&conn_id) {
             conn.subs.lock().unwrap().insert(channel.to_string());
@@ -79,27 +89,48 @@ impl WsHub {
         }
     }
 
-    /// Send a raw frame to one specific connection (used for acks).
+    /// Send a raw frame to one specific connection (used for acks). If the
+    /// connection's queue is full or its receiver is gone, the connection is
+    /// closed (removed) so its write side ends instead of stalling forever.
     pub fn deliver_direct(&self, conn_id: u64, frame: String) {
-        if let Some(conn) = self.conns.lock().unwrap().get(&conn_id) {
-            let _ = conn.tx.send(frame);
+        // Clone the conn out from under the lock first: `try_send` never
+        // blocks, but taking the lock again below (to remove on overflow)
+        // would deadlock a non-reentrant `std::sync::Mutex` if it were still
+        // held here.
+        let conn = self.conns.lock().unwrap().get(&conn_id).cloned();
+        let Some(conn) = conn else { return };
+        if conn.tx.try_send(frame).is_err() {
+            self.conns.lock().unwrap().remove(&conn_id);
         }
     }
 
     /// Send `frame` to every connection of `user_id` subscribed to `channel`.
+    /// A connection whose queue is full (or whose receiver is gone) is closed
+    /// (removed) so its write side ends instead of stalling forever.
     pub fn deliver(&self, user_id: i64, channel: &str, frame: String) {
-        let targets: Vec<Arc<Conn>> = self
+        let targets: Vec<(u64, Arc<Conn>)> = self
             .conns
             .lock()
             .unwrap()
-            .values()
-            .filter(|c| c.user_id == user_id && c.subs.lock().unwrap().contains(channel))
-            .cloned()
+            .iter()
+            .filter(|(_, c)| c.user_id == user_id && c.subs.lock().unwrap().contains(channel))
+            .map(|(id, c)| (*id, c.clone()))
             .collect();
-        for conn in targets {
-            // A closed receiver (client gone) just drops the frame; the
-            // read-loop will unregister the connection.
-            let _ = conn.tx.send(frame.clone());
+
+        // Collect overflowed/closed connection ids while iterating, then
+        // remove them after the loop — the outer lock is already released by
+        // the time we send, so re-locking here can't deadlock.
+        let mut overflowed = Vec::new();
+        for (id, conn) in targets {
+            if conn.tx.try_send(frame.clone()).is_err() {
+                overflowed.push(id);
+            }
+        }
+        if !overflowed.is_empty() {
+            let mut conns = self.conns.lock().unwrap();
+            for id in overflowed {
+                conns.remove(&id);
+            }
         }
     }
 }
@@ -122,7 +153,7 @@ impl EventSink for WsSink {
 mod tests {
     use super::*;
 
-    fn recv_now(rx: &mut mpsc::UnboundedReceiver<String>) -> Option<Value> {
+    fn recv_now(rx: &mut mpsc::Receiver<String>) -> Option<Value> {
         rx.try_recv()
             .ok()
             .map(|s| serde_json::from_str(&s).unwrap())
@@ -186,5 +217,21 @@ mod tests {
         .emit("ch", serde_json::json!("x"));
         assert!(recv_now(&mut rx1).is_some());
         assert!(recv_now(&mut rx2).is_some());
+    }
+
+    #[test]
+    fn overflow_closes_the_connection() {
+        let hub = Arc::new(WsHub::new());
+        let (a, _rx) = hub.register(1); // receiver kept but never drained
+        hub.subscribe(a, "ch");
+        let sink = WsSink {
+            hub: hub.clone(),
+            user_id: 1,
+        };
+        for i in 0..(super::WS_CONN_QUEUE + 5) {
+            sink.emit("ch", serde_json::json!(i));
+        }
+        // The connection was dropped after the queue filled.
+        assert!(!hub.has_connection(a));
     }
 }

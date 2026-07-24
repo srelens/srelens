@@ -34,3 +34,17 @@ impl UserStreams {
         }
     }
 }
+
+/// Abort every running stream/session across all six managers when a user's
+/// environment is torn down (e.g. logout, eviction from the LRU cache of
+/// active users), so no background task or child process outlives it.
+impl Drop for UserStreams {
+    fn drop(&mut self) {
+        self.watch.shutdown_all();
+        self.logs.shutdown_all();
+        self.exec.shutdown_all();
+        self.forward.shutdown_all();
+        self.terminal.shutdown_all();
+        self.helm.shutdown_all();
+    }
+}
