@@ -4237,6 +4237,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-streams"
+version = "0.0.0"
+dependencies = [
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "srelens-kube",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
