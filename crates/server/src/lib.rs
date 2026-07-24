@@ -10,6 +10,7 @@ use axum::Router;
 use srelens_capability::Registry;
 
 pub mod api;
+pub mod assets;
 
 /// Shared handler state.
 #[derive(Clone)]
@@ -23,12 +24,14 @@ pub struct ServerConfig {
     pub addr: SocketAddr,
 }
 
-/// Build the full application router.
+/// Build the full application router. Named routes win over the asset
+/// fallback, so `/api/*` and the health probes are never shadowed.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|| async { "ok" }))
         .route("/api/capability/:id", axum::routing::post(api::invoke_capability))
+        .fallback(get(assets::serve_asset))
         .with_state(state)
 }
 
@@ -72,5 +75,16 @@ mod tests {
             let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
             assert_eq!(&bytes[..], b"ok", "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn health_route_wins_over_asset_fallback() {
+        let resp = router(state())
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], b"ok");
     }
 }
