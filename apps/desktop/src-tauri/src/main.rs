@@ -34,7 +34,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     // `serve [addr] [--data DIR]` runs the web server (frontend + capability
-    // API) instead of the GUI. No auth yet (Plan 3B) — default bind is loopback.
+    // API) instead of the GUI. Sessions + OIDC/dev-login auth are required; default bind is loopback.
     if args.get(1).map(String::as_str) == Some("serve") {
         let mut addr: Option<String> = None;
         let mut data: Option<String> = None;
@@ -97,7 +97,7 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
         eprintln!(
-            "srelens web server listening on http://{addr} (no auth yet — keep this loopback)"
+            "srelens web server listening on http://{addr}"
         );
         eprintln!("srelens data directory: {}", data_dir.display());
         if let Err(e) = srelens_server::serve(

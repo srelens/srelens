@@ -1,6 +1,6 @@
 //! srelens web server foundation: serves the built frontend and exposes the
-//! capability registry over HTTP. Auth, sessions, and streaming arrive in
-//! later plans — until auth lands, bind loopback only.
+//! capability registry over HTTP. Requests to /api require a session (OIDC or dev login);
+//! streaming arrives in a later plan.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
