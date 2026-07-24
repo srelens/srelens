@@ -107,9 +107,13 @@ pub fn build_registry() -> Registry {
     build_registry_with(ClientCache::new_many(default_kubeconfig_paths()))
 }
 
-/// Build the registry using a caller-provided client cache, so the GUI can
-/// share one cache between request/response capabilities and live watches.
-pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
+/// Build the registry using a caller-provided client cache AND kubeconfig
+/// paths. The web server uses this with per-user paths; the desktop/MCP
+/// surfaces delegate with the host defaults.
+pub fn build_registry_with_paths(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+) -> Registry {
     let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
@@ -120,14 +124,14 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
 
     reg.register(srelens_kube::contexts::list_contexts_capability(
         cache.clone(),
-        default_kubeconfig_paths(),
+        kubeconfig_paths.clone(),
     ));
     reg.register(srelens_kube::contexts::delete_context_capability(
         cache.clone(),
     ));
 
     reg.register(srelens_kube::toolbox::diagnose_context_capability(
-        default_kubeconfig_paths(),
+        kubeconfig_paths.clone(),
         srelens_kube::toolbox::SearchPaths::from_env(),
         |path| path.is_file(),
     ));
@@ -310,6 +314,12 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
     reg
 }
 
+/// Build the registry using a caller-provided client cache with the host's
+/// default kubeconfig discovery (desktop + MCP behavior, unchanged).
+pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
+    build_registry_with_paths(cache, default_kubeconfig_paths())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +358,17 @@ mod tests {
         assert!(
             path.to_string_lossy().contains(".kube/config") || std::env::var("KUBECONFIG").is_ok()
         );
+    }
+
+    #[test]
+    fn with_paths_builds_same_capability_set() {
+        let cache = ClientCache::new_many(vec![]);
+        let reg = build_registry_with_paths(cache, vec![std::path::PathBuf::from("/nonexistent")]);
+        let mut ids = reg.ids();
+        ids.sort();
+        let default_reg = build_registry();
+        let mut default_ids = default_reg.ids();
+        default_ids.sort();
+        assert_eq!(ids, default_ids, "same capabilities regardless of paths");
     }
 }

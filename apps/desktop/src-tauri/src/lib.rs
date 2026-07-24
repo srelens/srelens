@@ -40,7 +40,7 @@ use updater::{update_check, update_install};
 use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
-pub use capabilities::build_registry;
+pub use capabilities::{build_registry, build_registry_with_paths};
 
 /// Size the main window to a comfortable default, clamped to the screen it
 /// opens on: on a large display it stays at the preferred ~16" size (centered),
