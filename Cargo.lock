@@ -4357,6 +4357,7 @@ dependencies = [
  "serde",
  "serde_json",
  "srelens-capability",
+ "tempfile",
  "tokio",
  "tower",
 ]

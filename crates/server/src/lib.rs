@@ -11,6 +11,7 @@ use srelens_capability::Registry;
 
 pub mod api;
 pub mod assets;
+pub mod config;
 
 /// Shared handler state.
 #[derive(Clone)]
@@ -22,6 +23,7 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub addr: SocketAddr,
+    pub data_dir: std::path::PathBuf,
 }
 
 /// Build the full application router. Named routes win over the asset
