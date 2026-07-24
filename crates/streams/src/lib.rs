@@ -6,5 +6,6 @@ pub mod helm;
 pub mod logs;
 pub mod sink;
 pub mod test_util;
+pub mod watch;
 
 pub use sink::EventSink;

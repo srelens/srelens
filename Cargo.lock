@@ -4192,6 +4192,7 @@ dependencies = [
  "srelens-capability",
  "srelens-kube",
  "srelens-mcp",
+ "srelens-streams",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

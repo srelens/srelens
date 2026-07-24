@@ -33,7 +33,8 @@ use srelens_kube::client_cache::ClientCache;
 use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize, TerminalManager};
 use toolbox::start_tool_install;
 use updater::{update_check, update_install};
-use watch::{start_resource_watch, stop_watch, WatchManager};
+use srelens_streams::watch::WatchManager;
+use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
 pub use capabilities::build_registry;
