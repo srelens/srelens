@@ -32,6 +32,8 @@ pub struct AppState {
     pub db: db::Db,
     pub master_key: Arc<crypto::MasterKey>,
     pub auth: Arc<auth::AuthConfig>,
+    pub idp: Arc<dyn auth::idp::IdentityProvider>,
+    pub pending: Arc<auth::idp::PendingLogins>,
 }
 
 impl AppState {
@@ -49,6 +51,8 @@ impl AppState {
                 dev_login: Some("dev@example.com".into()),
                 oidc: None,
             }),
+            idp: Arc::new(auth::idp::FakeIdp),
+            pending: Arc::new(auth::idp::PendingLogins::default()),
         }
     }
 }
@@ -74,6 +78,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|| async { "ok" }))
+        .route("/auth/login", get(auth::routes::login))
+        .route("/auth/callback", get(auth::routes::callback))
+        .route("/auth/logout", axum::routing::post(auth::routes::logout))
+        .route("/auth/dev-login", axum::routing::post(auth::routes::dev_login))
         .merge(api)
         .fallback(get(assets::serve_asset))
         .with_state(state)
@@ -97,6 +105,8 @@ pub async fn serve(registry: Arc<Registry>, config: ServerConfig) -> Result<(), 
         db,
         master_key: Arc::new(master_key),
         auth: Arc::new(auth_config),
+        idp: Arc::new(auth::idp::NullIdp),
+        pending: Arc::new(auth::idp::PendingLogins::default()),
     };
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
