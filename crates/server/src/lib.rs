@@ -18,6 +18,7 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod stores;
+pub mod streams;
 pub mod users;
 
 /// Builds a full capability registry for a (cache, kubeconfig-paths) pair.

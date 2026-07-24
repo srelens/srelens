@@ -5412,6 +5412,7 @@ dependencies = [
  "sqlx",
  "srelens-capability",
  "srelens-kube",
+ "srelens-streams",
  "tempfile",
  "tokio",
  "tower",

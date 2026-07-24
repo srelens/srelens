@@ -22,6 +22,7 @@ pub struct UserEnv {
     pub registry: Arc<Registry>,
     pub cache: Arc<ClientCache>,
     pub paths: Vec<PathBuf>,
+    pub streams: Arc<crate::streams::UserStreams>,
     last_used: Mutex<Instant>,
 }
 
@@ -111,10 +112,12 @@ impl UserEnvs {
 
         let cache = ClientCache::new_many(paths.clone());
         let registry = Arc::new((self.factory)(cache.clone(), paths.clone()));
+        let streams = Arc::new(crate::streams::UserStreams::new(cache.clone()));
         let env = Arc::new(UserEnv {
             registry,
             cache,
             paths,
+            streams,
             last_used: Mutex::new(Instant::now()),
         });
         // Last-writer-wins is fine: both candidates were built from the same
@@ -212,6 +215,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, json!({ "count": 1 }));
+
+        // The per-user stream bundle is constructed alongside the registry.
+        env.streams.watch.stop("no-such-channel"); // no panic == bundle present
 
         // Cached: same Arc on second call.
         let env2 = envs.env_for(&db, &k, user.id).await.unwrap();
