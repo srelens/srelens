@@ -25,7 +25,14 @@ pub async fn start_terminal(
     let mut paths = crate::capabilities::default_kubeconfig_paths();
     paths.extend(extra_kubeconfigs.iter().map(std::path::PathBuf::from));
     manager
-        .start(Arc::new(TauriSink(app)), context, paths, channel, cols, rows)
+        .start(
+            Arc::new(TauriSink(app)),
+            context,
+            paths,
+            channel,
+            cols,
+            rows,
+        )
         .await
 }
 
@@ -54,7 +61,10 @@ pub async fn terminal_resize(
 
 /// Close a terminal: kill the shell and drop the session.
 #[tauri::command]
-pub async fn terminal_close(session: u64, manager: State<'_, TerminalManager>) -> Result<(), String> {
+pub async fn terminal_close(
+    session: u64,
+    manager: State<'_, TerminalManager>,
+) -> Result<(), String> {
     manager.close(session);
     Ok(())
 }

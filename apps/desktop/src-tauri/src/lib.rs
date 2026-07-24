@@ -18,25 +18,25 @@ mod watch;
 use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppRegistry};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
-use srelens_streams::exec::ExecManager;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
 use forward::{start_port_forward, stop_port_forward};
-use srelens_streams::forward::ForwardManager;
 use helm::{helm_op_close, start_helm_op};
 use logs::{start_log_stream, stop_log_stream};
-use srelens_streams::helm::HelmManager;
-use srelens_streams::logs::LogStreamManager;
 use mcp::{
     install_srelens_cli, mcp_http_start, mcp_http_status, mcp_http_stop, srelens_cli_status,
     McpHttpManager,
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
+use srelens_streams::exec::ExecManager;
+use srelens_streams::forward::ForwardManager;
+use srelens_streams::helm::HelmManager;
+use srelens_streams::logs::LogStreamManager;
 use srelens_streams::terminal::TerminalManager;
+use srelens_streams::watch::WatchManager;
 use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize};
 use toolbox::start_tool_install;
 use updater::{update_check, update_install};
-use srelens_streams::watch::WatchManager;
 use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
@@ -234,7 +234,9 @@ pub fn run() {
             // debugging of a shipped build) has something to read; mirror to
             // stdout in dev for convenience.
             let mut log_targets = vec![tauri_plugin_log::Target::new(
-                tauri_plugin_log::TargetKind::LogDir { file_name: Some("srelens".into()) },
+                tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("srelens".into()),
+                },
             )];
             if cfg!(debug_assertions) {
                 log_targets.push(tauri_plugin_log::Target::new(

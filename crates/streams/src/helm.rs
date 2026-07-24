@@ -146,10 +146,7 @@ impl HelmManager {
             );
         });
 
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(id, Session { handle });
+        self.sessions.lock().unwrap().insert(id, Session { handle });
         Ok(id)
     }
 

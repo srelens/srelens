@@ -25,7 +25,14 @@ pub async fn start_helm_op(
     let mut paths = crate::capabilities::default_kubeconfig_paths();
     paths.extend(extra_kubeconfigs.iter().map(std::path::PathBuf::from));
     manager
-        .start(Arc::new(TauriSink(app)), context, paths, args, values, channel)
+        .start(
+            Arc::new(TauriSink(app)),
+            context,
+            paths,
+            args,
+            values,
+            channel,
+        )
         .await
 }
 

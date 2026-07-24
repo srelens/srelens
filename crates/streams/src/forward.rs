@@ -87,10 +87,7 @@ impl ForwardManager {
             );
         });
 
-        self.forwards
-            .lock()
-            .unwrap()
-            .insert(id, Forward { handle });
+        self.forwards.lock().unwrap().insert(id, Forward { handle });
         Ok(ForwardInfo {
             id,
             local_port: bound,

@@ -125,10 +125,7 @@ impl WatchManager {
             }
         });
 
-        self.tasks
-            .lock()
-            .unwrap()
-            .insert(channel.clone(), handle);
+        self.tasks.lock().unwrap().insert(channel.clone(), handle);
         Ok(channel)
     }
 }

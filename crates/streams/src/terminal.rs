@@ -38,11 +38,7 @@ impl Default for TerminalManager {
 /// cluster/user it references) to a private temp file. Pointing `KUBECONFIG`
 /// at just this file locks the terminal to that cluster — no other contexts
 /// are listed or switchable. Returns the temp file path.
-fn write_locked_kubeconfig(
-    id: u64,
-    context: &str,
-    paths: &[PathBuf],
-) -> Result<PathBuf, String> {
+fn write_locked_kubeconfig(id: u64, context: &str, paths: &[PathBuf]) -> Result<PathBuf, String> {
     let yaml = srelens_kube::connect::single_context_kubeconfig_yaml(paths, context)?;
 
     // Unique per-process + per-session name, created atomically with O_EXCL so
@@ -88,10 +84,11 @@ impl TerminalManager {
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let ctx = context.clone();
-        let overlay =
-            tokio::task::spawn_blocking(move || write_locked_kubeconfig(id, &ctx, &kubeconfig_paths))
-                .await
-                .map_err(|e| e.to_string())??;
+        let overlay = tokio::task::spawn_blocking(move || {
+            write_locked_kubeconfig(id, &ctx, &kubeconfig_paths)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let kubeconfig = overlay.clone().into_os_string();
 
         let pty = native_pty_system();
