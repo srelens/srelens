@@ -124,7 +124,9 @@ mod tests {
     async fn rejects_mismatched_origin() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         let h = headers(&[("origin", "https://evil.example")]);
-        let err = authorize_ws(&h, &state.auth, &state.db, 1).await.unwrap_err();
+        let err = authorize_ws(&h, &state.auth, &state.db, 1)
+            .await
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
     }
 
@@ -133,7 +135,9 @@ mod tests {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         // Matching origin, but no cookie.
         let h = headers(&[("origin", "http://127.0.0.1:8080")]);
-        let err = authorize_ws(&h, &state.auth, &state.db, 1).await.unwrap_err();
+        let err = authorize_ws(&h, &state.auth, &state.db, 1)
+            .await
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
     }
 
@@ -148,10 +152,16 @@ mod tests {
             ("origin", "http://127.0.0.1:8080"),
             ("cookie", &format!("srelens_session={token}")),
         ]);
-        assert_eq!(authorize_ws(&h, &state.auth, &state.db, 1).await.unwrap(), user.id);
+        assert_eq!(
+            authorize_ws(&h, &state.auth, &state.db, 1).await.unwrap(),
+            user.id
+        );
 
         // Absent origin (non-browser client) + cookie is allowed.
         let h = headers(&[("cookie", &format!("srelens_session={token}"))]);
-        assert_eq!(authorize_ws(&h, &state.auth, &state.db, 1).await.unwrap(), user.id);
+        assert_eq!(
+            authorize_ws(&h, &state.auth, &state.db, 1).await.unwrap(),
+            user.id
+        );
     }
 }

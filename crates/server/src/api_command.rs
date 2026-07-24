@@ -32,8 +32,12 @@ fn ok(value: Value) -> Response {
 // isn't worth rippling `?` through every call site — the size is inherent.
 #[allow(clippy::result_large_err)]
 fn parse<T: for<'de> Deserialize<'de>>(body: &Value) -> Result<T, Response> {
-    serde_json::from_value(body.clone())
-        .map_err(|e| error(StatusCode::BAD_REQUEST, &format!("invalid command args: {e}")))
+    serde_json::from_value(body.clone()).map_err(|e| {
+        error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid command args: {e}"),
+        )
+    })
 }
 
 pub async fn dispatch(
@@ -59,7 +63,12 @@ pub async fn dispatch(
         Ok(env) => env,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    let sink = || Arc::new(WsSink { hub: state.ws_hub.clone(), user_id: user.user_id });
+    let sink = || {
+        Arc::new(WsSink {
+            hub: state.ws_hub.clone(),
+            user_id: user.user_id,
+        })
+    };
 
     match run(&command, &args, &env, &sink).await {
         Ok(resp) => resp,
@@ -248,7 +257,15 @@ async fn run(
             let info = env
                 .streams
                 .forward
-                .start(sink(), a.context, a.namespace, a.kind, a.name, a.remote_port, a.local_port)
+                .start(
+                    sink(),
+                    a.context,
+                    a.namespace,
+                    a.kind,
+                    a.name,
+                    a.remote_port,
+                    a.local_port,
+                )
                 .await
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
             json!({ "id": info.id, "localPort": info.local_port })
@@ -298,7 +315,12 @@ async fn run(
             env.streams.helm.close(a.session);
             json!({})
         }
-        other => return Err(error(StatusCode::NOT_FOUND, &format!("unknown command: {other}"))),
+        other => {
+            return Err(error(
+                StatusCode::NOT_FOUND,
+                &format!("unknown command: {other}"),
+            ))
+        }
     };
     Ok(ok(out))
 }
@@ -313,9 +335,17 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    async fn authed_post(state: &AppState, command: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    async fn authed_post(
+        state: &AppState,
+        command: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
-        let token = state.db.create_session(user.id, crate::unix_now()).await.unwrap();
+        let token = state
+            .db
+            .create_session(user.id, crate::unix_now())
+            .await
+            .unwrap();
         let resp = router(state.clone())
             .oneshot(
                 Request::builder()
@@ -330,8 +360,14 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-        let v = if bytes.is_empty() { json!(null) } else { serde_json::from_slice(&bytes).unwrap() };
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v = if bytes.is_empty() {
+            json!(null)
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
         (status, v)
     }
 
@@ -340,7 +376,10 @@ mod tests {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         let (status, body) = authed_post(&state, "nope", json!({})).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body["error"].as_str().unwrap().starts_with("unknown command"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown command"));
     }
 
     #[tokio::test]

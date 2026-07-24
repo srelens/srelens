@@ -135,7 +135,10 @@ mod tests {
         let (_b, mut rx_b) = hub.register(2);
 
         hub.subscribe(a, "watch:pods:1");
-        let sink1 = WsSink { hub: hub.clone(), user_id: 1 };
+        let sink1 = WsSink {
+            hub: hub.clone(),
+            user_id: 1,
+        };
         sink1.emit("watch:pods:1", serde_json::json!([{ "name": "p" }]));
 
         // User 1's subscribed connection gets the data frame.
@@ -156,7 +159,10 @@ mod tests {
         let (a, mut rx_a) = hub.register(1);
         hub.subscribe(a, "ch");
         hub.unsubscribe(a, "ch");
-        let sink = WsSink { hub: hub.clone(), user_id: 1 };
+        let sink = WsSink {
+            hub: hub.clone(),
+            user_id: 1,
+        };
         sink.emit("ch", serde_json::json!(1));
         assert_eq!(recv_now(&mut rx_a), None);
 
@@ -173,7 +179,11 @@ mod tests {
         let (a2, mut rx2) = hub.register(7);
         hub.subscribe(a1, "ch");
         hub.subscribe(a2, "ch");
-        WsSink { hub: hub.clone(), user_id: 7 }.emit("ch", serde_json::json!("x"));
+        WsSink {
+            hub: hub.clone(),
+            user_id: 7,
+        }
+        .emit("ch", serde_json::json!("x"));
         assert!(recv_now(&mut rx1).is_some());
         assert!(recv_now(&mut rx2).is_some());
     }
