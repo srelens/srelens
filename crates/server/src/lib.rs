@@ -273,7 +273,11 @@ mod tests {
     async fn kubeconfig_crud_roundtrip() {
         let state = state().await;
         let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
-        let token = state.db.create_session(user.id, crate::unix_now()).await.unwrap();
+        let token = state
+            .db
+            .create_session(user.id, crate::unix_now())
+            .await
+            .unwrap();
         let cookie = format!("srelens_session={token}");
 
         let send = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
@@ -292,7 +296,10 @@ mod tests {
                     }
                     None => Body::empty(),
                 };
-                router(state).oneshot(builder.body(body).unwrap()).await.unwrap()
+                router(state)
+                    .oneshot(builder.body(body).unwrap())
+                    .await
+                    .unwrap()
             }
         };
 
@@ -354,7 +361,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri} must be gated (csrf first)");
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} must be gated (csrf first)"
+            );
         }
     }
 }

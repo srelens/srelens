@@ -32,7 +32,10 @@ pub struct UserEnvs {
 }
 
 fn user_runtime_dir(data_dir: &Path, user_id: i64) -> PathBuf {
-    data_dir.join("runtime").join("users").join(user_id.to_string())
+    data_dir
+        .join("runtime")
+        .join("users")
+        .join(user_id.to_string())
 }
 
 fn create_private_dir(dir: &Path) -> Result<(), String> {
@@ -155,10 +158,14 @@ mod tests {
         Arc::new(|_cache, paths: Vec<PathBuf>| {
             let mut reg = Registry::new();
             let n = paths.len();
-            reg.register(Capability::read_only("paths.count", "how many paths", move |_| {
-                let n = n;
-                async move { Ok(json!({ "count": n })) }
-            }));
+            reg.register(Capability::read_only(
+                "paths.count",
+                "how many paths",
+                move |_| {
+                    let n = n;
+                    async move { Ok(json!({ "count": n })) }
+                },
+            ));
             reg
         })
     }
@@ -193,10 +200,17 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&env.paths[0]).unwrap().permissions().mode();
+            let mode = std::fs::metadata(&env.paths[0])
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        let out = env.registry.invoke("paths.count", json!(null)).await.unwrap();
+        let out = env
+            .registry
+            .invoke("paths.count", json!(null))
+            .await
+            .unwrap();
         assert_eq!(out, json!({ "count": 1 }));
 
         // Cached: same Arc on second call.
@@ -222,14 +236,21 @@ mod tests {
         let data_dir = test_data_dir();
         let alice = db.upsert_user("i", "alice", "", "", 1).await.unwrap();
         let bob = db.upsert_user("i", "bob", "", "", 1).await.unwrap();
-        db.put_kubeconfig(alice.id, "a", &k, "alice-config", 1).await.unwrap();
+        db.put_kubeconfig(alice.id, "a", &k, "alice-config", 1)
+            .await
+            .unwrap();
 
         let envs = UserEnvs::new(factory(), data_dir.clone());
         let a = envs.env_for(&db, &k, alice.id).await.unwrap();
         let b = envs.env_for(&db, &k, bob.id).await.unwrap();
         assert_eq!(a.paths.len(), 1);
         assert_eq!(b.paths.len(), 0);
-        assert!(a.paths[0].starts_with(data_dir.join("runtime").join("users").join(alice.id.to_string())));
+        assert!(a.paths[0].starts_with(
+            data_dir
+                .join("runtime")
+                .join("users")
+                .join(alice.id.to_string())
+        ));
 
         // Zero idle tolerance evicts both and removes alice's files.
         envs.evict_idle(Duration::from_secs(0));

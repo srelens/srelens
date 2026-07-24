@@ -63,8 +63,7 @@ fn validate_name(name: &str) -> Result<(), &'static str> {
 }
 
 fn validate_yaml(yaml: &str) -> Result<(), &'static str> {
-    let parsed: serde_yaml::Value =
-        serde_yaml::from_str(yaml).map_err(|_| "not valid YAML")?;
+    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|_| "not valid YAML")?;
     let Some(mapping) = parsed.as_mapping() else {
         return Err("kubeconfig must be a YAML mapping");
     };
