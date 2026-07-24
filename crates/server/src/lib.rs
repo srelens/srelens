@@ -11,6 +11,7 @@ use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 
 pub mod api;
+pub mod api_kubeconfigs;
 pub mod assets;
 pub mod auth;
 pub mod config;
@@ -88,6 +89,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(api::invoke_capability),
         )
         .route("/api/me", get(auth::session::me))
+        .route(
+            "/api/kubeconfigs",
+            get(api_kubeconfigs::list).post(api_kubeconfigs::put),
+        )
+        .route(
+            "/api/kubeconfigs/:id",
+            axum::routing::delete(api_kubeconfigs::delete),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::session::require_session,
@@ -137,6 +146,28 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
         idp,
         pending: Arc::new(auth::idp::PendingLogins::default()),
     };
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                if let Err(e) = db.purge_expired_sessions(unix_now()).await {
+                    eprintln!("session purge failed: {e}");
+                }
+            }
+        });
+    }
+    {
+        let envs = state.user_envs.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tick.tick().await;
+                envs.evict_idle(std::time::Duration::from_secs(users::USER_ENV_IDLE_SECS));
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(config.addr)
         .await
         .map_err(|e| format!("bind {}: {e}", config.addr))?;
@@ -236,5 +267,94 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["email"], serde_json::json!("u@x"));
+    }
+
+    #[tokio::test]
+    async fn kubeconfig_crud_roundtrip() {
+        let state = state().await;
+        let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
+        let token = state.db.create_session(user.id, crate::unix_now()).await.unwrap();
+        let cookie = format!("srelens_session={token}");
+
+        let send = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
+            let state = state.clone();
+            let cookie = cookie.clone();
+            async move {
+                let mut builder = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("cookie", cookie)
+                    .header("x-srelens-csrf", "1");
+                let body = match body {
+                    Some(v) => {
+                        builder = builder.header("content-type", "application/json");
+                        Body::from(v.to_string())
+                    }
+                    None => Body::empty(),
+                };
+                router(state).oneshot(builder.body(body).unwrap()).await.unwrap()
+            }
+        };
+
+        // Empty list.
+        let resp = send("GET", "/api/kubeconfigs".into(), None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Upload.
+        let resp = send(
+            "POST",
+            "/api/kubeconfigs".into(),
+            Some(serde_json::json!({ "name": "prod", "yaml": "contexts: []\n" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+
+        // Bad yaml rejected.
+        let resp = send(
+            "POST",
+            "/api/kubeconfigs".into(),
+            Some(serde_json::json!({ "name": "bad", "yaml": "clusters: []" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Listed.
+        let resp = send("GET", "/api/kubeconfigs".into(), None).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["name"], serde_json::json!("prod"));
+
+        // Delete; second delete 404.
+        let resp = send("DELETE", format!("/api/kubeconfigs/{id}"), None).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = send("DELETE", format!("/api/kubeconfigs/{id}"), None).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn kubeconfig_routes_are_gated() {
+        let state = state().await;
+        for (method, uri) in [
+            ("GET", "/api/kubeconfigs"),
+            ("POST", "/api/kubeconfigs"),
+            ("DELETE", "/api/kubeconfigs/1"),
+        ] {
+            let resp = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri} must be gated (csrf first)");
+        }
     }
 }
