@@ -10,6 +10,10 @@ tokio = { version = "1", features = ["net", "rt-multi-thread", "macros"] }
 axum = "0.7"
 rust-embed = "8"
 mime_guess = "2"
+aes-gcm = "0.10"
+hex = "0.4"
+getrandom = "0.2"
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

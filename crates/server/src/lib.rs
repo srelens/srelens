@@ -12,6 +12,7 @@ use srelens_capability::Registry;
 pub mod api;
 pub mod assets;
 pub mod config;
+pub mod crypto;
 
 /// Shared handler state.
 #[derive(Clone)]
