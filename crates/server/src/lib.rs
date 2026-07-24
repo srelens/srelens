@@ -45,6 +45,7 @@ pub struct AppState {
     pub auth: Arc<auth::AuthConfig>,
     pub idp: Arc<dyn auth::idp::IdentityProvider>,
     pub pending: Arc<auth::idp::PendingLogins>,
+    pub ws_hub: Arc<ws::hub::WsHub>,
 }
 
 impl AppState {
@@ -70,6 +71,7 @@ impl AppState {
             }),
             idp: Arc::new(auth::idp::FakeIdp),
             pending: Arc::new(auth::idp::PendingLogins::default()),
+            ws_hub: Arc::new(ws::hub::WsHub::new()),
         }
     }
 }
@@ -113,6 +115,7 @@ pub fn router(state: AppState) -> Router {
             "/auth/dev-login",
             axum::routing::post(auth::routes::dev_login),
         )
+        .route("/api/ws", get(ws::route::ws_handler))
         .merge(api)
         .fallback(get(assets::serve_asset))
         .with_state(state)
@@ -147,6 +150,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
         auth: Arc::new(auth_config),
         idp,
         pending: Arc::new(auth::idp::PendingLogins::default()),
+        ws_hub: Arc::new(ws::hub::WsHub::new()),
     };
     {
         let db = state.db.clone();

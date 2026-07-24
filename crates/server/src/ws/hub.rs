@@ -79,6 +79,13 @@ impl WsHub {
         }
     }
 
+    /// Send a raw frame to one specific connection (used for acks).
+    pub fn deliver_direct(&self, conn_id: u64, frame: String) {
+        if let Some(conn) = self.conns.lock().unwrap().get(&conn_id) {
+            let _ = conn.tx.send(frame);
+        }
+    }
+
     /// Send `frame` to every connection of `user_id` subscribed to `channel`.
     pub fn deliver(&self, user_id: i64, channel: &str, frame: String) {
         let targets: Vec<Arc<Conn>> = self

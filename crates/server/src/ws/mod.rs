@@ -2,3 +2,4 @@
 //! upgrade handler (`route`).
 
 pub mod hub;
+pub mod route;
