@@ -11,6 +11,7 @@ use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 
 pub mod api;
+pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod assets;
 pub mod auth;
@@ -100,6 +101,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/kubeconfigs/:id",
             axum::routing::delete(api_kubeconfigs::delete),
+        )
+        .route(
+            "/api/command/:command",
+            axum::routing::post(api_command::dispatch),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
