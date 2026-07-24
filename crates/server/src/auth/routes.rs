@@ -142,6 +142,10 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
         return error(StatusCode::FORBIDDEN, "missing csrf header");
     }
     if let Some(token) = session::cookie_value(&headers, session::COOKIE_NAME) {
+        // Drop the user's cached env + decrypted runtime files on logout.
+        if let Ok(Some(user)) = state.db.validate_session(&token, crate::unix_now()).await {
+            state.user_envs.invalidate(user.id);
+        }
         if let Err(e) = state.db.revoke_session(&token).await {
             return error(StatusCode::INTERNAL_SERVER_ERROR, &e);
         }
@@ -431,6 +435,50 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_drops_the_user_env() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
+        let token = state.db.create_session(user.id, crate::unix_now()).await.unwrap();
+        // Give the user a real kubeconfig so materialization produces an
+        // actual decrypted file on disk (otherwise this test can't tell the
+        // difference between "invalidated" and "never had anything").
+        state
+            .db
+            .put_kubeconfig(user.id, "kc", &state.master_key, "contexts: []\n", crate::unix_now())
+            .await
+            .unwrap();
+
+        // Materialize an env and confirm the file really landed on disk.
+        let env_before = state.user_envs.env_for(&state.db, &state.master_key, user.id).await.unwrap();
+        assert_eq!(env_before.paths.len(), 1);
+        let path = env_before.paths[0].clone();
+        assert!(path.exists());
+
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/logout")
+                    .header("x-srelens-csrf", "1")
+                    .header("cookie", format!("srelens_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The decrypted runtime file must be gone immediately after logout —
+        // this is the real regression guard for `invalidate()`.
+        assert!(!path.exists(), "logout must delete the decrypted runtime file");
+
+        // A subsequent env_for must rebuild a NEW env (not the cached one);
+        // the kubeconfig is still in the DB, so it materializes again.
+        let env_after = state.user_envs.env_for(&state.db, &state.master_key, user.id).await.unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&env_before, &env_after));
     }
 
     #[tokio::test]

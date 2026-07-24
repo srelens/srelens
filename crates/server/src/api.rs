@@ -13,6 +13,12 @@ use srelens_capability::CapabilityError;
 use crate::auth::session::UserCtx;
 use crate::AppState;
 
+/// Capabilities that are desktop-only in web mode: `k8s.deleteContext` mutates
+/// the per-request materialized kubeconfig, which is rebuilt from the database
+/// on every env refresh, so its effect would silently vanish. Blocked until a
+/// database-backed context edit exists.
+pub const WEB_DENIED_CAPABILITIES: &[&str] = &["k8s.deleteContext"];
+
 /// Invoke a capability by id. The request body is the capability's input JSON;
 /// an empty body means null input. Unknown id → 404, invalid input (or a body
 /// that isn't JSON) → 400, handler failure (cluster unreachable, RBAC denial)
@@ -31,6 +37,13 @@ pub async fn invoke_capability(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
+    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "capability not available in web mode",
+        );
+    }
+
     if !body.is_empty() {
         let is_json = headers
             .get(axum::http::header::CONTENT_TYPE)
@@ -325,6 +338,15 @@ mod tests {
     async fn read_only_capability_still_accepts_null_input() {
         let (status, _) = post("/api/capability/echo", Body::empty()).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn web_denied_capability_is_rejected() {
+        // k8s.deleteContext isn't even registered in the test registry, but
+        // the deny-list must short-circuit with 400 (not 404) before dispatch.
+        let (status, body) = post("/api/capability/k8s.deleteContext", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
     }
 
     #[tokio::test]
