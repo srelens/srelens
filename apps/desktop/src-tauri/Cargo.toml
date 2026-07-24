@@ -37,8 +37,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "ma
 # provider. default-tls here pulls rustls-platform-verifier -> aws-lc-rs,
 # giving two providers and a runtime "could not determine CryptoProvider" panic.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
-# Local pseudo-terminal for the in-app kubectl shell (spawns the user's login shell).
-portable-pty = "0.8"
 
 # Auto-update is desktop-only (mobile stores handle their own updates).
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]

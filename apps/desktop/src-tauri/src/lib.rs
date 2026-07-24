@@ -32,7 +32,8 @@ use mcp::{
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
-use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize, TerminalManager};
+use srelens_streams::terminal::TerminalManager;
+use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize};
 use toolbox::start_tool_install;
 use updater::{update_check, update_install};
 use srelens_streams::watch::WatchManager;
