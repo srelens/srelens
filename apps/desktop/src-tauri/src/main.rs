@@ -33,6 +33,16 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    // `serve [addr]` runs the web server (frontend + capability API) instead
+    // of the GUI. No auth yet (Plan 3) — default bind is loopback.
+    if args.get(1).map(String::as_str) == Some("serve") {
+        let addr = args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:8080".into());
+        run_serve(&addr);
+        return;
+    }
     // `--mcp-stdio` / `--mcp-http [addr]` run the MCP server instead of the GUI,
     // so external MCP clients/agents can drive every capability.
     if args.iter().any(|a| a == "--mcp-stdio") {
@@ -59,6 +69,26 @@ fn run_mcp_http(addr: &str) {
         eprintln!("MCP HTTP listening on http://{addr}/mcp (loopback; destructive tools need _confirm)");
         if let Err(e) = srelens_mcp::http::serve_http(server, addr).await {
             eprintln!("mcp http server error: {e}");
+        }
+    });
+}
+
+fn run_serve(addr: &str) {
+    let addr: std::net::SocketAddr = addr.parse().expect("invalid serve address");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    runtime.block_on(async {
+        let registry = srelens_desktop_lib::build_registry();
+        eprintln!("srelens web server listening on http://{addr} (no auth yet — keep this loopback)");
+        if let Err(e) = srelens_server::serve(
+            Arc::new(registry),
+            srelens_server::ServerConfig { addr },
+        )
+        .await
+        {
+            eprintln!("web server error: {e}");
         }
     });
 }
