@@ -14,6 +14,7 @@ pub mod assets;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod stores;
 
 /// Shared handler state.
 #[derive(Clone)]
