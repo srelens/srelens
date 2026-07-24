@@ -14,3 +14,5 @@ mime_guess = "2"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }

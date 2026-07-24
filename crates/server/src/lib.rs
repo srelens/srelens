@@ -9,6 +9,8 @@ use axum::routing::get;
 use axum::Router;
 use srelens_capability::Registry;
 
+pub mod api;
+
 /// Shared handler state.
 #[derive(Clone)]
 pub struct AppState {
@@ -26,6 +28,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|| async { "ok" }))
+        .route("/api/capability/:id", axum::routing::post(api::invoke_capability))
         .with_state(state)
 }
 

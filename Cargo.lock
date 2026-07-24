@@ -4352,6 +4352,8 @@ dependencies = [
  "axum",
  "mime_guess",
  "rust-embed",
+ "schemars 0.8.22",
+ "serde",
  "serde_json",
  "srelens-capability",
  "tokio",
