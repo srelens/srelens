@@ -20,6 +20,7 @@ pub mod db;
 pub mod stores;
 pub mod streams;
 pub mod users;
+pub mod ws;
 
 /// Builds a full capability registry for a (cache, kubeconfig-paths) pair.
 /// The desktop binary supplies this from its capability assembly, keeping
