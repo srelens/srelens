@@ -76,9 +76,11 @@ mod tests {
 
     fn state() -> AppState {
         let mut reg = Registry::new();
-        reg.register(Capability::read_only("echo", "echoes input", |v| async move {
-            Ok(json!({ "echo": v }))
-        }));
+        reg.register(Capability::read_only(
+            "echo",
+            "echoes input",
+            |v| async move { Ok(json!({ "echo": v })) },
+        ));
         reg.register(Capability::typed::<AddIn, AddOut, _, _>(
             "math.add",
             "adds",
@@ -106,7 +108,9 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let value = if bytes.is_empty() {
             Value::Null
         } else {
@@ -138,10 +142,12 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_input_is_400() {
-        let (status, body) =
-            post("/api/capability/math.add", Body::from("{\"a\":\"x\"}")).await;
+        let (status, body) = post("/api/capability/math.add", Body::from("{\"a\":\"x\"}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"].as_str().unwrap().starts_with("invalid input:"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid input:"));
     }
 
     #[tokio::test]

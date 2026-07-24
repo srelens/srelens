@@ -30,7 +30,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(|| async { "ok" }))
-        .route("/api/capability/:id", axum::routing::post(api::invoke_capability))
+        .route(
+            "/api/capability/:id",
+            axum::routing::post(api::invoke_capability),
+        )
         .fallback(get(assets::serve_asset))
         .with_state(state)
 }
@@ -80,7 +83,12 @@ mod tests {
     #[tokio::test]
     async fn health_route_wins_over_asset_fallback() {
         let resp = router(state())
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

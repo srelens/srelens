@@ -16,7 +16,11 @@ struct Assets;
 /// exists (frontend not built, or a real missing asset like `/app.js`).
 fn resolve(path: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
     let trimmed = path.trim_start_matches('/');
-    let candidate = if trimmed.is_empty() { "index.html" } else { trimmed };
+    let candidate = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
     if exists(candidate) {
         return Some(candidate.to_string());
     }

@@ -81,12 +81,11 @@ fn run_serve(addr: &str) {
         .expect("build tokio runtime");
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
-        eprintln!("srelens web server listening on http://{addr} (no auth yet — keep this loopback)");
-        if let Err(e) = srelens_server::serve(
-            Arc::new(registry),
-            srelens_server::ServerConfig { addr },
-        )
-        .await
+        eprintln!(
+            "srelens web server listening on http://{addr} (no auth yet — keep this loopback)"
+        );
+        if let Err(e) =
+            srelens_server::serve(Arc::new(registry), srelens_server::ServerConfig { addr }).await
         {
             eprintln!("web server error: {e}");
         }
