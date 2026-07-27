@@ -29,4 +29,16 @@ export const notify = {
       duration: 12000,
     });
   },
+  /**
+   * An OIDC-protected cluster needs an interactive sign-in. Carries a "Sign in"
+   * action that starts the cluster login flow; stays up a while since it's an
+   * action prompt the user may not react to immediately.
+   */
+  clusterSignIn(title: string, description: string, onSignIn: () => void): void {
+    toast(title, {
+      description,
+      action: { label: "Sign in", onClick: () => onSignIn() },
+      duration: 30000,
+    });
+  },
 };
