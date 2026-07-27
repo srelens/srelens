@@ -14,8 +14,16 @@ use serde::Deserialize;
 use crate::auth::session;
 use crate::auth::AuthConfig;
 use crate::db::Db;
+use crate::users::{teardown_streams_if_disconnected, UserEnvs};
 use crate::ws::hub::{ack_frame, WsHub};
 use crate::AppState;
+
+/// Grace period after a user's last WS connection drops before their
+/// server-side stream tasks (watches/logs/exec/terminal/helm/forward) are
+/// torn down. Long enough to survive a page refresh / brief reconnect
+/// (wsClient's backoff caps at 10s), short enough to bound web-session
+/// memory when a tab is actually closed.
+const WS_DISCONNECT_GRACE_SECS: u64 = 60;
 
 /// Authenticate a WS upgrade: valid session cookie required; if an `Origin`
 /// header is present it must equal the configured public URL. Returns the
@@ -57,7 +65,8 @@ pub async fn ws_handler(
         }
     };
     let hub = state.ws_hub.clone();
-    upgrade.on_upgrade(move |socket| run_socket(socket, hub, user_id))
+    let user_envs = state.user_envs.clone();
+    upgrade.on_upgrade(move |socket| run_socket(socket, hub, user_envs, user_id))
 }
 
 #[derive(Deserialize)]
@@ -66,7 +75,12 @@ struct ClientFrame {
     channel: Option<String>,
 }
 
-async fn run_socket(socket: WebSocket, hub: std::sync::Arc<WsHub>, user_id: i64) {
+async fn run_socket(
+    socket: WebSocket,
+    hub: std::sync::Arc<WsHub>,
+    user_envs: std::sync::Arc<UserEnvs>,
+    user_id: i64,
+) {
     use futures::{SinkExt, StreamExt};
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (conn_id, mut out_rx) = hub.register(user_id);
@@ -112,6 +126,18 @@ async fn run_socket(socket: WebSocket, hub: std::sync::Arc<WsHub>, user_id: i64)
 
     hub.unregister(conn_id);
     writer.abort();
+
+    // If that was the user's last live connection, schedule teardown of their
+    // stream tasks after a grace period (a reconnect within the grace, e.g.
+    // on refresh, cancels it).
+    if hub.user_connection_count(user_id) == 0 {
+        tokio::spawn(teardown_streams_if_disconnected(
+            hub.clone(),
+            user_envs,
+            user_id,
+            std::time::Duration::from_secs(WS_DISCONNECT_GRACE_SECS),
+        ));
+    }
 }
 
 #[cfg(test)]

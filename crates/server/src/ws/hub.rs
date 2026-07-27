@@ -77,6 +77,17 @@ impl WsHub {
         self.conns.lock().unwrap().contains_key(&conn_id)
     }
 
+    /// How many live connections `user_id` currently has. Used to decide
+    /// whether to tear down their stream tasks after a WS disconnect.
+    pub fn user_connection_count(&self, user_id: i64) -> usize {
+        self.conns
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|c| c.user_id == user_id)
+            .count()
+    }
+
     pub fn subscribe(&self, conn_id: u64, channel: &str) {
         if let Some(conn) = self.conns.lock().unwrap().get(&conn_id) {
             conn.subs.lock().unwrap().insert(channel.to_string());
@@ -217,6 +228,23 @@ mod tests {
         .emit("ch", serde_json::json!("x"));
         assert!(recv_now(&mut rx1).is_some());
         assert!(recv_now(&mut rx2).is_some());
+    }
+
+    #[test]
+    fn user_connection_count_tracks_registrations_and_unregistrations() {
+        let hub = WsHub::new();
+        let (a1, _rx1) = hub.register(1);
+        let (a2, _rx2) = hub.register(1);
+        let (_b1, _rx3) = hub.register(2);
+
+        assert_eq!(hub.user_connection_count(1), 2);
+        assert_eq!(hub.user_connection_count(2), 1);
+
+        hub.unregister(a1);
+        assert_eq!(hub.user_connection_count(1), 1);
+
+        hub.unregister(a2);
+        assert_eq!(hub.user_connection_count(1), 0);
     }
 
     #[test]

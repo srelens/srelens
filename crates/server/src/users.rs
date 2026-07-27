@@ -170,6 +170,21 @@ impl UserEnvs {
     }
 }
 
+/// After `grace`, if the user has no live WS connections, drop their cached
+/// environment (aborting all stream tasks + freeing snapshots). A reconnect
+/// during the grace cancels the teardown.
+pub async fn teardown_streams_if_disconnected(
+    hub: Arc<crate::ws::hub::WsHub>,
+    user_envs: Arc<UserEnvs>,
+    user_id: i64,
+    grace: Duration,
+) {
+    tokio::time::sleep(grace).await;
+    if hub.user_connection_count(user_id) == 0 {
+        user_envs.invalidate(user_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +329,65 @@ mod tests {
         for e in &envs_built {
             assert!(Arc::ptr_eq(&envs_built[0], e));
         }
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn teardown_invalidates_env_when_no_ws_connections_remain() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+        // Cached: a second lookup returns the same Arc.
+        let env_again = envs.env_for(&db, &k, user.id).await.unwrap();
+        assert!(Arc::ptr_eq(&env, &env_again));
+
+        // No live connections for this user in the hub.
+        assert_eq!(hub.user_connection_count(user.id), 0);
+
+        teardown_streams_if_disconnected(hub.clone(), envs.clone(), user.id, Duration::ZERO).await;
+
+        // Invalidated: the runtime files are gone and a fresh lookup rebuilds
+        // (yielding a different Arc) instead of returning the old one.
+        assert!(!env.paths[0].exists());
+        let env_rebuilt = envs.env_for(&db, &k, user.id).await.unwrap();
+        assert!(!Arc::ptr_eq(&env, &env_rebuilt));
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn teardown_skips_when_a_ws_connection_is_still_live() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+
+        // Register a live WS connection for the user before building the env.
+        let (_conn_id, _rx) = hub.register(user.id);
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+
+        assert_eq!(hub.user_connection_count(user.id), 1);
+        teardown_streams_if_disconnected(hub.clone(), envs.clone(), user.id, Duration::ZERO).await;
+
+        // Teardown was skipped: the env is still cached as the same Arc.
+        let env_again = envs.env_for(&db, &k, user.id).await.unwrap();
+        assert!(Arc::ptr_eq(&env, &env_again));
+
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
