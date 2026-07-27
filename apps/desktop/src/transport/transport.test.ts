@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: getVersionMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
 
-import { invokeCapability, invokeCommand, on, relaunchApp, appVersion } from "./transport";
+import { invokeCapability, invokeCommand, on, relaunchApp, appVersion } from "./tauriTransport";
 
 beforeEach(() => {
   invokeMock.mockReset();
