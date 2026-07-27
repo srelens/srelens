@@ -14,6 +14,11 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::sink::EventSink;
 
+/// Global counter for unique overlay kubeconfig filenames across all
+/// TerminalManager instances in this process. Guarantees no collision even
+/// when multiple managers (e.g., per-user in a web server) create overlays.
+static NEXT_OVERLAY_ID: AtomicU64 = AtomicU64::new(1);
+
 struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -38,16 +43,17 @@ impl Default for TerminalManager {
 /// cluster/user it references) to a private temp file. Pointing `KUBECONFIG`
 /// at just this file locks the terminal to that cluster — no other contexts
 /// are listed or switchable. Returns the temp file path.
-fn write_locked_kubeconfig(id: u64, context: &str, paths: &[PathBuf]) -> Result<PathBuf, String> {
+fn write_locked_kubeconfig(overlay_id: u64, context: &str, paths: &[PathBuf]) -> Result<PathBuf, String> {
     let yaml = srelens_kube::connect::single_context_kubeconfig_yaml(paths, context)?;
 
-    // Unique per-process + per-session name, created atomically with O_EXCL so
-    // a pre-existing path/symlink can't be followed or overwritten, and mode
-    // 0600 at creation so there's no world-readable window.
+    // Unique per-process name (globally unique across all TerminalManager
+    // instances), created atomically with O_EXCL so a pre-existing path/symlink
+    // can't be followed or overwritten, and mode 0600 at creation so there's no
+    // world-readable window.
     let path = std::env::temp_dir().join(format!(
         "srelens-term-{}-{}.kubeconfig",
         std::process::id(),
-        id
+        overlay_id
     ));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -83,9 +89,10 @@ impl TerminalManager {
         rows: Option<u16>,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let overlay_id = NEXT_OVERLAY_ID.fetch_add(1, Ordering::SeqCst);
         let ctx = context.clone();
         let overlay = tokio::task::spawn_blocking(move || {
-            write_locked_kubeconfig(id, &ctx, &kubeconfig_paths)
+            write_locked_kubeconfig(overlay_id, &ctx, &kubeconfig_paths)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -227,14 +234,6 @@ mod tests {
     use super::*;
     use crate::test_util::TestSink;
 
-    // The overlay kubeconfig path is `srelens-term-<pid>-<session id>`, and
-    // each fresh `TerminalManager`'s session-id counter starts at 1 — so two
-    // managers in this same test binary both spawning their first session
-    // concurrently would race to `create_new` the identical path. Serialize
-    // the tests that spawn a real PTY session to avoid that collision (a
-    // real cross-manager overlay-path collision is out of scope here). An
-    // async mutex is safe to hold across `.await` (unlike `std::sync::Mutex`).
-    static PTY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn fixture_kubeconfig(dir: &std::path::Path) -> PathBuf {
         let path = dir.join("config");
@@ -263,7 +262,6 @@ contexts:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pty_round_trips_output_through_sink() {
-        let _guard = PTY_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let kc = fixture_kubeconfig(dir.path());
         let sink = Arc::new(TestSink::default());
@@ -308,7 +306,6 @@ contexts:
 
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_all_kills_children_and_removes_overlay() {
-        let _guard = PTY_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let kc = fixture_kubeconfig(dir.path());
         let sink = Arc::new(TestSink::default());
