@@ -15,6 +15,7 @@ pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod assets;
 pub mod auth;
+pub mod cluster_auth_resolver;
 pub mod cluster_oidc;
 pub mod cluster_registry;
 pub mod cluster_tokens;
@@ -67,7 +68,11 @@ impl AppState {
             std::env::temp_dir().join(format!("srelens-state-test-{}", hex::encode(bytes)));
         std::fs::create_dir_all(&data_dir).expect("test data dir");
         AppState {
-            user_envs: Arc::new(users::UserEnvs::new(factory, data_dir)),
+            user_envs: Arc::new(users::UserEnvs::new(
+                factory,
+                data_dir,
+                "http://127.0.0.1:8080".into(),
+            )),
             db: db::Db::open_in_memory().await.expect("in-memory db"),
             master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
             auth: Arc::new(auth::AuthConfig {
@@ -186,7 +191,11 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     // start materializing anyone's fresh environment.
     users::UserEnvs::wipe_runtime(&config.data_dir);
     let state = AppState {
-        user_envs: Arc::new(users::UserEnvs::new(factory, config.data_dir.clone())),
+        user_envs: Arc::new(users::UserEnvs::new(
+            factory,
+            config.data_dir.clone(),
+            auth_config.public_url.clone(),
+        )),
         db,
         master_key: Arc::new(master_key),
         auth: Arc::new(auth_config),

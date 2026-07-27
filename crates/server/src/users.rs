@@ -29,6 +29,9 @@ pub struct UserEnv {
 pub struct UserEnvs {
     factory: RegistryFactory,
     data_dir: PathBuf,
+    /// Public base URL of this server, used to build the cluster-OIDC redirect
+    /// URI (`<public_url>/auth/cluster/callback`) for the token refresh client.
+    public_url: String,
     map: Mutex<HashMap<i64, Arc<UserEnv>>>,
     // Serializes concurrent first-time builds per user: two racing misses on
     // the same user must not both `remove_dir_all` + materialize the runtime
@@ -71,10 +74,11 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
 }
 
 impl UserEnvs {
-    pub fn new(factory: RegistryFactory, data_dir: PathBuf) -> Self {
+    pub fn new(factory: RegistryFactory, data_dir: PathBuf, public_url: String) -> Self {
         Self {
             factory,
             data_dir,
+            public_url,
             map: Mutex::new(HashMap::new()),
             build_locks: Mutex::new(HashMap::new()),
         }
@@ -91,7 +95,7 @@ impl UserEnvs {
     pub async fn env_for(
         &self,
         db: &Db,
-        key: &MasterKey,
+        key: &Arc<MasterKey>,
         user_id: i64,
     ) -> Result<Arc<UserEnv>, String> {
         if let Some(env) = self.map.lock().unwrap().get(&user_id).cloned() {
@@ -121,6 +125,7 @@ impl UserEnvs {
         let _ = std::fs::remove_dir_all(&dir);
         create_private_dir(&dir)?;
         let mut paths = Vec::with_capacity(metas.len());
+        let mut yamls = Vec::with_capacity(metas.len());
         for meta in &metas {
             let yaml = db
                 .get_kubeconfig_yaml(user_id, meta.id, key)
@@ -129,9 +134,35 @@ impl UserEnvs {
             let path = dir.join(format!("kc-{}.yaml", meta.id));
             write_private_file(&path, yaml.as_bytes())?;
             paths.push(path);
+            yamls.push(yaml);
         }
 
         let cache = ClientCache::new_many(paths.clone());
+
+        // Install the cluster-OIDC bearer resolver: for a context whose user is
+        // OIDC, the cache authenticates with a srelens-managed id_token (server-
+        // side refresh) instead of running a headless-broken exec plugin.
+        let oidc_registry = Arc::new(
+            crate::cluster_registry::ClusterOidcRegistry::from_kubeconfig_yamls(&yamls),
+        );
+        let refresh = crate::cluster_oidc::make_refresh_fn(
+            oidc_registry.clone(),
+            format!("{}/auth/cluster/callback", self.public_url),
+            crate::unix_now,
+        );
+        let provider = Arc::new(crate::oidc_provider::OidcTokenProvider::new(
+            db.clone(),
+            key.clone(),
+            user_id,
+            refresh,
+        ));
+        cache
+            .set_auth_resolver(Arc::new(crate::cluster_auth_resolver::ClusterAuthResolver {
+                registry: oidc_registry,
+                provider,
+            }))
+            .await;
+
         let registry = Arc::new((self.factory)(cache.clone(), paths.clone()));
         let streams = Arc::new(crate::streams::UserStreams::new(cache.clone()));
         let env = Arc::new(UserEnv {
@@ -228,8 +259,8 @@ mod tests {
         })
     }
 
-    fn key() -> MasterKey {
-        MasterKey::from_hex(&"ab".repeat(32)).unwrap()
+    fn key() -> Arc<MasterKey> {
+        Arc::new(MasterKey::from_hex(&"ab".repeat(32)).unwrap())
     }
 
     fn test_data_dir() -> PathBuf {
@@ -250,7 +281,7 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = UserEnvs::new(factory(), data_dir.clone());
+        let envs = UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into());
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
         assert_eq!(env.paths.len(), 1);
         let on_disk = std::fs::read_to_string(&env.paths[0]).unwrap();
@@ -301,7 +332,7 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = UserEnvs::new(factory(), data_dir.clone());
+        let envs = UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into());
         let a = envs.env_for(&db, &k, alice.id).await.unwrap();
         let b = envs.env_for(&db, &k, bob.id).await.unwrap();
         assert_eq!(a.paths.len(), 1);
@@ -329,7 +360,7 @@ mod tests {
         db.put_kubeconfig(user.id, "kc", &k, "contexts: []\n", 1)
             .await
             .unwrap();
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
         // Fire many concurrent first-time env_for for the same user.
         let mut handles = vec![];
         for _ in 0..8 {
@@ -361,7 +392,7 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
@@ -393,7 +424,7 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         // Register a live WS connection for the user before building the env.
@@ -420,7 +451,7 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         let env = envs.env_for(&db, &k, user.id).await.unwrap();

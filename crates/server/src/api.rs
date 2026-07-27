@@ -125,6 +125,14 @@ pub async fn invoke_capability(
     match env.registry.invoke(&id, input).await {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => {
+            // A handler failure carrying the cluster-login marker means the
+            // context is OIDC-protected and has no valid token → 401 so the
+            // frontend can start the cluster sign-in flow.
+            if let CapabilityError::Handler(msg) = &e {
+                if let Some(resp) = maybe_cluster_login_response(msg) {
+                    return resp;
+                }
+            }
             let status = match &e {
                 CapabilityError::NotFound(_) => StatusCode::NOT_FOUND,
                 CapabilityError::InvalidInput(_) => StatusCode::BAD_REQUEST,
@@ -133,6 +141,27 @@ pub async fn invoke_capability(
             error_response(status, &e.to_string())
         }
     }
+}
+
+/// If `err_msg` is a cluster-login-required marker (from the OIDC auth
+/// resolver), build the 401 that tells the frontend to start the cluster OIDC
+/// flow: `{"error":"cluster_login_required","key","context","loginUrl"}`.
+/// Returns `None` for any other error so normal error mapping proceeds.
+pub fn maybe_cluster_login_response(err_msg: &str) -> Option<Response> {
+    let (key, context) = srelens_kube::auth_resolver::parse_needs_login(err_msg)?;
+    let login_url = format!("/auth/cluster/login?key={key}");
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "cluster_login_required",
+                "key": key,
+                "context": context,
+                "loginUrl": login_url,
+            })),
+        )
+            .into_response(),
+    )
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
@@ -177,6 +206,15 @@ mod tests {
         reg.register(Capability::read_only("boom", "always fails", |_| async {
             Err(CapabilityError::Handler("cluster unreachable".into()))
         }));
+        reg.register(Capability::read_only(
+            "needslogin",
+            "context needs cluster oidc login",
+            |_| async {
+                Err(CapabilityError::Handler(
+                    srelens_kube::auth_resolver::needs_login_marker("K", "ctx"),
+                ))
+            },
+        ));
         reg.register(Capability::typed::<AddIn, AddOut, _, _>(
             "danger.add",
             "non-read-only add",
@@ -240,6 +278,27 @@ mod tests {
         let (status, body) = post("/api/capability/echo", Body::empty()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!({ "echo": null }));
+    }
+
+    #[tokio::test]
+    async fn cluster_login_marker_becomes_401() {
+        // A handler error carrying the OIDC needs-login marker maps to a 401
+        // that tells the frontend where to start the cluster sign-in flow —
+        // not the generic 502 a plain handler failure would produce.
+        let (status, body) = post("/api/capability/needslogin", Body::empty()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], json!("cluster_login_required"));
+        assert_eq!(body["key"], json!("K"));
+        assert_eq!(body["context"], json!("ctx"));
+        assert_eq!(body["loginUrl"], json!("/auth/cluster/login?key=K"));
+    }
+
+    #[tokio::test]
+    async fn plain_handler_failure_stays_502() {
+        // A non-marker handler failure is unaffected by the marker check.
+        let (status, body) = post("/api/capability/boom", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], json!("handler error: cluster unreachable"));
     }
 
     #[tokio::test]

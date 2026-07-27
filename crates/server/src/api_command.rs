@@ -23,6 +23,14 @@ fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+/// Map a stream-start error to a response: a cluster-login-required marker (the
+/// context is OIDC-protected with no valid token) becomes a 401 the frontend
+/// can act on; anything else is a 502 (cluster unreachable, RBAC, etc.).
+fn command_error(err_msg: &str) -> Response {
+    crate::api::maybe_cluster_login_response(err_msg)
+        .unwrap_or_else(|| error(StatusCode::BAD_GATEWAY, err_msg))
+}
+
 fn ok(value: Value) -> Response {
     (StatusCode::OK, Json(value)).into_response()
 }
@@ -184,7 +192,7 @@ async fn run(
                 .watch
                 .start(sink(), a.context, a.namespace, a.kind, a.channel, paths)
                 .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
+                .map_err(|e| command_error(&e))?;
             json!(channel)
         }
         "stop_watch" => {
@@ -207,7 +215,7 @@ async fn run(
                     a.tail_lines,
                 )
                 .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
+                .map_err(|e| command_error(&e))?;
             json!(null)
         }
         "stop_log_stream" => {
@@ -234,7 +242,7 @@ async fn run(
                     },
                 )
                 .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
+                .map_err(|e| command_error(&e))?;
             json!(id)
         }
         "exec_input" => {
@@ -267,7 +275,7 @@ async fn run(
                     a.local_port,
                 )
                 .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
+                .map_err(|e| command_error(&e))?;
             json!({ "id": info.id, "localPort": info.local_port })
         }
         "stop_port_forward" => {
@@ -282,7 +290,7 @@ async fn run(
                 .terminal
                 .start(sink(), a.context, paths, a.channel, a.cols, a.rows)
                 .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
+                .map_err(|e| command_error(&e))?;
             json!(id)
         }
         "terminal_input" => {
@@ -307,7 +315,7 @@ async fn run(
                 .helm
                 .start(sink(), a.context, paths, a.args, a.values, a.channel)
                 .await
-                .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
+                .map_err(|e| command_error(&e))?;
             json!(id)
         }
         "helm_op_close" => {
