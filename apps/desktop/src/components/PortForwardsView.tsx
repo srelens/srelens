@@ -2,7 +2,7 @@ import React from "react";
 import { CircleStop, Copy } from "lucide-react";
 import { Table, Badge, Button, ColumnPicker, useColumnVisibility, type Column } from "../ui";
 import { useForwards } from "./ForwardsIndicator";
-import { stopPortForward, forwardUrl, type ActiveForward } from "../lib/forward";
+import { stopPortForward, forwardUrl, forwardAddress, type ActiveForward } from "../lib/forward";
 
 /**
  * Network overview of every active port-forward across all connected clusters.
@@ -40,7 +40,7 @@ export function PortForwardsView({ context }: { context?: string }) {
           target="_blank"
           rel="noreferrer"
         >
-          localhost:{f.localPort}
+          {forwardAddress(f)}
         </a>
       ),
     },
@@ -52,7 +52,7 @@ export function PortForwardsView({ context }: { context?: string }) {
         <div className="flex justify-end gap-2">
           <Button
             variant="ghost"
-            onClick={() => void navigator.clipboard?.writeText(`localhost:${f.localPort}`)}
+            onClick={() => void navigator.clipboard?.writeText(forwardAddress(f))}
           >
             <Copy data-icon="inline-start" />
             Copy

@@ -26,8 +26,38 @@ describe("PortForwardsView", () => {
     expect(screen.getByText(/No active port forwards/)).toBeDefined();
   });
 
-  it("lists active forwards and can stop one", async () => {
-    invokeCommandMock.mockResolvedValueOnce({ id: 1, localPort: 5000 });
+  it("lists active forwards and can stop one (desktop shows localhost address)", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    try {
+      invokeCommandMock.mockResolvedValueOnce({ id: 1, localPort: 5000 });
+      await act(async () => {
+        await startPortForward({
+          context: "kind-dev",
+          namespace: "default",
+          kind: "Service",
+          name: "web",
+          remotePort: 80,
+        });
+      });
+
+      render(<PortForwardsView context="kind-dev" />);
+      expect(screen.getByText("web")).toBeDefined();
+      expect(screen.getByText("Service")).toBeDefined();
+      expect(screen.getByText("localhost:5000")).toBeDefined();
+
+      invokeCommandMock.mockResolvedValueOnce(undefined);
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+      await waitFor(() =>
+        expect(invokeCommandMock).toHaveBeenCalledWith("stop_port_forward", { id: 1 }),
+      );
+      await waitFor(() => expect(screen.getByText(/No active port forwards/)).toBeDefined());
+    } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("shows the proxied /pf URL in web mode", async () => {
+    invokeCommandMock.mockResolvedValueOnce({ id: 2, localPort: 5001 });
     await act(async () => {
       await startPortForward({
         context: "kind-dev",
@@ -39,15 +69,6 @@ describe("PortForwardsView", () => {
     });
 
     render(<PortForwardsView context="kind-dev" />);
-    expect(screen.getByText("web")).toBeDefined();
-    expect(screen.getByText("Service")).toBeDefined();
-    expect(screen.getByText("localhost:5000")).toBeDefined();
-
-    invokeCommandMock.mockResolvedValueOnce(undefined);
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-    await waitFor(() =>
-      expect(invokeCommandMock).toHaveBeenCalledWith("stop_port_forward", { id: 1 }),
-    );
-    await waitFor(() => expect(screen.getByText(/No active port forwards/)).toBeDefined());
+    expect(screen.getByText(`${window.location.origin}/pf/2/`)).toBeDefined();
   });
 });

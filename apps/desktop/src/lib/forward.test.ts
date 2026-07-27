@@ -15,6 +15,7 @@ import {
   getForwards,
   subscribeForwards,
   forwardUrl,
+  forwardAddress,
   type ActiveForward,
 } from "./forward";
 
@@ -111,5 +112,18 @@ describe("forwardUrl", () => {
   });
   it("uses the /pf proxy path on web", () => {
     expect(forwardUrl({ id: 3, localPort: 5000 })).toBe("/pf/3/");
+  });
+});
+
+describe("forwardAddress", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+  it("uses localhost:port on desktop", () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    expect(forwardAddress({ id: 3, localPort: 5000 })).toBe("localhost:5000");
+  });
+  it("uses the absolute /pf proxy URL on web", () => {
+    expect(forwardAddress({ id: 3, localPort: 5000 })).toBe(`${window.location.origin}/pf/3/`);
   });
 });

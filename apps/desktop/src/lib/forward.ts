@@ -77,6 +77,15 @@ export function forwardUrl(info: { id: number; localPort: number }): string {
   return isTauri() ? `http://localhost:${info.localPort}` : `/pf/${info.id}/`;
 }
 
+/** The human-readable, copy-pasteable address of a live forward: the bound
+ *  localhost port on desktop, or the absolute same-origin `/pf/<id>/` proxy URL
+ *  on web (the container's loopback port isn't reachable from the browser). */
+export function forwardAddress(info: { id: number; localPort: number }): string {
+  return isTauri()
+    ? `localhost:${info.localPort}`
+    : `${window.location.origin}/pf/${info.id}/`;
+}
+
 function removeForward(id: number) {
   closers.get(id)?.();
   closers.delete(id);

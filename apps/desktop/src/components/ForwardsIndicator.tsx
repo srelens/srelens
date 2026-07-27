@@ -5,6 +5,7 @@ import {
   getForwards,
   subscribeForwards,
   stopPortForward,
+  forwardAddress,
   type ActiveForward,
 } from "../lib/forward";
 
@@ -15,7 +16,7 @@ export function useForwards(): ActiveForward[] {
 
 /**
  * Status-bar control listing active port-forwards. Hidden when none are
- * running; otherwise a count opens a popover to copy `localhost:<port>` or
+ * running; otherwise a count opens a popover to copy the forward's address or
  * stop each forward.
  */
 export function ForwardsIndicator() {
@@ -44,14 +45,14 @@ export function ForwardsIndicator() {
                   <span className="text-muted-foreground"> · {f.kind.toLowerCase()}</span>
                 </div>
                 <div className="truncate font-mono text-muted-foreground">
-                  localhost:{f.localPort} → {f.remotePort}
+                  {forwardAddress(f)} → {f.remotePort}
                 </div>
               </div>
               <button
                 type="button"
                 className="fl-forward-action rounded-sm px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                onClick={() => void navigator.clipboard?.writeText(`localhost:${f.localPort}`)}
-                title="Copy localhost address"
+                onClick={() => void navigator.clipboard?.writeText(forwardAddress(f))}
+                title="Copy address"
               >
                 <Copy aria-hidden="true" />
                 Copy
