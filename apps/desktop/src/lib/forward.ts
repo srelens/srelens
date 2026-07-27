@@ -1,4 +1,5 @@
 import { invokeCommand, on } from "../transport/transport";
+import { isTauri } from "../transport/platform";
 
 /** A live port-forward: a local port piped to a Pod or Service. */
 export interface ActiveForward {
@@ -67,6 +68,13 @@ export async function startPortForward(req: ForwardRequest): Promise<ActiveForwa
 export async function stopPortForward(id: number): Promise<void> {
   await invokeCommand("stop_port_forward", { id });
   removeForward(id);
+}
+
+/** Where a live port-forward is reachable from the current UI: the bound
+ *  localhost port on desktop, or the same-origin `/pf/<id>/` reverse proxy on
+ *  web (the container's loopback port isn't reachable from the browser). */
+export function forwardUrl(info: { id: number; localPort: number }): string {
+  return isTauri() ? `http://localhost:${info.localPort}` : `/pf/${info.id}/`;
 }
 
 function removeForward(id: number) {
