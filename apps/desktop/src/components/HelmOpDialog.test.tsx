@@ -3,7 +3,9 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { HelmOpDialog } from "./HelmOpDialog";
 import type { HelmChartRef } from "../lib/helm";
 
-const helmSearchRepoMock = vi.fn(async (): Promise<{ entries?: HelmChartRef[]; error?: string }> => ({ entries: [] }));
+const helmSearchRepoMock = vi.fn(
+  async (_context: string, _chart: string): Promise<{ entries?: HelmChartRef[]; error?: string }> => ({ entries: [] }),
+);
 
 vi.mock("../lib/helm", async (orig) => {
   const actual = await orig<typeof import("../lib/helm")>();

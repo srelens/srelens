@@ -6,6 +6,28 @@ import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "
 import { saveTextFile } from "../lib/files";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
 import { computeLogWindow } from "./logWindow";
+import { isTauri } from "../transport/platform";
+
+/**
+ * Save `content` to `filename`: in the desktop app via the native save
+ * dialog (`saveTextFile`); on the web, trigger a browser download — a
+ * Tauri webview's `<a download>` doesn't prompt a save, but a real browser's
+ * does, so this is the web-only path.
+ */
+async function saveOrDownload(filename: string, content: string): Promise<void> {
+  if (isTauri()) {
+    await saveTextFile(filename, content);
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 /** What a logs view is following: a single pod, or every pod of a workload. */
 export type LogsSource =
@@ -380,7 +402,7 @@ export function LogsView({
   function download() {
     const base = srcType === "pod" ? srcPod : srcName;
     setSaveError("");
-    void saveTextFile(`${base || "logs"}.log`, flatten(entries)).catch((e) => setSaveError(String(e)));
+    void saveOrDownload(`${base || "logs"}.log`, flatten(entries)).catch((e) => setSaveError(String(e)));
   }
 
   // Full dump: every container of every in-scope pod, ignoring the container
@@ -407,7 +429,7 @@ export function LogsView({
           parts.push("");
         }
       }
-      await saveTextFile(`${base || "logs"}-all.log`, parts.join("\n"));
+      await saveOrDownload(`${base || "logs"}-all.log`, parts.join("\n"));
     })()
       .catch((e) => setSaveError(String(e)))
       .finally(() => setSavingAll(false));

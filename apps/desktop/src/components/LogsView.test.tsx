@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
@@ -24,7 +24,12 @@ vi.mock("../lib/manifest", async (importOriginal) => {
 
 import { LogsView } from "./LogsView";
 
+// The download/download-all actions use saveTextFile only under Tauri (Task
+// 5 branches to a browser download on the web); give the suite a Tauri
+// context so those tests exercise the desktop path as before. The web-mode
+// download is covered separately, without this context.
 beforeEach(() => {
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
   podLogsMock.mockReset();
   getObjectMock.mockReset();
   podsForSelectorMock.mockReset();
@@ -35,6 +40,9 @@ beforeEach(() => {
   startLogStreamMock.mockResolvedValue({ stop: vi.fn() });
   saveTextFileMock.mockReset();
   saveTextFileMock.mockResolvedValue("/tmp/web-1.log");
+});
+afterEach(() => {
+  delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
 });
 
 describe("LogsView", () => {
@@ -113,6 +121,27 @@ describe("LogsView", () => {
     await waitFor(() =>
       expect(saveTextFileMock).toHaveBeenCalledWith("web-1.log", "line one\nline two"),
     );
+  });
+
+  it("triggers a browser download on the web instead of saveTextFile", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    const createObjectURLMock = vi.fn(() => "blob:mock-url");
+    const revokeObjectURLMock = vi.fn();
+    URL.createObjectURL = createObjectURLMock;
+    URL.revokeObjectURL = revokeObjectURLMock;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    podLogsMock.mockResolvedValue({ logs: "line one\nline two" });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await waitFor(() => expect(screen.getByText("line two")).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(createObjectURLMock).toHaveBeenCalled());
+    expect(clickSpy).toHaveBeenCalled();
+    expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:mock-url");
+    expect(saveTextFileMock).not.toHaveBeenCalled();
+
+    clickSpy.mockRestore();
   });
 
   it("filters lines with the search box", async () => {

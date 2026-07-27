@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
@@ -22,13 +22,21 @@ const SAMPLE = [
   "[2026-07-21][12:00:02][srelens][ERROR] connect kube_prod/default: unreachable",
 ].join("\n");
 
+// AppLogView only fetches the log file (read_app_log/app_log_path — desktop
+// Tauri commands that 404 on web) when running under Tauri; give the suite a
+// Tauri context so the fetch/filter tests exercise that path as before. The
+// web-mode notice is covered separately below, without this context.
 beforeEach(() => {
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
   readAppLogMock.mockReset();
   appLogPathMock.mockReset();
   revealAppLogMock.mockReset();
   readAppLogMock.mockResolvedValue(SAMPLE);
   appLogPathMock.mockResolvedValue("/Users/x/Library/Logs/srelens/srelens.log");
   revealAppLogMock.mockResolvedValue(undefined);
+});
+afterEach(() => {
+  delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
 });
 
 describe("logLineLevel", () => {
@@ -67,15 +75,18 @@ describe("AppLogView", () => {
   });
 
   it("reveals the log file in the file manager", async () => {
-    // The reveal button is desktop-only (Task 5 gates it behind `isTauri()`).
-    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
-    try {
-      render(<AppLogView />);
-      await waitFor(() => expect(screen.getByText(/starting/)).toBeDefined());
-      fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
-      await waitFor(() => expect(revealAppLogMock).toHaveBeenCalled());
-    } finally {
-      delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
-    }
+    render(<AppLogView />);
+    await waitFor(() => expect(screen.getByText(/starting/)).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(revealAppLogMock).toHaveBeenCalled());
+  });
+
+  it("shows a desktop-only notice on the web instead of fetching the log", () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    render(<AppLogView />);
+    expect(screen.getByText(/Application logs are available in the desktop app/)).toBeDefined();
+    expect(screen.getByText("docker logs")).toBeDefined();
+    expect(readAppLogMock).not.toHaveBeenCalled();
+    expect(appLogPathMock).not.toHaveBeenCalled();
   });
 });

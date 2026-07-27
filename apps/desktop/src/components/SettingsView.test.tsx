@@ -438,4 +438,35 @@ describe("SettingsView", () => {
 
     await waitFor(() => expect(onDeleteContext).toHaveBeenCalledWith("staging"));
   });
+
+  it("hides the Updates/MCP nav items and the request-timeout slider on the web", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+
+    // The desktop-only nav entries are gone entirely (not just empty panes).
+    expect(screen.queryByRole("button", { name: /Updates/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^MCP/ })).toBeNull();
+
+    // The request-timeout slider is a no-op on the web (set_request_timeout
+    // isn't a web command), so it's hidden rather than shown-but-broken.
+    fireEvent.click(screen.getByRole("button", { name: /Kubernetes/ }));
+    expect(await screen.findByLabelText("Default namespace")).toBeDefined();
+    expect(screen.queryByLabelText("Cluster request timeout in seconds")).toBeNull();
+  });
 });

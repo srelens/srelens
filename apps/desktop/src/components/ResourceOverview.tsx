@@ -1951,11 +1951,10 @@ export function ConfigDataEditor({
           <Button
             size="sm"
             onClick={() => void save()}
-            busy={busy}
             disabled={busy || !access.allowed(updateCheck)}
             title={denyReason(access, updateCheck)}
           >
-            Save
+            {busy ? <Spinner label="Saving" /> : "Save"}
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setEdited({})} disabled={busy}>
             Reset

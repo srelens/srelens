@@ -119,7 +119,12 @@ const pod = {
 };
 
 // watchResource(ctx, ns, kind, onRows) — push one snapshot, return a handle.
-function watchWith(rows: Array<{ name: string }>) {
+// Row shape varies by resource kind (deployments, statefulsets, PVCs, …), so
+// the parameter only pins down the field every caller shares (`name`) and
+// leaves the rest open via the index signature — otherwise TS's excess
+// property check on the inline object literals below would reject every
+// kind-specific field (namespace, capacity, provisioner, rules, role, …).
+function watchWith(rows: Array<{ name: string } & Record<string, unknown>>) {
   return (_ctx: string, _ns: string, _kind: string, onRows: (r: unknown) => void) => {
     onRows(rows);
     return Promise.resolve({ stop: vi.fn() });

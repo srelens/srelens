@@ -92,7 +92,11 @@ export function k8sDiagnostics(text: string, errors: Array<{ docIndex: number; m
   let docs: ReturnType<typeof parseAllDocuments> = [];
   try {
     // Match the backend's split (which skips empty documents) so docIndex aligns.
-    docs = parseAllDocuments(text).filter((d) => d.contents != null);
+    // Cast: `.filter()` widens the yaml package's generic Document union in a
+    // way `docs`'s ReturnType<typeof parseAllDocuments> annotation doesn't
+    // structurally match, even though every filtered element is still one of
+    // the same Document instances `parseAllDocuments` produced.
+    docs = parseAllDocuments(text).filter((d) => d.contents != null) as typeof docs;
   } catch {
     docs = [];
   }

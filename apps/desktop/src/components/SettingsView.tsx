@@ -145,6 +145,13 @@ export function SettingsView({
   contextsError?: string;
   onDeleteContext?: (name: string) => Promise<void>;
 }) {
+  // MCP and Updates are desktop-only surfaces (their content is already
+  // isTauri()-gated below); drop the nav entries entirely on the web instead
+  // of leaving empty panes behind.
+  const visibleSections = isTauri()
+    ? SETTINGS_SECTIONS
+    : SETTINGS_SECTIONS.filter((s) => s.id !== "mcp" && s.id !== "updates");
+
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [internalContexts, setInternalContexts] = useState<ClusterContext[] | null>(null);
   const [internalError, setInternalError] = useState("");
@@ -392,7 +399,7 @@ export function SettingsView({
 
       <div className="fl-settings-workspace">
         <nav className="fl-settings-nav" aria-label="Settings sections">
-          {SETTINGS_SECTIONS.map(({ id, label, description, icon: Icon }) => (
+          {visibleSections.map(({ id, label, description, icon: Icon }) => (
             <button
               key={id}
               type="button"
@@ -512,31 +519,33 @@ export function SettingsView({
                 />
               </label>
 
-              <div className="fl-settings-width-grid">
-                <label className="fl-settings-width-control">
-                  <span className="fl-settings-width-control__header">
-                    <Timer aria-hidden="true" />
-                    <span>
-                      <strong>Request timeout</strong>
-                      <small>How long to wait for a cluster response. Raise it for large clusters.</small>
+              {isTauri() && (
+                <div className="fl-settings-width-grid">
+                  <label className="fl-settings-width-control">
+                    <span className="fl-settings-width-control__header">
+                      <Timer aria-hidden="true" />
+                      <span>
+                        <strong>Request timeout</strong>
+                        <small>How long to wait for a cluster response. Raise it for large clusters.</small>
+                      </span>
+                      <output>{requestTimeout}s</output>
                     </span>
-                    <output>{requestTimeout}s</output>
-                  </span>
-                  <input
-                    type="range"
-                    min={REQUEST_TIMEOUT.MIN}
-                    max={REQUEST_TIMEOUT.MAX}
-                    step="1"
-                    value={requestTimeout}
-                    onChange={(event) => {
-                      const secs = Number(event.target.value);
-                      setRequestTimeout(secs);
-                      void updateRequestTimeout(secs);
-                    }}
-                    aria-label="Cluster request timeout in seconds"
-                  />
-                </label>
-              </div>
+                    <input
+                      type="range"
+                      min={REQUEST_TIMEOUT.MIN}
+                      max={REQUEST_TIMEOUT.MAX}
+                      step="1"
+                      value={requestTimeout}
+                      onChange={(event) => {
+                        const secs = Number(event.target.value);
+                        setRequestTimeout(secs);
+                        void updateRequestTimeout(secs);
+                      }}
+                      aria-label="Cluster request timeout in seconds"
+                    />
+                  </label>
+                </div>
+              )}
             </SectionPanel>
           )}
 

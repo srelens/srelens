@@ -175,7 +175,7 @@ export function McpSettingsSection() {
           {MCP_TOOLS.map((t) => (
             <Button
               key={t.id}
-              variant={tool === t.id ? "default" : "ghost"}
+              variant={tool === t.id ? "primary" : "ghost"}
               size="sm"
               aria-pressed={tool === t.id}
               onClick={() => setTool(t.id)}
@@ -188,7 +188,7 @@ export function McpSettingsSection() {
           {(["stdio", "http"] as McpTransport[]).map((tr) => (
             <Button
               key={tr}
-              variant={transport === tr ? "default" : "ghost"}
+              variant={transport === tr ? "primary" : "ghost"}
               size="sm"
               aria-pressed={transport === tr}
               onClick={() => setTransport(tr)}

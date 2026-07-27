@@ -52,7 +52,10 @@ export function AppLogView() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => load(), [load]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    return load();
+  }, [load]);
 
   const lines = useMemo(() => (raw ? raw.split("\n").filter(Boolean) : []), [raw]);
   const filtered = useMemo(() => {
@@ -74,6 +77,17 @@ export function AppLogView() {
     } catch {
       // Clipboard may be unavailable; the path is shown for manual copy.
     }
+  }
+
+  if (!isTauri()) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-1 rounded border border-border bg-card p-4 text-center text-sm text-muted-foreground">
+        <p>
+          Application logs are available in the desktop app; on the server, view container logs
+          (e.g. <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">docker logs</code>).
+        </p>
+      </div>
+    );
   }
 
   return (

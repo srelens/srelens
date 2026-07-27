@@ -1,14 +1,15 @@
 import React from "react";
 import { Button as ShadButton } from "@/components/ui/button";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "outline";
 
-// Our 4 intents map onto shadcn's button variants.
-const VARIANT: Record<ButtonVariant, "default" | "secondary" | "ghost" | "destructive"> = {
+// Our intents map onto shadcn's button variants.
+const VARIANT: Record<ButtonVariant, "default" | "secondary" | "ghost" | "destructive" | "outline"> = {
   primary: "default",
   secondary: "secondary",
   ghost: "ghost",
   danger: "destructive",
+  outline: "outline",
 };
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
