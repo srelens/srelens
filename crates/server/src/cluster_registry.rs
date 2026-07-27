@@ -56,6 +56,26 @@ impl ClusterOidcRegistry {
     pub fn all_keys(&self) -> Vec<String> {
         self.by_key.keys().cloned().collect()
     }
+
+    /// Every OIDC cluster: its key, config, and the contexts that use it.
+    pub fn oidc_clusters(&self) -> Vec<(String, OidcClusterConfig, Vec<String>)> {
+        let mut out: Vec<(String, OidcClusterConfig, Vec<String>)> = self
+            .by_key
+            .iter()
+            .map(|(key, cfg)| {
+                let mut contexts: Vec<String> = self
+                    .key_by_context
+                    .iter()
+                    .filter(|(_, k)| *k == key)
+                    .map(|(ctx, _)| ctx.clone())
+                    .collect();
+                contexts.sort();
+                (key.clone(), cfg.clone(), contexts)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0)); // stable order for the UI
+        out
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +100,20 @@ mod tests {
         let cfg = reg.config_for_key(&ka).unwrap();
         assert_eq!(cfg.issuer, "https://idp");
         assert_eq!(cfg.client_id, "k8s");
+    }
+
+    #[test]
+    fn oidc_clusters_dedups_by_key_and_lists_all_contexts() {
+        let a = oidc_kc("ctx-a", "https://idp", "k8s");
+        let b = oidc_kc("ctx-b", "https://idp", "k8s"); // same issuer+client → same key
+        let reg = ClusterOidcRegistry::from_kubeconfig_yamls(&[a, b]);
+        let entries = reg.oidc_clusters();
+        assert_eq!(entries.len(), 1);
+        let (key, cfg, contexts) = &entries[0];
+        assert_eq!(key, &reg.key_for_context("ctx-a").unwrap());
+        assert_eq!(cfg.issuer, "https://idp");
+        assert_eq!(cfg.client_id, "k8s");
+        assert_eq!(contexts, &vec!["ctx-a".to_string(), "ctx-b".to_string()]);
     }
 
     #[test]

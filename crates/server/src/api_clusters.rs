@@ -84,6 +84,45 @@ pub async fn create(
     Json(serde_json::json!({ "name": name })).into_response()
 }
 
+/// GET /api/clusters — list the caller's OIDC clusters with sign-in status.
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserCtx>,
+) -> Response {
+    let env = match state
+        .user_envs
+        .env_for(&state.db, &state.master_key, user.user_id)
+        .await
+    {
+        Ok(env) => env,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let now = crate::unix_now();
+    let mut clusters = Vec::new();
+    for (key, cfg, contexts) in env.oidc_registry.oidc_clusters() {
+        let token = state
+            .db
+            .get_cluster_token(user.user_id, &key, &state.master_key)
+            .await
+            .ok()
+            .flatten();
+        let (signed_in, expires_at) = match &token {
+            // "signed in" = a token exists and isn't already past expiry.
+            Some(t) => (t.expires_at > now, Some(t.expires_at)),
+            None => (false, None),
+        };
+        clusters.push(serde_json::json!({
+            "key": key,
+            "issuer": cfg.issuer,
+            "clientId": cfg.client_id,
+            "contexts": contexts,
+            "signedIn": signed_in,
+            "expiresAt": expires_at,
+        }));
+    }
+    Json(serde_json::json!({ "clusters": clusters })).into_response()
+}
+
 /// POST /api/clusters/:key/logout — forget the caller's stored OIDC token for
 /// this cluster (does not remove the cluster's kubeconfig itself).
 pub async fn logout(
@@ -181,6 +220,43 @@ mod tests {
         let reg = crate::cluster_registry::ClusterOidcRegistry::from_kubeconfig_yamls(&[yaml]);
         let key = reg.key_for_context("prod").expect("context is OIDC");
         assert!(reg.config_for_key(&key).is_some());
+    }
+
+    #[tokio::test]
+    async fn list_returns_created_oidc_cluster_not_signed_in() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let (_user_id, token) = session(&state).await;
+        let cookie = format!("srelens_session={token}");
+
+        let resp = send(
+            state.clone(),
+            "POST",
+            "/api/clusters".into(),
+            &cookie,
+            Some(serde_json::json!({
+                "name": "prod",
+                "server": "https://api.prod:6443",
+                "insecureSkipTlsVerify": true,
+                "oidc": {
+                    "issuer": "https://dex.example.com",
+                    "clientId": "k8s",
+                    "extraScopes": ["groups"],
+                }
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = send(state.clone(), "GET", "/api/clusters".into(), &cookie, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let clusters = v["clusters"].as_array().unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0]["signedIn"], serde_json::json!(false));
+        assert_eq!(clusters[0]["issuer"], serde_json::json!("https://dex.example.com"));
+        assert_eq!(clusters[0]["clientId"], serde_json::json!("k8s"));
+        assert!(!clusters[0]["contexts"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

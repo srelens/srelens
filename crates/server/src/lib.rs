@@ -119,7 +119,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/clusters",
-            axum::routing::post(api_clusters::create),
+            get(api_clusters::list).post(api_clusters::create),
         )
         .route(
             "/api/clusters/:key/logout",
