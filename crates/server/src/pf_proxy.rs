@@ -62,14 +62,21 @@ pub struct PfPath {
 }
 
 /// GET/POST/... `/pf/:id/*rest` — reverse-proxy to the caller's forward.
+///
+/// Takes the whole `axum::extract::Request` (rather than separate
+/// method/uri/headers/body extractors) because the WebSocket-upgrade path
+/// needs `hyper::upgrade::on(&mut req)`, which requires the original request
+/// value — reconstructing an equivalent `hyper::Request` from extracted parts
+/// does not carry the connection's upgrade extension.
 pub async fn proxy(
     State(state): State<AppState>,
     Path(pf): Path<PfPath>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Body,
+    mut req: axum::extract::Request,
 ) -> Response {
+    let headers = req.headers().clone();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+
     let user_id = match authorize_pf(&headers, &state.db, crate::unix_now()).await {
         Ok(id) => id,
         Err(status) => return status.into_response(),
@@ -86,6 +93,16 @@ pub async fn proxy(
     let Some(port) = env.streams.forward.local_port(pf.id) else {
         return (StatusCode::NOT_FOUND, "no such forward").into_response();
     };
+
+    let is_ws_upgrade = headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    if is_ws_upgrade {
+        return ws_passthrough(port, method, uri, headers, &mut req).await;
+    }
+    let body = req.into_body();
 
     // Build the upstream URI: preserve the sub-path and query, drop the
     // /pf/<id> prefix.
@@ -125,6 +142,115 @@ pub async fn proxy(
             out
         }
         Err(_) => (StatusCode::BAD_GATEWAY, "forwarded service unreachable").into_response(),
+    }
+}
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Relay a WebSocket upgrade to the forwarded loopback port. We send the raw
+/// upgrade request upstream, confirm the 101 response, then pipe bytes both
+/// ways between the client's upgraded connection and the upstream TCP socket.
+///
+/// Takes `req: &mut axum::extract::Request` (rather than reconstructing a
+/// `hyper::Request` from separate parts) so `hyper::upgrade::on` sees the
+/// original request value — that's what carries the connection's upgrade
+/// extension set by the server that accepted this request.
+async fn ws_passthrough(
+    port: u16,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    req: &mut axum::extract::Request,
+) -> Response {
+    // Only GET can be a WS handshake.
+    if method != Method::GET {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    // Connect to the upstream and send the handshake request line + headers,
+    // rewriting the path to strip /pf/<id>.
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let stripped = strip_pf_prefix(path_and_query);
+
+    let mut upstream = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+        Ok(s) => s,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+
+    let mut handshake = format!("GET {stripped} HTTP/1.1\r\n");
+    for (name, value) in headers.iter() {
+        if name.as_str() == "host" {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            handshake.push_str(&format!("{}: {}\r\n", name.as_str(), v));
+        }
+    }
+    handshake.push_str(&format!("host: 127.0.0.1:{port}\r\n\r\n"));
+    if upstream.write_all(handshake.as_bytes()).await.is_err() {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+
+    // Read the upstream response headers (until CRLFCRLF); require 101.
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match upstream.read(&mut byte).await {
+            Ok(0) => return StatusCode::BAD_GATEWAY.into_response(),
+            Ok(_) => {
+                head.push(byte[0]);
+                if head.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+                if head.len() > 16 * 1024 {
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+            }
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        }
+    }
+    let head_str = String::from_utf8_lossy(&head);
+    if !head_str.starts_with("HTTP/1.1 101") {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+
+    // Build the 101 response back to the client, echoing the upstream's WS
+    // accept headers, and take over the client connection on upgrade.
+    let mut client_resp = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+    for line in head_str.lines().skip(1) {
+        if let Some((name, value)) = line.split_once(':') {
+            let (name, value) = (name.trim(), value.trim());
+            if !name.is_empty() && !value.is_empty() {
+                client_resp = client_resp.header(name, value);
+            }
+        }
+    }
+
+    let on_upgrade = hyper::upgrade::on(req);
+
+    tokio::spawn(async move {
+        if let Ok(upgraded) = on_upgrade.await {
+            let mut client_io = hyper_util::rt::TokioIo::new(upgraded);
+            let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream).await;
+        }
+    });
+
+    match client_resp.body(Body::empty()) {
+        Ok(r) => r,
+        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
+/// Strip the leading `/pf/<id>` (two path segments) from a path+query,
+/// returning the remainder starting with `/`.
+fn strip_pf_prefix(path_and_query: &str) -> String {
+    // e.g. "/pf/3/socket?x=1" -> "/socket?x=1"; "/pf/3" -> "/"
+    let mut segs = path_and_query.splitn(4, '/'); // ["", "pf", "<id>", "rest?query"]
+    segs.next(); // leading ""
+    segs.next(); // "pf"
+    segs.next(); // "<id>"
+    match segs.next() {
+        Some(rest) if !rest.is_empty() => format!("/{rest}"),
+        _ => "/".to_string(),
     }
 }
 
@@ -211,5 +337,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         assert_eq!(&bytes[..], b"hello from pod");
+    }
+
+    #[test]
+    fn strip_pf_prefix_removes_two_segments() {
+        assert_eq!(super::strip_pf_prefix("/pf/3/socket?x=1"), "/socket?x=1");
+        assert_eq!(super::strip_pf_prefix("/pf/3/"), "/");
+        assert_eq!(super::strip_pf_prefix("/pf/3"), "/");
+        assert_eq!(super::strip_pf_prefix("/pf/12/a/b/c"), "/a/b/c");
     }
 }
