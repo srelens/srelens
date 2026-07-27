@@ -49,6 +49,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=backend /src/target/release/srelens-server /usr/local/bin/srelens-server
 USER srelens
 ENV SRELENS_DATA=/data
+# Belt-and-suspenders glibc arena cap (mostly moot with jemalloc as the
+# binary's global allocator, but a safe default if that ever changes).
+ENV MALLOC_ARENA_MAX=2
 EXPOSE 8080
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

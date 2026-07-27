@@ -26,6 +26,9 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 async-trait = "0.1"
 openidconnect = { version = "3", default-features = false, features = ["reqwest", "rustls-tls"] }
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [[bin]]
 name = "srelens-server"
 path = "src/bin/srelens-server.rs"
