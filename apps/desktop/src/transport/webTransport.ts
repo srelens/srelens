@@ -1,5 +1,7 @@
 // Web-mode transport: capability/command RPC over HTTP to the srelens server.
-// Streaming (on/subscribe) is provided by ./wsClient (wired in the next task).
+// Streaming (on/subscribe) is backed by the multiplexed socket in ./wsClient.
+
+import wsClient from "./wsClient";
 
 const CSRF = typeof crypto !== "undefined" && "randomUUID" in crypto
   ? crypto.randomUUID()
@@ -44,10 +46,23 @@ export async function appVersion(): Promise<string> {
   return (import.meta.env.VITE_APP_VERSION as string | undefined) ?? "web";
 }
 
-// Placeholder streaming exports; replaced by ./wsClient wiring in the next task.
-export function on(_channel: string, _handler: (payload: unknown) => void): () => void {
-  throw new Error("web streaming not wired yet");
+export function on(channel: string, handler: (payload: unknown) => void): () => void {
+  let dispose = () => {};
+  let disposed = false;
+  // Fire-and-forget: exec/port-forward subscribe by a server-assigned id and
+  // don't await the ack (parity with the desktop's synchronous `on`).
+  void wsClient.subscribeChannel(channel, handler).then((d) => {
+    if (disposed) d();
+    else dispose = d;
+  });
+  return () => {
+    disposed = true;
+    dispose();
+  };
 }
-export async function subscribe(_channel: string, _handler: (payload: unknown) => void): Promise<() => void> {
-  throw new Error("web streaming not wired yet");
+
+export async function subscribe(channel: string, handler: (payload: unknown) => void): Promise<() => void> {
+  // Await the `subbed` ack before resolving, so the caller can safely start
+  // the producer without losing the first frame (watch/logs/terminal/helm).
+  return wsClient.subscribeChannel(channel, handler, { awaitAck: true });
 }
