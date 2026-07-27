@@ -2565,6 +2565,14 @@ body {
   padding-right: 4px;
   scrollbar-width: thin;
 }
+.fl-cluster-test--ok {
+  font-size: 12px;
+  color: var(--fl-color-success, #16a34a);
+}
+.fl-cluster-test--fail {
+  font-size: 12px;
+  color: var(--fl-color-danger, #dc2626);
+}
 .fl-settings-mode-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

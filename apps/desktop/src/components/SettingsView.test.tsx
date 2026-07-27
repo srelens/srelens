@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "./SettingsView";
 import { DEFAULT_WORKSPACE_LAYOUT } from "../lib/settings";
@@ -68,6 +69,7 @@ describe("SettingsView", () => {
 
     expect(screen.getByText("Choose a palette and display mode. Changes apply immediately.")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     const displayName = await screen.findByRole("textbox", { name: "Display name for prod-eu" });
     fireEvent.change(displayName, { target: { value: "Production Europe" } });
     expect(onContextProfilesChange).toHaveBeenCalledWith({
@@ -95,6 +97,7 @@ describe("SettingsView", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     const url = await screen.findByRole("textbox", { name: "Custom logo URL for prod-eu" });
     fireEvent.change(url, { target: { value: "https://example.com/logo.png" } });
     expect(onContextProfilesChange).toHaveBeenCalledWith({
@@ -122,6 +125,7 @@ describe("SettingsView", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     const moveDown = await screen.findByRole("button", { name: "Move prod-eu down" });
     fireEvent.click(moveDown);
     expect(onContextOrderChange).toHaveBeenCalledWith(["staging", "prod-eu"]);
@@ -147,6 +151,7 @@ describe("SettingsView", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     await screen.findByText("Context identity");
     const rows = container.querySelectorAll<HTMLButtonElement>(".fl-context-manager__list > div > button");
     const grip = rows[0].querySelector<HTMLElement>(".fl-context-manager__grip")!;
@@ -392,6 +397,7 @@ describe("SettingsView", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     // Wait for the context details panel to render for the default selection (prod-eu)
     const removeButton = await screen.findByRole("button", { name: "Remove context" });
     fireEvent.click(removeButton);
@@ -425,6 +431,7 @@ describe("SettingsView", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
     await screen.findByText("Context identity");
 
     const row = container.querySelector<HTMLButtonElement>('button[data-context-name="staging"]')!;

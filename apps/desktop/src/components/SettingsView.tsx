@@ -172,10 +172,18 @@ export function SettingsView({
   // Bumped whenever a web-mode OIDC cluster is added, so the contexts/cluster
   // list below can refresh (consumed as a refreshNonce prop by Task 6's list).
   const [clusterRefresh, setClusterRefresh] = useState(0);
-  // Web-mode contexts sub-tab. The cluster-management sections (sources,
-  // sign-in) and the identity editor are tall; showing one at a time keeps the
-  // panel from overflowing (it can't scroll — the identity editor fills it).
-  const [webCtxTab, setWebCtxTab] = useState<"sources" | "signin" | "appearance">("sources");
+  // Contexts sub-tab. The cluster-management sections (sources, sign-in) and
+  // the identity editor are tall; showing one at a time keeps the panel from
+  // overflowing (it can't scroll — the identity editor fills it).
+  const [ctxTab, setCtxTab] = useState<"sources" | "signin" | "appearance">("sources");
+  // After an Add-cluster: refresh the web sign-in list and, on desktop, track
+  // the newly-saved kubeconfig file so its contexts appear.
+  const handleClusterAdded = (savedPath?: string) => {
+    setClusterRefresh((n) => n + 1);
+    if (savedPath) {
+      onKubeconfigFilesChange([...new Set([...kubeconfigFiles, savedPath])]);
+    }
+  };
   const [updateState, setUpdateState] = useState<UpdatePhase>({ phase: "idle" });
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(() => loadUpdateChannel());
   const [currentVersion, setCurrentVersion] = useState("");
@@ -565,11 +573,29 @@ export function SettingsView({
               title="Context management"
               description="Create a recognizable identity for every cluster without changing kubeconfig."
             >
-              {isTauri() && (
-                <div className="fl-kubeconfig-sources">
-                  <div>
-                    <span>
-                      <strong>Kubeconfig sources</strong>
+              <Tabs
+                tabs={
+                  isTauri()
+                    ? [
+                        { id: "sources", label: "Sources" },
+                        { id: "appearance", label: "Appearance" },
+                      ]
+                    : [
+                        { id: "sources", label: "Sources" },
+                        { id: "signin", label: "Cluster sign-in" },
+                        { id: "appearance", label: "Appearance" },
+                      ]
+                }
+                active={ctxTab}
+                onChange={(id) => setCtxTab(id as typeof ctxTab)}
+              />
+              {ctxTab === "sources" && (
+                <div className="fl-web-ctx-scroll">
+                  {isTauri() ? (
+                    <div className="fl-kubeconfig-sources">
+                      <div>
+                        <span>
+                          <strong>Kubeconfig sources</strong>
                       <small>The default kubeconfig is loaded first; additional files are merged in order.</small>
                     </span>
                     <span className="fl-kubeconfig-sources__actions">
@@ -626,31 +652,19 @@ export function SettingsView({
                     </div>
                   )}
                   {kubeconfigError && <p role="alert">{kubeconfigError}</p>}
+                    </div>
+                  ) : (
+                    <WebKubeconfigSection />
+                  )}
+                  <WebAddClusterSection onAdded={handleClusterAdded} />
                 </div>
               )}
-              {!isTauri() && (
-                <Tabs
-                  tabs={[
-                    { id: "sources", label: "Sources" },
-                    { id: "signin", label: "Cluster sign-in" },
-                    { id: "appearance", label: "Appearance" },
-                  ]}
-                  active={webCtxTab}
-                  onChange={(id) => setWebCtxTab(id as typeof webCtxTab)}
-                />
-              )}
-              {!isTauri() && webCtxTab === "sources" && (
-                <div className="fl-web-ctx-scroll">
-                  <WebKubeconfigSection />
-                  <WebAddClusterSection onAdded={() => setClusterRefresh((n) => n + 1)} />
-                </div>
-              )}
-              {!isTauri() && webCtxTab === "signin" && (
+              {!isTauri() && ctxTab === "signin" && (
                 <div className="fl-web-ctx-scroll">
                   <WebClusterSignInSection refreshNonce={clusterRefresh} />
                 </div>
               )}
-              {(isTauri() || webCtxTab === "appearance") &&
+              {ctxTab === "appearance" &&
                 (contexts === null ? (
                 <p className="fl-settings-context-state">Reading kubeconfig contexts…</p>
               ) : contextError ? (
