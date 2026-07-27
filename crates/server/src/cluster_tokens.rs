@@ -5,11 +5,21 @@
 use crate::crypto::{MasterKey, Sealed};
 use crate::db::Db;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StoredToken {
     pub id_token: String,
     pub refresh_token: Option<String>,
     pub expires_at: i64,
+}
+
+impl std::fmt::Debug for StoredToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredToken")
+            .field("id_token", &"<redacted>")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl Db {
@@ -140,5 +150,19 @@ mod tests {
         // Delete.
         db.delete_cluster_token(alice.id, "K1").await.unwrap();
         assert!(db.get_cluster_token(alice.id, "K1", &k).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn stored_token_debug_redacts_secrets() {
+        let token = StoredToken {
+            id_token: "super-secret-id-token".into(),
+            refresh_token: Some("super-secret-refresh-token".into()),
+            expires_at: 5000,
+        };
+        let debug = format!("{:?}", token);
+        assert!(!debug.contains("super-secret-id-token"));
+        assert!(!debug.contains("super-secret-refresh-token"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("5000"));
     }
 }
