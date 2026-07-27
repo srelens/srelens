@@ -46,6 +46,7 @@ import {
   loadUpdateChannel,
   loadMcpSettings,
 } from "./lib/settings";
+import { loadOpenTabs, saveOpenTabs, nextTabId } from "./lib/openTabs";
 import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
@@ -55,7 +56,7 @@ import { listContexts, deleteContext, type ClusterContext } from "./lib/clusters
 import { deletePod } from "./lib/workloads";
 import { clearAccessCache } from "./lib/access";
 
-interface ViewTab {
+export interface ViewTab {
   id: number;
   cluster: string | null;
   kind: ResourceKind;
@@ -72,9 +73,15 @@ interface ViewTab {
 }
 
 export function App() {
-  // Each tab is a (cluster, resource-kind) view, like browser tabs.
-  const [tabs, setTabs] = useState<ViewTab[]>([]);
-  const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  // Each tab is a (cluster, resource-kind) view, like browser tabs. In web mode
+  // the open tabs are restored from a prior session (a browser reload otherwise
+  // wipes them); desktop starts empty. Computed once so tabs/activeTabId/the id
+  // counter all agree on the same restored snapshot.
+  const [restored] = useState(loadOpenTabs);
+  const [tabs, setTabs] = useState<ViewTab[]>(() => restored?.tabs ?? []);
+  const [activeTabId, setActiveTabId] = useState<number | null>(
+    () => restored?.activeTabId ?? null,
+  );
   const [query, setQuery] = useState("");
   const [layout, setLayout] = useState(loadWorkspaceLayout);
   const [sidebarWidth, setSidebarWidth] = useState(layout.leftSidebarWidth);
@@ -87,7 +94,8 @@ export function App() {
   const [clusterNs, setClusterNs] = useState<Record<string, string>>(loadClusterNamespaces);
   // Global fallback namespace for clusters with no remembered selection.
   const [defaultNs, setDefaultNs] = useState(getDefaultNamespace);
-  const tabIdRef = useRef(1);
+  // Start the id counter past any restored tab so ids are never reused.
+  const tabIdRef = useRef(restored ? nextTabId(restored.tabs) : 1);
   const focusNonce = useRef(0);
   // Mirror the active tab id into a ref so the (once-registered) Cmd+W menu
   // event listener always sees the latest value without re-subscribing.
@@ -165,6 +173,9 @@ export function App() {
 
   // Persist per-cluster namespace whenever it changes.
   useEffect(() => saveClusterNamespaces(clusterNs), [clusterNs]);
+
+  // Persist the open tabs (web only) so a browser reload restores them.
+  useEffect(() => saveOpenTabs(tabs, activeTabId), [tabs, activeTabId]);
 
   /** The namespace a new tab in `cluster` should start on. */
   const namespaceFor = (cluster: string) => clusterNs[cluster] ?? defaultNs;
