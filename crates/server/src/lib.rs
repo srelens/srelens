@@ -19,6 +19,7 @@ pub mod cluster_tokens;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod oidc_provider;
 pub mod pf_proxy;
 pub mod stores;
 pub mod streams;
