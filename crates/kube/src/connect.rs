@@ -356,6 +356,100 @@ pub fn cluster_info_capability(cache: Arc<ClientCache>) -> Capability {
     )
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestClusterIn {
+    /// The kubeconfig YAML to probe (e.g. a synthesized-but-unsaved cluster).
+    pub yaml: String,
+    /// The context within `yaml` to connect to.
+    pub context: String,
+}
+
+/// Probe whether a kubeconfig's context is reachable WITHOUT running any
+/// exec/auth-provider plugin. This is deliberate: on the shared web server,
+/// running an exec command from user-supplied YAML would be remote code
+/// execution — so auth is stripped and this validates the server URL + CA/TLS
+/// only. A server that responds at all (including 401/403) is reachable; only a
+/// connection/TLS/DNS failure is not. Actual OIDC auth is validated later, when
+/// the cluster is used (native kubelogin on desktop, managed token on web).
+async fn probe_cluster_from_yaml(yaml: &str, context: &str) -> ClusterInfoOut {
+    let fail = |error: String| ClusterInfoOut {
+        context: context.to_string(),
+        reachable: false,
+        version: None,
+        error: Some(error),
+    };
+    let mut kc = match Kubeconfig::from_yaml(yaml) {
+        Ok(kc) => kc,
+        Err(e) => return fail(e.to_string()),
+    };
+    // Strip the target context's user auth so no exec plugin can run.
+    let user_name = kc
+        .contexts
+        .iter()
+        .find(|c| c.name == context)
+        .and_then(|c| c.context.as_ref())
+        .map(|c| c.user.clone());
+    match user_name {
+        Some(user_name) => {
+            for named in kc.auth_infos.iter_mut() {
+                if named.name == user_name {
+                    named.auth_info = Some(kube::config::AuthInfo::default());
+                }
+            }
+        }
+        None => return fail(format!("context not found: {context}")),
+    }
+    let options = KubeConfigOptions {
+        context: Some(context.to_string()),
+        cluster: None,
+        user: None,
+    };
+    let config = match Config::from_custom_kubeconfig(kc, &options).await {
+        Ok(c) => c,
+        Err(e) => return fail(e.to_string()),
+    };
+    let client = match Client::try_from(config) {
+        Ok(c) => c,
+        Err(e) => return fail(e.to_string()),
+    };
+    match tokio::time::timeout(request_timeout(), client.apiserver_version()).await {
+        Ok(Ok(info)) => ClusterInfoOut {
+            context: context.to_string(),
+            reachable: true,
+            version: Some(info.git_version),
+            error: None,
+        },
+        // The server responded with an HTTP error (e.g. 401/403 because auth was
+        // stripped) — it is reachable; it just needs authentication to use.
+        Ok(Err(kube::Error::Api(err))) => ClusterInfoOut {
+            context: context.to_string(),
+            reachable: true,
+            version: None,
+            error: Some(format!(
+                "server reachable (HTTP {}); sign in to authenticate",
+                err.code
+            )),
+        },
+        Ok(Err(e)) => fail(e.to_string()),
+        Err(_) => fail("connection timed out".to_string()),
+    }
+}
+
+/// Build the `k8s.testClusterConnection` capability — reachability check for a
+/// kubeconfig before it's saved. See [`probe_cluster_from_yaml`] for the
+/// no-exec safety rationale.
+pub fn test_cluster_connection_capability() -> Capability {
+    Capability::typed::<TestClusterIn, ClusterInfoOut, _, _>(
+        "k8s.testClusterConnection",
+        "probe a kubeconfig context's server reachability (no exec plugins run)",
+        Annotations::READ_ONLY,
+        move |input: TestClusterIn| async move {
+            Ok(probe_cluster_from_yaml(&input.yaml, &input.context).await)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +469,31 @@ mod tests {
         assert_eq!(request_timeout_secs(), 20);
         // Restore the default so other tests see a known value.
         set_request_timeout_secs(DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_strips_exec_and_never_runs_it() {
+        // A kubeconfig user with an exec plugin pointed at a command that, if
+        // run, would be obvious in the error — plus an unreachable server. The
+        // probe must strip the exec (RCE-safety on the shared web server) and
+        // fail with a CONNECTION error, never an exec/command error.
+        let yaml = "apiVersion: v1\nkind: Config\ncurrent-context: c\nclusters:\n- name: cl\n  cluster: {server: \"https://127.0.0.1:1\"}\nusers:\n- name: u\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: srelens-should-never-run-this\ncontexts:\n- name: c\n  context: {cluster: cl, user: u}\n";
+        let out = probe_cluster_from_yaml(yaml, "c").await;
+        assert!(!out.reachable);
+        let err = out.error.unwrap().to_lowercase();
+        assert!(
+            !err.contains("srelens-should-never-run-this"),
+            "exec command must not be run: {err}"
+        );
+        assert!(!err.contains("exec"), "no exec plugin should be attempted: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_reports_context_not_found() {
+        let yaml = "apiVersion: v1\nkind: Config\nclusters:\n- name: cl\n  cluster: {server: https://x}\ncontexts:\n- name: c\n  context: {cluster: cl, user: u}\n";
+        let out = probe_cluster_from_yaml(yaml, "missing").await;
+        assert!(!out.reachable);
+        assert!(out.error.unwrap().contains("context not found"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

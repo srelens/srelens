@@ -3,6 +3,9 @@
 //! kubeconfig.
 
 use base64::Engine;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::oidc_detect::OidcClusterConfig;
 
@@ -37,19 +40,30 @@ pub fn synthesize_kubeconfig(form: &ClusterForm) -> Result<String, String> {
 
     let mut user = serde_yaml::Mapping::new();
     if let Some(oidc) = &form.oidc {
-        let mut cfg = serde_yaml::Mapping::new();
-        cfg.insert("idp-issuer-url".into(), oidc.issuer.clone().into());
-        cfg.insert("client-id".into(), oidc.client_id.clone().into());
+        // Emit the `exec` kubelogin form (not the legacy `auth-provider: oidc`
+        // block). Desktop runs kubelogin natively to authenticate; web detects
+        // this same form, strips the exec block, and injects a srelens-managed
+        // token — so one synthesized kubeconfig works on both surfaces.
+        let mut args: Vec<serde_yaml::Value> = vec![
+            "get-token".into(),
+            format!("--oidc-issuer-url={}", oidc.issuer).into(),
+            format!("--oidc-client-id={}", oidc.client_id).into(),
+        ];
         if let Some(secret) = &oidc.client_secret {
-            cfg.insert("client-secret".into(), secret.clone().into());
+            args.push(format!("--oidc-client-secret={secret}").into());
         }
-        if !oidc.extra_scopes.is_empty() {
-            cfg.insert("extra-scopes".into(), oidc.extra_scopes.join(",").into());
+        for scope in &oidc.extra_scopes {
+            args.push(format!("--oidc-extra-scope={scope}").into());
         }
-        let mut ap = serde_yaml::Mapping::new();
-        ap.insert("name".into(), "oidc".into());
-        ap.insert("config".into(), serde_yaml::Value::Mapping(cfg));
-        user.insert("auth-provider".into(), serde_yaml::Value::Mapping(ap));
+        let mut exec = serde_yaml::Mapping::new();
+        exec.insert(
+            "apiVersion".into(),
+            "client.authentication.k8s.io/v1beta1".into(),
+        );
+        exec.insert("command".into(), "kubelogin".into());
+        exec.insert("args".into(), serde_yaml::Value::Sequence(args));
+        exec.insert("interactiveMode".into(), "IfAvailable".into());
+        user.insert("exec".into(), serde_yaml::Value::Mapping(exec));
     }
 
     let named = |name: &str, inner_key: &str, inner: serde_yaml::Value| {
@@ -82,6 +96,65 @@ pub fn synthesize_kubeconfig(form: &ClusterForm) -> Result<String, String> {
     Ok(doc)
 }
 
+/// Add-cluster form fields (camelCase to match the frontend). Deserializable so
+/// this is usable directly as a capability input on both desktop and web.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SynthesizeClusterIn {
+    pub name: String,
+    pub server: String,
+    #[serde(default)]
+    pub ca_cert_pem: Option<String>,
+    #[serde(default)]
+    pub insecure_skip_tls_verify: bool,
+    #[serde(default)]
+    pub oidc: Option<OidcFormIn>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcFormIn {
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub extra_scopes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SynthesizeClusterOut {
+    pub yaml: String,
+}
+
+/// `k8s.synthesizeClusterKubeconfig` — turn the Add-cluster form fields into a
+/// one-context kubeconfig YAML. Pure (no cluster contact); the caller then
+/// stores the YAML like any other kubeconfig. Shared by desktop and web so both
+/// produce byte-identical output.
+pub fn synthesize_cluster_capability() -> Capability {
+    Capability::typed::<SynthesizeClusterIn, SynthesizeClusterOut, _, _>(
+        "k8s.synthesizeClusterKubeconfig",
+        "synthesize a one-context kubeconfig from Add-cluster form fields",
+        Annotations::READ_ONLY,
+        move |input: SynthesizeClusterIn| async move {
+            let form = ClusterForm {
+                name: input.name,
+                server: input.server,
+                ca_cert_pem: input.ca_cert_pem,
+                insecure_skip_tls_verify: input.insecure_skip_tls_verify,
+                oidc: input.oidc.map(|o| OidcClusterConfig {
+                    issuer: o.issuer,
+                    client_id: o.client_id,
+                    client_secret: o.client_secret,
+                    extra_scopes: o.extra_scopes.unwrap_or_default(),
+                }),
+            };
+            let yaml = synthesize_kubeconfig(&form).map_err(CapabilityError::Handler)?;
+            Ok(SynthesizeClusterOut { yaml })
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,14 +178,33 @@ mod tests {
             }),
         };
         let yaml = synthesize_kubeconfig(&form).unwrap();
+        // Uses the exec kubelogin form so native desktop auth works.
+        assert!(yaml.contains("command: kubelogin"));
         let kc = Kubeconfig::from_yaml(&yaml).expect("kube parses it");
         assert_eq!(kc.contexts[0].name, "prod");
-        // The detector recovers the OIDC config we put in.
+        // The detector recovers the OIDC config from the exec block.
         let auth = kc.auth_infos[0].auth_info.clone().unwrap();
         let got = detect_oidc_user(&auth).unwrap();
         assert_eq!(got.issuer, "https://dex");
         assert_eq!(got.client_id, "k8s");
         assert_eq!(got.extra_scopes, vec!["groups".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn synthesize_capability_emits_exec_form() {
+        let cap = synthesize_cluster_capability();
+        let out = (cap.handler)(serde_json::json!({
+            "name": "prod",
+            "server": "https://api:6443",
+            "insecureSkipTlsVerify": true,
+            "oidc": { "issuer": "https://dex", "clientId": "k8s", "extraScopes": ["groups"] }
+        }))
+        .await
+        .unwrap();
+        let yaml = out["yaml"].as_str().unwrap();
+        assert!(yaml.contains("command: kubelogin"));
+        assert!(yaml.contains("--oidc-issuer-url=https://dex"));
+        assert!(yaml.contains("--oidc-extra-scope=groups"));
     }
 
     #[test]

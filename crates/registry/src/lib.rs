@@ -169,6 +169,10 @@ pub fn build_registry_with_paths(
     reg.register(srelens_kube::connect::cluster_info_capability(
         cache.clone(),
     ));
+    // Add-cluster form support (desktop + web): synthesize a kubeconfig from
+    // form fields, and probe a kubeconfig's reachability before saving it.
+    reg.register(srelens_kube::cluster_synth::synthesize_cluster_capability());
+    reg.register(srelens_kube::connect::test_cluster_connection_capability());
     reg.register(srelens_kube::workloads::list_namespaces_capability(
         cache.clone(),
     ));
