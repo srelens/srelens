@@ -12,7 +12,7 @@ use kube::config::{Config, KubeConfigOptions, Kubeconfig};
 use kube::Client;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use srelens_capability::{Annotations, Capability};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::context_resolve::resolve_context;
@@ -326,24 +326,31 @@ pub fn cluster_info_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ClusterInfoIn| {
             let cache = cache.clone();
             async move {
-                Ok(match connect_and_version(&cache, &input.context).await {
-                    Ok(version) => ClusterInfoOut {
+                match connect_and_version(&cache, &input.context).await {
+                    Ok(version) => Ok(ClusterInfoOut {
                         context: input.context,
                         reachable: true,
                         version: Some(version),
                         error: None,
-                    },
+                    }),
                     Err(error) => {
                         // A failed handshake may mean a stale cached client.
                         cache.invalidate(&input.context).await;
-                        ClusterInfoOut {
+                        // An OIDC cluster with no valid token must surface as a
+                        // login signal (mapped to 401 upstream), not a
+                        // reachable:false result the UI would render with the
+                        // raw marker text.
+                        if crate::auth_resolver::parse_needs_login(&error).is_some() {
+                            return Err(CapabilityError::Handler(error));
+                        }
+                        Ok(ClusterInfoOut {
                             context: input.context,
                             reachable: false,
                             version: None,
                             error: Some(error),
-                        }
+                        })
                     }
-                })
+                }
             }
         },
     )
@@ -368,6 +375,49 @@ mod tests {
         assert_eq!(request_timeout_secs(), 20);
         // Restore the default so other tests see a known value.
         set_request_timeout_secs(DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cluster_info_maps_needs_login_to_handler_error() {
+        use crate::auth_resolver::{needs_login_marker, AuthMode, AuthResolver};
+
+        struct NeedsLogin;
+        #[async_trait::async_trait]
+        impl AuthResolver for NeedsLogin {
+            async fn resolve(&self, context: &str) -> Result<AuthMode, String> {
+                Err(needs_login_marker("K", context))
+            }
+        }
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "srelens-clusterinfo-oidc-{}-{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(
+            &path,
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx\nclusters:\n- name: c\n  cluster: {server: https://x}\ncontexts:\n- name: ctx\n  context: {cluster: c, user: u}\nusers:\n- name: u\n  user: {}\n",
+        )
+        .unwrap();
+
+        let cache = ClientCache::new(path.clone());
+        cache.set_auth_resolver(Arc::new(NeedsLogin)).await;
+        let cap = cluster_info_capability(cache);
+        // A needs-login must map to Handler(marker) (→ 401), NOT a
+        // reachable:false Ok result carrying the raw marker string.
+        let err = (cap.handler)(json!({ "context": "ctx" }))
+            .await
+            .expect_err("expected a needs-login handler error");
+        if let CapabilityError::Handler(msg) = err {
+            assert_eq!(msg, needs_login_marker("K", "ctx"));
+        } else {
+            panic!("expected CapabilityError::Handler(marker)");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
