@@ -94,6 +94,7 @@ pub mod access;
 pub mod actions;
 pub mod client_cache;
 pub mod cluster;
+pub mod cluster_synth;
 pub mod crds;
 pub mod connect;
 pub mod context_resolve;
