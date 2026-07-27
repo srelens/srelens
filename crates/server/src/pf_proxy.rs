@@ -40,6 +40,25 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.iter().any(|h| name.as_str().eq_ignore_ascii_case(h))
 }
 
+/// Strip the `srelens_session` pair from a `cookie` header value before it is
+/// forwarded to a forwarded pod. The pod is untrusted (it's whatever the
+/// port-forward target happens to be) — forwarding the session cookie
+/// verbatim would let a hostile/compromised upstream replay it against the
+/// srelens server itself. Any other cookies the client sent are preserved.
+/// Returns an empty string when nothing is left, so callers can omit the
+/// header entirely rather than sending an empty `Cookie:`.
+fn strip_session_cookie(value: &str) -> String {
+    value
+        .split(';')
+        .map(|pair| pair.trim())
+        .filter(|pair| {
+            let name = pair.split_once('=').map(|(n, _)| n).unwrap_or(pair);
+            name != session::COOKIE_NAME
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Authenticate a `/pf` request by session cookie. No CSRF/Origin check: a
 /// browser navigation or sub-resource load to a proxied service cannot carry
 /// them, and authorization is enforced by per-user forward ownership.
@@ -116,9 +135,19 @@ pub async fn proxy(
 
     let mut builder = hyper::Request::builder().method(method).uri(upstream_uri);
     for (name, value) in headers.iter() {
-        if !is_hop_by_hop(name) && name.as_str() != "host" {
-            builder = builder.header(name, value);
+        if is_hop_by_hop(name) || name.as_str() == "host" {
+            continue;
         }
+        if name.as_str().eq_ignore_ascii_case("cookie") {
+            if let Ok(v) = value.to_str() {
+                let stripped = strip_session_cookie(v);
+                if !stripped.is_empty() {
+                    builder = builder.header(name, stripped);
+                }
+            }
+            continue;
+        }
+        builder = builder.header(name, value);
     }
     let upstream_req = match builder.body(body) {
         Ok(r) => r,
@@ -181,9 +210,15 @@ async fn ws_passthrough(
         if name.as_str() == "host" {
             continue;
         }
-        if let Ok(v) = value.to_str() {
-            handshake.push_str(&format!("{}: {}\r\n", name.as_str(), v));
+        let Ok(v) = value.to_str() else { continue };
+        if name.as_str().eq_ignore_ascii_case("cookie") {
+            let stripped_cookie = strip_session_cookie(v);
+            if !stripped_cookie.is_empty() {
+                handshake.push_str(&format!("{}: {}\r\n", name.as_str(), stripped_cookie));
+            }
+            continue;
         }
+        handshake.push_str(&format!("{}: {}\r\n", name.as_str(), v));
     }
     handshake.push_str(&format!("host: 127.0.0.1:{port}\r\n\r\n"));
     if upstream.write_all(handshake.as_bytes()).await.is_err() {
@@ -345,5 +380,15 @@ mod tests {
         assert_eq!(super::strip_pf_prefix("/pf/3/"), "/");
         assert_eq!(super::strip_pf_prefix("/pf/3"), "/");
         assert_eq!(super::strip_pf_prefix("/pf/12/a/b/c"), "/a/b/c");
+    }
+
+    #[test]
+    fn strip_session_cookie_drops_only_the_session_pair() {
+        assert_eq!(
+            super::strip_session_cookie("a=1; srelens_session=tok; b=2"),
+            "a=1; b=2"
+        );
+        assert_eq!(super::strip_session_cookie("srelens_session=tok"), "");
+        assert_eq!(super::strip_session_cookie("x=1"), "x=1");
     }
 }
