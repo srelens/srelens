@@ -105,6 +105,49 @@ jobs:
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
           echo "release=true" >> "$GITHUB_OUTPUT"
 
+  # Publish the srelens web image to GHCR (multi-arch) whenever the version
+  # job determined there's something to release — mirrors the desktop build's
+  # release gate, independent of the (long) desktop matrix below.
+  docker:
+    name: docker image
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute tags
+        id: tags
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          TAGS="ghcr.io/srelens/srelens:${VERSION}"
+          # `latest` only for stable releases on main.
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},ghcr.io/srelens/srelens:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   build:
     needs: version
     # Always run on dev (prereleases); on main only when the version job

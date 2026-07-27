@@ -1,0 +1,27 @@
+services:
+  srelens:
+    image: ghcr.io/srelens/srelens:latest
+    # Or build locally: `docker compose build`
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - srelens-data:/data
+    environment:
+      # Public URL the browser uses; REQUIRED for a non-loopback deployment so
+      # OIDC redirects and Secure cookies are correct.
+      SRELENS_PUBLIC_URL: ${SRELENS_PUBLIC_URL:-http://localhost:8080}
+      # Stable at-rest encryption key (64 hex chars); if unset, a key is
+      # generated into /data/master.key on first boot.
+      SRELENS_MASTER_KEY: ${SRELENS_MASTER_KEY:-}
+      # OIDC (recommended). Leave unset only for local trials with dev login.
+      SRELENS_OIDC_ISSUER: ${SRELENS_OIDC_ISSUER:-}
+      SRELENS_OIDC_CLIENT_ID: ${SRELENS_OIDC_CLIENT_ID:-}
+      SRELENS_OIDC_CLIENT_SECRET: ${SRELENS_OIDC_CLIENT_SECRET:-}
+      SRELENS_OIDC_ALLOWED_DOMAINS: ${SRELENS_OIDC_ALLOWED_DOMAINS:-}
+      # DANGER: dev login bypasses OIDC — never set this on a public deployment.
+      SRELENS_DEV_LOGIN: ${SRELENS_DEV_LOGIN:-}
+    restart: unless-stopped
+
+volumes:
+  srelens-data:
