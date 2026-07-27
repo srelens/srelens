@@ -21,7 +21,9 @@ pub type HttpProxyClient = Client<HttpConnector, Body>;
 
 /// Build the proxy client.
 pub fn client() -> HttpProxyClient {
-    Client::builder(TokioExecutor::new()).build_http()
+    let mut connector = HttpConnector::new();
+    connector.set_connect_timeout(Some(std::time::Duration::from_secs(10)));
+    Client::builder(TokioExecutor::new()).build(connector)
 }
 
 /// Hop-by-hop headers that must not be forwarded (RFC 7230 §6.1).
@@ -200,11 +202,6 @@ async fn ws_passthrough(
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let stripped = strip_pf_prefix(path_and_query);
 
-    let mut upstream = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-        Ok(s) => s,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
-
     let mut handshake = format!("GET {stripped} HTTP/1.1\r\n");
     for (name, value) in headers.iter() {
         if name.as_str() == "host" {
@@ -221,28 +218,18 @@ async fn ws_passthrough(
         handshake.push_str(&format!("{}: {}\r\n", name.as_str(), v));
     }
     handshake.push_str(&format!("host: 127.0.0.1:{port}\r\n\r\n"));
-    if upstream.write_all(handshake.as_bytes()).await.is_err() {
-        return StatusCode::BAD_GATEWAY.into_response();
-    }
 
-    // Read the upstream response headers (until CRLFCRLF); require 101.
-    let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        match upstream.read(&mut byte).await {
-            Ok(0) => return StatusCode::BAD_GATEWAY.into_response(),
-            Ok(_) => {
-                head.push(byte[0]);
-                if head.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-                if head.len() > 16 * 1024 {
-                    return StatusCode::BAD_GATEWAY.into_response();
-                }
-            }
-            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-        }
-    }
+    let (mut upstream, head) = match upstream_ws_handshake(
+        port,
+        handshake.as_bytes(),
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(status) => return status.into_response(),
+    };
+
     let head_str = String::from_utf8_lossy(&head);
     if !head_str.starts_with("HTTP/1.1 101") {
         return StatusCode::BAD_GATEWAY.into_response();
@@ -273,6 +260,51 @@ async fn ws_passthrough(
         Ok(r) => r,
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
+}
+
+/// Connect to a forwarded loopback port, write the raw WS handshake request,
+/// and read the upstream response head (until CRLFCRLF), all bounded by
+/// `timeout`. Returns the connected socket plus the raw head bytes so the
+/// caller can decide whether the response is actually a 101 — this fn only
+/// owns connect/write/read-until-blank-line and timeout enforcement, not
+/// status validation, so it stays trivially testable against any upstream
+/// response (101, 401, or none at all).
+async fn upstream_ws_handshake(
+    port: u16,
+    req_bytes: &[u8],
+    timeout: std::time::Duration,
+) -> Result<(tokio::net::TcpStream, Vec<u8>), StatusCode> {
+    tokio::time::timeout(timeout, async move {
+        let mut upstream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+        upstream
+            .write_all(req_bytes)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match upstream.read(&mut byte).await {
+                Ok(0) => return Err(StatusCode::BAD_GATEWAY),
+                Ok(_) => {
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    if head.len() > 16 * 1024 {
+                        return Err(StatusCode::BAD_GATEWAY);
+                    }
+                }
+                Err(_) => return Err(StatusCode::BAD_GATEWAY),
+            }
+        }
+        Ok((upstream, head))
+    })
+    .await
+    .unwrap_or(Err(StatusCode::GATEWAY_TIMEOUT))
 }
 
 /// Strip the leading `/pf/<id>` (two path segments) from a path+query,
@@ -372,6 +404,101 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         assert_eq!(&bytes[..], b"hello from pod");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upstream_ws_handshake_times_out_on_black_hole_port() {
+        // Bound but never accept: the connect completes (loopback backlog),
+        // but nothing ever reads the request or writes a response head, so
+        // the read-until-CRLFCRLF loop must hit the timeout, not hang forever.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Keep the listener alive for the duration of the test but never call
+        // accept() on it.
+        let _listener = listener;
+
+        let start = std::time::Instant::now();
+        let result = super::upstream_ws_handshake(
+            port,
+            b"GET / HTTP/1.1\r\n\r\n",
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.err(), Some(StatusCode::GATEWAY_TIMEOUT));
+        assert!(elapsed < std::time::Duration::from_secs(5), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn upstream_ws_handshake_connect_refused_is_bad_gateway() {
+        // No listener bound on this port: connect fails fast (not the
+        // timeout path), and the error must map to a gateway status rather
+        // than panicking or hanging.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // free the port so nothing is listening on it
+
+        let result = super::upstream_ws_handshake(
+            port,
+            b"GET / HTTP/1.1\r\n\r\n",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(result.err(), Some(StatusCode::BAD_GATEWAY));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upstream_ws_handshake_returns_head_for_101_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let result = super::upstream_ws_handshake(
+            port,
+            b"GET / HTTP/1.1\r\n\r\n",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        let (_stream, head) = result.expect("expected Ok for a 101-responding upstream");
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upstream_ws_handshake_returns_head_for_non_101_response() {
+        // A non-101 (e.g. 401) response head is still returned as `Ok` — this
+        // fn only owns connect/write/read-head/timeout; validating the status
+        // line is the caller's job (ws_passthrough maps non-101 to 502).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let result = super::upstream_ws_handshake(
+            port,
+            b"GET / HTTP/1.1\r\n\r\n",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        let (_stream, head) = result.expect("expected Ok even for a 401 response");
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 401"));
     }
 
     #[test]
