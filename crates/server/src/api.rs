@@ -17,10 +17,18 @@ use crate::AppState;
 /// boundary — these must be denied at the API layer too. `k8s.deleteContext`
 /// mutates the per-request materialized kubeconfig (silently reverts on env
 /// rebuild); the `toolbox.*` mutators install/remove tools on the shared
-/// container host, affecting every user. Read-only toolbox capabilities
-/// (status/diagnoseContext/searchPlugins) stay allowed.
+/// container host, affecting every user. `k8s.helmRepoAdd`/`k8s.helmRepoUpdate`
+/// run via `run_helm_local`, which inherits the process env, so helm's repo
+/// config is shared across every web user in the container — one user could
+/// add a repo whose name shadows another user's, pointing at an attacker URL
+/// that a victim's next helmInstall would pull from. The other helm ops
+/// (install/upgrade/rollback/uninstall/template/searchRepo/list/get) use
+/// per-context temp kubeconfigs and stay allowed. Read-only toolbox
+/// capabilities (status/diagnoseContext/searchPlugins) stay allowed.
 pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "k8s.deleteContext",
+    "k8s.helmRepoAdd",
+    "k8s.helmRepoUpdate",
     "toolbox.installKubectl",
     "toolbox.installHelm",
     "toolbox.installKrew",
@@ -385,6 +393,15 @@ mod tests {
             "toolbox.upgradePlugin",
             "toolbox.removePlugin",
         ] {
+            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
+            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn helm_repo_mutators_are_denied_on_web() {
+        for id in ["k8s.helmRepoAdd", "k8s.helmRepoUpdate"] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
             assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
