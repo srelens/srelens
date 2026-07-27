@@ -1,7 +1,7 @@
 # srelens web mode: multi-user webapp in Docker — design
 
 **Date:** 2026-07-24
-**Status:** Approved (brainstorming session)
+**Status:** Shipped (branch refactor/streams-eventsink)
 
 ## Goal
 
@@ -296,3 +296,36 @@ Image `ghcr.io/srelens/srelens`, amd64+arm64, built in the existing release CI.
 `apps/desktop/src-tauri/src/{bridge.rs,capabilities.rs,main.rs}` ·
 `apps/desktop/src-tauri/src/{watch,logs,exec,forward,terminal,helm}.rs` ·
 `crates/mcp/src/http.rs` · `crates/kube/src/client_cache.rs`
+
+## Deferred beyond this feature
+
+Shipped as `crates/streams`, `crates/registry`, `crates/server`
+(`srelens-server`), the multi-stage `Dockerfile`, `docker-compose.yml`, and
+`docs/WEB.md`, on `refactor/streams-eventsink`. The following were
+deliberately left out rather than solved partially — each is a real,
+truthful gap in what shipped, not a bug:
+
+- **`SRELENS_OIDC_ALLOWED_GROUPS` group-based gating** — not implemented;
+  `AuthConfig` (`crates/server/src/auth/mod.rs`) only enforces the
+  email-domain allowlist (`SRELENS_OIDC_ALLOWED_DOMAINS`).
+- **Kubeconfig rename** — there is no in-place rename of a stored kubeconfig
+  row; renaming means delete-and-re-add under the new name. `k8s.deleteContext`
+  stays denied on the web surface for the same underlying reason (the
+  materialized kubeconfig is rebuilt from the database on every `env_for`
+  call, so an in-place edit would silently revert).
+- **HTTPS-upstream and raw-TCP port-forwards** — `/pf/{id}/…`
+  (`crates/server/src/pf_proxy.rs`) only proxies plain HTTP and WebSocket
+  upgrades to the loopback-bound forward; an HTTPS upstream or arbitrary raw
+  TCP forwarding (as the desktop app supports locally) is out of scope.
+- **Per-user helm repo config** — `helm repo add`/`helm repo update` write into
+  process-wide helm state shared by every user in the container, so both are
+  denied on web (`api::WEB_DENIED_CAPABILITIES`) rather than given a per-user
+  sandbox. The rest of helm (install/upgrade/rollback/uninstall/template/
+  search/list/get), which use per-context temp kubeconfigs, remain allowed.
+- **MCP endpoints in web mode** — the MCP HTTP server is a separate surface
+  from `srelens-server`; multi-user MCP auth over the web deployment is a
+  future design, not attempted here. (The in-container terminal is likewise
+  never exposed through the MCP capability registry.)
+- **HA / multi-replica / Postgres** — the server assumes a single replica with
+  embedded SQLite on one volume; there is no shared-state story for running
+  more than one instance behind a load balancer.

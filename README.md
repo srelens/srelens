@@ -108,6 +108,9 @@ Download the latest beta for your platform from
 See the [installation guide](docs/INSTALL.md) for platform-specific installation,
 first-launch, updating, verification, and uninstall instructions.
 
+**Run as a web app (Docker):** srelens can also run as a multi-user web server
+in a container — see [docs/WEB.md](docs/WEB.md).
+
 ## MCP server
 
 srelens includes an MCP server generated from the same capability registry used by
