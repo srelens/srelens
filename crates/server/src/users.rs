@@ -154,6 +154,20 @@ impl UserEnvs {
         let _ = std::fs::remove_dir_all(user_runtime_dir(&self.data_dir, user_id));
     }
 
+    /// Whether the user currently has any active port-forwards. Port-forward
+    /// traffic runs over plain HTTP at `/pf/{id}/*`, not the WebSocket, so a
+    /// user can drop their WS connection while still actively using a
+    /// forward from an external tool. Used by the WS-disconnect teardown to
+    /// avoid killing those forwards out from under them.
+    pub fn has_active_forwards(&self, user_id: i64) -> bool {
+        self.map
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .map(|env| env.streams.forward.active_count() > 0)
+            .unwrap_or(false)
+    }
+
     /// Evict environments idle longer than `max_idle` (and their files).
     pub fn evict_idle(&self, max_idle: Duration) {
         let stale: Vec<i64> = self
@@ -170,9 +184,14 @@ impl UserEnvs {
     }
 }
 
-/// After `grace`, if the user has no live WS connections, drop their cached
-/// environment (aborting all stream tasks + freeing snapshots). A reconnect
-/// during the grace cancels the teardown.
+/// After `grace`, if the user has no live WS connections AND no active
+/// port-forwards, drop their cached environment (aborting all stream tasks +
+/// freeing snapshots). A reconnect during the grace cancels the teardown, and
+/// so does an in-progress port-forward: forwards run over plain HTTP (not the
+/// WS), so a user can close their tab and keep using a forward from an
+/// external tool. Such forwards are kept alive by their own traffic via the
+/// idle eviction that `env_for` bumps on each `/pf` request; keeping the rest
+/// of the (small) env cached alongside them is an acceptable trade.
 pub async fn teardown_streams_if_disconnected(
     hub: Arc<crate::ws::hub::WsHub>,
     user_envs: Arc<UserEnvs>,
@@ -180,7 +199,7 @@ pub async fn teardown_streams_if_disconnected(
     grace: Duration,
 ) {
     tokio::time::sleep(grace).await;
-    if hub.user_connection_count(user_id) == 0 {
+    if hub.user_connection_count(user_id) == 0 && !user_envs.has_active_forwards(user_id) {
         user_envs.invalidate(user_id);
     }
 }
@@ -382,6 +401,35 @@ mod tests {
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
 
         assert_eq!(hub.user_connection_count(user.id), 1);
+        teardown_streams_if_disconnected(hub.clone(), envs.clone(), user.id, Duration::ZERO).await;
+
+        // Teardown was skipped: the env is still cached as the same Arc.
+        let env_again = envs.env_for(&db, &k, user.id).await.unwrap();
+        assert!(Arc::ptr_eq(&env, &env_again));
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn teardown_skips_when_user_has_an_active_port_forward() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+        env.streams.forward.insert_test_forward(1, 12345);
+
+        // No live WS connections, but an active forward is enough to skip.
+        assert_eq!(hub.user_connection_count(user.id), 0);
+        assert!(envs.has_active_forwards(user.id));
+
         teardown_streams_if_disconnected(hub.clone(), envs.clone(), user.id, Duration::ZERO).await;
 
         // Teardown was skipped: the env is still cached as the same Arc.

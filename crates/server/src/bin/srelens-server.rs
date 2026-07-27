@@ -58,6 +58,7 @@ fn main() {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n >= 1)
+        .map(|n| n.clamp(1, 64))
         .unwrap_or(4);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)

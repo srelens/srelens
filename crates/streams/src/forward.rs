@@ -111,6 +111,13 @@ impl ForwardManager {
         self.forwards.lock().unwrap().get(&id).map(|f| f.local_port)
     }
 
+    /// How many port-forwards are currently running. Used to keep a user's
+    /// environment alive across a WebSocket disconnect while they still have
+    /// forwards in use (proxied over plain HTTP, not the WS).
+    pub fn active_count(&self) -> usize {
+        self.forwards.lock().unwrap().len()
+    }
+
     /// Register a forward id → local port directly (no live cluster).
     /// Intended for tests of downstream consumers such as the web reverse
     /// proxy, which need a fake forward without standing up a real cluster.
@@ -204,5 +211,15 @@ mod tests {
         assert_eq!(manager.local_port(9999), None);
         manager.stop(info.id);
         assert_eq!(manager.local_port(info.id), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn active_count_tracks_inserts_and_stop() {
+        let manager = ForwardManager::new(ClientCache::new_many(vec![]));
+        assert_eq!(manager.active_count(), 0);
+        manager.insert_test_forward(1, 12345);
+        assert_eq!(manager.active_count(), 1);
+        manager.stop(1);
+        assert_eq!(manager.active_count(), 0);
     }
 }
