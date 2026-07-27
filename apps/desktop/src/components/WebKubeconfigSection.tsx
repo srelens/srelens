@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { FilePlus2, Trash2, Upload } from "lucide-react";
+import { FilePlus2, Plug, Trash2, Upload } from "lucide-react";
 import { Button, TextInput } from "../ui";
 import { list, remove, upload, type KubeconfigMeta } from "../lib/webKubeconfigs";
+import { testKubeconfigYaml, type TestResult } from "../lib/addCluster";
 
 /**
  * Settings → Kubernetes (web mode). Desktop merges local kubeconfig files
@@ -16,9 +17,24 @@ export function WebKubeconfigSection() {
   const [yaml, setYaml] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
 
   const refresh = () => void list().then(setItems).catch((e) => setError(String(e)));
   useEffect(refresh, []);
+
+  const test = async () => {
+    setError("");
+    setTestResult(null);
+    setTesting(true);
+    try {
+      setTestResult(await testKubeconfigYaml(yaml));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const add = async () => {
     setError("");
@@ -96,8 +112,28 @@ export function WebKubeconfigSection() {
           aria-label="Kubeconfig YAML"
           spellCheck={false}
         />
+        {testResult && (
+          <p
+            role="status"
+            className={testResult.reachable ? "fl-cluster-test--ok" : "fl-cluster-test--fail"}
+          >
+            {testResult.reachable
+              ? `✓ Reachable${testResult.version ? ` — ${testResult.version}` : ""}${
+                  testResult.error ? ` (${testResult.error})` : ""
+                }`
+              : `✕ Not reachable: ${testResult.error ?? "unknown error"}`}
+          </p>
+        )}
         <footer>
-          <Button size="sm" disabled={!yaml.trim() || busy} onClick={() => void add()}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!yaml.trim() || testing || busy}
+            onClick={() => void test()}
+          >
+            <Plug data-icon="inline-start" /> {testing ? "Testing…" : "Test connection"}
+          </Button>
+          <Button size="sm" disabled={!yaml.trim() || busy || testing} onClick={() => void add()}>
             <FilePlus2 data-icon="inline-start" /> Upload kubeconfig
           </Button>
         </footer>
