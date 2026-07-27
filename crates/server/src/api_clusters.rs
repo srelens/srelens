@@ -329,6 +329,7 @@ mod tests {
     async fn cluster_routes_are_gated() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         for (method, uri) in [
+            ("GET", "/api/clusters"),
             ("POST", "/api/clusters"),
             ("POST", "/api/clusters/k/logout"),
         ] {
