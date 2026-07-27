@@ -13,7 +13,7 @@ use crate::connect::build_client;
 
 pub struct ClientCache {
     paths: RwLock<Vec<PathBuf>>,
-    clients: Mutex<HashMap<String, Client>>,
+    clients: Mutex<HashMap<String, (Client, Option<String>)>>,
     auth_resolver: RwLock<Option<Arc<dyn AuthResolver>>>,
 }
 
@@ -63,25 +63,40 @@ impl ClientCache {
         self.paths.read().await.clone()
     }
 
-    /// Return a cached client for `context`, building and caching one on a miss.
+    /// Return a client for `context`. With an auth resolver installed (web
+    /// mode) the desired auth is resolved first; a cached client is reused only
+    /// while its bearer is unchanged, so a refreshed OIDC token is picked up.
+    /// Without a resolver (desktop) this is the original miss-builds-and-caches
+    /// behavior, with `None` as the bearer.
     pub async fn get(&self, context: &str) -> Result<Client, String> {
-        if let Some(client) = self.clients.lock().await.get(context).cloned() {
-            return Ok(client);
-        }
-        let paths = self.paths().await;
-        let client = match self.auth_resolver.read().await.clone() {
-            Some(resolver) => match resolver.resolve(context).await? {
-                crate::auth_resolver::AuthMode::Bearer(bearer) => {
-                    crate::connect::build_client_with_bearer(&paths, context, &bearer).await?
-                }
-                crate::auth_resolver::AuthMode::Default => build_client(&paths, context).await?,
+        // Resolve desired auth first. Cheap for non-OIDC (in-memory lookup);
+        // for OIDC this consults the token provider (and may refresh, single-
+        // flighted). A needs-login propagates out as the marker String error.
+        let resolver = self.auth_resolver.read().await.clone();
+        let want_bearer: Option<String> = match resolver {
+            Some(r) => match r.resolve(context).await? {
+                crate::auth_resolver::AuthMode::Bearer(tok) => Some(tok),
+                crate::auth_resolver::AuthMode::Default => None,
             },
+            None => None,
+        };
+
+        // Cache hit only if the cached client was built with the same bearer.
+        if let Some((client, cached)) = self.clients.lock().await.get(context) {
+            if *cached == want_bearer {
+                return Ok(client.clone());
+            }
+        }
+
+        let paths = self.paths().await;
+        let client = match &want_bearer {
+            Some(tok) => crate::connect::build_client_with_bearer(&paths, context, tok).await?,
             None => build_client(&paths, context).await?,
         };
         self.clients
             .lock()
             .await
-            .insert(context.to_string(), client.clone());
+            .insert(context.to_string(), (client.clone(), want_bearer));
         Ok(client)
     }
 
@@ -127,6 +142,27 @@ mod tests {
     impl AuthResolver for NeedsLoginResolver {
         async fn resolve(&self, context: &str) -> Result<AuthMode, String> {
             Err(needs_login_marker(&self.key, context))
+        }
+    }
+
+    /// Returns each token in turn (then repeats the last), counting calls — to
+    /// simulate a bearer that changes after a token refresh.
+    struct SequenceResolver {
+        tokens: Vec<String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthResolver for SequenceResolver {
+        async fn resolve(&self, _context: &str) -> Result<AuthMode, String> {
+            let i = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tok = self
+                .tokens
+                .get(i)
+                .or_else(|| self.tokens.last())
+                .expect("at least one token")
+                .clone();
+            Ok(AuthMode::Bearer(tok))
         }
     }
 
@@ -178,6 +214,64 @@ mod tests {
             Ok(_) => panic!("expected Err(needs_login_marker), got Ok"),
         };
         assert_eq!(err, needs_login_marker("abc", "prod"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_rebuilds_when_bearer_changes() {
+        // A cached OIDC client must not outlive its bearer: once the resolver
+        // reports a new token (a refresh happened), get() rebuilds rather than
+        // serving the stale client.
+        let path = write_temp_kubeconfig(
+            "rotate",
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx-a\nclusters:\n  - name: c\n    cluster: { server: https://a.example:6443 }\nusers:\n  - name: u\n    user:\n      auth-provider:\n        name: oidc\n        config: {}\ncontexts:\n  - name: ctx-a\n    context: { cluster: c, user: u }\n",
+        );
+        let cache = ClientCache::new(path.clone());
+        let resolver = Arc::new(SequenceResolver {
+            tokens: vec!["t1".to_string(), "t2".to_string()],
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        cache.set_auth_resolver(resolver.clone()).await;
+
+        cache.get("ctx-a").await.expect("first get builds with t1");
+        assert_eq!(
+            cache.clients.lock().await.get("ctx-a").unwrap().1,
+            Some("t1".to_string()),
+        );
+
+        cache.get("ctx-a").await.expect("second get rebuilds with t2");
+        assert_eq!(
+            cache.clients.lock().await.get("ctx-a").unwrap().1,
+            Some("t2".to_string()),
+            "cached bearer must be replaced, proving a rebuild not a stale hit",
+        );
+        assert_eq!(
+            resolver.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "resolver is consulted on every get, not only on a miss",
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_resolver_caches_and_does_not_rebuild() {
+        // Desktop parity: with no resolver installed, the first get builds and
+        // caches (bearer None) and a subsequent get is served from cache without
+        // touching the kubeconfig again — proven by deleting the file first.
+        let path = write_temp_kubeconfig(
+            "parity",
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx-a\nclusters:\n  - name: c\n    cluster: { server: https://a.example:6443 }\nusers:\n  - name: u\n    user: { token: static-abc }\ncontexts:\n  - name: ctx-a\n    context: { cluster: c, user: u }\n",
+        );
+        let cache = ClientCache::new(path.clone());
+        cache.get("ctx-a").await.expect("first get builds");
+        assert_eq!(cache.clients.lock().await.get("ctx-a").unwrap().1, None);
+
+        // Remove the kubeconfig; a cache hit must not need to re-read it.
+        std::fs::remove_file(&path).unwrap();
+        cache
+            .get("ctx-a")
+            .await
+            .expect("second get is served from cache, no rebuild");
     }
 
     #[tokio::test(flavor = "multi_thread")]
