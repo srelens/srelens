@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invokeCapability } from "./webTransport";
+import { requestClusterLogin } from "../lib/clusterLogin";
+
+vi.mock("../lib/clusterLogin", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/clusterLogin")>()),
+  requestClusterLogin: vi.fn(),
+}));
 
 describe("webTransport.invokeCapability", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -30,5 +36,21 @@ describe("webTransport.invokeCapability", () => {
   it("throws 'unauthenticated' on 401", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 401 })));
     await expect(invokeCapability("ping")).rejects.toThrow("unauthenticated");
+  });
+
+  it("prompts cluster sign-in on a 401 cluster_login_required body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: "cluster_login_required", key: "k", context: "c", loginUrl: "/auth/cluster/login?key=k" }),
+          { status: 401 },
+        ),
+      ),
+    );
+    await expect(invokeCapability("k8s.listPods")).rejects.toThrow("cluster_login_required");
+    expect(requestClusterLogin).toHaveBeenCalledWith(
+      expect.objectContaining({ key: "k", context: "c", loginUrl: "/auth/cluster/login?key=k" }),
+    );
   });
 });

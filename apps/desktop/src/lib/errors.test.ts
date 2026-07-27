@@ -68,6 +68,13 @@ describe("describeError", () => {
     expect(describeError("forbidden: pods is forbidden").title).toBe("Access denied");
   });
 
+  it("classifies a cluster-login marker as a distinct sign-in prompt, not generic unauthorized", () => {
+    expect(describeError("NEEDS_CLUSTER_LOGIN:abc123:my-context").title).toBe(
+      "Cluster sign-in required",
+    );
+    expect(describeError("cluster_login_required").title).toBe("Cluster sign-in required");
+  });
+
   it("classifies TLS/certificate failures", () => {
     expect(describeError("x509: certificate signed by unknown authority").title).toBe(
       "Couldn't verify the cluster",

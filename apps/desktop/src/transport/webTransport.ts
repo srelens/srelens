@@ -2,6 +2,7 @@
 // Streaming (on/subscribe) is backed by the multiplexed socket in ./wsClient.
 
 import wsClient from "./wsClient";
+import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLogin";
 
 const CSRF = typeof crypto !== "undefined" && "randomUUID" in crypto
   ? crypto.randomUUID()
@@ -19,11 +20,23 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json", ...csrfHeader() },
     body: JSON.stringify(body ?? null),
   });
-  if (res.status === 401) throw new Error("unauthenticated");
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (res.status === 401) {
+    const login = parseClusterLoginRequired(data);
+    if (login) {
+      requestClusterLogin(login);
+      throw new Error("cluster_login_required");
+    }
+    throw new Error("unauthenticated"); // app-session expired, not a cluster
+  }
   if (!res.ok) {
-    const message = data && typeof data === "object" && "error" in data ? String(data.error) : res.statusText;
+    const message = data && typeof data === "object" && "error" in data ? String((data as Record<string, unknown>).error) : res.statusText;
     throw new Error(message);
   }
   return data as T;

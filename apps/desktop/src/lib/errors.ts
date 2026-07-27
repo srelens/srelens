@@ -12,6 +12,8 @@
  * `{ error: string }` shapes the lib layer returns.
  */
 
+import { parseClusterLoginRequired } from "./clusterLogin";
+
 export interface FriendlyError {
   /** Short, human headline for the failure. */
   title: string;
@@ -99,6 +101,14 @@ export function describeError(input: unknown): FriendlyError {
       title: "Cluster address not found",
       detail:
         "The API server hostname couldn't be resolved. Check the server URL in your kubeconfig context and your DNS or network connection.",
+      raw,
+    };
+  }
+  if (/cluster_login_required|NEEDS_CLUSTER_LOGIN/.test(raw) || parseClusterLoginRequired(raw)) {
+    return {
+      title: "Cluster sign-in required",
+      detail:
+        "This cluster uses OIDC. Use the “Sign in” prompt (or Settings → Contexts) to sign in, then retry.",
       raw,
     };
   }
