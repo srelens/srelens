@@ -3,6 +3,7 @@ import { Download, RefreshCw, Search, Trash2, Wrench } from "lucide-react";
 import { Badge, Button, PageHeader, SectionPanel, Spinner, StatusPill, TextInput } from "../ui";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { listContexts } from "../lib/clusters";
+import { isTauri } from "../transport/platform";
 import {
   diagnoseContext,
   installKubectl,
@@ -141,9 +142,13 @@ function ToolCard({
           <p className="fl-toolbox-card__meta">
             {busy ? (progress != null ? `Downloading… ${progress}%` : "Installing…") : "Not installed"}
           </p>
-          <Button onClick={onInstall} disabled={busy} aria-label={`Install ${tool.name}`}>
-            {busy ? <Spinner /> : <Download data-icon="inline-start" />} Install
-          </Button>
+          {isTauri() ? (
+            <Button onClick={onInstall} disabled={busy} aria-label={`Install ${tool.name}`}>
+              {busy ? <Spinner /> : <Download data-icon="inline-start" />} Install
+            </Button>
+          ) : (
+            <small className="fl-toolbox-card__path">Tool installation is available in the desktop app.</small>
+          )}
         </>
       )}
     </div>
@@ -218,13 +223,19 @@ function PluginsSection() {
                 </td>
                 <td className="fl-toolbox-plugins__action">
                   {p.installed ? (
-                    <Button variant="ghost" onClick={() => void doRemove(p.name)} disabled={busy === p.name} aria-label={`Remove ${p.name}`}>
-                      {busy === p.name ? <Spinner /> : <Trash2 data-icon="inline-start" />} Remove
-                    </Button>
-                  ) : (
+                    isTauri() ? (
+                      <Button variant="ghost" onClick={() => void doRemove(p.name)} disabled={busy === p.name} aria-label={`Remove ${p.name}`}>
+                        {busy === p.name ? <Spinner /> : <Trash2 data-icon="inline-start" />} Remove
+                      </Button>
+                    ) : (
+                      <small>Available in the desktop app</small>
+                    )
+                  ) : isTauri() ? (
                     <Button variant="secondary" onClick={() => setConfirm(p.name)} disabled={busy === p.name}>
                       {busy === p.name ? <Spinner /> : <Download data-icon="inline-start" />} Install
                     </Button>
+                  ) : (
+                    <small>Available in the desktop app</small>
                   )}
                 </td>
               </tr>
@@ -296,7 +307,7 @@ function ContextHealthSection({
                       <li key={item.binary} className="fl-toolbox-req">
                         <code>{item.binary}</code>
                         <StatusPill status={STATUS_LABEL[item.status]} kind={STATUS_KIND[item.status]} />
-                        {item.status === "missing" && item.installable && (
+                        {item.status === "missing" && item.installable && isTauri() && (
                           <Button
                             variant="secondary"
                             disabled={busy !== null}
@@ -311,6 +322,9 @@ function ContextHealthSection({
                           >
                             {busy === item.binary ? <Spinner /> : "Install"}
                           </Button>
+                        )}
+                        {item.status === "missing" && item.installable && !isTauri() && (
+                          <small className="fl-toolbox-req__hint">install {item.binary} in the desktop app</small>
                         )}
                         {item.status === "missing" && !item.installable && (
                           <small className="fl-toolbox-req__hint">install {item.binary} yourself</small>

@@ -65,6 +65,8 @@ import { AppLogView } from "./AppLogView";
 import { pickKubeconfigFiles, savePastedKubeconfig } from "../lib/files";
 import { checkForUpdate, installUpdate, type UpdateMeta } from "../lib/updater";
 import { appVersion, relaunchApp } from "../transport/transport";
+import { isTauri } from "../transport/platform";
+import { WebKubeconfigSection } from "./WebKubeconfigSection";
 
 const MODE_OPTIONS: Array<{ mode: ThemeMode; label: string; description: string; icon: React.ElementType }> = [
   { mode: "dark", label: "Dark", description: "Low-light operational workspace", icon: Moon },
@@ -544,67 +546,70 @@ export function SettingsView({
               title="Context management"
               description="Create a recognizable identity for every cluster without changing kubeconfig."
             >
-              <div className="fl-kubeconfig-sources">
-                <div>
-                  <span>
-                    <strong>Kubeconfig sources</strong>
-                    <small>The default kubeconfig is loaded first; additional files are merged in order.</small>
-                  </span>
-                  <span className="fl-kubeconfig-sources__actions">
-                    <Button variant="outline" size="sm" onClick={() => setPasteKubeconfigOpen((open) => !open)}>
-                      <ClipboardPaste data-icon="inline-start" /> Paste
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => void addKubeconfigFiles()}>
-                      <FilePlus2 data-icon="inline-start" /> Add files
-                    </Button>
-                  </span>
-                </div>
-                <div className="fl-kubeconfig-sources__files">
-                  <span className="is-default">Default / KUBECONFIG</span>
-                  {kubeconfigFiles.map((path) => (
-                    <span key={path} title={path}>
-                      <code>{path.split(/[\\/]/).at(-1) || path}</code>
-                      <button
-                        type="button"
-                        onClick={() => onKubeconfigFilesChange(kubeconfigFiles.filter((item) => item !== path))}
-                        aria-label={`Remove kubeconfig ${path}`}
-                      >
-                        <X aria-hidden="true" />
-                      </button>
+              {isTauri() && (
+                <div className="fl-kubeconfig-sources">
+                  <div>
+                    <span>
+                      <strong>Kubeconfig sources</strong>
+                      <small>The default kubeconfig is loaded first; additional files are merged in order.</small>
                     </span>
-                  ))}
-                </div>
-                {pasteKubeconfigOpen && (
-                  <div className="fl-kubeconfig-paste">
-                    <div>
-                      <label>
-                        <span>Name</span>
-                        <TextInput
-                          value={pastedKubeconfigName}
-                          onValueChange={setPastedKubeconfigName}
-                          placeholder="Team or environment"
-                          aria-label="Pasted kubeconfig name"
-                        />
-                      </label>
-                      <span>Saved securely in the srelens app configuration directory.</span>
-                    </div>
-                    <textarea
-                      value={pastedKubeconfig}
-                      onChange={(event) => setPastedKubeconfig(event.target.value)}
-                      placeholder="Paste kubeconfig YAML here…"
-                      aria-label="Kubeconfig YAML"
-                      spellCheck={false}
-                    />
-                    <footer>
-                      <Button variant="ghost" size="sm" onClick={() => setPasteKubeconfigOpen(false)}>Cancel</Button>
-                      <Button size="sm" disabled={!pastedKubeconfig.trim()} onClick={() => void addPastedKubeconfig()}>
-                        Add kubeconfig
+                    <span className="fl-kubeconfig-sources__actions">
+                      <Button variant="outline" size="sm" onClick={() => setPasteKubeconfigOpen((open) => !open)}>
+                        <ClipboardPaste data-icon="inline-start" /> Paste
                       </Button>
-                    </footer>
+                      <Button variant="outline" size="sm" onClick={() => void addKubeconfigFiles()}>
+                        <FilePlus2 data-icon="inline-start" /> Add files
+                      </Button>
+                    </span>
                   </div>
-                )}
-                {kubeconfigError && <p role="alert">{kubeconfigError}</p>}
-              </div>
+                  <div className="fl-kubeconfig-sources__files">
+                    <span className="is-default">Default / KUBECONFIG</span>
+                    {kubeconfigFiles.map((path) => (
+                      <span key={path} title={path}>
+                        <code>{path.split(/[\\/]/).at(-1) || path}</code>
+                        <button
+                          type="button"
+                          onClick={() => onKubeconfigFilesChange(kubeconfigFiles.filter((item) => item !== path))}
+                          aria-label={`Remove kubeconfig ${path}`}
+                        >
+                          <X aria-hidden="true" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  {pasteKubeconfigOpen && (
+                    <div className="fl-kubeconfig-paste">
+                      <div>
+                        <label>
+                          <span>Name</span>
+                          <TextInput
+                            value={pastedKubeconfigName}
+                            onValueChange={setPastedKubeconfigName}
+                            placeholder="Team or environment"
+                            aria-label="Pasted kubeconfig name"
+                          />
+                        </label>
+                        <span>Saved securely in the srelens app configuration directory.</span>
+                      </div>
+                      <textarea
+                        value={pastedKubeconfig}
+                        onChange={(event) => setPastedKubeconfig(event.target.value)}
+                        placeholder="Paste kubeconfig YAML here…"
+                        aria-label="Kubeconfig YAML"
+                        spellCheck={false}
+                      />
+                      <footer>
+                        <Button variant="ghost" size="sm" onClick={() => setPasteKubeconfigOpen(false)}>Cancel</Button>
+                        <Button size="sm" disabled={!pastedKubeconfig.trim()} onClick={() => void addPastedKubeconfig()}>
+                          Add kubeconfig
+                        </Button>
+                      </footer>
+                    </div>
+                  )}
+                  {kubeconfigError && <p role="alert">{kubeconfigError}</p>}
+                </div>
+              )}
+              {!isTauri() && <WebKubeconfigSection />}
               {contexts === null ? (
                 <p className="fl-settings-context-state">Reading kubeconfig contexts…</p>
               ) : contextError ? (
@@ -843,7 +848,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "mcp" && (
+          {section === "mcp" && isTauri() && (
             <SectionPanel
               title="MCP"
               description="Expose srelens to agents and MCP clients, and get ready-to-paste client config."
@@ -861,7 +866,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "updates" && (
+          {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">
                 <div className="fl-settings-update__version">

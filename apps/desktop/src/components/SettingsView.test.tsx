@@ -1,7 +1,18 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "./SettingsView";
 import { DEFAULT_WORKSPACE_LAYOUT } from "../lib/settings";
+
+// These tests exercise desktop-only UI (native kubeconfig picker, in-app
+// updater, relaunch) that Task 5 gates behind `isTauri()`. Give the suite a
+// Tauri context so those blocks render as before; web-mode rendering of the
+// same sections is covered separately (WebKubeconfigSection.test.tsx).
+beforeEach(() => {
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+});
+afterEach(() => {
+  delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+});
 
 const fileMocks = vi.hoisted(() => ({
   pickKubeconfigFiles: vi.fn(),

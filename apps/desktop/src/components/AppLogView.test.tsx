@@ -67,9 +67,15 @@ describe("AppLogView", () => {
   });
 
   it("reveals the log file in the file manager", async () => {
-    render(<AppLogView />);
-    await waitFor(() => expect(screen.getByText(/starting/)).toBeDefined());
-    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
-    await waitFor(() => expect(revealAppLogMock).toHaveBeenCalled());
+    // The reveal button is desktop-only (Task 5 gates it behind `isTauri()`).
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    try {
+      render(<AppLogView />);
+      await waitFor(() => expect(screen.getByText(/starting/)).toBeDefined());
+      fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+      await waitFor(() => expect(revealAppLogMock).toHaveBeenCalled());
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    }
   });
 });

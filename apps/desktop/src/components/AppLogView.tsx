@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Copy, FolderOpen, RefreshCw } from "lucide-react";
 import { appLogPath, readAppLog, revealAppLog } from "../lib/appLog";
 import { Button, IconButton, Select, Spinner, TextInput } from "../ui";
+import { isTauri } from "../transport/platform";
 
 /** Log levels emitted by tauri-plugin-log, most→least severe. */
 const LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] as const;
@@ -95,10 +96,12 @@ export function AppLogView() {
         <div className="ml-auto flex items-center gap-1">
           {loading && <Spinner label="Loading log" />}
           <IconButton icon={RefreshCw} label="Refresh" onClick={load} disabled={loading} />
-          <Button variant="outline" size="sm" onClick={() => void revealAppLog()}>
-            <FolderOpen aria-hidden="true" className="size-3.5" />
-            Reveal
-          </Button>
+          {isTauri() && (
+            <Button variant="outline" size="sm" onClick={() => void revealAppLog()}>
+              <FolderOpen aria-hidden="true" className="size-3.5" />
+              Reveal
+            </Button>
+          )}
         </div>
       </div>
 

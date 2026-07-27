@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 const toolbox = vi.hoisted(() => ({
@@ -18,7 +18,11 @@ vi.mock("../lib/clusters", () => ({
 
 import { ToolboxView } from "./ToolboxView";
 
+// Task 5 gates the install actions behind `isTauri()`; these tests exercise
+// installs, so give them a Tauri context (web-mode hides the same buttons —
+// unit-tested implicitly by the isTauri()-gated JSX, no separate render path).
 beforeEach(() => {
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
   Object.values(toolbox).forEach((m) => m.mockReset());
   toolbox.toolboxStatus.mockResolvedValue({
     data: [
@@ -29,6 +33,9 @@ beforeEach(() => {
   });
   toolbox.searchPlugins.mockResolvedValue({ data: [] });
   toolbox.diagnoseContext.mockResolvedValue({ data: { context: "dev", items: [] } });
+});
+afterEach(() => {
+  delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
 });
 
 describe("ToolboxView", () => {
@@ -87,5 +94,34 @@ describe("ToolboxView", () => {
     expect(screen.getByText("Missing")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Install" }));
     await waitFor(() => expect(toolbox.installPlugin).toHaveBeenCalledWith("oidc-login"));
+  });
+
+  it("hides install and remove actions in web mode", async () => {
+    // No Tauri marker here — this is the web-mode case the other tests'
+    // Tauri context (set in beforeEach) doesn't cover.
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    toolbox.searchPlugins.mockResolvedValue({
+      data: [
+        { name: "oidc-login", description: "OIDC login", installed: false },
+        { name: "already-here", description: "Already installed", installed: true },
+      ],
+    });
+    render(<ToolboxView />);
+    await screen.findByText("v1.30.2");
+
+    // Tools section: krew is missing, but no install button/action reaches the server toolchain on web.
+    expect(screen.queryByRole("button", { name: /install krew/i })).toBeNull();
+    expect(screen.getByText(/Tool installation is available in the desktop app/)).toBeDefined();
+
+    // Plugins section: neither install nor remove is reachable on web.
+    fireEvent.change(screen.getByLabelText("Search krew plugins"), { target: { value: "oidc" } });
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    expect(await screen.findByText("oidc-login")).toBeDefined();
+    expect(screen.getByText("already-here")).toBeDefined();
+
+    expect(screen.queryByRole("button", { name: /install/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /remove/i })).toBeNull();
+    expect(toolbox.installPlugin).not.toHaveBeenCalled();
+    expect(toolbox.removePlugin).not.toHaveBeenCalled();
   });
 });

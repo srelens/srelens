@@ -49,6 +49,7 @@ import {
 import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
+import { isTauri } from "./transport/platform";
 import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "./lib/clusters";
 import { deletePod } from "./lib/workloads";
@@ -105,7 +106,9 @@ export function App() {
   const [contextsError, setContextsError] = useState("");
 
   const refreshContexts = () => {
-    listContexts(kubeconfigFiles).then((o) => {
+    // Web has no local kubeconfig files to merge in — the server resolves
+    // contexts server-side from the caller's uploaded kubeconfigs instead.
+    listContexts(isTauri() ? kubeconfigFiles : []).then((o) => {
       setContexts(o.contexts ?? []);
       setContextsError(o.error ?? "");
 
@@ -338,6 +341,7 @@ export function App() {
   // rather than only when the user opens Settings and clicks "check".
   const notifiedVersionRef = useRef<string | null>(null);
   useEffect(() => {
+    if (!isTauri()) return;
     const channel = loadUpdateChannel();
     const run = () =>
       void checkForUpdateAndNotify(
@@ -357,6 +361,7 @@ export function App() {
   // Start the in-app MCP HTTP server on launch if the user left it enabled, so
   // agents can connect without opening Settings first.
   useEffect(() => {
+    if (!isTauri()) return;
     const mcp = loadMcpSettings();
     if (mcp.enabled) void startMcpHttp(mcp.port).catch(() => {});
   }, []);
