@@ -71,9 +71,16 @@ class WsClient {
       // A stream may report that its context's OIDC cluster needs sign-in (the
       // client is resolved async inside the stream, so this can't be an HTTP
       // 401). Detect the marker centrally and prompt, then still fan the
-      // payload out so the stream tears down as usual.
-      const login = parseClusterLoginRequired(frame.payload);
-      if (login) requestClusterLogin(login);
+      // payload out so the stream tears down as usual. Skip raw byte-output
+      // channels (`*:out:*`, log lines) — the marker only ever arrives on
+      // error/exit/closed channels, and raw output could contain the literal
+      // string (e.g. cat-ing a source file) and spuriously prompt.
+      const rawOutput =
+        frame.channel.includes(":out:") || frame.channel.startsWith("logs:line");
+      if (!rawOutput) {
+        const login = parseClusterLoginRequired(frame.payload);
+        if (login) requestClusterLogin(login);
+      }
       const set = this.handlers.get(frame.channel);
       if (set) for (const h of set) h(frame.payload);
     }

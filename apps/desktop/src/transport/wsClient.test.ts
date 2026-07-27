@@ -155,4 +155,20 @@ describe("wsClient", () => {
     expect(requestClusterLogin).not.toHaveBeenCalled();
     expect(handler).toHaveBeenCalledWith(payload);
   });
+
+  it("does not prompt on raw output channels even if the bytes contain the marker", async () => {
+    const { default: client } = await import("./wsClient");
+    const handler = vi.fn();
+    // A terminal/exec stdout stream: the user could cat a file that literally
+    // contains the marker string — it must NOT trigger a sign-in prompt.
+    await client.subscribeChannel("term:out:1", handler, { awaitAck: false });
+    const ws = FakeWS.instances[0];
+    ws.open();
+
+    const payload = "$ grep NEEDS_CLUSTER_LOGIN:k:ctx ./src\n";
+    ws.message(JSON.stringify({ channel: "term:out:1", payload }));
+
+    expect(requestClusterLogin).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledWith(payload); // output still delivered
+  });
 });
