@@ -14,6 +14,7 @@ use crate::sink::EventSink;
 
 struct Forward {
     handle: JoinHandle<()>,
+    local_port: u16,
 }
 
 /// Owns running port-forwards (keyed by numeric id).
@@ -87,7 +88,10 @@ impl ForwardManager {
             );
         });
 
-        self.forwards.lock().unwrap().insert(id, Forward { handle });
+        self.forwards
+            .lock()
+            .unwrap()
+            .insert(id, Forward { handle, local_port: bound });
         Ok(ForwardInfo {
             id,
             local_port: bound,
@@ -99,6 +103,12 @@ impl ForwardManager {
         if let Some(f) = self.forwards.lock().unwrap().remove(&id) {
             f.handle.abort();
         }
+    }
+
+    /// The bound loopback port for a live forward id (used by the web
+    /// reverse proxy), or None if the id is unknown or already stopped.
+    pub fn local_port(&self, id: u64) -> Option<u16> {
+        self.forwards.lock().unwrap().get(&id).map(|f| f.local_port)
     }
 
     /// Abort every running port-forward (used when a user's environment is
@@ -168,5 +178,19 @@ mod tests {
         manager.shutdown_all(); // no panic; subsequent stop is a no-op
         assert!(manager.forwards.lock().unwrap().is_empty());
         manager.stop(info.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_port_lookup_matches_start_and_clears_on_stop() {
+        let manager = ForwardManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let info = manager
+            .start(sink, "nope".into(), "ns".into(), "Pod".into(), "pod-a".into(), 8080, None)
+            .await
+            .expect("bind succeeds locally");
+        assert_eq!(manager.local_port(info.id), Some(info.local_port));
+        assert_eq!(manager.local_port(9999), None);
+        manager.stop(info.id);
+        assert_eq!(manager.local_port(info.id), None);
     }
 }
