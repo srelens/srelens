@@ -2837,6 +2837,37 @@ body {
   color: var(--fl-color-danger);
   font-size: 11px;
 }
+.fl-cluster-signin-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--fl-color-border-faint);
+  border-radius: var(--fl-radius-md, 8px);
+  background: var(--fl-color-surface);
+  padding: 6px 9px;
+}
+.fl-cluster-signin-row > span:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+.fl-cluster-signin-row strong {
+  overflow: hidden;
+  color: var(--fl-color-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fl-cluster-signin-row small {
+  overflow: hidden;
+  color: var(--fl-color-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .fl-kubeconfig-paste {
   margin-top: 10px;
   border-top: 1px solid var(--fl-color-border-faint);

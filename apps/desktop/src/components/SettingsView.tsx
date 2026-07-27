@@ -68,6 +68,7 @@ import { appVersion, relaunchApp } from "../transport/transport";
 import { isTauri } from "../transport/platform";
 import { WebKubeconfigSection } from "./WebKubeconfigSection";
 import { WebAddClusterSection } from "./WebAddClusterSection";
+import { WebClusterSignInSection } from "./WebClusterSignInSection";
 
 const MODE_OPTIONS: Array<{ mode: ThemeMode; label: string; description: string; icon: React.ElementType }> = [
   { mode: "dark", label: "Dark", description: "Low-light operational workspace", icon: Moon },
@@ -624,6 +625,7 @@ export function SettingsView({
               )}
               {!isTauri() && <WebKubeconfigSection />}
               {!isTauri() && <WebAddClusterSection onAdded={() => setClusterRefresh((n) => n + 1)} />}
+              {!isTauri() && <WebClusterSignInSection refreshNonce={clusterRefresh} />}
               {contexts === null ? (
                 <p className="fl-settings-context-state">Reading kubeconfig contexts…</p>
               ) : contextError ? (
