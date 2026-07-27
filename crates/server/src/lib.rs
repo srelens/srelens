@@ -11,6 +11,7 @@ use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 
 pub mod api;
+pub mod api_clusters;
 pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod assets;
@@ -52,6 +53,7 @@ pub struct AppState {
     pub auth: Arc<auth::AuthConfig>,
     pub idp: Arc<dyn auth::idp::IdentityProvider>,
     pub pending: Arc<auth::idp::PendingLogins>,
+    pub pending_cluster: Arc<auth::cluster_routes::PendingClusterLogins>,
     pub ws_hub: Arc<ws::hub::WsHub>,
     pub pf_client: pf_proxy::HttpProxyClient,
 }
@@ -83,6 +85,7 @@ impl AppState {
             }),
             idp: Arc::new(auth::idp::FakeIdp),
             pending: Arc::new(auth::idp::PendingLogins::default()),
+            pending_cluster: Arc::new(auth::cluster_routes::PendingClusterLogins::default()),
             ws_hub: Arc::new(ws::hub::WsHub::new()),
             pf_client: pf_proxy::client(),
         }
@@ -115,6 +118,14 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api_kubeconfigs::delete),
         )
         .route(
+            "/api/clusters",
+            axum::routing::post(api_clusters::create),
+        )
+        .route(
+            "/api/clusters/:key/logout",
+            axum::routing::post(api_clusters::logout),
+        )
+        .route(
             "/api/command/:command",
             axum::routing::post(api_command::dispatch),
         )
@@ -131,6 +142,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/auth/dev-login",
             axum::routing::post(auth::routes::dev_login),
+        )
+        .route("/auth/cluster/login", get(auth::cluster_routes::login))
+        .route(
+            "/auth/cluster/callback",
+            get(auth::cluster_routes::callback),
         )
         .route("/api/ws", get(ws::route::ws_handler))
         .route(
@@ -201,6 +217,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
         auth: Arc::new(auth_config),
         idp,
         pending: Arc::new(auth::idp::PendingLogins::default()),
+        pending_cluster: Arc::new(auth::cluster_routes::PendingClusterLogins::default()),
         ws_hub: Arc::new(ws::hub::WsHub::new()),
         pf_client: pf_proxy::client(),
     };

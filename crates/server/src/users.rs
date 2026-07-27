@@ -23,6 +23,10 @@ pub struct UserEnv {
     pub cache: Arc<ClientCache>,
     pub paths: Vec<PathBuf>,
     pub streams: Arc<crate::streams::UserStreams>,
+    /// This user's index of OIDC clusters (issuer/client per oidc_key), built
+    /// from their kubeconfigs — the cluster-login routes resolve `?key=`
+    /// against this same registry the auth resolver uses.
+    pub oidc_registry: Arc<crate::cluster_registry::ClusterOidcRegistry>,
     last_used: Mutex<Instant>,
 }
 
@@ -158,7 +162,7 @@ impl UserEnvs {
         ));
         cache
             .set_auth_resolver(Arc::new(crate::cluster_auth_resolver::ClusterAuthResolver {
-                registry: oidc_registry,
+                registry: oidc_registry.clone(),
                 provider,
             }))
             .await;
@@ -170,6 +174,7 @@ impl UserEnvs {
             cache,
             paths,
             streams,
+            oidc_registry,
             last_used: Mutex::new(Instant::now()),
         });
         // Last-writer-wins is fine: both candidates were built from the same

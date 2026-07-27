@@ -1,6 +1,7 @@
 //! Authentication: configuration, identity-provider abstraction, session
 //! middleware, and the login/callback/logout routes.
 
+pub mod cluster_routes;
 pub mod idp;
 pub mod oidc;
 pub mod routes;
