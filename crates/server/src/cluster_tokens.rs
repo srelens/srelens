@@ -58,6 +58,9 @@ impl Db {
         oidc_key: &str,
         key: &MasterKey,
     ) -> Result<Option<StoredToken>, String> {
+        // The row is the sealed id/refresh ciphertext+nonce pairs plus expiry;
+        // the tuple mirrors the SELECT below, so a type alias would obscure it.
+        #[allow(clippy::type_complexity)]
         let row: Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, i64)> = sqlx::query_as(
             "SELECT id_token_ct, id_token_nonce, refresh_ct, refresh_nonce, expires_at
              FROM cluster_oidc_tokens WHERE user_id = ? AND oidc_key = ?",
