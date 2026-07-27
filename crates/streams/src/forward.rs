@@ -111,6 +111,18 @@ impl ForwardManager {
         self.forwards.lock().unwrap().get(&id).map(|f| f.local_port)
     }
 
+    /// Register a forward id → local port directly (no live cluster).
+    /// Intended for tests of downstream consumers such as the web reverse
+    /// proxy, which need a fake forward without standing up a real cluster.
+    pub fn insert_test_forward(&self, id: u64, local_port: u16) {
+        // A never-completing handle stands in for the real serve loop.
+        let handle = tokio::spawn(async { std::future::pending::<()>().await });
+        self.forwards
+            .lock()
+            .unwrap()
+            .insert(id, Forward { handle, local_port });
+    }
+
     /// Abort every running port-forward (used when a user's environment is
     /// dropped).
     pub fn shutdown_all(&self) {

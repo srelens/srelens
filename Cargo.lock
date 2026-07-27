@@ -5405,6 +5405,8 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
+ "hyper 1.10.1",
+ "hyper-util",
  "mime_guess",
  "openidconnect",
  "rust-embed",

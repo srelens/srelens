@@ -18,6 +18,7 @@ pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod pf_proxy;
 pub mod stores;
 pub mod streams;
 pub mod users;
@@ -47,6 +48,7 @@ pub struct AppState {
     pub idp: Arc<dyn auth::idp::IdentityProvider>,
     pub pending: Arc<auth::idp::PendingLogins>,
     pub ws_hub: Arc<ws::hub::WsHub>,
+    pub pf_client: pf_proxy::HttpProxyClient,
 }
 
 impl AppState {
@@ -73,6 +75,7 @@ impl AppState {
             idp: Arc::new(auth::idp::FakeIdp),
             pending: Arc::new(auth::idp::PendingLogins::default()),
             ws_hub: Arc::new(ws::hub::WsHub::new()),
+            pf_client: pf_proxy::client(),
         }
     }
 }
@@ -121,6 +124,36 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(auth::routes::dev_login),
         )
         .route("/api/ws", get(ws::route::ws_handler))
+        .route(
+            "/pf/:id",
+            get(pf_proxy::proxy)
+                .post(pf_proxy::proxy)
+                .put(pf_proxy::proxy)
+                .delete(pf_proxy::proxy)
+                .patch(pf_proxy::proxy),
+        )
+        // matchit treats "/pf/:id/" as distinct from both "/pf/:id" (exact,
+        // no trailing slash) and "/pf/:id/*rest" (which requires at least an
+        // empty-but-present wildcard segment and errors as
+        // `ExtraTrailingSlash` on a bare trailing slash) — so the bare
+        // trailing-slash form needs its own explicit route to avoid falling
+        // through to the asset fallback.
+        .route(
+            "/pf/:id/",
+            get(pf_proxy::proxy)
+                .post(pf_proxy::proxy)
+                .put(pf_proxy::proxy)
+                .delete(pf_proxy::proxy)
+                .patch(pf_proxy::proxy),
+        )
+        .route(
+            "/pf/:id/*rest",
+            get(pf_proxy::proxy)
+                .post(pf_proxy::proxy)
+                .put(pf_proxy::proxy)
+                .delete(pf_proxy::proxy)
+                .patch(pf_proxy::proxy),
+        )
         .merge(api)
         .fallback(get(assets::serve_asset))
         .with_state(state)
@@ -156,6 +189,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
         idp,
         pending: Arc::new(auth::idp::PendingLogins::default()),
         ws_hub: Arc::new(ws::hub::WsHub::new()),
+        pf_client: pf_proxy::client(),
     };
     {
         let db = state.db.clone();
