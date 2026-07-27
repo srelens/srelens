@@ -185,12 +185,12 @@ async fn run(
                 .start(sink(), a.context, a.namespace, a.kind, a.channel, paths)
                 .await
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
-            json!({ "channel": channel })
+            json!(channel)
         }
         "stop_watch" => {
             let a: ChannelArg = parse(body)?;
             env.streams.watch.stop(&a.channel);
-            json!({})
+            json!(null)
         }
         "start_log_stream" => {
             let a: LogStart = parse(body)?;
@@ -208,12 +208,12 @@ async fn run(
                 )
                 .await
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
-            json!({})
+            json!(null)
         }
         "stop_log_stream" => {
             let a: ChannelArg = parse(body)?;
             env.streams.logs.stop(&a.channel);
-            json!({})
+            json!(null)
         }
         "start_pod_exec" => {
             let a: ExecStart = parse(body)?;
@@ -235,22 +235,22 @@ async fn run(
                 )
                 .await
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
-            json!({ "id": id })
+            json!(id)
         }
         "exec_input" => {
             let a: InputArg = parse(body)?;
             env.streams.exec.input(a.session, a.data).await;
-            json!({})
+            json!(null)
         }
         "exec_resize" => {
             let a: ResizeArg = parse(body)?;
             env.streams.exec.resize(a.session, a.cols, a.rows).await;
-            json!({})
+            json!(null)
         }
         "exec_close" => {
             let a: SessionArg = parse(body)?;
             env.streams.exec.close(a.session);
-            json!({})
+            json!(null)
         }
         "start_port_forward" => {
             let a: ForwardStart = parse(body)?;
@@ -273,7 +273,7 @@ async fn run(
         "stop_port_forward" => {
             let a: IdArg = parse(body)?;
             env.streams.forward.stop(a.id);
-            json!({})
+            json!(null)
         }
         "start_terminal" => {
             let a: TerminalStart = parse(body)?;
@@ -283,22 +283,22 @@ async fn run(
                 .start(sink(), a.context, paths, a.channel, a.cols, a.rows)
                 .await
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
-            json!({ "id": id })
+            json!(id)
         }
         "terminal_input" => {
             let a: InputArg = parse(body)?;
             env.streams.terminal.input(a.session, &a.data);
-            json!({})
+            json!(null)
         }
         "terminal_resize" => {
             let a: ResizeArg = parse(body)?;
             env.streams.terminal.resize(a.session, a.cols, a.rows);
-            json!({})
+            json!(null)
         }
         "terminal_close" => {
             let a: SessionArg = parse(body)?;
             env.streams.terminal.close(a.session);
-            json!({})
+            json!(null)
         }
         "start_helm_op" => {
             let a: HelmStart = parse(body)?;
@@ -308,12 +308,12 @@ async fn run(
                 .start(sink(), a.context, paths, a.args, a.values, a.channel)
                 .await
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, &e))?;
-            json!({ "id": id })
+            json!(id)
         }
         "helm_op_close" => {
             let a: SessionArg = parse(body)?;
             env.streams.helm.close(a.session);
-            json!({})
+            json!(null)
         }
         other => {
             return Err(error(
@@ -395,15 +395,31 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, json!({ "channel": "watch:1" }));
+        assert_eq!(body, json!("watch:1"));
     }
 
     #[tokio::test]
-    async fn void_command_returns_empty_object() {
+    async fn void_command_returns_null() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         let (status, body) = authed_post(&state, "stop_watch", json!({ "channel": "x" })).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, json!({}));
+        assert_eq!(body, json!(null));
+    }
+
+    #[tokio::test]
+    async fn exec_start_returns_a_bare_session_id() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let (status, body) = authed_post(
+            &state,
+            "start_pod_exec",
+            json!({ "context": "c", "namespace": "n", "pod": "p" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.is_number(),
+            "exec session id must be a bare number (desktop parity), got {body}"
+        );
     }
 
     #[tokio::test]
