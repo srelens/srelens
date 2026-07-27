@@ -15,6 +15,7 @@ pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod assets;
 pub mod auth;
+pub mod cluster_tokens;
 pub mod config;
 pub mod crypto;
 pub mod db;
