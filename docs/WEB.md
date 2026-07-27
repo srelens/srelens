@@ -91,6 +91,62 @@ merged, the same way the desktop app merges multiple local kubeconfig files.
 Removing an uploaded kubeconfig is supported; renaming one currently isn't —
 delete and re-add it under the new name instead.
 
+## Cluster OIDC sign-in (Headlamp-style)
+
+Some Kubernetes clusters put their API server behind an OIDC identity provider,
+and normally reach it through a `kubelogin` / `oidc-login` exec plugin. That
+plugin can't run inside the headless container, which is why such clusters
+otherwise fail to connect. Instead, srelens runs the OIDC authorization-code +
+PKCE flow **in your browser** and uses the resulting `id_token` as the Bearer
+for API calls — the same approach Headlamp takes — so no exec plugin is needed.
+
+**This is separate from the app sign-in.** The `SRELENS_OIDC_*` variables above
+authenticate you *to srelens*; cluster OIDC authenticates you *to a Kubernetes
+API server*. They can use entirely different identity providers.
+
+You define an OIDC cluster two ways:
+
+- **Upload a kubeconfig** whose user is an OIDC user — either a legacy
+  `auth-provider: oidc` block (`idp-issuer-url`, `client-id`, optional
+  `client-secret`/`extra-scopes`) or an `exec` `kubelogin`/`oidc-login` plugin
+  (srelens reads the issuer/client from its flags). srelens detects it
+  automatically.
+- **Settings → Contexts → Add cluster**: fill in the API server URL, a CA
+  certificate (or check *skip TLS verify*), and the OIDC issuer + client id
+  (+ optional client secret and extra scopes). srelens synthesizes and stores
+  the kubeconfig for you.
+
+**When you use an OIDC cluster that has no valid token, srelens prompts
+"Sign in to `<cluster>`"** (from any view or stream). Clicking it runs the
+sign-in flow and returns you to the app. **Settings → Contexts** lists your
+OIDC clusters with their sign-in status and a per-cluster **Sign out**. srelens
+refreshes the token server-side while it can, and re-prompts when it can't.
+
+### Operator requirement: register the redirect URI
+
+Each OIDC cluster's identity-provider client **must allow the redirect URI**
+
+```
+${SRELENS_PUBLIC_URL}/auth/cluster/callback
+```
+
+(the srelens analogue of kubelogin's `http://localhost:8000` callback). Use a
+**public client with PKCE** — no client secret is required (a confidential
+secret is supported but optional). `SRELENS_PUBLIC_URL` must be set correctly
+for this URL to be right.
+
+### Limitations
+
+- The managed OIDC token authenticates **kube-rs API calls only**. The
+  in-browser **terminal** and **helm** run `kubectl`/`helm` subprocesses that
+  can't use it (kubectl ≥ 1.26 removed the built-in `auth-provider: oidc`
+  support), so those two features don't work against an OIDC-only cluster.
+- **Private-CA identity providers** — an IdP served under a private root the
+  container doesn't trust — are not yet supported (discovery uses the system
+  trust store).
+- This covers OIDC only. Non-OIDC exec plugins (`aws eks get-token`, `gcloud`)
+  still require [extending the image](#extending-the-image-with-cloud-clis).
+
 ## Web-mode behavior
 
 - **Terminal:** each user gets an in-container shell (a real PTY, `bash`),
