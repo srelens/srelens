@@ -9,7 +9,10 @@ services:
       - srelens-data:/data
     environment:
       # Public URL the browser uses; REQUIRED for a non-loopback deployment so
-      # OIDC redirects and Secure cookies are correct.
+      # OIDC redirects and Secure cookies are correct. This builds both the app
+      # sign-in redirect and each cluster's OIDC callback
+      # (${SRELENS_PUBLIC_URL}/auth/cluster/callback) — register that callback
+      # URI at every OIDC-protected cluster's IdP client. See docs/WEB.md.
       SRELENS_PUBLIC_URL: ${SRELENS_PUBLIC_URL:-http://localhost:8080}
       # Stable at-rest encryption key (64 hex chars); if unset, a key is
       # generated into /data/master.key on first boot.

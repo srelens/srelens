@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:22-slim AS frontend
+FROM node:24-slim AS frontend
 RUN corepack enable && corepack prepare pnpm@9 --activate
 WORKDIR /src
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
@@ -26,8 +26,10 @@ RUN strip target/release/srelens-server
 
 # ---- Stage 3: slim runtime --------------------------------------------------
 FROM debian:bookworm-slim AS runtime
-ARG KUBECTL_VERSION=v1.31.0
-ARG HELM_VERSION=v3.16.2
+ARG KUBECTL_VERSION=v1.36.3
+# Helm is pinned to the 3.x line on purpose: Helm 4 has breaking CLI/behavior
+# changes the helm capabilities aren't validated against yet.
+ARG HELM_VERSION=v3.21.3
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates bash curl jq tar \
