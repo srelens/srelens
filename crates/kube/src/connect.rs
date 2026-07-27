@@ -584,12 +584,14 @@ mod tests {
             "apiVersion: v1\nkind: Config\ncurrent-context: ctx-oidc\nclusters:\n  - name: c\n    cluster: { server: https://oidc.example:6443 }\nusers:\n  - name: u\n    user:\n      auth-provider:\n        name: oidc\n        config:\n          idp-issuer-url: https://issuer.example\n          client-id: some-client\ncontexts:\n  - name: ctx-oidc\n    context: { cluster: c, user: u }\n",
         );
 
-        let result = build_client_with_bearer(&[path.clone()], "ctx-oidc", "test-bearer-token").await;
+        let result =
+            build_client_with_bearer(std::slice::from_ref(&path), "ctx-oidc", "test-bearer-token")
+                .await;
         if let Err(e) = &result {
             panic!("expected Ok, got Err({e})");
         }
 
-        let missing = build_client_with_bearer(&[path.clone()], "missing-ctx", "t").await;
+        let missing = build_client_with_bearer(std::slice::from_ref(&path), "missing-ctx", "t").await;
         assert!(missing.is_err());
 
         let _ = std::fs::remove_file(&path);
