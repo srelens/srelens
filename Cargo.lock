@@ -5349,6 +5349,7 @@ dependencies = [
  "srelens-capability",
  "srelens-kube",
  "srelens-mcp",
+ "srelens-registry",
  "srelens-server",
  "srelens-streams",
  "tauri",
@@ -5393,6 +5394,18 @@ dependencies = [
  "srelens-capability",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "srelens-registry"
+version = "0.0.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde_json",
+ "srelens-capability",
+ "srelens-kube",
+ "srelens-mcp",
+ "tokio",
 ]
 
 [[package]]

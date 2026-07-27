@@ -1,0 +1,18 @@
+[package]
+name = "srelens-registry"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+srelens-capability = { path = "../capability" }
+srelens-kube = { path = "../kube" }
+serde_json = "1"
+# Blocking HTTP for toolbox downloads (run inside spawn_blocking). rustls with
+# NO auto crypto-provider: the workspace standardises on ring via kube-client;
+# a second provider (aws-lc-rs) causes a runtime "could not determine
+# CryptoProvider" panic. Mirrors apps/desktop/src-tauri/Cargo.toml.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+
+[dev-dependencies]
+srelens-mcp = { path = "../mcp" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

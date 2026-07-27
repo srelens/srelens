@@ -30,6 +30,7 @@ srelens-mcp = { path = "../../../crates/mcp" }
 srelens-kube = { path = "../../../crates/kube" }
 srelens-streams = { path = "../../../crates/streams" }
 srelens-server = { path = "../../../crates/server" }
+srelens-registry = { path = "../../../crates/registry" }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
 # Blocking HTTP for Toolbox tool downloads (run inside spawn_blocking).
 # rustls-no-provider matches tauri-plugin-updater's reqwest so no second TLS
