@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
+kube = { version = "0.96", default-features = false, features = ["config"] }
 srelens-registry = { path = "../registry" }
 srelens-streams = { path = "../streams" }
 serde = { version = "1", features = ["derive"] }

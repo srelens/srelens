@@ -5420,6 +5420,7 @@ dependencies = [
  "hex",
  "hyper 1.10.1",
  "hyper-util",
+ "kube",
  "mime_guess",
  "openidconnect",
  "rust-embed",
