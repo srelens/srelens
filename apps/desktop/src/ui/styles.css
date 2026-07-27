@@ -2550,6 +2550,20 @@ body {
   min-height: 0;
   flex: 1;
   flex-direction: column;
+  gap: 12px;
+}
+/* Web contexts sub-tab bodies (Sources, Cluster sign-in) scroll within the
+   fixed-height panel; the Appearance tab uses the context-manager instead,
+   which fills the space and scrolls its own panes. */
+.fl-web-ctx-scroll {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
 }
 .fl-settings-mode-grid {
   display: grid;
