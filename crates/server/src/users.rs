@@ -30,6 +30,10 @@ pub struct UserEnvs {
     factory: RegistryFactory,
     data_dir: PathBuf,
     map: Mutex<HashMap<i64, Arc<UserEnv>>>,
+    // Serializes concurrent first-time builds per user: two racing misses on
+    // the same user must not both `remove_dir_all` + materialize the runtime
+    // dir at once (the loser can delete the winner's freshly-written files).
+    build_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 fn user_runtime_dir(data_dir: &Path, user_id: i64) -> PathBuf {
@@ -72,6 +76,7 @@ impl UserEnvs {
             factory,
             data_dir,
             map: Mutex::new(HashMap::new()),
+            build_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -89,6 +94,22 @@ impl UserEnvs {
         key: &MasterKey,
         user_id: i64,
     ) -> Result<Arc<UserEnv>, String> {
+        if let Some(env) = self.map.lock().unwrap().get(&user_id).cloned() {
+            *env.last_used.lock().unwrap() = Instant::now();
+            return Ok(env);
+        }
+
+        // Cache miss: serialize the build per-user so concurrent first-time
+        // callers don't race (the loser's remove_dir_all could delete the
+        // winner's just-materialized files). The std Mutex guarding the lock
+        // map is never held across an .await — only the tokio lock is.
+        let lock = {
+            let mut locks = self.build_locks.lock().unwrap();
+            locks.entry(user_id).or_default().clone()
+        };
+        let _guard = lock.lock().await;
+
+        // Double-check: another builder may have finished while we waited.
         if let Some(env) = self.map.lock().unwrap().get(&user_id).cloned() {
             *env.last_used.lock().unwrap() = Instant::now();
             return Ok(env);
@@ -262,6 +283,37 @@ mod tests {
         envs.evict_idle(Duration::from_secs(0));
         assert!(!a.paths[0].exists());
 
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_env_for_builds_once() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "contexts: []\n", 1)
+            .await
+            .unwrap();
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone()));
+        // Fire many concurrent first-time env_for for the same user.
+        let mut handles = vec![];
+        for _ in 0..8 {
+            let envs = envs.clone();
+            let db = db.clone();
+            let k2 = key();
+            handles.push(tokio::spawn(async move {
+                envs.env_for(&db, &k2, user.id).await
+            }));
+        }
+        let mut envs_built = vec![];
+        for h in handles {
+            envs_built.push(h.await.unwrap().expect("env_for ok"));
+        }
+        // All concurrent calls resolve to the SAME env (single build, no race error).
+        for e in &envs_built {
+            assert!(Arc::ptr_eq(&envs_built[0], e));
+        }
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
