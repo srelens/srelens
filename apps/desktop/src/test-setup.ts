@@ -4,6 +4,11 @@ import { cleanup } from "@testing-library/react";
 // Unmount React trees between tests so repeated render() calls don't stack.
 afterEach(() => cleanup());
 
+// Web mode persists UI state (open tabs, namespaces, theme) to localStorage, so
+// one test's writes must not leak into the next test's fresh render — clear it
+// between tests. (Desktop is unaffected; this only matters under jsdom.)
+afterEach(() => localStorage.clear());
+
 // jsdom lacks a few browser APIs that HeroUI / React-Aria components touch
 // (media queries for theming, ResizeObserver for popovers/overlays). Provide
 // inert stubs so those components mount in tests.
