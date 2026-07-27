@@ -67,6 +67,7 @@ import { checkForUpdate, installUpdate, type UpdateMeta } from "../lib/updater";
 import { appVersion, relaunchApp } from "../transport/transport";
 import { isTauri } from "../transport/platform";
 import { WebKubeconfigSection } from "./WebKubeconfigSection";
+import { WebAddClusterSection } from "./WebAddClusterSection";
 
 const MODE_OPTIONS: Array<{ mode: ThemeMode; label: string; description: string; icon: React.ElementType }> = [
   { mode: "dark", label: "Dark", description: "Low-light operational workspace", icon: Moon },
@@ -166,6 +167,9 @@ export function SettingsView({
   const [pasteKubeconfigOpen, setPasteKubeconfigOpen] = useState(false);
   const [pastedKubeconfig, setPastedKubeconfig] = useState("");
   const [pastedKubeconfigName, setPastedKubeconfigName] = useState("");
+  // Bumped whenever a web-mode OIDC cluster is added, so the contexts/cluster
+  // list below can refresh (consumed as a refreshNonce prop by Task 6's list).
+  const [clusterRefresh, setClusterRefresh] = useState(0);
   const [updateState, setUpdateState] = useState<UpdatePhase>({ phase: "idle" });
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(() => loadUpdateChannel());
   const [currentVersion, setCurrentVersion] = useState("");
@@ -619,6 +623,7 @@ export function SettingsView({
                 </div>
               )}
               {!isTauri() && <WebKubeconfigSection />}
+              {!isTauri() && <WebAddClusterSection onAdded={() => setClusterRefresh((n) => n + 1)} />}
               {contexts === null ? (
                 <p className="fl-settings-context-state">Reading kubeconfig contexts…</p>
               ) : contextError ? (
