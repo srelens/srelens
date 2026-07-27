@@ -119,6 +119,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod networkpolicies;
 pub mod nodes;
+pub mod oidc_detect;
 pub mod persistentvolumes;
 pub mod pvcs;
 pub mod resourcequotas;
