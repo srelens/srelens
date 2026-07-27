@@ -1,4 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { requestClusterLogin } from "../lib/clusterLogin";
+
+vi.mock("../lib/clusterLogin", async (orig) => ({
+  ...(await orig<typeof import("../lib/clusterLogin")>()),
+  requestClusterLogin: vi.fn(),
+}));
 
 // A controllable fake WebSocket.
 class FakeWS {
@@ -39,6 +45,7 @@ describe("wsClient", () => {
     vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
     vi.stubGlobal("location", { protocol: "http:", host: "127.0.0.1:8080" } as unknown as Location);
     vi.resetModules();
+    vi.mocked(requestClusterLogin).mockClear();
   });
 
   it("subscribe resolves only after the subbed ack and delivers payloads", async () => {
@@ -117,5 +124,35 @@ describe("wsClient", () => {
     dispose();
 
     expect(first.sent).toContain(JSON.stringify({ op: "unsub", channel: "watch:1" }));
+  });
+
+  it("prompts cluster sign-in when a stream frame carries the needs-login marker, and still fans out the payload", async () => {
+    const { default: client } = await import("./wsClient");
+    const handler = vi.fn();
+    await client.subscribeChannel("watch:x", handler, { awaitAck: false });
+    const ws = FakeWS.instances[0];
+    ws.open();
+
+    const payload = { error: "NEEDS_CLUSTER_LOGIN:k:ctx" };
+    ws.message(JSON.stringify({ channel: "watch:x", payload }));
+
+    expect(requestClusterLogin).toHaveBeenCalledWith(
+      expect.objectContaining({ key: "k", context: "ctx" }),
+    );
+    expect(handler).toHaveBeenCalledWith(payload); // fan-out not broken
+  });
+
+  it("does not prompt cluster sign-in for a normal stream frame", async () => {
+    const { default: client } = await import("./wsClient");
+    const handler = vi.fn();
+    await client.subscribeChannel("watch:x", handler, { awaitAck: false });
+    const ws = FakeWS.instances[0];
+    ws.open();
+
+    const payload = { status: "live" };
+    ws.message(JSON.stringify({ channel: "watch:x", payload }));
+
+    expect(requestClusterLogin).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledWith(payload);
   });
 });

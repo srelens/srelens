@@ -3,6 +3,8 @@
 // socket; the server fans out {channel,payload} frames. Reconnects with
 // backoff and resubscribes every live channel so a dropped socket self-heals.
 
+import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLogin";
+
 type Handler = (payload: unknown) => void;
 
 export function wsUrl(): string {
@@ -66,6 +68,12 @@ class WsClient {
       return;
     }
     if (frame.channel && "payload" in frame) {
+      // A stream may report that its context's OIDC cluster needs sign-in (the
+      // client is resolved async inside the stream, so this can't be an HTTP
+      // 401). Detect the marker centrally and prompt, then still fan the
+      // payload out so the stream tears down as usual.
+      const login = parseClusterLoginRequired(frame.payload);
+      if (login) requestClusterLogin(login);
       const set = this.handlers.get(frame.channel);
       if (set) for (const h of set) h(frame.payload);
     }
