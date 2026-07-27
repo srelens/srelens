@@ -49,7 +49,7 @@ pub struct PutKubeconfig {
     pub yaml: String,
 }
 
-fn validate_name(name: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_name(name: &str) -> Result<(), &'static str> {
     if name.trim().is_empty() {
         return Err("name must not be empty");
     }

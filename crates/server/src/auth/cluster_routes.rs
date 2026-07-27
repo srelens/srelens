@@ -129,11 +129,17 @@ pub async fn login(
             created_at: Instant::now(),
         },
     ) {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "too many logins in flight");
+        return error(StatusCode::TOO_MANY_REQUESTS, "too many logins in flight");
     }
 
+    // The auth URL comes from a user-supplied issuer's discovery document, so
+    // an unparseable value must not panic the handler — map it to 502.
+    let location = match begin.auth_url.parse() {
+        Ok(loc) => loc,
+        Err(_) => return error(StatusCode::BAD_GATEWAY, "invalid IdP authorization URL"),
+    };
     let mut headers = HeaderMap::new();
-    headers.insert(LOCATION, begin.auth_url.parse().expect("valid auth url"));
+    headers.insert(LOCATION, location);
     headers.insert(
         SET_COOKIE,
         session::login_cookie(&binder, state.auth.cookie_secure())
@@ -365,12 +371,18 @@ mod tests {
     }
 
     async fn cookie_session(state: &AppState) -> String {
+        session_for(state).await.1
+    }
+
+    /// Create a user + session, returning `(user_id, session_token)`.
+    async fn session_for(state: &AppState) -> (i64, String) {
         let user = state.db.upsert_user("i", "s", "u@x", "U", 1).await.unwrap();
-        state
+        let token = state
             .db
             .create_session(user.id, crate::unix_now())
             .await
-            .unwrap()
+            .unwrap();
+        (user.id, token)
     }
 
     #[tokio::test]
@@ -451,5 +463,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn callback_rejects_wrong_or_missing_binder_cookie() {
+        // The pending flow belongs to the CALLER (ownership passes), but the
+        // browser presents a binder cookie that doesn't match the stored hash
+        // (or none at all) → 400, so an attacker who fixated a state can't
+        // complete the flow from a different browser.
+        for binder_cookie in ["; srelens_login=wrong", ""] {
+            let state = AppState::for_tests(Arc::new(Registry::new())).await;
+            let (user_id, token) = session_for(&state).await;
+            assert!(state.pending_cluster.insert(
+                "st".into(),
+                PendingClusterLogin {
+                    user_id,
+                    oidc_key: "k".into(),
+                    pkce_verifier: "v".into(),
+                    binder_hash: sha256_hex("the-real-binder"),
+                    created_at: Instant::now(),
+                }
+            ));
+            let resp = router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/auth/cluster/callback?code=c&state=st")
+                        .header("cookie", format!("srelens_session={token}{binder_cookie}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "binder cookie {binder_cookie:?} must be rejected",
+            );
+        }
     }
 }

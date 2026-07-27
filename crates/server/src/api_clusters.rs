@@ -43,8 +43,14 @@ pub async fn create(
     Extension(user): Extension<UserCtx>,
     Json(body): Json<ClusterCreate>,
 ) -> Response {
+    // Same name rules as an uploaded kubeconfig (bounded length, no path
+    // separators), applied to the trimmed name that will be stored.
+    let name = body.name.trim().to_string();
+    if let Err(e) = crate::api_kubeconfigs::validate_name(&name) {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
     let form = srelens_kube::cluster_synth::ClusterForm {
-        name: body.name.clone(),
+        name: name.clone(),
         server: body.server,
         ca_cert_pem: body.ca_cert_pem,
         insecure_skip_tls_verify: body.insecure_skip_tls_verify,
@@ -65,7 +71,7 @@ pub async fn create(
         .db
         .put_kubeconfig(
             user.user_id,
-            &body.name,
+            &name,
             &state.master_key,
             &yaml,
             crate::unix_now(),
@@ -75,7 +81,7 @@ pub async fn create(
         return error(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
     state.user_envs.invalidate(user.user_id);
-    Json(serde_json::json!({ "name": body.name })).into_response()
+    Json(serde_json::json!({ "name": name })).into_response()
 }
 
 /// POST /api/clusters/:key/logout — forget the caller's stored OIDC token for
