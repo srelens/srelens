@@ -5431,6 +5431,7 @@ dependencies = [
  "sqlx",
  "srelens-capability",
  "srelens-kube",
+ "srelens-registry",
  "srelens-streams",
  "tempfile",
  "tokio",

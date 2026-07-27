@@ -221,7 +221,30 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
 
 /// Serve on an already-bound listener with a fully-built state.
 pub async fn serve_on(state: AppState, listener: tokio::net::TcpListener) -> std::io::Result<()> {
-    axum::serve(listener, router(state)).await
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+}
+
+/// Resolves on SIGTERM (docker stop) or Ctrl-C (SIGINT), for graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 #[cfg(test)]

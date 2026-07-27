@@ -6,11 +6,12 @@ edition.workspace = true
 [dependencies]
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
+srelens-registry = { path = "../registry" }
 srelens-streams = { path = "../streams" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "signal"] }
 axum = { version = "0.7", features = ["ws"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
@@ -24,6 +25,10 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 async-trait = "0.1"
 openidconnect = { version = "3", default-features = false, features = ["reqwest", "rustls-tls"] }
+
+[[bin]]
+name = "srelens-server"
+path = "src/bin/srelens-server.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
