@@ -13,11 +13,21 @@ use srelens_capability::CapabilityError;
 use crate::auth::session::UserCtx;
 use crate::AppState;
 
-/// Capabilities that are desktop-only in web mode: `k8s.deleteContext` mutates
-/// the per-request materialized kubeconfig, which is rebuilt from the database
-/// on every env refresh, so its effect would silently vanish. Blocked until a
-/// database-backed context edit exists.
-pub const WEB_DENIED_CAPABILITIES: &[&str] = &["k8s.deleteContext"];
+/// Capabilities blocked on the web surface. UI gating is not a security
+/// boundary — these must be denied at the API layer too. `k8s.deleteContext`
+/// mutates the per-request materialized kubeconfig (silently reverts on env
+/// rebuild); the `toolbox.*` mutators install/remove tools on the shared
+/// container host, affecting every user. Read-only toolbox capabilities
+/// (status/diagnoseContext/searchPlugins) stay allowed.
+pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
+    "k8s.deleteContext",
+    "toolbox.installKubectl",
+    "toolbox.installHelm",
+    "toolbox.installKrew",
+    "toolbox.installPlugin",
+    "toolbox.upgradePlugin",
+    "toolbox.removePlugin",
+];
 
 /// Invoke a capability by id. The request body is the capability's input JSON;
 /// an empty body means null input. Unknown id → 404, invalid input (or a body
@@ -363,5 +373,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn toolbox_mutators_are_denied_on_web() {
+        for id in [
+            "toolbox.installKubectl",
+            "toolbox.installHelm",
+            "toolbox.installKrew",
+            "toolbox.installPlugin",
+            "toolbox.upgradePlugin",
+            "toolbox.removePlugin",
+        ] {
+            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
+            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn toolbox_read_capabilities_are_not_denied() {
+        // A read-only toolbox cap is not in the deny-list, so it reaches
+        // dispatch and 404s (unregistered in the test registry) rather than
+        // being 400-denied.
+        let (status, _) = post("/api/capability/toolbox.status", Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
