@@ -1,0 +1,10 @@
+target
+node_modules
+apps/desktop/node_modules
+apps/desktop/dist
+apps/desktop/src-tauri/target
+.git
+.superpowers
+docs
+packaging
+**/*.md
