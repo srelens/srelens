@@ -92,6 +92,7 @@ mod age_tests {
 
 pub mod access;
 pub mod actions;
+pub mod auth_resolver;
 pub mod client_cache;
 pub mod cluster;
 pub mod cluster_synth;

@@ -222,6 +222,76 @@ pub(crate) async fn build_client(paths: &[PathBuf], context: &str) -> Result<Cli
     Client::try_from(config).map_err(|e| e.to_string())
 }
 
+/// Rewrite `kc` so the user of `in_config_ctx` authenticates with a static
+/// Bearer token — strips any auth-provider/exec so kube-rs won't run a plugin.
+/// (Used for srelens-managed OIDC clusters; the id_token is the Bearer.)
+fn set_context_bearer(kc: &mut Kubeconfig, in_config_ctx: &str, bearer: &str) {
+    let user_name = kc
+        .contexts
+        .iter()
+        .find(|c| c.name == in_config_ctx)
+        .and_then(|c| c.context.as_ref())
+        .map(|c| c.user.clone());
+    if let Some(user_name) = user_name {
+        for named in kc.auth_infos.iter_mut() {
+            if named.name == user_name {
+                named.auth_info = Some(kube::config::AuthInfo {
+                    token: Some(bearer.to_string().into()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
+/// Like `config_for_context`, but authenticates `context` with `bearer`,
+/// ignoring the kubeconfig's own auth (OIDC-managed clusters).
+async fn config_for_context_with_bearer(
+    paths: &[PathBuf],
+    context: &str,
+    bearer: &str,
+) -> Result<Config, String> {
+    let resolved = resolve_context(paths, context);
+    let in_config = resolved
+        .as_ref()
+        .map(|target| target.original_name.clone())
+        .unwrap_or_else(|| context.to_string());
+
+    if let Some(target) = &resolved {
+        if let Ok(mut kc) = Kubeconfig::read_from(&target.source) {
+            set_context_bearer(&mut kc, &target.original_name, bearer);
+            let options = KubeConfigOptions {
+                context: Some(target.original_name.clone()),
+                cluster: None,
+                user: None,
+            };
+            if let Ok(config) = Config::from_custom_kubeconfig(kc, &options).await {
+                return Ok(config);
+            }
+        }
+    }
+    let mut kubeconfig = load_kubeconfigs(paths)?;
+    set_context_bearer(&mut kubeconfig, &in_config, bearer);
+    let options = KubeConfigOptions {
+        context: Some(in_config),
+        cluster: None,
+        user: None,
+    };
+    Config::from_custom_kubeconfig(kubeconfig, &options)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Build a client for `context` authenticating with a static Bearer token.
+pub async fn build_client_with_bearer(
+    paths: &[PathBuf],
+    context: &str,
+    bearer: &str,
+) -> Result<Client, String> {
+    let config = config_for_context_with_bearer(paths, context, bearer).await?;
+    Client::try_from(config).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClusterInfoIn {
     /// The kubeconfig context name to connect to.
@@ -450,6 +520,29 @@ mod tests {
 
         let _ = std::fs::remove_file(&file_a);
         let _ = std::fs::remove_file(&file_b);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_client_with_bearer_strips_auth_provider_and_builds() {
+        // A user with `auth-provider: oidc` would make plain `build_client`
+        // try to run kubelogin (fails headless). `build_client_with_bearer`
+        // must rewrite the AuthInfo to a static token before building, so the
+        // client construction succeeds without ever touching the exec/plugin
+        // path (building a Client doesn't hit the network).
+        let path = write_temp_kubeconfig(
+            "oidc",
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx-oidc\nclusters:\n  - name: c\n    cluster: { server: https://oidc.example:6443 }\nusers:\n  - name: u\n    user:\n      auth-provider:\n        name: oidc\n        config:\n          idp-issuer-url: https://issuer.example\n          client-id: some-client\ncontexts:\n  - name: ctx-oidc\n    context: { cluster: c, user: u }\n",
+        );
+
+        let result = build_client_with_bearer(&[path.clone()], "ctx-oidc", "test-bearer-token").await;
+        if let Err(e) = &result {
+            panic!("expected Ok, got Err({e})");
+        }
+
+        let missing = build_client_with_bearer(&[path.clone()], "missing-ctx", "t").await;
+        assert!(missing.is_err());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test(flavor = "multi_thread")]

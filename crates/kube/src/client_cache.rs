@@ -8,11 +8,13 @@ use std::sync::Arc;
 use kube::Client;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::auth_resolver::AuthResolver;
 use crate::connect::build_client;
 
 pub struct ClientCache {
     paths: RwLock<Vec<PathBuf>>,
     clients: Mutex<HashMap<String, Client>>,
+    auth_resolver: RwLock<Option<Arc<dyn AuthResolver>>>,
 }
 
 impl ClientCache {
@@ -24,7 +26,13 @@ impl ClientCache {
         Arc::new(Self {
             paths: RwLock::new(paths),
             clients: Mutex::new(HashMap::new()),
+            auth_resolver: RwLock::new(None),
         })
+    }
+
+    /// Install a per-context auth resolver (web mode). None = kube-rs default.
+    pub async fn set_auth_resolver(&self, resolver: Arc<dyn AuthResolver>) {
+        *self.auth_resolver.write().await = Some(resolver);
     }
 
     pub async fn set_paths(&self, paths: Vec<PathBuf>) {
@@ -61,7 +69,15 @@ impl ClientCache {
             return Ok(client);
         }
         let paths = self.paths().await;
-        let client = build_client(&paths, context).await?;
+        let client = match self.auth_resolver.read().await.clone() {
+            Some(resolver) => match resolver.resolve(context).await? {
+                crate::auth_resolver::AuthMode::Bearer(bearer) => {
+                    crate::connect::build_client_with_bearer(&paths, context, &bearer).await?
+                }
+                crate::auth_resolver::AuthMode::Default => build_client(&paths, context).await?,
+            },
+            None => build_client(&paths, context).await?,
+        };
         self.clients
             .lock()
             .await
@@ -83,6 +99,86 @@ impl ClientCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth_resolver::{needs_login_marker, AuthMode};
+
+    struct FakeResolver(AuthMode);
+
+    impl FakeResolver {
+        fn bearer(token: &str) -> Self {
+            Self(AuthMode::Bearer(token.to_string()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthResolver for FakeResolver {
+        async fn resolve(&self, _context: &str) -> Result<AuthMode, String> {
+            match &self.0 {
+                AuthMode::Bearer(t) => Ok(AuthMode::Bearer(t.clone())),
+                AuthMode::Default => Ok(AuthMode::Default),
+            }
+        }
+    }
+
+    struct NeedsLoginResolver {
+        key: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AuthResolver for NeedsLoginResolver {
+        async fn resolve(&self, context: &str) -> Result<AuthMode, String> {
+            Err(needs_login_marker(&self.key, context))
+        }
+    }
+
+    /// Write `contents` to a unique temp file (pid + nanos) and return its path.
+    fn write_temp_kubeconfig(tag: &str, contents: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "srelens-client-cache-test-{tag}-{}-{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_builds_via_bearer_path_when_resolver_returns_bearer() {
+        let path = write_temp_kubeconfig(
+            "bearer",
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx-a\nclusters:\n  - name: c\n    cluster: { server: https://a.example:6443 }\nusers:\n  - name: u\n    user:\n      auth-provider:\n        name: oidc\n        config: {}\ncontexts:\n  - name: ctx-a\n    context: { cluster: c, user: u }\n",
+        );
+
+        let cache = ClientCache::new(path.clone());
+        cache
+            .set_auth_resolver(Arc::new(FakeResolver::bearer("test-token")))
+            .await;
+
+        let result = cache.get("ctx-a").await;
+        if let Err(e) = &result {
+            panic!("expected Ok via bearer path, got Err({e})");
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_surfaces_needs_login_marker_from_resolver_error() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        cache
+            .set_auth_resolver(Arc::new(NeedsLoginResolver {
+                key: "abc".to_string(),
+            }))
+            .await;
+
+        let err = match cache.get("prod").await {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err(needs_login_marker), got Ok"),
+        };
+        assert_eq!(err, needs_login_marker("abc", "prod"));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_errors_for_unknown_context() {
