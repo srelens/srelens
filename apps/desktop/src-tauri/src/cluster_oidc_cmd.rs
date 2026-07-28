@@ -81,6 +81,14 @@ fn spawn_loopback() -> Result<(u16, std::sync::mpsc::Receiver<LoopbackResult>), 
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // The listener is non-blocking so the accept loop can honor
+                    // the deadline, but the accepted socket inherits O_NONBLOCK
+                    // on BSD/macOS — a bare read() would then return WouldBlock
+                    // before the browser's request bytes land and drop the real
+                    // callback. Put this socket back into blocking mode with a
+                    // bounded read timeout so we actually wait for the request.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                     let mut buf = [0u8; 4096];
                     let n = stream.read(&mut buf).unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
