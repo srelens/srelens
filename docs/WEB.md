@@ -4,7 +4,7 @@ srelens can run as a multi-user web server in a single Docker container, instead
 of (or alongside) the desktop app. A team deploys one container; each person
 signs in with their identity provider (or a local dev login while trying it
 out), uploads their own kubeconfig, and gets the full srelens experience —
-resource browsing, watches, logs, pod exec, an in-container terminal, helm,
+resource browsing, watches, logs, in-pod exec terminals, helm,
 and port-forwarding — in the browser. Nothing here changes the desktop app,
 which remains the primary product.
 
@@ -13,10 +13,17 @@ which remains the primary product.
 ```sh
 docker run \
   -v srelens-data:/data \
+  --tmpfs /data/runtime:mode=0700,uid=10001,gid=10001 \
   -p 8080:8080 \
   -e SRELENS_DEV_LOGIN=you@example.com \
+  -e SRELENS_MASTER_KEY=$(openssl rand -hex 32) \
   ghcr.io/srelens/srelens
 ```
+
+`SRELENS_MASTER_KEY` is required — it seals stored kubeconfigs at rest. The
+one-liner above generates a throwaway key for the trial; for anything you'll
+restart, set a **stable** key (a fresh key can't decrypt earlier data). The
+`--tmpfs` keeps decrypted kubeconfigs in RAM, off the persistent volume.
 
 Open `http://localhost:8080`, sign in with the dev-login email above (no IdP
 required), and add a kubeconfig from **Settings → Kubernetes**.
@@ -55,8 +62,8 @@ controller, a cloud load balancer, …) — see below for why this matters.
 | `SRELENS_OIDC_CLIENT_ID` | With OIDC | OAuth client id registered with your IdP. |
 | `SRELENS_OIDC_CLIENT_SECRET` | With OIDC | OAuth client secret. Never logged (redacted in debug output). |
 | `SRELENS_OIDC_ALLOWED_DOMAINS` | Optional | Comma-separated list of email domains allowed to sign in (e.g. `example.com,corp.io`), case-insensitive. Leave unset to allow any authenticated email through. |
-| `SRELENS_MASTER_KEY` | Recommended | 64 hex characters (32 bytes) used to encrypt kubeconfigs at rest (AES-256-GCM). If unset, a key is generated on first boot and saved to `/data/master.key` (mode 0600) — fine as long as `/data` is persisted, but an explicit key is more portable across redeploys/volume changes. |
-| `SRELENS_DATA` | Optional | Path to the data directory holding the SQLite database, master key, and per-user runtime files. Defaults to `/data` in the shipped image (`./srelens-data` if unset outside the container). |
+| `SRELENS_MASTER_KEY` | **Required** | 64 hex characters (32 bytes) that seal every kubeconfig and OIDC token at rest (AES-256-GCM). **Server mode refuses to start without it** — the key is never written to the data volume, so a stolen volume yields only sealed ciphertext. Generate with `openssl rand -hex 32` and keep it stable (rotating it makes existing sealed data unreadable). |
+| `SRELENS_DATA` | Optional | Path to the data directory holding the SQLite database and per-user runtime files. Defaults to `/data` in the shipped image (`./srelens-data` if unset outside the container). |
 | `SRELENS_DEV_LOGIN` | Optional | An email address; when set, enables `POST /auth/dev-login`, a no-IdP login shortcut for local trials. **Never set this on a deployment reachable by anyone other than you** — see below. |
 
 At least one of OIDC (all three `SRELENS_OIDC_*` vars) or `SRELENS_DEV_LOGIN`
@@ -73,11 +80,20 @@ must be configured — the server refuses to start unauthenticated.
   deployment.** It mints a session for that email with no identity check at
   all — anyone who can reach the container becomes that user. It exists for
   trying srelens out locally, nothing else.
-- **Set a stable `SRELENS_MASTER_KEY`, or make sure `/data` is persisted.**
-  Kubeconfigs are encrypted at rest under this key. If it's auto-generated and
-  `/data` isn't a real persistent volume, every restart loses the key and every
-  stored kubeconfig becomes permanently undecryptable (users would need to
-  re-upload).
+- **Set a stable `SRELENS_MASTER_KEY` (required).** Every stored kubeconfig and
+  OIDC token is sealed at rest under this key, and server mode won't start
+  without it. It is read only from the environment and never written to disk, so
+  the persistent volume holds ciphertext alone — but that also means the key
+  lives wherever your environment/secret store keeps it, so back it up and keep
+  it stable (rotating or losing it makes existing sealed data permanently
+  undecryptable — users would need to re-upload).
+- **Keep decrypted material off the persistent disk.** kubectl/helm/kube-rs need
+  real kubeconfig files, so each user's are briefly *materialized* (decrypted,
+  0600, per-user) along with their private helm state under `/data/runtime`. The
+  shipped `docker-compose.yml` mounts that path as **tmpfs (RAM)** so this
+  plaintext never touches the durable volume and is gone on restart. If you run
+  the image without that compose file, mount an equivalent RAM-backed volume at
+  `/data/runtime` yourself (`--tmpfs /data/runtime:mode=0700,uid=10001,gid=10001`).
 
 ## Adding kubeconfigs
 
@@ -150,10 +166,11 @@ URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
 
 ### Limitations
 
-- The managed OIDC token authenticates **kube-rs API calls only**. The
-  in-browser **terminal** and **helm** run `kubectl`/`helm` subprocesses that
-  can't use it (kubectl ≥ 1.26 removed the built-in `auth-provider: oidc`
-  support), so those two features don't work against an OIDC-only cluster.
+- The managed OIDC token authenticates **kube-rs API calls only** — which
+  includes the web in-pod **exec** terminal (it streams through the API). But
+  **helm** runs a `helm` subprocess that can't use it (kubectl ≥ 1.26 removed
+  the built-in `auth-provider: oidc` support), so helm doesn't work against an
+  OIDC-only cluster. The desktop **host shell** shares this subprocess limit.
 - **Private-CA identity providers** — an IdP served under a private root the
   container doesn't trust — are not yet supported (discovery uses the system
   trust store).
@@ -162,27 +179,35 @@ URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
 
 ## Web-mode behavior
 
-- **Terminal:** each user gets an in-container shell (a real PTY, `bash`),
-  locked to whichever kube context they opened it against via a private
-  single-context kubeconfig overlay — the same mechanism the desktop terminal
-  uses. This gives users shell access inside the srelens container itself
-  (to run `kubectl`/`helm` ad hoc); srelens is meant to be a trusted team tool,
-  and the container runs as a non-root user.
+- **Terminal:** web users get an RBAC-scoped **in-pod exec** terminal — the
+  same model Headlamp uses: srelens opens an interactive session *inside a
+  pod/container* over the Kubernetes API, authorized by the user's own cluster
+  credentials. The **host shell** (`bash` inside the srelens container, the
+  `kubectl · <ctx>` tab on desktop) is **desktop-only** and is refused on the
+  web surface: on a shared multi-user server a container-host shell runs as the
+  single shared UID and would let any user read every other user's materialized
+  kubeconfigs and sealed tokens. `POST /api/command/start_terminal` returns
+  `403` in web mode; `start_pod_exec` stays available.
 - **Port-forwarding:** a forwarded port binds to loopback inside the container;
   the browser reaches it through an in-app link that proxies through the
   server at `/pf/{id}/…`, authenticated by your session and scoped to forwards
   you own. Only plain HTTP and WebSocket upgrades are proxied this way —
   **HTTPS upstreams and raw TCP forwards are not supported** in web mode (the
   desktop app can still do arbitrary TCP forwarding locally).
-- **Toolbox and helm repo management are disabled on the web surface.**
-  Installing `kubectl`/`helm`/`krew` plugins, and running `helm repo
-  add`/`helm repo update`, all touch process-wide state shared by every user
-  in the container (installed binaries, helm's repo list) — one user's action
-  would affect everyone else's session, so these are rejected with an error at
-  the API layer regardless of what the UI shows. Read-only toolbox operations
-  (status, diagnose, search plugins) and the rest of helm (install, upgrade,
-  rollback, uninstall, template, search, list, get — which use per-context
-  temp kubeconfigs, not shared state) remain available.
+- **Toolbox installs and helm `repo`/`plugin` operations are disabled on the
+  web surface.** Installing `kubectl`/`helm`/`krew` plugins, `helm repo
+  add`/`update`, and `helm plugin install` either write process-wide state or,
+  in the case of `helm plugin install <url>`, download and execute code — so on
+  a shared container one user's action would reach every other user (or run as
+  the shared UID). These are rejected at **both** API layers: the capability
+  surface (`WEB_DENIED_CAPABILITIES`) and the streaming command surface
+  (`start_helm_op` refuses a `repo`/`plugin` subcommand), regardless of what
+  the UI shows. Read-only toolbox operations (status, diagnose, search plugins)
+  and the rest of helm (install, upgrade, rollback, uninstall, template,
+  search, list, get) remain available. Each user's helm invocation also runs
+  against a **private helm home** (`HELM_CONFIG_HOME`/`HELM_CACHE_HOME`/
+  `HELM_DATA_HOME` under their runtime dir), so even allowed operations never
+  share repository config, cache, or plugins across users.
 
 ## Extending the image with cloud CLIs
 
