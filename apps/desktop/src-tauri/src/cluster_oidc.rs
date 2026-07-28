@@ -93,7 +93,11 @@ impl DesktopClusterOidc {
     /// clusters (added at runtime — pasted kubeconfig, file watcher) are
     /// resolvable without an app restart.
     pub async fn rebuild(&self, cache: &Arc<ClientCache>) {
-        let yamls = read_kubeconfig_yamls(&crate::capabilities::default_kubeconfig_paths());
+        // Index from the cache's CURRENT path set — not just the default
+        // kubeconfig — so clusters added via the app (pasted / Add-cluster form,
+        // materialized under the app config dir and pushed into the cache) are
+        // recognized. The watcher calls this when cache.paths() changes.
+        let yamls = read_kubeconfig_yamls(&cache.paths().await);
         let new_registry = ClusterOidcRegistry::from_kubeconfig_yamls(&yamls);
         *self.registry.lock().unwrap() = Arc::new(new_registry);
         self.install_on(cache).await;

@@ -3,6 +3,8 @@ import { LogIn, LogOut, Pencil } from "lucide-react";
 import { Button } from "../ui";
 import { listClusters, clusterLogout, type OidcClusterRow } from "../lib/webClusters";
 import { notify } from "../lib/notify";
+import { isTauri } from "../transport/platform";
+import { invokeCommand } from "../transport/transport";
 
 export interface WebClusterSignInSectionProps {
   /** Bumped by the parent (e.g. after adding a cluster) to force a refresh. */
@@ -37,6 +39,14 @@ export function WebClusterSignInSection({ refreshNonce, onEdit }: WebClusterSign
   useEffect(refresh, [refreshNonce]);
 
   const signIn = (key: string) => {
+    if (isTauri()) {
+      // Desktop: the same managed flow via the Tauri command (opens the browser
+      // + captures the loopback callback), then refresh the list.
+      void invokeCommand("cluster_login", { key })
+        .then(refresh)
+        .catch((e) => notify.error("Sign-in failed", String(e)));
+      return;
+    }
     window.location.href = `/auth/cluster/login?key=${encodeURIComponent(key)}`;
   };
 

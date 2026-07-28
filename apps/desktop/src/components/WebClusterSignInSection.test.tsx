@@ -3,12 +3,14 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 
-const { listClustersMock, clusterLogoutMock, notifySuccessMock, notifyErrorMock } = vi.hoisted(() => ({
-  listClustersMock: vi.fn(),
-  clusterLogoutMock: vi.fn(),
-  notifySuccessMock: vi.fn(),
-  notifyErrorMock: vi.fn(),
-}));
+const { listClustersMock, clusterLogoutMock, notifySuccessMock, notifyErrorMock, invokeCommandMock } =
+  vi.hoisted(() => ({
+    listClustersMock: vi.fn(),
+    clusterLogoutMock: vi.fn(),
+    notifySuccessMock: vi.fn(),
+    notifyErrorMock: vi.fn(),
+    invokeCommandMock: vi.fn(),
+  }));
 vi.mock("../lib/webClusters", () => ({
   listClusters: listClustersMock,
   clusterLogout: clusterLogoutMock,
@@ -16,6 +18,7 @@ vi.mock("../lib/webClusters", () => ({
 vi.mock("../lib/notify", () => ({
   notify: { success: notifySuccessMock, error: notifyErrorMock },
 }));
+vi.mock("../transport/transport", () => ({ invokeCommand: invokeCommandMock }));
 
 import { WebClusterSignInSection } from "./WebClusterSignInSection";
 
@@ -76,5 +79,21 @@ describe("WebClusterSignInSection", () => {
     await waitFor(() => expect(clusterLogoutMock).toHaveBeenCalledWith("staging"));
     expect(notifySuccessMock).toHaveBeenCalled();
     await waitFor(() => expect(listClustersMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("signs in via the tauri command on desktop (not a web navigation)", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    invokeCommandMock.mockResolvedValue(undefined);
+    try {
+      const user = userEvent.setup();
+      render(<WebClusterSignInSection />);
+      await waitFor(() => expect(screen.getByText("prod-context")).toBeDefined());
+      await user.click(screen.getByRole("button", { name: /sign in/i }));
+      await waitFor(() =>
+        expect(invokeCommandMock).toHaveBeenCalledWith("cluster_login", { key: "prod" }),
+      );
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    }
   });
 });
