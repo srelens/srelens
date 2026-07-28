@@ -2,6 +2,7 @@ mod app_log;
 mod appimage;
 mod bridge;
 pub mod capabilities;
+mod cluster_oidc;
 mod exec;
 mod files;
 mod forward;
@@ -34,6 +35,7 @@ use srelens_streams::helm::HelmManager;
 use srelens_streams::logs::LogStreamManager;
 use srelens_streams::terminal::TerminalManager;
 use srelens_streams::watch::WatchManager;
+use tauri::Manager;
 use terminal::{start_terminal, terminal_close, terminal_input, terminal_resize};
 use toolbox::start_tool_install;
 use updater::{update_check, update_install};
@@ -220,13 +222,16 @@ pub fn run() {
     let cache = ClientCache::new_many(capabilities::default_kubeconfig_paths());
     let registry = capabilities::build_registry_with(cache.clone());
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
     let watcher_cache = cache.clone();
+    let oidc_cache = cache.clone();
     builder
         .setup(move |app| {
             // Application logging: always write a rotating file to the OS log
@@ -272,6 +277,29 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 watch_kubeconfig_files(handle, watcher_cache).await;
             });
+
+            // Managed cluster OIDC (desktop): install the resolver so OIDC
+            // contexts sign in through srelens's own browser flow instead of
+            // an exec plugin. Non-OIDC contexts are unaffected — the resolver
+            // returns `AuthMode::Default` for them, falling back to kube-rs's
+            // native kubeconfig auth.
+            let paths = capabilities::default_kubeconfig_paths();
+            let yamls = cluster_oidc::read_kubeconfig_yamls(&paths);
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .map_err(|e| e.to_string())?
+                .join("cluster-oidc");
+            let oidc = tauri::async_runtime::block_on(cluster_oidc::DesktopClusterOidc::build(
+                &config_dir,
+                &yamls,
+            ))
+            .map_err(|e| format!("cluster oidc init: {e}"))?;
+            tauri::async_runtime::block_on(oidc.install_on(&oidc_cache));
+            app.manage(std::sync::Arc::new(oidc));
+            // Expose the shared cache so Task 2's login commands can clear it
+            // (force a re-resolve) after a token change.
+            app.manage(oidc_cache);
 
             Ok(())
         })
