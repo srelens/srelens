@@ -191,11 +191,10 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     let auth_config = auth::AuthConfig::from_env(|k| std::env::var(k).ok())?;
     config::ensure_data_dir(&config.data_dir)
         .map_err(|e| format!("create data dir {}: {e}", config.data_dir.display()))?;
+    // Server mode requires the key from the environment — it is never written
+    // to the data volume, so a stolen volume yields only sealed ciphertext.
     let env_key = std::env::var("SRELENS_MASTER_KEY").ok();
-    let master_key = crypto::MasterKey::load_or_generate(
-        env_key.as_deref(),
-        &config.data_dir.join("master.key"),
-    )?;
+    let master_key = crypto::MasterKey::require_env(env_key.as_deref())?;
     let db = db::Db::open(&config.data_dir.join("srelens.db")).await?;
     let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
         Some(settings) => {

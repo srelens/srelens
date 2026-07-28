@@ -39,8 +39,25 @@ impl MasterKey {
         })
     }
 
+    /// Server mode: the key MUST come from `SRELENS_MASTER_KEY`, never a file on
+    /// disk. Writing the key next to the sealed database would defeat at-rest
+    /// encryption — the persistent volume would hold both the ciphertext and the
+    /// key that opens it — so a missing or blank value is a hard startup error.
+    pub fn require_env(env_value: Option<&str>) -> Result<Self, String> {
+        match env_value {
+            Some(hex) if !hex.trim().is_empty() => Self::from_hex(hex),
+            _ => Err(
+                "SRELENS_MASTER_KEY must be set in server mode (64 hex chars = 32 bytes). \
+                 Refusing to persist a generated key next to the encrypted database. \
+                 Generate one with: openssl rand -hex 32"
+                    .into(),
+            ),
+        }
+    }
+
     /// Load the key: env value wins; else read `key_file`; else generate a new
     /// key into `key_file` (0600, created atomically with O_EXCL semantics).
+    /// Used by the single-user desktop app; the server uses [`require_env`].
     pub fn load_or_generate(env_value: Option<&str>, key_file: &Path) -> Result<Self, String> {
         if let Some(hex_key) = env_value {
             if !hex_key.trim().is_empty() {
@@ -116,6 +133,16 @@ mod tests {
         let mut sealed = k.seal(b"secret").unwrap();
         sealed.ciphertext[0] ^= 0xff;
         assert!(k.open(&sealed).is_err());
+    }
+
+    #[test]
+    fn require_env_rejects_missing_or_blank_and_accepts_hex() {
+        // Server mode must refuse to run without an env-provided key (so the key
+        // is never written to disk), and must not fall back to a file.
+        assert!(MasterKey::require_env(None).is_err());
+        assert!(MasterKey::require_env(Some("   ")).is_err());
+        assert!(MasterKey::require_env(Some("nothex")).is_err());
+        assert!(MasterKey::require_env(Some(&"ab".repeat(32))).is_ok());
     }
 
     #[test]

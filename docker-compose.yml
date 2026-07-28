@@ -7,6 +7,12 @@ services:
       - "8080:8080"
     volumes:
       - srelens-data:/data
+    tmpfs:
+      # Per-user decrypted kubeconfigs and helm state are materialized here for
+      # kubectl/helm/kube-rs to read as real files. Back it with RAM (tmpfs) so
+      # this plaintext never lands on the persistent volume — it stays private
+      # to the container user (uid/gid 10001, mode 0700) and vanishes on restart.
+      - /data/runtime:mode=0700,uid=10001,gid=10001
     environment:
       # Public URL the browser uses; REQUIRED for a non-loopback deployment so
       # OIDC redirects and Secure cookies are correct. This builds both the app
@@ -14,8 +20,12 @@ services:
       # (${SRELENS_PUBLIC_URL}/auth/cluster/callback) — register that callback
       # URI at every OIDC-protected cluster's IdP client. See docs/WEB.md.
       SRELENS_PUBLIC_URL: ${SRELENS_PUBLIC_URL:-http://localhost:8080}
-      # Stable at-rest encryption key (64 hex chars); if unset, a key is
-      # generated into /data/master.key on first boot.
+      # REQUIRED: at-rest encryption key (64 hex chars) that seals every
+      # kubeconfig and OIDC token in the database. Server mode refuses to start
+      # without it — the key is never written to the data volume, so a stolen
+      # volume yields only sealed ciphertext. Generate once, keep it stable
+      # (rotating it makes existing sealed data unreadable):
+      #   openssl rand -hex 32
       SRELENS_MASTER_KEY: ${SRELENS_MASTER_KEY:-}
       # OIDC (recommended). Leave unset only for local trials with dev login.
       SRELENS_OIDC_ISSUER: ${SRELENS_OIDC_ISSUER:-}

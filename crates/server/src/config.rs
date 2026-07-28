@@ -19,7 +19,9 @@ pub fn resolve_data_dir(flag: Option<&str>, env: Option<&str>) -> PathBuf {
 }
 
 /// Create the data directory if missing. On unix it is created (or tightened)
-/// to mode 0700 — it will hold the master key and decrypted runtime files.
+/// to mode 0700 — it holds the sealed database and the (plaintext, ideally
+/// tmpfs-backed) decrypted runtime files. In server mode the master key comes
+/// from `SRELENS_MASTER_KEY` and is never written here.
 pub fn ensure_data_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
