@@ -109,7 +109,16 @@ See the [installation guide](docs/INSTALL.md) for platform-specific installation
 first-launch, updating, verification, and uninstall instructions.
 
 **Run as a web app (Docker):** srelens can also run as a multi-user web server
-in a container — see [docs/WEB.md](docs/WEB.md).
+in a container. Users sign in with OIDC (or a local dev login for trials) and
+each gets a fully isolated environment built only from their own uploaded
+kubeconfigs. OIDC-protected clusters work with a browser-based, Headlamp-style
+sign-in — srelens runs the authorization-code + PKCE flow and injects the
+id_token itself, so no `kubelogin`/exec plugin is needed. Kubeconfigs and tokens
+are sealed at rest under a required `SRELENS_MASTER_KEY` that is never written to
+disk; decrypted files live only in tmpfs. Some desktop-only actions (host shell,
+raw helm repo/plugin) are gated off the shared surface — web users get
+RBAC-scoped in-pod exec terminals instead. See [docs/WEB.md](docs/WEB.md) for
+deployment, environment variables, and the full security model.
 
 ## MCP server
 
