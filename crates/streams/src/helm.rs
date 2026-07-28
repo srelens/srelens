@@ -50,6 +50,12 @@ impl HelmManager {
     /// streaming stdout+stderr on `helm:out:<channel>`; `helm:exit:<channel>`
     /// fires with None on success or an error string on failure. Returns the
     /// session id.
+    ///
+    /// `helm_home`, when set, isolates helm's on-disk state (repository config,
+    /// cache, plugins) under that directory via the `HELM_*_HOME` env vars. The
+    /// multi-user web server passes each user's private dir so one user's helm
+    /// state can never leak into or be read from another's; desktop passes
+    /// `None` and uses helm's default single-user home unchanged.
     pub async fn start(
         &self,
         sink: Arc<dyn EventSink>,
@@ -58,6 +64,7 @@ impl HelmManager {
         args: Vec<String>,
         values: String,
         channel: String,
+        helm_home: Option<PathBuf>,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let bin = srelens_kube::helm_cli::helm_binary()?;
@@ -95,13 +102,31 @@ impl HelmManager {
             // moment it returns — deleting the values file while helm is still
             // starting. `kubeconfig` is captured implicitly by `.env(...)`.
             let _values_file = values_file;
-            let spawn = tokio::process::Command::new(&bin)
-                .args(&full_args)
+            let mut cmd = tokio::process::Command::new(&bin);
+            cmd.args(&full_args)
                 .env("KUBECONFIG", kubeconfig.path())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn();
+                .kill_on_drop(true);
+            if let Some(home) = &helm_home {
+                // Point every helm state location at this user's private dir.
+                // repositories.yaml, the download cache, and installed plugins
+                // then live under `home` alone — a `repo`/`plugin`/cache write
+                // by one user can't reach another's environment on the shared
+                // server. helm creates these subdirs on demand.
+                cmd.env("HELM_CONFIG_HOME", home.join("config"))
+                    .env("HELM_CACHE_HOME", home.join("cache"))
+                    .env("HELM_DATA_HOME", home.join("data"))
+                    .env(
+                        "HELM_REPOSITORY_CONFIG",
+                        home.join("config").join("repositories.yaml"),
+                    )
+                    .env(
+                        "HELM_REPOSITORY_CACHE",
+                        home.join("cache").join("repository"),
+                    );
+            }
+            let spawn = cmd.spawn();
 
             let result = match spawn {
                 Ok(mut child) => {

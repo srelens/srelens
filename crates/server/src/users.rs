@@ -22,6 +22,9 @@ pub struct UserEnv {
     pub registry: Arc<Registry>,
     pub cache: Arc<ClientCache>,
     pub paths: Vec<PathBuf>,
+    /// This user's private helm home (`<runtime>/<id>/helm`): helm's repository
+    /// config, cache, and plugins live here so helm state never crosses users.
+    pub helm_home: PathBuf,
     pub streams: Arc<crate::streams::UserStreams>,
     /// This user's index of OIDC clusters (issuer/client per oidc_key), built
     /// from their kubeconfigs — the cluster-login routes resolve `?key=`
@@ -128,6 +131,10 @@ impl UserEnvs {
         let dir = user_runtime_dir(&self.data_dir, user_id);
         let _ = std::fs::remove_dir_all(&dir);
         create_private_dir(&dir)?;
+        // Private per-user helm home; helm creates its subdirs (config/cache/
+        // data) on demand under this 0700 root.
+        let helm_home = dir.join("helm");
+        create_private_dir(&helm_home)?;
         let mut paths = Vec::with_capacity(metas.len());
         let mut yamls = Vec::with_capacity(metas.len());
         for meta in &metas {
@@ -173,6 +180,7 @@ impl UserEnvs {
             registry,
             cache,
             paths,
+            helm_home,
             streams,
             oidc_registry,
             last_used: Mutex::new(Instant::now()),
