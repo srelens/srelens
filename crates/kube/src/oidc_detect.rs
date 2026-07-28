@@ -31,13 +31,28 @@ impl OidcClusterConfig {
     }
 }
 
-/// True when a kubeconfig user's `exec` command is a known OIDC login helper.
+/// The final path component of an exec command, lower-cased and with a trailing
+/// `.exe` removed (Windows kubeconfigs). Handles both `/` and `\` separators.
+fn command_base(command: &str) -> String {
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    base.strip_suffix(".exe")
+        .unwrap_or(base)
+        .to_ascii_lowercase()
+}
+
+/// True when a kubeconfig user's `exec` command is a known OIDC login helper
+/// invoked directly (kubelogin / kubectl-oidc_login / oidc-login).
 fn is_kubelogin(command: &str) -> bool {
-    let base = command.rsplit('/').next().unwrap_or(command);
     matches!(
-        base,
+        command_base(command).as_str(),
         "kubelogin" | "kubectl-oidc_login" | "oidc-login" | "kubectl-oidc-login"
     )
+}
+
+/// True when the exec command is `kubectl` (the OIDC helper may be invoked as
+/// the `kubectl oidc-login` plugin subcommand).
+fn is_kubectl(command: &str) -> bool {
+    command_base(command) == "kubectl"
 }
 
 /// Pull `--flag value` or `--flag=value` for `flag` from an exec arg list.
@@ -86,11 +101,14 @@ pub fn detect_oidc_user(auth: &kube::config::AuthInfo) -> Option<OidcClusterConf
             });
         }
     }
-    // 2) exec kubelogin/oidc-login
+    // 2) exec kubelogin/oidc-login, either as a direct binary or invoked as the
+    //    `kubectl oidc-login` plugin subcommand.
     if let Some(exec) = &auth.exec {
         let command = exec.command.as_deref()?;
-        if is_kubelogin(command) {
-            let args = exec.args.clone().unwrap_or_default();
+        let args = exec.args.clone().unwrap_or_default();
+        let is_oidc_login =
+            is_kubelogin(command) || (is_kubectl(command) && args.iter().any(|a| a == "oidc-login"));
+        if is_oidc_login {
             let issuer = exec_flag(&args, "--oidc-issuer-url")?;
             let client_id = exec_flag(&args, "--oidc-client-id")?;
             let client_secret =
@@ -184,6 +202,91 @@ users:
         assert_eq!(got.client_id, "kubernetes");
         assert_eq!(got.client_secret, None);
         assert_eq!(got.extra_scopes, vec!["groups".to_string()]);
+    }
+
+    #[test]
+    fn detects_kubectl_oidc_login_plugin_form() {
+        // `kubectl oidc-login` — the plugin invoked via kubectl (command is
+        // `kubectl`, first arg `oidc-login`).
+        let yaml = r#"apiVersion: v1
+kind: Config
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubectl
+      args:
+      - oidc-login
+      - get-token
+      - --oidc-issuer-url=https://dex.example.com
+      - --oidc-client-id=k8s
+      - --oidc-extra-scope=groups
+"#;
+        let got = detect_oidc_user(&auth_of(yaml)).unwrap();
+        assert_eq!(got.issuer, "https://dex.example.com");
+        assert_eq!(got.client_id, "k8s");
+        assert_eq!(got.extra_scopes, vec!["groups".to_string()]);
+    }
+
+    #[test]
+    fn detects_windows_kubelogin_exe_and_path() {
+        let yaml = r#"apiVersion: v1
+kind: Config
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: C:\tools\kubelogin.exe
+      args:
+      - get-token
+      - --oidc-issuer-url=https://idp
+      - --oidc-client-id=cid
+"#;
+        let got = detect_oidc_user(&auth_of(yaml)).unwrap();
+        assert_eq!(got.issuer, "https://idp");
+        assert_eq!(got.client_id, "cid");
+    }
+
+    #[test]
+    fn plain_kubectl_exec_without_oidc_login_is_none() {
+        // `kubectl` used as an exec plugin for something else must NOT match.
+        let yaml = r#"apiVersion: v1
+kind: Config
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubectl
+      args:
+      - config
+      - view
+"#;
+        assert!(detect_oidc_user(&auth_of(yaml)).is_none());
+    }
+
+    #[test]
+    fn azure_kubelogin_without_oidc_flags_is_none() {
+        // Azure kubelogin (same binary name, different flags) is a different
+        // auth flow srelens can't manage — must not be mis-detected as OIDC.
+        let yaml = r#"apiVersion: v1
+kind: Config
+users:
+- name: u
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubelogin
+      args:
+      - get-token
+      - --server-id=abc
+      - --client-id=def
+      - --tenant-id=ghi
+      - --login=azurecli
+"#;
+        assert!(detect_oidc_user(&auth_of(yaml)).is_none());
     }
 
     #[test]
