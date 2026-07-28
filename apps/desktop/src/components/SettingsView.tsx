@@ -574,18 +574,11 @@ export function SettingsView({
               description="Create a recognizable identity for every cluster without changing kubeconfig."
             >
               <Tabs
-                tabs={
-                  isTauri()
-                    ? [
-                        { id: "sources", label: "Sources" },
-                        { id: "appearance", label: "Appearance" },
-                      ]
-                    : [
-                        { id: "sources", label: "Sources" },
-                        { id: "signin", label: "Cluster sign-in" },
-                        { id: "appearance", label: "Appearance" },
-                      ]
-                }
+                tabs={[
+                  { id: "sources", label: "Sources" },
+                  { id: "signin", label: "Cluster sign-in" },
+                  { id: "appearance", label: "Appearance" },
+                ]}
                 active={ctxTab}
                 onChange={(id) => setCtxTab(id as typeof ctxTab)}
               />
@@ -659,7 +652,7 @@ export function SettingsView({
                   <WebAddClusterSection onAdded={handleClusterAdded} />
                 </div>
               )}
-              {!isTauri() && ctxTab === "signin" && (
+              {ctxTab === "signin" && (
                 <div className="fl-web-ctx-scroll">
                   <WebClusterSignInSection refreshNonce={clusterRefresh} />
                 </div>

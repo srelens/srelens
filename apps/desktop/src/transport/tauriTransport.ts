@@ -2,10 +2,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLogin";
 
 /** Request/response to a backend capability. */
 export async function invokeCapability<T>(id: string, input: unknown = null): Promise<T> {
-  return invoke<T>("invoke_capability", { id, input });
+  try {
+    return await invoke<T>("invoke_capability", { id, input });
+  } catch (e) {
+    const login = parseClusterLoginRequired(e);
+    if (login) {
+      requestClusterLogin(login);
+      throw new Error("cluster_login_required");
+    }
+    throw e;
+  }
 }
 
 /** Invoke a raw Tauri command (for streaming primitives like watches). */
