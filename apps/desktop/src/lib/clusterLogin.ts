@@ -43,9 +43,11 @@ export function parseClusterLoginRequired(value: unknown): ClusterLoginInfo | nu
     if (obj.error === "cluster_login_required" && typeof obj.key === "string") {
       const key = obj.key;
       const context = typeof obj.context === "string" ? obj.context : "";
-      const loginUrl =
-        typeof obj.loginUrl === "string" ? obj.loginUrl : loginUrlForKey(key);
-      return { key, context, loginUrl };
+      // Always DERIVE the login URL from the (opaque hex) key rather than
+      // trusting a `loginUrl` string from the response body — the redirect
+      // target is then a fixed same-origin path (`/auth/cluster/login?key=…`)
+      // that can't be steered to `javascript:` or an external host.
+      return { key, context, loginUrl: loginUrlForKey(key) };
     }
     // A stream event may nest the marker in an `error` string.
     if (typeof obj.error === "string") return fromMarker(obj.error);

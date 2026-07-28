@@ -123,17 +123,22 @@ impl PendingLogins {
 /// rejects anything else.
 pub struct FakeIdp;
 
+/// A random 128-bit hex string, for the fake IdP's state/nonce/verifier.
+fn random_hex() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(hex::encode(bytes))
+}
+
 #[async_trait::async_trait]
 impl IdentityProvider for FakeIdp {
     fn begin_login(&self) -> Result<LoginBegin, String> {
-        let mut bytes = [0u8; 16];
-        getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
-        let state = hex::encode(bytes);
+        let state = random_hex()?;
         Ok(LoginBegin {
             auth_url: format!("https://fake-idp.example/authorize?state={state}"),
             state,
-            nonce: "fake-nonce".into(),
-            pkce_verifier: "fake-verifier".into(),
+            nonce: random_hex()?,
+            pkce_verifier: random_hex()?,
         })
     }
 
@@ -143,8 +148,11 @@ impl IdentityProvider for FakeIdp {
         nonce: &str,
         pkce_verifier: &str,
     ) -> Result<IdentityClaims, String> {
-        if nonce != "fake-nonce" || pkce_verifier != "fake-verifier" {
-            return Err("bad nonce or verifier".into());
+        // A fake IdP doesn't verify the nonce/PKCE against a real token — it
+        // only requires they were carried through the flow. The genuine state +
+        // PKCE binding is enforced by PendingLogins and the real OidcProvider.
+        if nonce.is_empty() || pkce_verifier.is_empty() {
+            return Err("missing nonce or verifier".into());
         }
         let mut parts = code.splitn(3, ':');
         match (parts.next(), parts.next(), parts.next()) {
@@ -198,17 +206,15 @@ mod tests {
             .complete_login("garbage", &begin.nonce, &begin.pkce_verifier)
             .await
             .is_err());
-        // Nonce and verifier mismatch rejection
+        // A missing nonce/verifier is rejected (they must be carried through
+        // the flow). The fake doesn't validate their VALUE against a real token
+        // — the genuine nonce/PKCE check is the real OidcProvider's job.
         assert!(idp
-            .complete_login(
-                "ok:alice:alice@example.com",
-                "wrong-nonce",
-                &begin.pkce_verifier
-            )
+            .complete_login("ok:alice:alice@example.com", "", &begin.pkce_verifier)
             .await
             .is_err());
         assert!(idp
-            .complete_login("ok:alice:alice@example.com", &begin.nonce, "wrong-verifier")
+            .complete_login("ok:alice:alice@example.com", &begin.nonce, "")
             .await
             .is_err());
     }
