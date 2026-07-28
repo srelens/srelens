@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clusterLogout, createCluster, listClusters, type OidcClusterRow } from "./webClusters";
 
+function setDesktop(on: boolean) {
+  if (on) {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+  } else {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  }
+}
+
 describe("webClusters.listClusters", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -108,5 +116,36 @@ describe("webClusters.clusterLogout", () => {
       vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "not found" }), { status: 404 })),
     );
     await expect(clusterLogout("prod")).rejects.toThrow("not found");
+  });
+});
+
+vi.mock("../transport/transport", () => ({ invokeCommand: vi.fn() }));
+
+describe("webClusters on desktop", () => {
+  afterEach(() => {
+    setDesktop(false);
+    vi.restoreAllMocks();
+  });
+
+  it("listClusters calls invokeCommand(list_clusters) and returns its result", async () => {
+    setDesktop(true);
+    const { invokeCommand } = await import("../transport/transport");
+    const clusters: OidcClusterRow[] = [
+      { key: "prod", issuer: "https://issuer", clientId: "abc", contexts: ["prod-ctx"], signedIn: true, expiresAt: 123 },
+    ];
+    vi.mocked(invokeCommand).mockResolvedValue(clusters);
+
+    expect(await listClusters()).toEqual(clusters);
+    expect(invokeCommand).toHaveBeenCalledWith("list_clusters");
+  });
+
+  it("clusterLogout calls invokeCommand(cluster_logout, { key })", async () => {
+    setDesktop(true);
+    const { invokeCommand } = await import("../transport/transport");
+    vi.mocked(invokeCommand).mockResolvedValue(undefined);
+
+    await clusterLogout("k");
+
+    expect(invokeCommand).toHaveBeenCalledWith("cluster_logout", { key: "k" });
   });
 });

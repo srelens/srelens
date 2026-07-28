@@ -1,6 +1,8 @@
 // Web-mode cluster management: define an OIDC cluster from a form, list the
 // user's OIDC clusters + sign-in status, and sign out of one. Raw fetch (like
 // lib/webKubeconfigs.ts), not the capability transport.
+import { isTauri } from "../transport/platform";
+import { invokeCommand } from "../transport/transport";
 import { csrfHeader } from "../transport/webTransport";
 
 export interface OidcClusterRow {
@@ -25,8 +27,10 @@ async function parseError(res: Response): Promise<never> {
   throw new Error((data as { error?: string }).error ?? `request failed: ${res.status}`);
 }
 
-/** GET /api/clusters — the caller's defined OIDC clusters and sign-in status. */
+/** GET /api/clusters — the caller's defined OIDC clusters and sign-in status.
+ * On desktop, lists them via the Tauri command instead (no server involved). */
 export async function listClusters(): Promise<OidcClusterRow[]> {
+  if (isTauri()) return invokeCommand<OidcClusterRow[]>("list_clusters");
   const res = await fetch("/api/clusters", { credentials: "include", headers: { ...csrfHeader() } });
   if (!res.ok) await parseError(res);
   const data = (await res.json()) as { clusters?: OidcClusterRow[] };
@@ -44,8 +48,13 @@ export async function createCluster(input: CreateClusterInput): Promise<void> {
   if (!res.ok) await parseError(res);
 }
 
-/** POST /api/clusters/:key/logout — sign out of a cluster's OIDC session. */
+/** POST /api/clusters/:key/logout — sign out of a cluster's OIDC session. On
+ * desktop, signs out via the Tauri command instead. */
 export async function clusterLogout(key: string): Promise<void> {
+  if (isTauri()) {
+    await invokeCommand("cluster_logout", { key });
+    return;
+  }
   const res = await fetch(`/api/clusters/${encodeURIComponent(key)}/logout`, {
     method: "POST",
     credentials: "include",

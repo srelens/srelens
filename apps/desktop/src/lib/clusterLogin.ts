@@ -1,7 +1,10 @@
 // Detects the "this OIDC cluster needs an interactive sign-in" signal — which
 // arrives either as an HTTP 401 body or as an async WebSocket stream event —
-// and prompts the user to sign in. Web-only; desktop uses native auth.
+// and prompts the user to sign in, on both web (full-page redirect to the
+// server's OIDC login route) and desktop (a Tauri command that opens the
+// browser and captures the loopback callback).
 import { isWeb } from "../transport/platform";
+import { invokeCommand } from "../transport/transport";
 import { notify } from "./notify";
 
 export const CLUSTER_LOGIN_MARKER = "NEEDS_CLUSTER_LOGIN";
@@ -56,12 +59,25 @@ const promptedAt = new Map<string, number>();
 const PROMPT_COOLDOWN_MS = 15_000;
 
 export function requestClusterLogin(info: ClusterLoginInfo): void {
-  if (!isWeb) return; // desktop never sees this signal
   const now = Date.now();
   const last = promptedAt.get(info.key);
   if (last !== undefined && now - last < PROMPT_COOLDOWN_MS) return;
   promptedAt.set(info.key, now);
   const where = info.context ? `“${info.context}”` : "this cluster";
+  if (!isWeb) {
+    // Desktop: the same managed flow, driven by a Tauri command that opens
+    // the browser and captures the loopback callback.
+    notify.clusterSignIn(
+      `Sign in to ${where}`,
+      "This cluster uses OIDC and needs you to sign in.",
+      () => {
+        void invokeCommand("cluster_login", { key: info.key })
+          .then(() => window.location.reload())
+          .catch((e) => notify.error("Sign-in failed", String(e)));
+      },
+    );
+    return;
+  }
   notify.clusterSignIn(
     `Sign in to ${where}`,
     "This cluster uses OIDC and needs you to sign in.",
