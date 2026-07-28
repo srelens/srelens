@@ -3,6 +3,7 @@ mod appimage;
 mod bridge;
 pub mod capabilities;
 mod cluster_oidc;
+mod cluster_oidc_cmd;
 mod exec;
 mod files;
 mod forward;
@@ -207,6 +208,15 @@ async fn watch_kubeconfig_files(app_handle: tauri::AppHandle, cache: std::sync::
 
         if changed {
             cache.clear().await;
+            // A cluster added/removed at runtime (Add-cluster form, edited
+            // kubeconfig) may change which contexts are OIDC-managed; rebuild
+            // the registry and reinstall the resolver so it's recognized
+            // without an app restart.
+            if let Some(oidc) =
+                app_handle.try_state::<std::sync::Arc<crate::cluster_oidc::DesktopClusterOidc>>()
+            {
+                oidc.rebuild(&cache).await;
+            }
             let _ = app_handle.emit("kubeconfig-changed", ());
         }
     }
@@ -344,7 +354,10 @@ pub fn run() {
             helm_op_close,
             read_app_log,
             app_log_path,
-            reveal_app_log
+            reveal_app_log,
+            cluster_oidc_cmd::cluster_login,
+            cluster_oidc_cmd::cluster_logout,
+            cluster_oidc_cmd::list_clusters
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

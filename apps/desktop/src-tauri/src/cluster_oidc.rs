@@ -27,7 +27,11 @@ pub struct DesktopClusterOidc {
     pub db: Db,
     pub master_key: Arc<MasterKey>,
     pub user_id: i64,
-    pub registry: Arc<ClusterOidcRegistry>,
+    /// Interior-mutable so a runtime kubeconfig change (Add-cluster form, file
+    /// watcher) can rebuild the registry without restarting the app. Readers
+    /// go through `registry()`, which clones the current `Arc` under the lock
+    /// and releases it immediately.
+    registry: std::sync::Mutex<Arc<ClusterOidcRegistry>>,
     /// The public base URL used to build the loopback redirect (host+port set
     /// per sign-in; see the command). Kept here so provider refresh uses the
     /// same shape.
@@ -51,18 +55,25 @@ impl DesktopClusterOidc {
             db,
             master_key: Arc::new(master_key),
             user_id: user.id,
-            registry,
+            registry: std::sync::Mutex::new(registry),
             // Refresh (no browser) uses only the token endpoint; the redirect
             // isn't sent on the refresh grant, so a stable placeholder is fine.
             redirect_base: "http://127.0.0.1".to_string(),
         })
     }
 
-    /// Build the provider + resolver and install it on `cache` so a detected
-    /// OIDC context authenticates with the managed token (or signals login).
+    /// The current OIDC cluster registry (a cheap `Arc` clone).
+    pub fn registry(&self) -> Arc<ClusterOidcRegistry> {
+        self.registry.lock().unwrap().clone()
+    }
+
+    /// Build the provider + resolver from the CURRENT registry and install it
+    /// on `cache` so a detected OIDC context authenticates with the managed
+    /// token (or signals login).
     pub async fn install_on(&self, cache: &Arc<ClientCache>) {
+        let registry = self.registry();
         let refresh = make_refresh_fn(
-            self.registry.clone(),
+            registry.clone(),
             format!("{}/auth/cluster/callback", self.redirect_base),
             unix_now,
         );
@@ -73,11 +84,19 @@ impl DesktopClusterOidc {
             refresh,
         ));
         cache
-            .set_auth_resolver(Arc::new(ClusterAuthResolver {
-                registry: self.registry.clone(),
-                provider,
-            }))
+            .set_auth_resolver(Arc::new(ClusterAuthResolver { registry, provider }))
             .await;
+    }
+
+    /// Re-read the kubeconfigs on disk, rebuild the OIDC registry, swap it in,
+    /// and reinstall the resolver on `cache` so newly detected/removed OIDC
+    /// clusters (added at runtime — pasted kubeconfig, file watcher) are
+    /// resolvable without an app restart.
+    pub async fn rebuild(&self, cache: &Arc<ClientCache>) {
+        let yamls = read_kubeconfig_yamls(&crate::capabilities::default_kubeconfig_paths());
+        let new_registry = ClusterOidcRegistry::from_kubeconfig_yamls(&yamls);
+        *self.registry.lock().unwrap() = Arc::new(new_registry);
+        self.install_on(cache).await;
     }
 }
 
