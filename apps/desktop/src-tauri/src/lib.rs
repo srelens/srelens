@@ -293,23 +293,32 @@ pub fn run() {
             // an exec plugin. Non-OIDC contexts are unaffected — the resolver
             // returns `AuthMode::Default` for them, falling back to kube-rs's
             // native kubeconfig auth.
-            let paths = capabilities::default_kubeconfig_paths();
-            let yamls = cluster_oidc::read_kubeconfig_yamls(&paths);
-            let config_dir = app
+            // Best-effort: a corrupt token db or unwritable config dir logs and
+            // is skipped (OIDC contexts then fall back to native exec) rather
+            // than aborting app startup.
+            let oidc_env = app
                 .path()
                 .app_config_dir()
-                .map_err(|e| e.to_string())?
-                .join("cluster-oidc");
-            let oidc = tauri::async_runtime::block_on(cluster_oidc::DesktopClusterOidc::build(
-                &config_dir,
-                &yamls,
-            ))
-            .map_err(|e| format!("cluster oidc init: {e}"))?;
-            tauri::async_runtime::block_on(oidc.install_on(&oidc_cache));
-            app.manage(std::sync::Arc::new(oidc));
-            // Expose the shared cache so Task 2's login commands can clear it
-            // (force a re-resolve) after a token change.
-            app.manage(oidc_cache);
+                .map_err(|e| e.to_string())
+                .map(|dir| dir.join("cluster-oidc"))
+                .and_then(|config_dir| {
+                    let paths = capabilities::default_kubeconfig_paths();
+                    let yamls = cluster_oidc::read_kubeconfig_yamls(&paths);
+                    tauri::async_runtime::block_on(cluster_oidc::DesktopClusterOidc::build(
+                        &config_dir,
+                        &yamls,
+                    ))
+                });
+            match oidc_env {
+                Ok(oidc) => {
+                    tauri::async_runtime::block_on(oidc.install_on(&oidc_cache));
+                    app.manage(std::sync::Arc::new(oidc));
+                    // Expose the shared cache so the login commands can clear it
+                    // (force a re-resolve) after a token change.
+                    app.manage(oidc_cache);
+                }
+                Err(e) => log::warn!("cluster OIDC unavailable: {e}"),
+            }
 
             Ok(())
         })

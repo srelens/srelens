@@ -135,6 +135,19 @@ ${SRELENS_PUBLIC_URL}/auth/cluster/callback
 secret is supported but optional). `SRELENS_PUBLIC_URL` must be set correctly
 for this URL to be right.
 
+### Desktop app
+
+The **desktop app** runs the same managed OIDC sign-in — no `kubelogin` needed
+there either. Instead of the web callback, it uses a loopback redirect
+`http://127.0.0.1:<port>/auth/cluster/callback` (RFC 8252, like `kubelogin`),
+opening your system browser and capturing the code on a one-shot local
+listener. Tokens are sealed at rest under a local key in the app config
+directory. The cluster's IdP client must permit loopback redirects — most allow
+any `http://127.0.0.1:*` port for a public client; if yours requires an exact
+URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
+`http://127.0.0.1:<that-port>/auth/cluster/callback`. Non-OIDC exec plugins
+(aws, gke-gcloud-auth-plugin) still run natively on desktop.
+
 ### Limitations
 
 - The managed OIDC token authenticates **kube-rs API calls only**. The
