@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LogIn, LogOut } from "lucide-react";
+import { LogIn, LogOut, Pencil } from "lucide-react";
 import { Button } from "../ui";
 import { listClusters, clusterLogout, type OidcClusterRow } from "../lib/webClusters";
 import { notify } from "../lib/notify";
@@ -7,6 +7,8 @@ import { notify } from "../lib/notify";
 export interface WebClusterSignInSectionProps {
   /** Bumped by the parent (e.g. after adding a cluster) to force a refresh. */
   refreshNonce?: number;
+  /** Edit a cluster's config: called with a context name to prefill the form. */
+  onEdit?: (context: string) => void;
 }
 
 /**
@@ -16,7 +18,7 @@ export interface WebClusterSignInSectionProps {
  * (login triggered on first API 401) discoverable ahead of time, and gives an
  * explicit way to end a cluster's session.
  */
-export function WebClusterSignInSection({ refreshNonce }: WebClusterSignInSectionProps) {
+export function WebClusterSignInSection({ refreshNonce, onEdit }: WebClusterSignInSectionProps) {
   const [rows, setRows] = useState<OidcClusterRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -74,7 +76,7 @@ export function WebClusterSignInSection({ refreshNonce }: WebClusterSignInSectio
           No OIDC clusters. Add one above, or upload a kubeconfig with an OIDC user.
         </p>
       ) : (
-        <div className="fl-kubeconfig-sources__files">
+        <div className="fl-cluster-signin-list">
           {rows.map((row) => {
             const label = row.contexts.length > 0 ? row.contexts.join(", ") : row.issuer;
             const busy = signingOut.has(row.key);
@@ -90,17 +92,25 @@ export function WebClusterSignInSection({ refreshNonce }: WebClusterSignInSectio
                   </small>
                 </span>
                 <span className="fl-kubeconfig-sources__actions">
-                  <Button size="sm" variant="ghost" onClick={() => signIn(row.key)}>
-                    <LogIn data-icon="inline-start" /> Sign in
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={!row.signedIn || busy}
-                    onClick={() => void signOut(row)}
-                  >
-                    <LogOut data-icon="inline-start" /> Sign out
-                  </Button>
+                  {onEdit && row.contexts[0] && (
+                    <Button size="sm" variant="ghost" onClick={() => onEdit(row.contexts[0])}>
+                      <Pencil data-icon="inline-start" /> Edit
+                    </Button>
+                  )}
+                  {row.signedIn ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => void signOut(row)}
+                    >
+                      <LogOut data-icon="inline-start" /> Sign out
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="ghost" onClick={() => signIn(row.key)}>
+                      <LogIn data-icon="inline-start" /> Sign in
+                    </Button>
+                  )}
                 </span>
               </div>
             );

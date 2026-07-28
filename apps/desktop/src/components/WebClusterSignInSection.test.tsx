@@ -55,12 +55,13 @@ describe("WebClusterSignInSection", () => {
     expect(screen.getByText(/Not signed in/)).toBeDefined();
     expect(screen.getByText(/Signed in/)).toBeDefined();
 
+    // Each row shows the one relevant action: Sign in when signed out, Sign
+    // out when signed in.
     const signInButtons = screen.getAllByRole("button", { name: /sign in/i });
-    expect(signInButtons.length).toBe(2);
+    expect(signInButtons.length).toBe(1);
     const signOutButtons = screen.getAllByRole("button", { name: /sign out/i });
-    expect(signOutButtons.length).toBe(2);
-    // Only the signed-in row's Sign out button should be enabled.
-    expect(signOutButtons.some((b) => !(b as HTMLButtonElement).disabled)).toBe(true);
+    expect(signOutButtons.length).toBe(1);
+    expect((signOutButtons[0] as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("signs out of a cluster and refreshes the list", async () => {
