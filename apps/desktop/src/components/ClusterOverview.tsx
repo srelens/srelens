@@ -15,6 +15,7 @@ import {
   StatusMeter,
 } from "../ui";
 import { describeError, isExecAuthError } from "../lib/errors";
+import { isTauri } from "../transport/platform";
 import type { ResourceKind } from "./ResourceBrowser";
 
 interface Stats {
@@ -186,7 +187,10 @@ export function ClusterOverview({
         detail={friendly.detail}
         onRetry={refresh}
         action={
-          onDiagnose && isExecAuthError(error)
+          // The Toolbox can install a missing plugin on desktop, but tool
+          // installs are disabled in the web container (and an exec plugin
+          // can't run there regardless) — so only offer it on desktop.
+          onDiagnose && isExecAuthError(error) && isTauri()
             ? { label: "Diagnose in Toolbox", onClick: onDiagnose }
             : undefined
         }

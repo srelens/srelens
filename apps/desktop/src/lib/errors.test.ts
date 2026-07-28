@@ -17,10 +17,18 @@ describe("isExecAuthError", () => {
     expect(isExecAuthError("connection refused")).toBe(false);
     expect(isExecAuthError("Unauthorized")).toBe(false);
   });
-  it("describeError surfaces the auth-plugin message", () => {
+  it("describeError gives platform-appropriate exec-auth guidance", () => {
+    // Web (jsdom default, no Tauri): can't run plugins → point to Add cluster.
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    expect(describeError("unable to run auth exec: executable not found").title).toBe(
+      "This cluster needs OIDC sign-in",
+    );
+    // Desktop: the plugin can be installed/run locally → Toolbox guidance.
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
     expect(describeError("unable to run auth exec: executable not found").title).toBe(
       "Auth plugin couldn't run",
     );
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 });
 

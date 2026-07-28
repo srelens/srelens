@@ -13,6 +13,7 @@
  */
 
 import { parseClusterLoginRequired } from "./clusterLogin";
+import { isTauri } from "../transport/platform";
 
 export interface FriendlyError {
   /** Short, human headline for the failure. */
@@ -72,6 +73,18 @@ export function describeError(input: unknown): FriendlyError {
   const lower = raw.toLowerCase();
 
   if (isExecAuthError(raw)) {
+    // The right guidance differs by platform: desktop can install and run the
+    // plugin locally; the web container can't run exec plugins at all, so an
+    // OIDC cluster must be re-added with its issuer/client and signed in
+    // through the browser instead.
+    if (!isTauri()) {
+      return {
+        title: "This cluster needs OIDC sign-in",
+        detail:
+          "This context authenticates through an exec plugin (e.g. kubelogin), which can't run in the srelens container. If it's an OIDC cluster, add it under Settings → Contexts → Add cluster with its API server, issuer and client ID, then sign in through your browser. (Non-OIDC plugins like aws or gke-gcloud-auth-plugin need the image extended with the tool and cloud credentials.)",
+        raw,
+      };
+    }
     return {
       title: "Auth plugin couldn't run",
       detail:
