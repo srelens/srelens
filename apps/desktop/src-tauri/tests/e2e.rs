@@ -1722,6 +1722,51 @@ async fn run_suite() {
         .any(|n| n["name"] == node_name && n["unschedulable"] == false));
     println!("{node_name}: uncordoned");
 
+    // === cluster-OIDC add-cluster capabilities =================================
+    // synthesizeClusterKubeconfig is a pure form→kubeconfig transform: assert it
+    // produces a parseable exec-kubelogin kubeconfig naming the given context.
+    println!("=== synthesizeClusterKubeconfig ===");
+    let synth = h
+        .ok(
+            "k8s.synthesizeClusterKubeconfig",
+            json!({
+                "name": "e2e-synth",
+                "server": "https://api.example:6443",
+                "insecureSkipTlsVerify": true,
+                "oidc": { "issuer": "https://dex.example", "clientId": "k8s", "extraScopes": ["groups"] }
+            }),
+        )
+        .await;
+    let synth_yaml = synth["yaml"].as_str().expect("synthesized kubeconfig yaml");
+    assert!(
+        synth_yaml.contains("e2e-synth"),
+        "synthesized kubeconfig names the context: {synth_yaml}"
+    );
+    assert!(
+        synth_yaml.contains("command: kubelogin"),
+        "synthesized kubeconfig uses the exec kubelogin form: {synth_yaml}"
+    );
+
+    // testClusterConnection probes reachability WITHOUT running exec plugins; the
+    // real kind cluster responds (even to a stripped-auth request), so it must
+    // report reachable against the e2e context's own kubeconfig.
+    println!("=== testClusterConnection ===");
+    let kube_yaml = kubeconfig_paths()
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok().filter(|c| c.contains(ctx.as_str())))
+        .expect("no kubeconfig file declares the e2e context");
+    let probe = h
+        .ok(
+            "k8s.testClusterConnection",
+            json!({ "yaml": kube_yaml, "context": ctx }),
+        )
+        .await;
+    assert_eq!(
+        probe["reachable"],
+        json!(true),
+        "kind cluster must be reachable: {probe}"
+    );
+
     // === 10. deleteContext — DANGEROUS: only ever on a throwaway copy =========
     println!("=== deleteContext (throwaway kubeconfig copy) ===");
     delete_context_on_a_copy(&mut h, &ctx).await;
