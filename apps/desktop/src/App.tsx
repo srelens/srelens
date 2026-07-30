@@ -90,6 +90,10 @@ export function App() {
   const [contextOrder, setContextOrder] = useState(loadContextOrder);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Bumped after a palette action mutates a resource, so the active
+  // ResourceBrowser remounts and re-fetches (mirrors the settingsSectionNonce
+  // remount-via-key pattern below).
+  const [viewReloadNonce, setViewReloadNonce] = useState(0);
   // Last-used namespace per cluster (persisted across restarts).
   const [clusterNs, setClusterNs] = useState<Record<string, string>>(loadClusterNamespaces);
   // Global fallback namespace for clusters with no remembered selection.
@@ -645,7 +649,7 @@ export function App() {
                     />
                   ) : activeCluster ? (
                     <ResourceBrowser
-                      key={activeTab.id}
+                      key={`${activeTab.id}:${viewReloadNonce}`}
                       context={activeCluster}
                       kind={activeKind}
                       query={query}
@@ -748,6 +752,8 @@ export function App() {
         }
         onOpenResource={openResource}
         onOpenCrd={(crd) => activeCluster && openCrdView(activeCluster, crd)}
+        currentViewKind={activeTab?.kind}
+        onAfterAction={() => setViewReloadNonce((n) => n + 1)}
       />
       <Toaster position="top-right" richColors closeButton />
     </div>

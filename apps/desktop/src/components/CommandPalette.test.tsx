@@ -220,4 +220,27 @@ describe("CommandPalette", () => {
     setup({ currentViewKind: "pods" });
     expect(await screen.findByText("Quick: Pods")).toBeDefined();
   });
+
+  it("narrows to the given kind when the query starts with a known kind token", async () => {
+    listResourceMock.mockImplementation((_c: string, kind: string) =>
+      Promise.resolve({
+        items:
+          kind === "Pod"
+            ? [{ name: "nginx", namespace: "default", age: "1m" }]
+            : kind === "Service"
+              ? [{ name: "nginx", namespace: "default", age: "1m" }]
+              : [],
+      }),
+    );
+    setup();
+    await waitFor(() => expect(listResourceMock).toHaveBeenCalled());
+
+    await userEvent.type(screen.getByPlaceholderText(/Search resources/), "pod ng");
+
+    // Both a pod and a service named "nginx" are indexed, but "pod ng" must
+    // only surface the pod.
+    expect(await screen.findByText("nginx")).toBeDefined();
+    expect(screen.getByText("Pod")).toBeDefined();
+    expect(screen.queryByText("Service")).toBeNull();
+  });
 });

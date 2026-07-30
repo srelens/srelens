@@ -39,6 +39,38 @@ const SEARCH_KINDS: ResourceKind[] = [
 // Views you can jump to. "portforwards" is a virtual view, still navigable.
 const NAV_KINDS = (Object.keys(RESOURCE_LABELS) as ResourceKind[]).filter((k) => k !== "overview");
 
+/**
+ * Maps a leading query token to a kind, so "pod nginx" or "svc web" narrows
+ * the resource search to that kind before name-filtering. Keys include each
+ * searchable ResourceKind itself, its singular K8S_KIND label, and common
+ * kubectl-style short aliases.
+ */
+const KIND_TOKENS: Partial<Record<string, ResourceKind>> = (() => {
+  const map: Partial<Record<string, ResourceKind>> = {};
+  for (const k of SEARCH_KINDS) {
+    map[k] = k;
+    const label = K8S_KIND[k];
+    if (label) map[label.toLowerCase()] = k;
+  }
+  const aliases: Record<string, ResourceKind> = {
+    po: "pods",
+    deploy: "deployments",
+    deploys: "deployments",
+    sts: "statefulsets",
+    ds: "daemonsets",
+    rs: "replicasets",
+    cj: "cronjobs",
+    svc: "services",
+    ing: "ingresses",
+    cm: "configmaps",
+    pvc: "persistentvolumeclaims",
+    sa: "serviceaccounts",
+    no: "nodes",
+  };
+  Object.assign(map, aliases);
+  return map;
+})();
+
 interface ResItem {
   kind: ResourceKind;
   namespace: string;
@@ -228,9 +260,15 @@ export function CommandPalette({
 
   const resMatches = useMemo(() => {
     if (!q) return [];
-    return items
-      .filter((r) => r.name.toLowerCase().includes(q))
-      .sort(rankBy(q, (r) => r.name))
+    // A leading kind token ("pod nginx", "svc web") narrows the search to
+    // that kind before filtering by the rest of the query as the name.
+    const [first, ...rest] = q.split(/\s+/);
+    const kind = KIND_TOKENS[first];
+    const nameQuery = kind ? rest.join(" ") : q;
+    const scoped = kind ? items.filter((r) => r.kind === kind) : items;
+    return scoped
+      .filter((r) => r.name.toLowerCase().includes(nameQuery))
+      .sort(rankBy(nameQuery, (r) => r.name))
       .slice(0, 50);
   }, [items, q]);
 
