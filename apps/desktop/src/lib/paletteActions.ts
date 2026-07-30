@@ -1,13 +1,11 @@
 import { K8S_KIND, type ResourceKind } from "../components/ResourceBrowser";
 import {
   deleteResource,
-  scaleResource,
   rolloutRestart,
   cordonNode,
   drainNode,
   cronjobSetSuspend,
   cronjobTriggerNow,
-  debugPod,
   createNodeDebugPod,
 } from "./actions";
 import { deletePod, evictPod } from "./workloads";
@@ -28,7 +26,16 @@ export interface PaletteAction {
   /** Resource kinds this action applies to, or "*" for every kind. */
   kinds: ResourceKind[] | "*";
   destructive?: boolean;
-  run: (c: PaletteActionCtx) => Promise<{ error?: string }> | { error?: string } | void;
+  /**
+   * Marks this action as needing extra input the palette can't collect
+   * inline (a replica count, a debug image). Rather than prompting via
+   * `window.prompt` or a hardcoded value, the palette (wired up in Task 4)
+   * opens the matching existing dialog — the scale dialog for "scale", the
+   * debug-container dialog for "debug" — and lets that dialog's own submit
+   * flow invoke the backend. Actions marked this way have no `run`.
+   */
+  opensDialog?: "scale" | "debug";
+  run?: (c: PaletteActionCtx) => Promise<{ error?: string }> | { error?: string } | void;
 }
 
 /** Convert a palette `ResourceKind` to the API kind string `lib/actions.ts` expects. */
@@ -56,13 +63,7 @@ export const PALETTE_ACTIONS: PaletteAction[] = [
     capabilityId: "k8s.scale",
     label: "Scale…",
     kinds: SCALABLE_KINDS,
-    run: (c) => {
-      const input = typeof window !== "undefined" ? window.prompt(`Scale ${c.name} to how many replicas?`) : null;
-      if (input === null) return;
-      const replicas = Number(input);
-      if (!Number.isInteger(replicas) || replicas < 0) return { error: "Enter a non-negative replica count" };
-      return scaleResource(c.context, kindToK8s(c.kind), c.namespace ?? "", c.name, replicas);
-    },
+    opensDialog: "scale",
   },
   {
     capabilityId: "k8s.rolloutRestart",
@@ -93,13 +94,10 @@ export const PALETTE_ACTIONS: PaletteAction[] = [
   },
   {
     capabilityId: "k8s.debugPod",
-    label: "Debug (ephemeral container)",
+    label: "Debug (ephemeral container)…",
     kinds: ["pods"],
     destructive: true,
-    run: async (c) => {
-      const out = await debugPod(c.context, c.namespace ?? "", c.name, "busybox");
-      return out.error ? { error: out.error } : {};
-    },
+    opensDialog: "debug",
   },
   {
     capabilityId: "k8s.cordonNode",
@@ -158,6 +156,9 @@ export const PALETTE_ACTIONS: PaletteAction[] = [
 
 /** Actions applicable to a given resource kind, in registry order. */
 export function actionsForKind(kind: ResourceKind): PaletteAction[] {
+  // UI-only pseudo-kinds (settings, toolbox, overview, …) have no API kind
+  // string and aren't a real resource a "*" action could target.
+  if (kindToK8s(kind) === "") return [];
   return PALETTE_ACTIONS.filter((a) => a.kinds === "*" || a.kinds.includes(kind));
 }
 
