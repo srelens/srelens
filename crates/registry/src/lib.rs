@@ -11,6 +11,16 @@ use serde_json::json;
 use srelens_capability::{Capability, Registry};
 use srelens_kube::client_cache::ClientCache;
 
+mod catalog;
+pub use catalog::{catalog_of, CatalogEntry};
+
+/// Sorted id + annotation-flag projection of the live registry, emitted to a
+/// committed JSON so the frontend palette audit can cross-check it without
+/// linking Rust. See `capability_catalog_json_is_in_sync`.
+pub fn capability_catalog() -> Vec<CatalogEntry> {
+    catalog_of(&build_registry())
+}
+
 /// Resolve kubeconfig paths: every `$KUBECONFIG` entry, else `$HOME/.kube/config`.
 pub fn default_kubeconfig_paths() -> Vec<PathBuf> {
     if let Some(value) = std::env::var_os("KUBECONFIG") {
@@ -378,5 +388,19 @@ mod tests {
         let mut default_ids = default_reg.ids();
         default_ids.sort();
         assert_eq!(ids, default_ids, "same capabilities regardless of paths");
+    }
+
+    #[test]
+    fn capability_catalog_json_is_in_sync() {
+        // The committed JSON is the bridge to the frontend palette audit. It MUST
+        // equal the live registry; regenerate with `UPDATE_CATALOG=1 cargo test`.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/desktop/src/lib/capability-catalog.json");
+        let want = serde_json::to_string_pretty(&capability_catalog()).unwrap() + "\n";
+        if std::env::var("UPDATE_CATALOG").is_ok() {
+            std::fs::write(path, &want).unwrap();
+            return;
+        }
+        let got = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(got, want, "capability-catalog.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry");
     }
 }

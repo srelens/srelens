@@ -5635,6 +5635,7 @@ name = "srelens-registry"
 version = "0.0.0"
 dependencies = [
  "reqwest 0.13.4",
+ "serde",
  "serde_json",
  "srelens-capability",
  "srelens-kube",

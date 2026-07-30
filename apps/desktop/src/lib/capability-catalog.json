@@ -1,0 +1,412 @@
+[
+  {
+    "id": "k8s.applyManifest",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.bindingsForServiceAccount",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.canI",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.clusterInfo",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.cordonNode",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.createNodeDebugPod",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.cronjobSetSuspend",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.cronjobTriggerNow",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.debugPod",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.deleteContext",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.deletePod",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.deleteResource",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.diffManifest",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.drainNode",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.evictPod",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.getHelmRelease",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.getManifest",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.getObject",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.getSecret",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmInstall",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmRepoAdd",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmRepoUpdate",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmRollback",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmSearchRepo",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmTemplate",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmUninstall",
+    "readOnly": false,
+    "destructive": true
+  },
+  {
+    "id": "k8s.helmUpgrade",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.helmVersion",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listCRDs",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listClusterRoleBindings",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listClusterRoles",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listConfigMaps",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listContexts",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listCronJobs",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listCustomResource",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listDaemonSets",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listDeployments",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listEndpointSlices",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listEvents",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listHelmReleases",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listIngresses",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listJobs",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listLimitRanges",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listNamespaces",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listNetworkPolicies",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listNodes",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listPersistentVolumeClaims",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listPersistentVolumes",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listPods",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listReplicaSets",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listResource",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listResourceQuotas",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listRoleBindings",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listRoles",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listSecrets",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listServiceAccounts",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listServices",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listStatefulSets",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.listStorageClasses",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.nodeMetrics",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.openApiSchema",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.podLogs",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.podMetrics",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.podsForPvc",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.podsForSelector",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.podsForServiceAccount",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.rolloutRestart",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.scale",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.synthesizeClusterKubeconfig",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.testClusterConnection",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "k8s.updateConfigData",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "k8s.validateManifest",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "ping",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.diagnoseContext",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.installHelm",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.installKrew",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.installKubectl",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.installPlugin",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.removePlugin",
+    "readOnly": false,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.searchPlugins",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.status",
+    "readOnly": true,
+    "destructive": false
+  },
+  {
+    "id": "toolbox.upgradePlugin",
+    "readOnly": false,
+    "destructive": false
+  }
+]

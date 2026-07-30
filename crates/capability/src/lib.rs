@@ -96,6 +96,10 @@ impl Registry {
         self.caps.keys().map(String::as_str).collect()
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &Capability> {
+        self.caps.values()
+    }
+
     pub fn get(&self, id: &str) -> Option<&Capability> {
         self.caps.get(id)
     }
