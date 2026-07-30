@@ -53,6 +53,27 @@ image locally), publishes `:8080`, and persists `/data` on a named volume.
 Put a TLS-terminating reverse proxy in front of it (nginx, Caddy, an ingress
 controller, a cloud load balancer, …) — see below for why this matters.
 
+## Scaling and availability
+
+> **Run a single instance.** Web mode is **not** horizontally scalable today —
+> do not run more than one replica behind a load balancer.
+
+Each instance keeps state that isn't shared across replicas: the SQLite database
+(a single file — concurrent writers from multiple containers corrupt it),
+in-memory OIDC login state (sign-in would start on one replica and fail its
+callback on another), the live WebSocket streams, and port-forwards (a TCP tunnel
+that lives inside the container that opened it). A second replica therefore breaks
+logins, streams, and port-forwards, and risks database corruption.
+
+Scale **vertically** (more CPU/RAM for the one instance) — a single instance
+serves many users comfortably, since the workload is mostly async I/O. For
+resilience, use `restart: unless-stopped` (as the compose file does) and a
+persisted `/data` volume; on restart, users simply re-connect.
+
+Horizontal scaling (multiple replicas via a replicated store, streams over the
+WebSocket, and port-forward owner-routing) is designed but not yet built; it is
+tracked as future work.
+
 ## Environment variables
 
 | Variable | Required | Description |
