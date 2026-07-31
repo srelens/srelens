@@ -20,9 +20,11 @@ struct Forward {
 /// Reconnect policy: a handful of attempts with a short capped exponential
 /// backoff, small enough that tests exercising the give-up path stay fast.
 /// `MAX_ATTEMPTS` counts CONSECUTIVE failed attempts since the last
-/// successful establish — see `attempt_after_established` — so a forward
-/// that's been happily active for hours and then reconnects once doesn't
-/// inherit a stale attempt count from an earlier flaky period.
+/// successful establish — see `next_reconnect_state` — so a forward that's
+/// been happily active for hours and then reconnects once doesn't inherit a
+/// stale attempt count from an earlier flaky period: the first reconnect
+/// after ANY successful establish always reports `attempt:1`, never a
+/// continuation of whatever count came before that establish.
 ///
 /// 5 (not 4) so `MAX_BACKOFF_MS`'s cap is actually reachable: sleeps only
 /// happen for attempts before the last one (1..=MAX_ATTEMPTS-1), and
@@ -40,17 +42,42 @@ fn backoff_for(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
-/// The attempt counter to carry into the next loop iteration once the
-/// current one has just reached "active" (a successful establish): reset to
-/// 0, so `attempt += 1` at the top of the next iteration starts a fresh
-/// consecutive-failure count instead of continuing to accumulate from
-/// before this success. When the session hasn't just established, the
-/// attempt count is left untouched.
-fn attempt_after_established(attempt: u32, just_established: bool) -> u32 {
-    if just_established {
-        0
+/// Outcome of one failed connect/serve attempt: whether the reconnect loop
+/// should give up, and the `attempt` number to report on the
+/// `forward:status:<id>` event for this failure (`reconnecting` when
+/// `give_up` is false, `failed` when it's true).
+struct ReconnectDecision {
+    give_up: bool,
+    attempt: u32,
+}
+
+/// Pure state transition for the reconnect loop's attempt bookkeeping.
+/// `attempt` always counts CONSECUTIVE failures since the last successful
+/// establish:
+///
+/// | `established_this_session` | `prev_consecutive_failures` | → `attempt` |
+/// |-----------------------------|-------------------------------|-------------|
+/// | `false` (never established this session) | `n`             | `n + 1`     |
+/// | `true` (established, then failed)         | any (ignored)   | `1`         |
+///
+/// A session that establishes and later fails ALWAYS restarts the
+/// consecutive-failure count at 1 — it never continues from whatever count
+/// preceded the successful establish, since that would double-count an
+/// earlier flaky period against a session that went on to work for a while.
+/// A session that never establishes just increments as usual. `give_up` is
+/// `attempt >= MAX_ATTEMPTS` either way.
+fn next_reconnect_state(
+    established_this_session: bool,
+    prev_consecutive_failures: u32,
+) -> ReconnectDecision {
+    let attempt = if established_this_session {
+        1
     } else {
-        attempt
+        prev_consecutive_failures + 1
+    };
+    ReconnectDecision {
+        give_up: attempt >= MAX_ATTEMPTS,
+        attempt,
     }
 }
 
@@ -118,9 +145,9 @@ impl ForwardManager {
         let closed_channel = format!("forward:closed:{id}");
         let status_channel = format!("forward:status:{id}");
         let handle = tokio::spawn(async move {
-            let mut attempt: u32 = 0;
+            let mut consecutive_failures: u32 = 0;
             let final_error = loop {
-                attempt += 1;
+                let mut established_this_session = false;
 
                 // Re-resolve Service targets every attempt so a replacement
                 // pod is picked up; a Pod target's name never changes.
@@ -141,12 +168,13 @@ impl ForwardManager {
                     Ok((pod, target_port)) => {
                         match forward::connect_pod_api(cache.clone(), &context, &namespace).await {
                             Ok(api) => {
-                                sink.emit(&status_channel, status_payload("active", attempt, None));
-                                // Reset now, not after `serve_pod_forward` returns: this
-                                // session has established, so the NEXT failure (whenever
-                                // it comes) starts a fresh consecutive-attempt count
-                                // rather than inheriting this attempt's number.
-                                attempt = attempt_after_established(attempt, true);
+                                established_this_session = true;
+                                // `active` always reports attempt:0 — reaching
+                                // "active" means there's no consecutive-failure
+                                // streak to report; see `next_reconnect_state`
+                                // for how a later failure of THIS session is
+                                // counted (always restarts at 1).
+                                sink.emit(&status_channel, status_payload("active", 0, None));
                                 forward::serve_pod_forward(&listener, api, pod, target_port).await
                             }
                             Err(e) => Err(e),
@@ -163,19 +191,22 @@ impl ForwardManager {
                     Err(e) => e,
                 };
 
-                if attempt >= MAX_ATTEMPTS {
+                let decision = next_reconnect_state(established_this_session, consecutive_failures);
+                consecutive_failures = decision.attempt;
+
+                if decision.give_up {
                     sink.emit(
                         &status_channel,
-                        status_payload("failed", attempt, Some(&err)),
+                        status_payload("failed", decision.attempt, Some(&err)),
                     );
                     break Some(err);
                 }
 
                 sink.emit(
                     &status_channel,
-                    status_payload("reconnecting", attempt, Some(&err)),
+                    status_payload("reconnecting", decision.attempt, Some(&err)),
                 );
-                tokio::time::sleep(backoff_for(attempt)).await;
+                tokio::time::sleep(backoff_for(decision.attempt)).await;
             };
 
             sink.emit(
@@ -242,29 +273,74 @@ mod tests {
     use crate::test_util::TestSink;
 
     #[test]
-    fn attempt_resets_to_zero_on_establish_else_unchanged() {
-        // A session that just reached "active" starts the next
-        // consecutive-failure count from scratch...
-        assert_eq!(attempt_after_established(3, true), 0);
-        assert_eq!(attempt_after_established(MAX_ATTEMPTS, true), 0);
-        // ...but an attempt count is left alone when nothing established
-        // (e.g. resolve/connect failed before a session could start).
-        assert_eq!(attempt_after_established(3, false), 3);
-        assert_eq!(attempt_after_established(0, false), 0);
+    fn next_reconnect_state_never_established_counts_up_then_gives_up() {
+        // A session that never reaches "active" just counts consecutive
+        // failures 1, 2, 3, ... and gives up exactly at MAX_ATTEMPTS.
+        let mut consecutive_failures = 0;
+        for expected in 1..MAX_ATTEMPTS {
+            let decision = next_reconnect_state(false, consecutive_failures);
+            assert_eq!(decision.attempt, expected);
+            assert!(
+                !decision.give_up,
+                "attempt {expected} should not give up yet"
+            );
+            consecutive_failures = decision.attempt;
+        }
+        let decision = next_reconnect_state(false, consecutive_failures);
+        assert_eq!(decision.attempt, MAX_ATTEMPTS);
+        assert!(
+            decision.give_up,
+            "the MAX_ATTEMPTS-th failure should give up"
+        );
     }
 
-    // NOTE on coverage: this proves the reset *decision* used by the loop
-    // (`attempt = attempt_after_established(attempt, true)` right after the
-    // "active" emit), but not the full end-to-end path — "forward is active
-    // against a real pod, that pod is deleted, the streams loop reconnects,
-    // emits active again on attempt N>1, resets, then fails MAX_ATTEMPTS
-    // times counting 1..MAX_ATTEMPTS instead of continuing from N". Driving
-    // that deterministically would need `connect_pod_api`/`serve_pod_forward`
-    // to succeed without a real cluster, which needs a fake kube apiserver
-    // (e.g. a mock HTTP service behind `kube::Client::new`) — no such test
-    // harness exists in this repo today and building one would pull in a new
-    // dev-dependency (tower/hyper test helpers), which is out of scope here.
-    // See the task report for this gap.
+    #[test]
+    fn next_reconnect_state_established_then_failed_resets_to_one() {
+        // No matter how many consecutive failures preceded a successful
+        // establish, the first failure AFTER that establish is attempt:1 —
+        // it never continues counting from whatever came before the success.
+        for prev in [0, 1, MAX_ATTEMPTS - 1, MAX_ATTEMPTS, 100] {
+            let decision = next_reconnect_state(true, prev);
+            assert_eq!(decision.attempt, 1, "prev_consecutive_failures={prev}");
+            assert!(!decision.give_up, "a single failure should never give up");
+        }
+    }
+
+    #[test]
+    fn next_reconnect_state_repeated_establish_fail_cycles_never_accumulate() {
+        // Simulate many establish -> fail cycles in a row (e.g. a pod that
+        // keeps getting recreated and immediately deleted again): the
+        // attempt count must reset to 1 every single time, never climbing
+        // toward MAX_ATTEMPTS just because it happened before.
+        let mut consecutive_failures = 0;
+        for _ in 0..(MAX_ATTEMPTS * 3) {
+            let decision = next_reconnect_state(true, consecutive_failures);
+            assert_eq!(decision.attempt, 1);
+            assert!(!decision.give_up);
+            consecutive_failures = decision.attempt;
+        }
+    }
+
+    #[test]
+    fn next_reconnect_state_give_up_threshold_is_exactly_max_attempts() {
+        assert!(!next_reconnect_state(false, MAX_ATTEMPTS - 2).give_up);
+        assert!(next_reconnect_state(false, MAX_ATTEMPTS - 1).give_up);
+    }
+
+    // NOTE on coverage: the tests above exhaustively prove the pure
+    // transition (`next_reconnect_state`) that the loop relies on, but not
+    // the full end-to-end path — "forward is active against a real pod,
+    // that pod is deleted, the streams loop reconnects, emits active again,
+    // then a later failure streak counts 1..MAX_ATTEMPTS instead of
+    // continuing from whatever count preceded the successful establish".
+    // Driving that deterministically would need `connect_pod_api` /
+    // `serve_pod_forward` to succeed without a real cluster, which needs a
+    // fake kube apiserver (e.g. a mock HTTP service behind
+    // `kube::Client::new`) — no such test harness exists in this repo today
+    // and building one would pull in a new dev-dependency (tower/hyper test
+    // helpers), which is out of scope here. A separate follow-up issue
+    // tracks building that cluster harness. See the task report for this
+    // gap.
 
     #[tokio::test(flavor = "multi_thread")]
     async fn forward_retries_then_marks_failed() {
