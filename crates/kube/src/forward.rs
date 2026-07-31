@@ -61,20 +61,30 @@ pub async fn bind_local(port: u16) -> Result<TcpListener, BindError> {
     }
 }
 
+/// Build the port-forward API client for a context/namespace. Split out from
+/// `serve_pod_forward` so callers (the reconnect loop) can tell "the session
+/// established" (this succeeded) apart from "the accept loop ended" (below).
+pub async fn connect_pod_api(
+    cache: Arc<ClientCache>,
+    context: &str,
+    namespace: &str,
+) -> Result<Api<Pod>, String> {
+    let client = cache.get(context).await?;
+    Ok(Api::namespaced(client, namespace))
+}
+
 /// Accept loop for a bound listener: every inbound local connection opens its
 /// own port-forward stream to `pod:remote_port` and is piped bidirectionally.
-/// Runs until the listener errors or the spawning task is aborted.
+/// Runs until the listener errors or the spawning task is aborted. Takes the
+/// listener by reference so a reconnect loop can keep the same bound local
+/// port across attempts and re-accept on it (`TcpListener::accept` only needs
+/// `&self`, so no re-bind is required).
 pub async fn serve_pod_forward(
-    listener: TcpListener,
-    cache: Arc<ClientCache>,
-    context: String,
-    namespace: String,
+    listener: &TcpListener,
+    api: Api<Pod>,
     pod: String,
     remote_port: u16,
 ) -> Result<(), String> {
-    let client = cache.get(&context).await?;
-    let api: Api<Pod> = Api::namespaced(client, &namespace);
-
     loop {
         let (mut local, _peer) = listener.accept().await.map_err(|e| e.to_string())?;
         let api = api.clone();
