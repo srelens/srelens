@@ -5,12 +5,15 @@ import React from "react";
 
 const { invokeCommandMock, onMock } = vi.hoisted(() => ({
   invokeCommandMock: vi.fn(),
-  onMock: vi.fn(() => () => {}),
+  onMock: vi.fn((_channel: string, _handler: (payload?: unknown) => void) => () => {}),
 }));
 vi.mock("../transport/transport", () => ({ invokeCommand: invokeCommandMock, on: onMock }));
 
 import { ForwardsIndicator } from "./ForwardsIndicator";
 import { startPortForward, stopPortForward, getForwards } from "../lib/forward";
+
+// Capture `forward:status:<id>` handlers so tests can fire status events.
+const statusHandlers = new Map<string, (payload: unknown) => void>();
 
 beforeEach(async () => {
   // Reset the module-level store between tests.
@@ -20,6 +23,11 @@ beforeEach(async () => {
   }
   invokeCommandMock.mockReset();
   onMock.mockClear();
+  statusHandlers.clear();
+  onMock.mockImplementation((channel: string, handler: (payload?: unknown) => void) => {
+    if (channel.startsWith("forward:status:")) statusHandlers.set(channel, handler);
+    return () => statusHandlers.delete(channel);
+  });
 });
 
 describe("ForwardsIndicator", () => {
@@ -73,5 +81,32 @@ describe("ForwardsIndicator", () => {
     render(<ForwardsIndicator />);
     await userEvent.click(screen.getByRole("button", { name: /active port forwards/ }));
     expect(await screen.findByText(`${window.location.origin}/pf/2/ → 80`)).toBeDefined();
+  });
+
+  it("reflects a reconnecting/failed status instead of always showing active", async () => {
+    invokeCommandMock.mockResolvedValueOnce({ id: 3, localPort: 5002 });
+    await act(async () => {
+      await startPortForward({
+        context: "kind-dev",
+        namespace: "default",
+        kind: "Pod",
+        name: "web-1",
+        remotePort: 80,
+      });
+    });
+
+    render(<ForwardsIndicator />);
+    await userEvent.click(screen.getByRole("button", { name: /active port forwards/ }));
+    expect(await screen.findByText("Active")).toBeDefined();
+
+    act(() => {
+      statusHandlers.get("forward:status:3")?.({ state: "reconnecting" });
+    });
+    expect(await screen.findByText("Reconnecting")).toBeDefined();
+
+    act(() => {
+      statusHandlers.get("forward:status:3")?.({ state: "failed" });
+    });
+    expect(await screen.findByText("Failed")).toBeDefined();
   });
 });

@@ -1,6 +1,7 @@
 import React, { useSyncExternalStore } from "react";
 import { ArrowLeftRight, CircleStop, Copy } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { StatusPill, type StatusKind } from "../ui";
 import {
   getForwards,
   subscribeForwards,
@@ -12,6 +13,28 @@ import {
 /** Subscribe to the active port-forwards store. */
 export function useForwards(): ActiveForward[] {
   return useSyncExternalStore(subscribeForwards, getForwards, getForwards);
+}
+
+const STATUS_KIND: Record<ActiveForward["status"], StatusKind> = {
+  active: "success",
+  reconnecting: "warning",
+  failed: "danger",
+};
+
+const STATUS_LABEL: Record<ActiveForward["status"], string> = {
+  active: "Active",
+  reconnecting: "Reconnecting",
+  failed: "Failed",
+};
+
+/** Colour/label for a forward's live status — shared by every view that
+ *  lists forwards, so reconnecting/failed forwards never read as active. */
+export function forwardStatusKind(status: ActiveForward["status"]): StatusKind {
+  return STATUS_KIND[status];
+}
+
+export function forwardStatusLabel(status: ActiveForward["status"]): string {
+  return STATUS_LABEL[status];
 }
 
 /**
@@ -47,6 +70,7 @@ export function ForwardsIndicator() {
                 <div className="truncate font-mono text-muted-foreground">
                   {forwardAddress(f)} → {f.remotePort}
                 </div>
+                <StatusPill status={forwardStatusLabel(f.status)} kind={forwardStatusKind(f.status)} />
               </div>
               <button
                 type="button"

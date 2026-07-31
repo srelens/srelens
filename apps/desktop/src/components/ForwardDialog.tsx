@@ -1,10 +1,19 @@
 import React, { useState } from "react";
-import { ConfirmDialog, TextInput } from "../ui";
+import { ConfirmDialog, TextInput, Button } from "../ui";
 import { startPortForward } from "../lib/forward";
+import { saveForward } from "../lib/savedForwards";
 
 function validPort(v: string): number | null {
   const n = Number(v);
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+}
+
+/** Extract the backend-suggested free port from a local-port conflict error,
+ *  e.g. "port 8080 is already in use; 54321 is free" (see `BindError::InUse`
+ *  in crates/kube/src/forward.rs). Returns null for any other error. */
+function suggestedPortFrom(message: string): number | null {
+  const match = /(\d+)\s+is free\b/.exec(message);
+  return match ? Number(match[1]) : null;
 }
 
 /**
@@ -30,8 +39,49 @@ export function ForwardDialog({
   const [local, setLocal] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [suggestedPort, setSuggestedPort] = useState<number | null>(null);
+  const [saveState, setSaveState] = useState<"idle" | "busy" | "saved">("idle");
 
-  async function submit() {
+  /** Start the forward. `overrideLocalPort` (used by "use it" on a conflict
+   *  suggestion) wins over whatever is in the local-port field. */
+  async function start(overrideLocalPort?: number) {
+    const remotePort = validPort(remote);
+    if (remotePort === null) {
+      setError("Enter a remote port between 1 and 65535");
+      return;
+    }
+    let localPort: number | undefined = overrideLocalPort;
+    if (localPort === undefined && local.trim()) {
+      const l = validPort(local);
+      if (l === null) {
+        setError("Local port must be between 1 and 65535");
+        return;
+      }
+      localPort = l;
+    }
+    setBusy(true);
+    setError("");
+    setSuggestedPort(null);
+    try {
+      await startPortForward({ context, namespace, kind, name, remotePort, localPort });
+      onClose();
+    } catch (e) {
+      const message = String(e);
+      setError(message);
+      setSuggestedPort(suggestedPortFrom(message));
+      setBusy(false);
+    }
+  }
+
+  /** Retry the forward on the backend's suggested free local port. */
+  async function useSuggestedPort() {
+    if (suggestedPort === null) return;
+    setLocal(String(suggestedPort));
+    await start(suggestedPort);
+  }
+
+  /** Persist the current target as a reusable shortcut (doesn't start it). */
+  async function handleSave() {
     const remotePort = validPort(remote);
     if (remotePort === null) {
       setError("Enter a remote port between 1 and 65535");
@@ -46,14 +96,21 @@ export function ForwardDialog({
       }
       localPort = l;
     }
-    setBusy(true);
-    setError("");
+    setSaveState("busy");
     try {
-      await startPortForward({ context, namespace, kind, name, remotePort, localPort });
-      onClose();
+      await saveForward(context, {
+        id: crypto.randomUUID(),
+        name,
+        namespace,
+        kind,
+        target: name,
+        remotePort,
+        localPort,
+      });
+      setSaveState("saved");
     } catch (e) {
       setError(String(e));
-      setBusy(false);
+      setSaveState("idle");
     }
   }
 
@@ -96,12 +153,30 @@ export function ForwardDialog({
               </div>
             </label>
           </div>
-          {error && <p className="m-0 text-sm text-destructive">Error: {error}</p>}
+          <div>
+            <Button
+              variant="secondary"
+              disabled={saveState !== "idle"}
+              onClick={() => void handleSave()}
+            >
+              {saveState === "saved" ? "Saved" : "Save this forward"}
+            </Button>
+          </div>
+          {error && (
+            <div className="flex flex-col items-start gap-2">
+              <p className="m-0 text-sm text-destructive">Error: {error}</p>
+              {suggestedPort !== null && (
+                <Button variant="secondary" disabled={busy} onClick={() => void useSuggestedPort()}>
+                  Use port {suggestedPort}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
       }
       confirmLabel="Forward"
       busy={busy}
-      onConfirm={() => void submit()}
+      onConfirm={() => void start()}
       onCancel={onClose}
     />
   );
