@@ -19,14 +19,21 @@ import {
   type ActiveForward,
 } from "./forward";
 
-// Capture the `forward:closed:<id>` handlers so tests can fire the event.
+// Capture the `forward:closed:<id>` / `forward:status:<id>` handlers so tests
+// can fire the events.
 const closedHandlers = new Map<string, () => void>();
+const statusHandlers = new Map<string, (payload: unknown) => void>();
 
 beforeEach(async () => {
   invokeCommandMock.mockReset();
   onMock.mockReset();
   closedHandlers.clear();
-  onMock.mockImplementation((channel: string, handler: () => void) => {
+  statusHandlers.clear();
+  onMock.mockImplementation((channel: string, handler: (payload?: unknown) => void) => {
+    if (channel.startsWith("forward:status:")) {
+      statusHandlers.set(channel, handler);
+      return () => statusHandlers.delete(channel);
+    }
     closedHandlers.set(channel, handler);
     return () => closedHandlers.delete(channel);
   });
@@ -91,9 +98,29 @@ describe("forward store", () => {
     expect(getForwards()).toHaveLength(0);
   });
 
+  it("defaults a new forward's status to active", async () => {
+    invokeCommandMock.mockResolvedValueOnce({ id: 5, localPort: 5002 });
+    const fwd = await startPortForward(req);
+    expect(fwd.status).toBe("active");
+    expect(getForwards()[0].status).toBe("active");
+  });
+
+  it("flips status to reconnecting when the backend emits forward:status", async () => {
+    const notify = vi.fn();
+    invokeCommandMock.mockResolvedValueOnce({ id: 6, localPort: 5003 });
+    await startPortForward(req);
+    const unsub = subscribeForwards(notify);
+
+    statusHandlers.get("forward:status:6")?.({ state: "reconnecting", attempt: 1, error: null });
+
+    expect(getForwards()[0].status).toBe("reconnecting");
+    expect(notify).toHaveBeenCalled();
+    unsub();
+  });
+
   it("passes a preferred local port through", async () => {
     invokeCommandMock.mockResolvedValueOnce({ id: 4, localPort: 8080 });
-    const withLocal: ActiveForward = { ...req, id: 0, localPort: 0 };
+    const withLocal: ActiveForward = { ...req, id: 0, localPort: 0, status: "active" };
     await startPortForward({ ...withLocal, localPort: 8080 });
     expect(invokeCommandMock).toHaveBeenCalledWith(
       "start_port_forward",

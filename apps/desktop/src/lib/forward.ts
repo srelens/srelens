@@ -11,6 +11,8 @@ export interface ActiveForward {
   name: string;
   remotePort: number;
   localPort: number;
+  /** Live state, driven by `forward:status:<id>` events from the backend. */
+  status: "active" | "reconnecting" | "failed";
 }
 
 export interface ForwardRequest {
@@ -54,12 +56,19 @@ export async function startPortForward(req: ForwardRequest): Promise<ActiveForwa
     remotePort: req.remotePort,
     localPort: req.localPort ?? null,
   });
-  const fwd: ActiveForward = { ...req, id: info.id, localPort: info.localPort };
+  const fwd: ActiveForward = { ...req, id: info.id, localPort: info.localPort, status: "active" };
   forwards = [...forwards, fwd];
-  closers.set(
-    info.id,
-    on(`forward:closed:${info.id}`, () => removeForward(info.id)),
-  );
+  const unsubClosed = on(`forward:closed:${info.id}`, () => removeForward(info.id));
+  const unsubStatus = on(`forward:status:${info.id}`, (payload) => {
+    const state = (payload as { state?: unknown } | null)?.state;
+    if (state === "active" || state === "reconnecting" || state === "failed") {
+      setForwardStatus(info.id, state);
+    }
+  });
+  closers.set(info.id, () => {
+    unsubClosed();
+    unsubStatus();
+  });
   emit();
   return fwd;
 }
@@ -84,6 +93,14 @@ export function forwardAddress(info: { id: number; localPort: number }): string 
   return isTauri()
     ? `localhost:${info.localPort}`
     : `${window.location.origin}/pf/${info.id}/`;
+}
+
+function setForwardStatus(id: number, status: ActiveForward["status"]) {
+  const next = forwards.map((f) => (f.id === id && f.status !== status ? { ...f, status } : f));
+  if (next.some((f, i) => f !== forwards[i])) {
+    forwards = next;
+    emit();
+  }
 }
 
 function removeForward(id: number) {
