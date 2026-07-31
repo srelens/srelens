@@ -168,14 +168,24 @@ impl ForwardManager {
                     Ok((pod, target_port)) => {
                         match forward::connect_pod_api(cache.clone(), &context, &namespace).await {
                             Ok(api) => {
-                                established_this_session = true;
-                                // `active` always reports attempt:0 — reaching
-                                // "active" means there's no consecutive-failure
-                                // streak to report; see `next_reconnect_state`
-                                // for how a later failure of THIS session is
-                                // counted (always restarts at 1).
-                                sink.emit(&status_channel, status_payload("active", 0, None));
-                                forward::serve_pod_forward(&listener, api, pod, target_port).await
+                                // Building the Api handle does no I/O, so it isn't
+                                // evidence the target works. Probe readiness first:
+                                // only a pod that's actually present + Running counts
+                                // as "established". Otherwise a permanently-dead
+                                // target would reset the failure counter to 1 every
+                                // attempt and never reach the give-up threshold.
+                                if forward::pod_is_ready(&api, &pod).await {
+                                    established_this_session = true;
+                                    // `active` always reports attempt:0 — reaching
+                                    // "active" means there's no consecutive-failure
+                                    // streak to report; see `next_reconnect_state`
+                                    // for how a later failure of THIS session is
+                                    // counted (always restarts at 1).
+                                    sink.emit(&status_channel, status_payload("active", 0, None));
+                                    forward::serve_pod_forward(&listener, api, pod, target_port).await
+                                } else {
+                                    Err(format!("target pod {pod} is not ready"))
+                                }
                             }
                             Err(e) => Err(e),
                         }

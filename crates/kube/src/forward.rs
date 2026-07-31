@@ -163,6 +163,16 @@ pub fn pod_is_gone(pod: &Pod) -> bool {
     pod.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Running")
 }
 
+/// One-shot readiness probe: true only when the target pod currently exists and
+/// is Running (not terminating). A missing pod or an API error reads as
+/// not-ready. Used to decide whether a reconnect attempt actually *established*
+/// — building an `Api<Pod>` handle does no I/O and always "succeeds", so without
+/// this probe a permanently-dead target would reconnect forever and never reach
+/// the give-up threshold. Mirrors the monitor's own liveness check.
+pub async fn pod_is_ready(api: &Api<Pod>, pod: &str) -> bool {
+    matches!(api.get_opt(pod).await, Ok(Some(p)) if !pod_is_gone(&p))
+}
+
 /// Resolve a Service to a concrete `(pod, container_port)` to forward to: pick
 /// the matching service port, then the first ready pod behind its selector, and
 /// map the service's target port onto that pod.
