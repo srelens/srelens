@@ -73,7 +73,9 @@ impl ForwardManager {
             (name, remote_port)
         };
 
-        let listener = forward::bind_local(local_port.unwrap_or(0)).await?;
+        let listener = forward::bind_local(local_port.unwrap_or(0))
+            .await
+            .map_err(|e| e.to_string())?;
         let bound = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);

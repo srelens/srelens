@@ -2,6 +2,8 @@
 //! each inbound connection through its own port-forward stream to a pod —
 //! Tauri-agnostic so the listener/stream plumbing stays reusable and testable.
 
+use std::fmt;
+use std::io::ErrorKind;
 use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::{Pod, Service, ServicePort};
@@ -13,12 +15,50 @@ use tokio::net::TcpListener;
 
 use crate::client_cache::ClientCache;
 
+/// Why `bind_local` failed. `InUse` carries a `suggested` free port (found by
+/// binding `:0` once) so callers can offer it to the user instead of just
+/// failing outright.
+#[derive(Debug)]
+pub enum BindError {
+    InUse { requested: u16, suggested: u16 },
+    Io(String),
+}
+
+impl fmt::Display for BindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BindError::InUse { requested, suggested } => write!(
+                f,
+                "port {requested} is already in use; {suggested} is free"
+            ),
+            BindError::Io(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for BindError {}
+
 /// Bind a loopback TCP listener. A `port` of 0 lets the OS pick a free port;
-/// read `local_addr()` on the returned listener for the chosen port.
-pub async fn bind_local(port: u16) -> Result<TcpListener, String> {
-    TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| e.to_string())
+/// read `local_addr()` on the returned listener for the chosen port. If
+/// `port` is already taken, binds `:0` to find a free port to suggest and
+/// returns `BindError::InUse` with that suggestion.
+pub async fn bind_local(port: u16) -> Result<TcpListener, BindError> {
+    match TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == ErrorKind::AddrInUse => {
+            let suggested = TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .map_err(|e| BindError::Io(e.to_string()))?
+                .local_addr()
+                .map_err(|e| BindError::Io(e.to_string()))?
+                .port();
+            Err(BindError::InUse {
+                requested: port,
+                suggested,
+            })
+        }
+        Err(e) => Err(BindError::Io(e.to_string())),
+    }
 }
 
 /// Accept loop for a bound listener: every inbound local connection opens its
@@ -157,6 +197,20 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         assert!(addr.ip().is_loopback());
         assert!(addr.port() > 0);
+    }
+
+    #[tokio::test]
+    async fn bind_local_reports_conflict_with_a_free_suggestion() {
+        let taken = bind_local(0).await.unwrap();
+        let p = taken.local_addr().unwrap().port();
+        match bind_local(p).await {
+            Err(BindError::InUse { requested, suggested }) => {
+                assert_eq!(requested, p);
+                assert!(suggested != 0 && suggested != p);
+                bind_local(suggested).await.expect("suggested port is free");
+            }
+            other => panic!("expected InUse, got {other:?}"),
+        }
     }
 
     #[test]
