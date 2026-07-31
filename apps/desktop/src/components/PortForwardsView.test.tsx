@@ -159,6 +159,20 @@ describe("PortForwardsView", () => {
       );
     });
 
+    it("surfaces an error when starting a saved forward fails (not silent)", async () => {
+      listSavedForwardsMock.mockResolvedValue([sf]);
+      invokeCommandMock.mockRejectedValueOnce(
+        new Error("port 8080 is already in use; 8081 is free"),
+      );
+      render(<PortForwardsView context="kind-dev" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("web console");
+      expect(alert.textContent).toContain("8080 is already in use");
+    });
+
     it("Delete removes a saved row via deleteSavedForward", async () => {
       listSavedForwardsMock.mockResolvedValueOnce([sf]).mockResolvedValueOnce([]);
       render(<PortForwardsView context="kind-dev" />);

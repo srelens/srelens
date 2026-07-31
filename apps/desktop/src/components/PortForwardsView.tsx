@@ -85,6 +85,7 @@ export function PortForwardsView({ context }: { context?: string }) {
 
   const [saved, setSaved] = useState<SavedForward[]>([]);
   const [startingId, setStartingId] = useState<string | null>(null);
+  const [savedError, setSavedError] = useState("");
 
   const refreshSaved = useCallback(() => {
     if (!context) {
@@ -101,6 +102,7 @@ export function PortForwardsView({ context }: { context?: string }) {
   async function handleStartSaved(sf: SavedForward) {
     if (!context) return;
     setStartingId(sf.id);
+    setSavedError("");
     try {
       await startPortForward({
         context,
@@ -110,6 +112,10 @@ export function PortForwardsView({ context }: { context?: string }) {
         remotePort: sf.remotePort,
         localPort: sf.localPort,
       });
+    } catch (e) {
+      // Surface the failure (e.g. the pinned local port is now taken, or the
+      // target is unreachable) instead of failing silently.
+      setSavedError(`Couldn't start ${sf.name}: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setStartingId(null);
     }
@@ -174,6 +180,11 @@ export function PortForwardsView({ context }: { context?: string }) {
             <span className="font-medium">Saved</span>
             <Badge variant="neutral">{saved.length}</Badge>
           </div>
+          {savedError && (
+            <div role="alert" className="shrink-0 px-3 pb-2 text-xs text-destructive">
+              {savedError}
+            </div>
+          )}
           <div className="min-h-0 flex-1 overflow-auto">
             {saved.length === 0 ? (
               <div className="p-4 text-center text-sm text-muted-foreground">
