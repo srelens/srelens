@@ -71,6 +71,29 @@ fn exec_flag(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// Env-var marker srelens stamps into the `exec` block of kubeconfigs it
+/// synthesizes from the "Add cluster" OIDC form. It lets srelens tell apart a
+/// cluster the user added *through srelens* (which should use the managed
+/// browser sign-in) from a pre-existing kubeconfig context that uses its own
+/// `kubectl` exec plugin (kubelogin/aws/gke — which must be left to run
+/// natively). `kubelogin` ignores unknown env vars, so the marker is inert to
+/// the plugin.
+pub const SRELENS_MANAGED_OIDC_ENV: &str = "SRELENS_MANAGED_OIDC";
+
+/// True when a kubeconfig user's `exec` block carries srelens's managed-OIDC
+/// marker (see [`SRELENS_MANAGED_OIDC_ENV`]) — i.e. srelens synthesized it from
+/// the Add-cluster form. Only such contexts should be routed to the managed
+/// cluster sign-in; everything else keeps its native auth.
+pub fn is_srelens_managed_oidc(auth: &kube::config::AuthInfo) -> bool {
+    let Some(exec) = &auth.exec else {
+        return false;
+    };
+    exec.env.as_ref().is_some_and(|env| {
+        env.iter()
+            .any(|e| e.get("name").map(String::as_str) == Some(SRELENS_MANAGED_OIDC_ENV))
+    })
+}
+
 /// Detect OIDC settings from a kubeconfig user, or None if it isn't OIDC.
 pub fn detect_oidc_user(auth: &kube::config::AuthInfo) -> Option<OidcClusterConfig> {
     // 1) Legacy auth-provider: oidc
@@ -299,5 +322,38 @@ users:
     token: static-bearer
 "#;
         assert!(detect_oidc_user(&auth_of(yaml)).is_none());
+    }
+
+    #[test]
+    fn is_srelens_managed_oidc_requires_the_marker() {
+        // srelens-form-added: exec with the SRELENS_MANAGED_OIDC env marker.
+        let marked = r#"apiVersion: v1
+kind: Config
+users:
+- name: u
+  user:
+    exec:
+      command: kubelogin
+      args: [get-token, --oidc-issuer-url=https://idp, --oidc-client-id=k8s]
+      env:
+      - {name: SRELENS_MANAGED_OIDC, value: "1"}
+"#;
+        assert!(is_srelens_managed_oidc(&auth_of(marked)));
+
+        // A user's own kubelogin cluster: same exec shape, no marker → native.
+        let plain = r#"apiVersion: v1
+kind: Config
+users:
+- name: u
+  user:
+    exec:
+      command: kubelogin
+      args: [get-token, --oidc-issuer-url=https://idp, --oidc-client-id=k8s]
+"#;
+        assert!(!is_srelens_managed_oidc(&auth_of(plain)));
+
+        // No exec at all → native.
+        let token = "apiVersion: v1\nkind: Config\nusers:\n- name: u\n  user: {token: static}\n";
+        assert!(!is_srelens_managed_oidc(&auth_of(token)));
     }
 }

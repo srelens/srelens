@@ -63,6 +63,17 @@ pub fn synthesize_kubeconfig(form: &ClusterForm) -> Result<String, String> {
         exec.insert("command".into(), "kubelogin".into());
         exec.insert("args".into(), serde_yaml::Value::Sequence(args));
         exec.insert("interactiveMode".into(), "IfAvailable".into());
+        // Stamp srelens's managed-OIDC marker so this context (and only clusters
+        // added through the srelens OIDC form) is routed to the managed browser
+        // sign-in; native kubeconfig+plugin contexts carry no marker and are
+        // left to run their own exec plugin. `kubelogin` ignores unknown env.
+        let mut env_entry = serde_yaml::Mapping::new();
+        env_entry.insert("name".into(), crate::oidc_detect::SRELENS_MANAGED_OIDC_ENV.into());
+        env_entry.insert("value".into(), "1".into());
+        exec.insert(
+            "env".into(),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(env_entry)]),
+        );
         user.insert("exec".into(), serde_yaml::Value::Mapping(exec));
     }
 
@@ -158,7 +169,7 @@ pub fn synthesize_cluster_capability() -> Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oidc_detect::{detect_oidc_user, OidcClusterConfig};
+    use crate::oidc_detect::{detect_oidc_user, is_srelens_managed_oidc, OidcClusterConfig};
     use kube::config::Kubeconfig;
 
     #[test]
@@ -182,8 +193,13 @@ mod tests {
         assert!(yaml.contains("command: kubelogin"));
         let kc = Kubeconfig::from_yaml(&yaml).expect("kube parses it");
         assert_eq!(kc.contexts[0].name, "prod");
-        // The detector recovers the OIDC config from the exec block.
+        // The synthesized cluster carries srelens's managed-OIDC marker, so it
+        // (and only form-added clusters) is routed to the managed sign-in.
         let auth = kc.auth_infos[0].auth_info.clone().unwrap();
+        assert!(
+            is_srelens_managed_oidc(&auth),
+            "synthesized OIDC clusters must carry the srelens managed marker"
+        );
         let got = detect_oidc_user(&auth).unwrap();
         assert_eq!(got.issuer, "https://dex");
         assert_eq!(got.client_id, "k8s");

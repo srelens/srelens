@@ -141,17 +141,18 @@ for API calls — the same approach Headlamp takes — so no exec plugin is need
 authenticate you *to srelens*; cluster OIDC authenticates you *to a Kubernetes
 API server*. They can use entirely different identity providers.
 
-You define an OIDC cluster two ways:
+You opt a cluster into managed sign-in through **Settings → Contexts → Add
+cluster**: fill in the API server URL, a CA certificate (or check *skip TLS
+verify*), and the OIDC issuer + client id (+ optional client secret and extra
+scopes). srelens synthesizes and stores the kubeconfig, stamping it with an
+internal marker so *only* these clusters use the managed browser flow.
 
-- **Upload a kubeconfig** whose user is an OIDC user — either a legacy
-  `auth-provider: oidc` block (`idp-issuer-url`, `client-id`, optional
-  `client-secret`/`extra-scopes`) or an `exec` `kubelogin`/`oidc-login` plugin
-  (srelens reads the issuer/client from its flags). srelens detects it
-  automatically.
-- **Settings → Contexts → Add cluster**: fill in the API server URL, a CA
-  certificate (or check *skip TLS verify*), and the OIDC issuer + client id
-  (+ optional client secret and extra scopes). srelens synthesizes and stores
-  the kubeconfig for you.
+**Clusters from an existing kubeconfig are left alone.** A context that already
+authenticates with its own `kubectl` exec plugin — `kubelogin`/`oidc-login`,
+`aws eks get-token`, `gke-gcloud-auth-plugin`, etc. — keeps using that plugin
+natively; srelens does **not** take it over, so on desktop your working setup is
+untouched. (On the web container exec plugins can't run at all — so to use such
+a cluster in web mode, re-add it via **Add cluster** to get the managed flow.)
 
 **When you use an OIDC cluster that has no valid token, srelens prompts
 "Sign in to `<cluster>`"** (from any view or stream). Clicking it runs the

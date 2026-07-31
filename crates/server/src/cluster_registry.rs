@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use srelens_kube::oidc_detect::{detect_oidc_user, OidcClusterConfig};
+use srelens_kube::oidc_detect::{detect_oidc_user, is_srelens_managed_oidc, OidcClusterConfig};
 
 #[derive(Default)]
 pub struct ClusterOidcRegistry {
@@ -23,11 +23,18 @@ impl ClusterOidcRegistry {
                 continue;
             };
             // Map user-name -> detected OIDC config.
+            // Only clusters ADDED THROUGH the srelens OIDC form are managed:
+            // their synthesized `exec` carries srelens's marker. A pre-existing
+            // kubeconfig context that uses its own kubelogin/aws/gke exec plugin
+            // has no marker and is left untouched to run natively — even though
+            // `detect_oidc_user` would recognize its shape.
             let mut oidc_users: HashMap<String, OidcClusterConfig> = HashMap::new();
             for named in &kc.auth_infos {
                 if let Some(auth) = &named.auth_info {
-                    if let Some(cfg) = detect_oidc_user(auth) {
-                        oidc_users.insert(named.name.clone(), cfg);
+                    if is_srelens_managed_oidc(auth) {
+                        if let Some(cfg) = detect_oidc_user(auth) {
+                            oidc_users.insert(named.name.clone(), cfg);
+                        }
                     }
                 }
             }
@@ -82,16 +89,37 @@ impl ClusterOidcRegistry {
 mod tests {
     use super::*;
 
-    fn oidc_kc(ctx: &str, issuer: &str, client: &str) -> String {
+    // A kubeconfig the srelens Add-cluster form would synthesize: the exec
+    // kubelogin form WITH srelens's managed-OIDC env marker, so it's routed to
+    // the managed sign-in.
+    fn managed_oidc_kc(ctx: &str, issuer: &str, client: &str) -> String {
         format!(
-            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {{server: https://x}}\nusers:\n- name: u\n  user:\n    auth-provider:\n      name: oidc\n      config:\n        idp-issuer-url: {issuer}\n        client-id: {client}\ncontexts:\n- name: {ctx}\n  context: {{cluster: c, user: u}}\n"
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {{server: https://x}}\nusers:\n- name: u\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: kubelogin\n      args: [\"get-token\", \"--oidc-issuer-url={issuer}\", \"--oidc-client-id={client}\"]\n      env:\n      - {{name: SRELENS_MANAGED_OIDC, value: \"1\"}}\ncontexts:\n- name: {ctx}\n  context: {{cluster: c, user: u}}\n"
+        )
+    }
+
+    // A user's OWN kubelogin cluster: same exec shape, but NO srelens marker —
+    // it must run its native plugin, not be hijacked into managed sign-in.
+    fn unmarked_kubelogin_kc(ctx: &str) -> String {
+        format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {{server: https://x}}\nusers:\n- name: u\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      command: kubelogin\n      args: [\"get-token\", \"--oidc-issuer-url=https://idp\", \"--oidc-client-id=k8s\"]\ncontexts:\n- name: {ctx}\n  context: {{cluster: c, user: u}}\n"
         )
     }
 
     #[test]
+    fn unmarked_exec_plugin_context_is_native_not_managed() {
+        // The bug this guards: a pre-existing kubelogin kubeconfig must NOT be
+        // pulled into managed sign-in — only srelens-form-added (marked)
+        // clusters are managed.
+        let reg = ClusterOidcRegistry::from_kubeconfig_yamls(&[unmarked_kubelogin_kc("mine")]);
+        assert!(reg.key_for_context("mine").is_none());
+        assert!(reg.all_keys().is_empty());
+    }
+
+    #[test]
     fn indexes_oidc_contexts_and_dedups_by_key() {
-        let a = oidc_kc("ctx-a", "https://idp", "k8s");
-        let b = oidc_kc("ctx-b", "https://idp", "k8s"); // same issuer+client → same key
+        let a = managed_oidc_kc("ctx-a", "https://idp", "k8s");
+        let b = managed_oidc_kc("ctx-b", "https://idp", "k8s"); // same issuer+client → same key
         let reg = ClusterOidcRegistry::from_kubeconfig_yamls(&[a, b]);
         let ka = reg.key_for_context("ctx-a").unwrap();
         let kb = reg.key_for_context("ctx-b").unwrap();
@@ -104,8 +132,8 @@ mod tests {
 
     #[test]
     fn oidc_clusters_dedups_by_key_and_lists_all_contexts() {
-        let a = oidc_kc("ctx-a", "https://idp", "k8s");
-        let b = oidc_kc("ctx-b", "https://idp", "k8s"); // same issuer+client → same key
+        let a = managed_oidc_kc("ctx-a", "https://idp", "k8s");
+        let b = managed_oidc_kc("ctx-b", "https://idp", "k8s"); // same issuer+client → same key
         let reg = ClusterOidcRegistry::from_kubeconfig_yamls(&[a, b]);
         let entries = reg.oidc_clusters();
         assert_eq!(entries.len(), 1);
