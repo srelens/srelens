@@ -75,11 +75,33 @@ pub async fn connect_pod_api(
 
 /// Accept loop for a bound listener: every inbound local connection opens its
 /// own port-forward stream to `pod:remote_port` and is piped bidirectionally.
-/// Runs until the listener errors or the spawning task is aborted. Takes the
-/// listener by reference so a reconnect loop can keep the same bound local
-/// port across attempts and re-accept on it (`TcpListener::accept` only needs
-/// `&self`, so no re-bind is required).
+/// Runs until the listener errors, the target pod monitor detects the pod is
+/// gone (see below), or the spawning task is aborted. Takes the listener by
+/// reference so a reconnect loop can keep the same bound local port across
+/// attempts and re-accept on it (`TcpListener::accept` only needs `&self`, so
+/// no re-bind is required).
+///
+/// Per-connection port-forward failures (e.g. a single `portforward` call
+/// failing) are swallowed inside the detached per-connection task and do not
+/// end the session by themselves — only the accept loop erroring or the
+/// target-pod monitor detecting pod loss does. This matters for Service
+/// targets: without the monitor, a deleted target pod would leave the accept
+/// loop parked in `listener.accept()` forever, so the outer reconnect loop
+/// (which re-resolves a Service to its current backing pod on every attempt)
+/// would never get a chance to run again.
 pub async fn serve_pod_forward(
+    listener: &TcpListener,
+    api: Api<Pod>,
+    pod: String,
+    remote_port: u16,
+) -> Result<(), String> {
+    tokio::select! {
+        res = accept_loop(listener, api.clone(), pod.clone(), remote_port) => res,
+        res = monitor_target_pod(api, pod) => res,
+    }
+}
+
+async fn accept_loop(
     listener: &TcpListener,
     api: Api<Pod>,
     pod: String,
@@ -99,6 +121,46 @@ pub async fn serve_pod_forward(
             }
         });
     }
+}
+
+/// How often the target-pod monitor polls the cluster for the forwarded
+/// pod's liveness.
+const POD_MONITOR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Poll `pod` on a short interval and return an error once it's gone (deleted
+/// or no longer `Running`), ending the `serve_pod_forward` session so the
+/// outer reconnect loop gets a chance to re-resolve (a Service target picks
+/// up its replacement pod). A transient API error while polling (e.g. a
+/// momentary network blip) is not treated as "gone" — only an authoritative
+/// answer from the API (not found, or an object that fails `pod_is_gone`)
+/// ends the session, so we don't tear down a healthy forward on a hiccup.
+///
+/// The first check is skipped by `POD_MONITOR_INTERVAL` (rather than firing
+/// immediately) since a freshly resolved target may still be transitioning
+/// into `Running` right as this session starts.
+async fn monitor_target_pod(api: Api<Pod>, pod: String) -> Result<(), String> {
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + POD_MONITOR_INTERVAL,
+        POD_MONITOR_INTERVAL,
+    );
+    loop {
+        interval.tick().await;
+        match api.get_opt(&pod).await {
+            Ok(Some(p)) if !pod_is_gone(&p) => continue,
+            Ok(_) => return Err(format!("target pod {pod} is no longer available")),
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Whether `pod` should be treated as no longer usable as a forward target:
+/// it's mid-deletion (`deletionTimestamp` set) or its phase isn't `Running`
+/// (e.g. `Failed`, `Succeeded`, or missing status entirely).
+pub fn pod_is_gone(pod: &Pod) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return true;
+    }
+    pod.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Running")
 }
 
 /// Resolve a Service to a concrete `(pod, container_port)` to forward to: pick
@@ -303,5 +365,43 @@ mod tests {
             Some("pending")
         );
         assert!(pick_ready_pod(&[]).is_none());
+    }
+
+    fn pod_with(phase: Option<&str>, deleted: bool) -> Pod {
+        let deletion_timestamp = deleted.then(|| {
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::chrono::Utc::now())
+        });
+        Pod {
+            metadata: kube::core::ObjectMeta {
+                deletion_timestamp,
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                phase: phase.map(String::from),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pod_is_gone_true_when_running_but_marked_for_deletion() {
+        // A pod mid-termination is still (briefly) `Running` in status, but
+        // the deletionTimestamp means it's on its way out — treat it as gone
+        // so the forward doesn't keep serving through a terminating pod.
+        assert!(pod_is_gone(&pod_with(Some("Running"), true)));
+    }
+
+    #[test]
+    fn pod_is_gone_true_when_phase_is_not_running() {
+        assert!(pod_is_gone(&pod_with(Some("Pending"), false)));
+        assert!(pod_is_gone(&pod_with(Some("Failed"), false)));
+        assert!(pod_is_gone(&pod_with(Some("Succeeded"), false)));
+        assert!(pod_is_gone(&pod_with(None, false)));
+    }
+
+    #[test]
+    fn pod_is_gone_false_when_running_and_not_deleted() {
+        assert!(!pod_is_gone(&pod_with(Some("Running"), false)));
     }
 }

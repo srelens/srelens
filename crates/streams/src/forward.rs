@@ -19,7 +19,16 @@ struct Forward {
 
 /// Reconnect policy: a handful of attempts with a short capped exponential
 /// backoff, small enough that tests exercising the give-up path stay fast.
-const MAX_ATTEMPTS: u32 = 4;
+/// `MAX_ATTEMPTS` counts CONSECUTIVE failed attempts since the last
+/// successful establish — see `attempt_after_established` — so a forward
+/// that's been happily active for hours and then reconnects once doesn't
+/// inherit a stale attempt count from an earlier flaky period.
+///
+/// 5 (not 4) so `MAX_BACKOFF_MS`'s cap is actually reachable: sleeps only
+/// happen for attempts before the last one (1..=MAX_ATTEMPTS-1), and
+/// `backoff_for(4)` is the first attempt whose uncapped value (240ms)
+/// exceeds the 150ms cap.
+const MAX_ATTEMPTS: u32 = 5;
 const BASE_BACKOFF_MS: u64 = 15;
 const MAX_BACKOFF_MS: u64 = 150;
 
@@ -29,6 +38,20 @@ fn backoff_for(attempt: u32) -> std::time::Duration {
         .saturating_mul(multiplier)
         .min(MAX_BACKOFF_MS);
     std::time::Duration::from_millis(ms)
+}
+
+/// The attempt counter to carry into the next loop iteration once the
+/// current one has just reached "active" (a successful establish): reset to
+/// 0, so `attempt += 1` at the top of the next iteration starts a fresh
+/// consecutive-failure count instead of continuing to accumulate from
+/// before this success. When the session hasn't just established, the
+/// attempt count is left untouched.
+fn attempt_after_established(attempt: u32, just_established: bool) -> u32 {
+    if just_established {
+        0
+    } else {
+        attempt
+    }
 }
 
 fn status_payload(state: &str, attempt: u32, error: Option<&str>) -> serde_json::Value {
@@ -119,6 +142,11 @@ impl ForwardManager {
                         match forward::connect_pod_api(cache.clone(), &context, &namespace).await {
                             Ok(api) => {
                                 sink.emit(&status_channel, status_payload("active", attempt, None));
+                                // Reset now, not after `serve_pod_forward` returns: this
+                                // session has established, so the NEXT failure (whenever
+                                // it comes) starts a fresh consecutive-attempt count
+                                // rather than inheriting this attempt's number.
+                                attempt = attempt_after_established(attempt, true);
                                 forward::serve_pod_forward(&listener, api, pod, target_port).await
                             }
                             Err(e) => Err(e),
@@ -212,6 +240,31 @@ impl ForwardManager {
 mod tests {
     use super::*;
     use crate::test_util::TestSink;
+
+    #[test]
+    fn attempt_resets_to_zero_on_establish_else_unchanged() {
+        // A session that just reached "active" starts the next
+        // consecutive-failure count from scratch...
+        assert_eq!(attempt_after_established(3, true), 0);
+        assert_eq!(attempt_after_established(MAX_ATTEMPTS, true), 0);
+        // ...but an attempt count is left alone when nothing established
+        // (e.g. resolve/connect failed before a session could start).
+        assert_eq!(attempt_after_established(3, false), 3);
+        assert_eq!(attempt_after_established(0, false), 0);
+    }
+
+    // NOTE on coverage: this proves the reset *decision* used by the loop
+    // (`attempt = attempt_after_established(attempt, true)` right after the
+    // "active" emit), but not the full end-to-end path — "forward is active
+    // against a real pod, that pod is deleted, the streams loop reconnects,
+    // emits active again on attempt N>1, resets, then fails MAX_ATTEMPTS
+    // times counting 1..MAX_ATTEMPTS instead of continuing from N". Driving
+    // that deterministically would need `connect_pod_api`/`serve_pod_forward`
+    // to succeed without a real cluster, which needs a fake kube apiserver
+    // (e.g. a mock HTTP service behind `kube::Client::new`) — no such test
+    // harness exists in this repo today and building one would pull in a new
+    // dev-dependency (tower/hyper test helpers), which is out of scope here.
+    // See the task report for this gap.
 
     #[tokio::test(flavor = "multi_thread")]
     async fn forward_retries_then_marks_failed() {
