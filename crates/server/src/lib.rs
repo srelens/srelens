@@ -14,6 +14,7 @@ pub mod api;
 pub mod api_clusters;
 pub mod api_command;
 pub mod api_kubeconfigs;
+pub mod api_settings;
 pub mod assets;
 pub mod auth;
 pub mod cluster_auth_resolver;
@@ -128,6 +129,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/command/:command",
             axum::routing::post(api_command::dispatch),
+        )
+        .route(
+            "/api/settings/:key",
+            get(api_settings::get)
+                .put(api_settings::put)
+                .delete(api_settings::delete),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

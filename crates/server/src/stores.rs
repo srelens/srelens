@@ -270,6 +270,16 @@ impl Db {
                 .map_err(|e| e.to_string())?;
         Ok(row.map(|(v,)| v))
     }
+
+    pub async fn delete_setting(&self, user_id: i64, key: &str) -> Result<(), String> {
+        sqlx::query("DELETE FROM settings WHERE user_id = ? AND key = ?")
+            .bind(user_id)
+            .bind(key)
+            .execute(self.pool())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +446,47 @@ mod tests {
         db.set_setting(user.id, "theme", "\"light\"").await.unwrap();
         assert_eq!(
             db.get_setting(user.id, "theme").await.unwrap().unwrap(),
+            "\"light\""
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_setting_clears_the_value() {
+        let db = db().await;
+        let user = db.upsert_user("i", "s", "", "", 1).await.unwrap();
+        db.set_setting(user.id, "theme", "\"dark\"").await.unwrap();
+        db.delete_setting(user.id, "theme").await.unwrap();
+        assert!(db.get_setting(user.id, "theme").await.unwrap().is_none());
+
+        // Deleting an already-absent key is a no-op, not an error.
+        db.delete_setting(user.id, "theme").await.unwrap();
+        db.delete_setting(user.id, "never-set").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_are_isolated_per_user() {
+        let db = db().await;
+        let alice = db.upsert_user("i", "alice", "", "", 1).await.unwrap();
+        let bob = db.upsert_user("i", "bob", "", "", 1).await.unwrap();
+
+        db.set_setting(alice.id, "theme", "\"dark\"").await.unwrap();
+        assert!(db.get_setting(bob.id, "theme").await.unwrap().is_none());
+
+        db.set_setting(bob.id, "theme", "\"light\"").await.unwrap();
+        assert_eq!(
+            db.get_setting(alice.id, "theme").await.unwrap().unwrap(),
+            "\"dark\""
+        );
+        assert_eq!(
+            db.get_setting(bob.id, "theme").await.unwrap().unwrap(),
+            "\"light\""
+        );
+
+        // Deleting one user's setting doesn't touch the other's.
+        db.delete_setting(alice.id, "theme").await.unwrap();
+        assert!(db.get_setting(alice.id, "theme").await.unwrap().is_none());
+        assert_eq!(
+            db.get_setting(bob.id, "theme").await.unwrap().unwrap(),
             "\"light\""
         );
     }
