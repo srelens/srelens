@@ -78,6 +78,11 @@ fn exec_flag(args: &[String], flag: &str) -> Option<String> {
 /// `kubectl` exec plugin (kubelogin/aws/gke — which must be left to run
 /// natively). `kubelogin` ignores unknown env vars, so the marker is inert to
 /// the plugin.
+///
+/// The marker is **advisory, not a trust boundary**: it travels in-band in a
+/// file the user controls, so an uploaded kubeconfig can set it and opt itself
+/// into the managed flow. That is no worse than the user editing any other
+/// kubeconfig field, but never use it to make an authorization decision.
 pub const SRELENS_MANAGED_OIDC_ENV: &str = "SRELENS_MANAGED_OIDC";
 
 /// True when a kubeconfig user's `exec` block carries srelens's managed-OIDC
@@ -95,6 +100,13 @@ pub fn is_srelens_managed_oidc(auth: &kube::config::AuthInfo) -> bool {
 }
 
 /// Detect OIDC settings from a kubeconfig user, or None if it isn't OIDC.
+///
+/// This answers "what OIDC config does this user describe?", NOT "should srelens
+/// manage it" — callers gate on [`is_srelens_managed_oidc`] first. Since the
+/// marker lives in an `exec` block and srelens only ever synthesizes the `exec`
+/// form, the legacy `auth-provider: oidc` branch below is currently reachable
+/// only from tests; it is kept so the detector stays complete for kubeconfigs
+/// srelens didn't write (diagnostics, and any future opt-in path).
 pub fn detect_oidc_user(auth: &kube::config::AuthInfo) -> Option<OidcClusterConfig> {
     // 1) Legacy auth-provider: oidc
     if let Some(ap) = &auth.auth_provider {

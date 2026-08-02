@@ -41,9 +41,11 @@ pub fn synthesize_kubeconfig(form: &ClusterForm) -> Result<String, String> {
     let mut user = serde_yaml::Mapping::new();
     if let Some(oidc) = &form.oidc {
         // Emit the `exec` kubelogin form (not the legacy `auth-provider: oidc`
-        // block). Desktop runs kubelogin natively to authenticate; web detects
-        // this same form, strips the exec block, and injects a srelens-managed
-        // token — so one synthesized kubeconfig works on both surfaces.
+        // block), stamped with srelens's managed-OIDC marker below. Both desktop
+        // and web recognise the marker and authenticate the context with a
+        // srelens-managed token instead of running the plugin — so one
+        // synthesized kubeconfig works on both surfaces. The exec block is still
+        // emitted so the file stays a valid, portable kubeconfig for `kubectl`.
         let mut args: Vec<serde_yaml::Value> = vec![
             "get-token".into(),
             format!("--oidc-issuer-url={}", oidc.issuer).into(),

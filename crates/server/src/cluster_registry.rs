@@ -13,9 +13,12 @@ pub struct ClusterOidcRegistry {
 }
 
 impl ClusterOidcRegistry {
-    /// Build from a user's kubeconfig YAML documents. Contexts whose user is
-    /// OIDC are indexed; non-OIDC contexts are ignored. Malformed YAML
-    /// documents are skipped rather than aborting the whole build.
+    /// Build from a user's kubeconfig YAML documents. A context is indexed only
+    /// when its user carries srelens's managed-OIDC marker (i.e. srelens
+    /// synthesized it from the Add-cluster form); every other context — including
+    /// one whose user *looks* like OIDC to `detect_oidc_user` — is ignored and
+    /// keeps its native auth. Malformed YAML documents are skipped rather than
+    /// aborting the whole build.
     pub fn from_kubeconfig_yamls(yamls: &[String]) -> Self {
         let mut reg = ClusterOidcRegistry::default();
         for yaml in yamls {

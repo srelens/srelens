@@ -1,8 +1,11 @@
 //! Desktop-side managed cluster OIDC. Reuses the server's OIDC machinery (token
 //! provider, registry, resolver, flow) but with a LOCAL sqlite token store
 //! under the app config dir and a loopback browser-login flow (see
-//! commands in `cluster_oidc_cmd.rs` / lib.rs). Managed sign-in is the desktop
-//! default for detected OIDC contexts; non-OIDC exec plugins still run natively.
+//! commands in `cluster_oidc_cmd.rs` / lib.rs). Managed sign-in applies only to
+//! clusters added through the srelens Add-cluster form (their synthesized
+//! kubeconfig carries srelens's managed-OIDC marker); every pre-existing
+//! kubeconfig context — including one with its own kubelogin/aws/gke exec
+//! plugin — keeps running that plugin natively.
 
 use std::path::Path;
 use std::sync::Arc;
