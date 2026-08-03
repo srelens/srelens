@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { Copy, Download, Radio } from "lucide-react";
-import { Button, TextInput } from "../ui";
+import { Copy, Download, Eye, EyeOff, Radio, RefreshCw, Trash2 } from "lucide-react";
+import { Button, ConfirmDialog, TextInput } from "../ui";
 import { notify } from "../lib/notify";
 import {
   loadMcpSettings,
@@ -15,7 +15,14 @@ import {
   srelensCliStatus,
   type CliStatus,
 } from "../lib/mcp";
+import { getMcpToken, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "../lib/mcpClients";
+import { McpAuditList } from "./McpAuditList";
+
+/** Masked by default: only the last 4 characters are shown until revealed. */
+function maskToken(token: string): string {
+  return `••••${token.slice(-4)}`;
+}
 
 async function copy(text: string) {
   try {
@@ -39,10 +46,16 @@ export function McpSettingsSection() {
   const [cliMessage, setCliMessage] = useState("");
   const [tool, setTool] = useState<McpTool>("claude-code");
   const [transport, setTransport] = useState<McpTransport>("stdio");
+  const [token, setToken] = useState<string | null>(null);
+  const [tokenRevealed, setTokenRevealed] = useState(false);
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenError, setTokenError] = useState("");
+  const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
 
   useEffect(() => {
     void mcpHttpStatus().then(setRunningUrl).catch(() => {});
     void srelensCliStatus().then(setCli).catch(() => {});
+    void getMcpToken().then(setToken).catch(() => {});
   }, []);
 
   function persist(next: McpSettings) {
@@ -89,6 +102,43 @@ export function McpSettingsSection() {
       notify.success("srelens CLI installed");
     } catch (e) {
       setCliMessage(String(e));
+    }
+  }
+
+  async function confirmRotate() {
+    setTokenBusy(true);
+    setTokenError("");
+    try {
+      const next = await rotateMcpToken();
+      setToken(next);
+      setTokenRevealed(false);
+      notify.success("Token rotated — connected clients need the new value.");
+      setTokenConfirm(null);
+    } catch (e) {
+      setTokenError(String(e));
+    } finally {
+      setTokenBusy(false);
+    }
+  }
+
+  async function confirmRevoke() {
+    setTokenBusy(true);
+    setTokenError("");
+    try {
+      await revokeMcpToken();
+      setToken(null);
+      setTokenRevealed(false);
+      notify.success("Token revoked. The MCP HTTP server has stopped.");
+      // The server stops as a side effect of revocation; reflect that instead
+      // of leaving the toggle showing a server that's no longer listening.
+      const status = await mcpHttpStatus().catch(() => null);
+      setRunningUrl(status);
+      if (!status) persist({ ...settings, enabled: false });
+      setTokenConfirm(null);
+    } catch (e) {
+      setTokenError(String(e));
+    } finally {
+      setTokenBusy(false);
     }
   }
 
@@ -166,6 +216,84 @@ export function McpSettingsSection() {
           </p>
         )}
         {cliMessage && <p className="whitespace-pre-wrap text-sm text-muted-foreground">{cliMessage}</p>}
+      </section>
+
+      {/* Access token */}
+      <section className="flex flex-col gap-2">
+        <h4 className="text-sm font-medium">Access token</h4>
+        <p className="text-sm text-muted-foreground">
+          The HTTP transport requires this token — clients must send it as{" "}
+          <code className="fl-mono">Authorization: Bearer &lt;token&gt;</code>. Stdio connections (spawned
+          via the CLI) don't need it.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <code className="fl-mono rounded-md border border-border bg-muted/40 px-2 py-1 text-sm">
+            {token ? (tokenRevealed ? token : maskToken(token)) : "Loading…"}
+          </code>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setTokenRevealed((r) => !r)}
+            disabled={!token}
+            aria-label={tokenRevealed ? "Hide token" : "Reveal token"}
+          >
+            {tokenRevealed ? <EyeOff data-icon="inline-start" /> : <Eye data-icon="inline-start" />}
+            {tokenRevealed ? "Hide" : "Reveal"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => token && void copy(token)}
+            disabled={!token}
+            aria-label="Copy token"
+          >
+            <Copy data-icon="inline-start" />
+            Copy
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setTokenConfirm("rotate")}
+            disabled={!token || tokenBusy}
+          >
+            <RefreshCw data-icon="inline-start" />
+            Rotate token
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={() => setTokenConfirm("revoke")}
+            disabled={!token || tokenBusy}
+          >
+            <Trash2 data-icon="inline-start" />
+            Revoke token
+          </Button>
+        </div>
+        {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}
+      </section>
+
+      {tokenConfirm && (
+        <ConfirmDialog
+          title={tokenConfirm === "rotate" ? "Rotate access token?" : "Revoke access token?"}
+          message={
+            tokenConfirm === "rotate" ? (
+              "Connected clients are using the current token — once you rotate it, they'll need the new value or they'll stop working."
+            ) : (
+              "Revoking also stops the MCP HTTP server: it never serves without a valid token. Any clients connected over HTTP will disconnect."
+            )
+          }
+          confirmLabel={tokenConfirm === "rotate" ? "Rotate" : "Revoke"}
+          danger={tokenConfirm === "revoke"}
+          busy={tokenBusy}
+          onConfirm={() => void (tokenConfirm === "rotate" ? confirmRotate() : confirmRevoke())}
+          onCancel={() => setTokenConfirm(null)}
+        />
+      )}
+
+      {/* Recent agent activity */}
+      <section className="flex flex-col gap-2">
+        <h4 className="text-sm font-medium">Recent agent activity</h4>
+        <McpAuditList />
       </section>
 
       {/* Per-tool config */}
