@@ -33,22 +33,33 @@ impl AuditSink for NoopAudit {
 
 /// Redact argument VALUES while keeping keys, so an operator can see the shape
 /// of a call without its secrets. Sensitive-annotated tools redact everything;
-/// otherwise only keys that name a credential.
+/// otherwise only keys that name a credential. Recursively walks nested objects
+/// and arrays to find and redact credentials at any depth.
 pub fn redact(args: &Value, sensitive: bool) -> Value {
     const NEEDLES: [&str; 4] = ["token", "secret", "password", "key"];
+
     match args {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, v) in map {
                 let lower = k.to_ascii_lowercase();
-                let hit = sensitive || NEEDLES.iter().any(|n| lower.contains(n));
-                out.insert(
-                    k.clone(),
-                    if hit { json!("<redacted>") } else { v.clone() },
-                );
+                let is_credential_key = NEEDLES.iter().any(|n| lower.contains(n));
+
+                if sensitive || is_credential_key {
+                    // Redact this value entirely
+                    out.insert(k.clone(), json!("<redacted>"));
+                } else {
+                    // Recurse into the value to find nested credentials
+                    out.insert(k.clone(), redact(v, false));
+                }
             }
             Value::Object(out)
         }
+        Value::Array(arr) => {
+            // Recurse into array elements with the same sensitivity
+            Value::Array(arr.iter().map(|v| redact(v, sensitive)).collect())
+        }
+        // Scalars stay as-is (no redaction needed)
         other => other.clone(),
     }
 }
@@ -170,5 +181,53 @@ mod tests {
         assert!(dir.join("b.jsonl.1").exists(), "expected a rotated file");
         let live = std::fs::metadata(&path).unwrap().len();
         assert!(live <= 200 * 2, "live file should stay near the cap, was {live}");
+    }
+
+    #[test]
+    fn redaction_recurses_into_nested_objects() {
+        let args = json!({
+            "manifest": {
+                "data": {
+                    "password": "hunter2"
+                }
+            }
+        });
+        let out = redact(&args, false);
+        // Keys must survive at all levels
+        assert!(out["manifest"].is_object());
+        assert!(out["manifest"]["data"].is_object());
+        // But the credential value must be redacted
+        assert_eq!(out["manifest"]["data"]["password"], json!("<redacted>"));
+    }
+
+    #[test]
+    fn redaction_recurses_into_array_elements() {
+        let args = json!({
+            "items": [
+                { "apiKey": "secret123" },
+                { "name": "safe" }
+            ]
+        });
+        let out = redact(&args, false);
+        // Array structure is preserved
+        assert!(out["items"].is_array());
+        // Credential in first element is redacted
+        assert_eq!(out["items"][0]["apiKey"], json!("<redacted>"));
+        // Non-credential in second element is preserved
+        assert_eq!(out["items"][1]["name"], json!("safe"));
+    }
+
+    #[test]
+    fn redaction_preserves_deep_non_credential_values() {
+        let args = json!({
+            "spec": {
+                "replicas": 3,
+                "image": "nginx:1.14"
+            }
+        });
+        let out = redact(&args, false);
+        // Non-credential scalar values must survive redaction
+        assert_eq!(out["spec"]["replicas"], json!(3));
+        assert_eq!(out["spec"]["image"], json!("nginx:1.14"));
     }
 }
