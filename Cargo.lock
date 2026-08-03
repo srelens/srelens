@@ -5568,6 +5568,7 @@ dependencies = [
 name = "srelens-mcp"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "serde_json",
  "srelens-capability",

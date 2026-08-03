@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 srelens-capability = { path = "../capability" }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros"] }

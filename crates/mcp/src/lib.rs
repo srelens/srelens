@@ -2,6 +2,7 @@
 
 pub mod completeness;
 pub mod http;
+pub mod policy;
 pub mod stdio;
 
 use std::sync::Arc;
