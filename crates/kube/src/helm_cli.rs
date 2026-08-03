@@ -608,7 +608,7 @@ pub fn helm_repo_update_capability(_cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<HelmRepoUpdateIn, HelmOpOut, _, _>(
         "k8s.helmRepoUpdate",
         "refresh the local cache of chart repositories",
-        Annotations::default(),
+        Annotations::MUTATING,
         move |_input: HelmRepoUpdateIn| async move {
             let out = run_helm_local(&repo_update_args())
                 .await

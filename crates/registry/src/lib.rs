@@ -350,7 +350,7 @@ mod tests {
         let reg = build_registry();
         let server = McpServer::new(Arc::new(reg.clone()));
         assert_eq!(assert_every_capability_has_a_tool(&reg, &server), Ok(()));
-        srelens_mcp::completeness::assert_destructive_capabilities_are_gated(&reg);
+        srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
     }
 
     #[test]
