@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use subtle::ConstantTimeEq;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct Token(String);
 
 impl Token {
@@ -74,11 +74,24 @@ impl TokenStore for FileTokenStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, t.as_str())?;
         #[cfg(unix)]
         {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.path)?;
+            f.write_all(t.as_str().as_bytes())?;
+            // Belt-and-braces: enforce 0600 even for overwrites of existing files
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&self.path, t.as_str())?;
         }
         Ok(())
     }
@@ -152,5 +165,22 @@ mod tests {
         store.save(&Token::generate()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "token file must not be group/world readable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_tightens_loose_permissions_on_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("srelens-perm2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        // Pre-create with loose permissions (0644)
+        std::fs::write(&path, "dummy").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // Now save should tighten to 0600
+        let store = FileTokenStore::new(path.clone());
+        store.save(&Token::generate()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "save must tighten loose permissions to 0600");
     }
 }
