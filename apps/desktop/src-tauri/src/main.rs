@@ -111,6 +111,22 @@ fn mcp_token_path() -> std::path::PathBuf {
         .join("token")
 }
 
+/// Where a headless run (`--mcp-stdio` / `--mcp-http`) writes its audit log —
+/// `audit.jsonl` next to the token file, in the same `mcp/` directory
+/// `mcp_token_path()` resolves. Derived from that path (not recomputed from
+/// the formula it documents) so the two can never drift apart.
+fn mcp_audit_path() -> std::path::PathBuf {
+    mcp_token_path()
+        .parent()
+        .expect("mcp_token_path() always has a parent directory")
+        .join("audit.jsonl")
+}
+
+/// Same rotation cap the desktop app's in-process MCP server uses (see
+/// `McpAuditPath` wiring in `mcp.rs`), so a headless run and the GUI behave
+/// identically.
+const MCP_AUDIT_CAP_BYTES: u64 = 5 * 1024 * 1024;
+
 fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) {
     let addr: std::net::SocketAddr = addr.parse().expect("invalid --mcp-http address");
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(allow_destructive));
@@ -153,7 +169,12 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) 
         .expect("build tokio runtime");
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
-        let server = srelens_mcp::McpServer::new(Arc::new(registry)).with_policy(policy);
+        let server = srelens_mcp::McpServer::new(Arc::new(registry))
+            .with_policy(policy)
+            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+                mcp_audit_path(),
+                MCP_AUDIT_CAP_BYTES,
+            )));
         eprintln!(
             "MCP HTTP listening on http://{addr}/mcp (loopback; destructive tools need \
              --mcp-allow-destructive and _confirm)"
@@ -193,7 +214,12 @@ fn run_mcp_stdio(allow_destructive: bool) {
         .expect("build tokio runtime");
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
-        let server = srelens_mcp::McpServer::new(Arc::new(registry)).with_policy(policy);
+        let server = srelens_mcp::McpServer::new(Arc::new(registry))
+            .with_policy(policy)
+            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+                mcp_audit_path(),
+                MCP_AUDIT_CAP_BYTES,
+            )));
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         let writer = tokio::io::stdout();
         if let Err(e) = srelens_mcp::stdio::serve(server, reader, writer).await {
