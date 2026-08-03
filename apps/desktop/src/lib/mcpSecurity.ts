@@ -14,7 +14,7 @@ export interface AuditEntry {
   args: Record<string, unknown>;
   decision: "approved" | "denied" | "auto";
   outcome: "ok" | "error";
-  err?: string | null;
+  err: string | null;
 }
 
 export async function respondToConfirm(id: string, approved: boolean): Promise<void> {
