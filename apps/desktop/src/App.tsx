@@ -19,6 +19,7 @@ import { EditResourceTab } from "./components/EditResourceTab";
 import { SettingsView } from "./components/SettingsView";
 import { ToolboxView } from "./components/ToolboxView";
 import { CommandPalette } from "./components/CommandPalette";
+import { McpConfirmDialog } from "./components/McpConfirmDialog";
 import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
@@ -756,6 +757,7 @@ export function App() {
         onAfterAction={() => setViewReloadNonce((n) => n + 1)}
       />
       <Toaster position="top-right" richColors closeButton />
+      <McpConfirmDialog />
     </div>
   );
 }
