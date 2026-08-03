@@ -34,16 +34,31 @@ impl McpHttpManager {
     }
 }
 
-fn stop_running(manager: &McpHttpManager, pending: &crate::mcp_confirm::Pending) {
+/// Stop whatever server is currently registered, if any, and wait for its
+/// task to actually finish before returning. Signals graceful shutdown first
+/// (axum's graceful shutdown waits on in-flight keep-alive connections, which
+/// an idle MCP client may be holding open) and only falls back to `abort()`
+/// if that doesn't finish promptly — aborting alone does not synchronously
+/// drop the task's future, so the old listener fd can still be open when the
+/// caller immediately tries to rebind the same port.
+async fn stop_running(manager: &McpHttpManager, pending: &crate::mcp_confirm::Pending) {
     // Release every in-flight confirm as denied first, so a call blocked on a
     // dialog fails fast instead of hanging until its timeout once the
     // transport it belongs to is gone.
     pending.deny_all();
-    if let Some(mut running) = manager.running.lock().unwrap().take() {
+    let running = manager.running.lock().unwrap().take();
+    if let Some(mut running) = running {
         if let Some(tx) = running.shutdown.take() {
             let _ = tx.send(());
         }
-        running.handle.abort();
+        let mut handle = running.handle;
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 }
 
@@ -65,7 +80,7 @@ async fn start_server(
     token: srelens_mcp::auth::Token,
     audit_path: &std::path::Path,
 ) -> Result<String, String> {
-    stop_running(manager, pending);
+    stop_running(manager, pending).await;
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -130,11 +145,11 @@ pub async fn mcp_http_start(
 
 /// Stop the MCP HTTP server if running.
 #[tauri::command]
-pub fn mcp_http_stop(
+pub async fn mcp_http_stop(
     manager: State<'_, McpHttpManager>,
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
 ) -> Result<(), String> {
-    stop_running(&manager, &pending);
+    stop_running(&manager, &pending).await;
     Ok(())
 }
 
@@ -213,13 +228,13 @@ pub fn mcp_token_storage(
 /// Revoke the MCP bearer token and stop the HTTP transport — it must never
 /// serve unauthenticated.
 #[tauri::command]
-pub fn mcp_token_revoke(
+pub async fn mcp_token_revoke(
     store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
     manager: State<'_, McpHttpManager>,
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
 ) -> Result<(), String> {
     store.clear().map_err(|e| e.to_string())?;
-    stop_running(&manager, &pending);
+    stop_running(&manager, &pending).await;
     Ok(())
 }
 
@@ -318,5 +333,50 @@ pub fn install_srelens_cli() -> Result<String, String> {
     {
         let _ = exe;
         Err("Installing the srelens CLI is only supported on macOS/Linux.".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this closes: `stop_running` used to send the shutdown signal
+    /// and `abort()` the task without waiting for either to actually finish,
+    /// so `start_server`'s immediate rebind on the same port raced the old
+    /// listener's fd closing — the reviewer reproduced 38/50 failures. This
+    /// drives the exact shape of that race (bind, register as `Running`,
+    /// `stop_running`, rebind the identical port) 50 times in a row; with the
+    /// fix (`await` the handle, with a bounded `abort()` fallback) every
+    /// rebind must succeed.
+    #[tokio::test]
+    async fn stop_running_releases_the_port_before_returning() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+        let manager = McpHttpManager::new(cache);
+        let pending = crate::mcp_confirm::Pending::default();
+
+        for i in 0..50 {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0)); // OS-assigned port
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            let bound_addr = listener.local_addr().unwrap();
+            let (tx, rx) = oneshot::channel::<()>();
+            // Mirrors `serve_http_with_shutdown`: the task owns the listener
+            // and only lets go of it once told to shut down, just like axum
+            // holding the socket open for an idle keep-alive connection.
+            let handle = tokio::spawn(async move {
+                let _ = rx.await;
+                drop(listener);
+            });
+            *manager.running.lock().unwrap() = Some(Running {
+                addr: bound_addr,
+                shutdown: Some(tx),
+                handle,
+            });
+
+            stop_running(&manager, &pending).await;
+
+            tokio::net::TcpListener::bind(bound_addr).await.unwrap_or_else(|e| {
+                panic!("rebind attempt {i} on {bound_addr} failed: {e}")
+            });
+        }
     }
 }
