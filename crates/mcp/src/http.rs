@@ -23,11 +23,29 @@ async fn rpc(State(server): State<Arc<McpServer>>, Json(req): Json<Value>) -> Js
     }
 }
 
-/// True for `127.0.0.1[:port]`, `[::1]:port` and `localhost[:port]`.
+/// True for `127.0.0.1[:port]`, `[::1]`, `[::1]:port`, bare `::1`, and
+/// `localhost[:port]` (case-insensitively). Host header hostnames are
+/// case-insensitive per HTTP semantics, and IPv6 needs care: a bracketed
+/// address may carry a `:port` suffix outside the brackets, but the colons
+/// *inside* the brackets are part of the address, not port separators, and
+/// an unbracketed literal like `::1` has no unambiguous port syntax at all.
 fn host_is_loopback(host: &str) -> bool {
-    let h = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-    let h = h.trim_start_matches('[').trim_end_matches(']');
-    h == "127.0.0.1" || h == "::1" || h == "localhost"
+    let h: &str = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6, with or without a trailing `:port`. Split on `]`,
+        // never on `:`, so the address's own colons are never touched.
+        rest.split(']').next().unwrap_or("")
+    } else if host.matches(':').count() > 1 {
+        // Unbracketed IPv6 (e.g. bare "::1"): more than one colon means
+        // there's no unambiguous port suffix, so treat it all as the host.
+        host
+    } else {
+        // "host:port" or a bare host — strip a numeric trailing port only.
+        match host.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => host,
+        }
+    };
+    h.eq_ignore_ascii_case("127.0.0.1") || h == "::1" || h.eq_ignore_ascii_case("localhost")
 }
 
 async fn guard(
@@ -118,6 +136,8 @@ where
 mod tests {
     use super::*;
     use crate::McpServer;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use srelens_capability::{Capability, Registry};
     use tower::ServiceExt; // oneshot
 
@@ -131,9 +151,6 @@ mod tests {
 
     #[tokio::test]
     async fn http_handles_tools_call() {
-        use axum::body::Body;
-        use axum::http::{Request, StatusCode};
-
         let app = router(test_server());
         let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"ping","arguments":"hi"}});
@@ -155,9 +172,6 @@ mod tests {
         assert_eq!(v["result"]["isError"], false);
         assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("echo"));
     }
-
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
 
     fn call_body() -> Body {
         Body::from(
@@ -249,5 +263,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn host_is_loopback_accepts_loopback_forms() {
+        for host in [
+            "[::1]",
+            "[::1]:8765",
+            "LOCALHOST",
+            "LocalHost:8765",
+            "127.0.0.1",
+            "127.0.0.1:8765",
+            "::1",
+        ] {
+            assert!(host_is_loopback(host), "expected {host:?} to be accepted");
+        }
+    }
+
+    #[test]
+    fn host_is_loopback_rejects_non_loopback_forms() {
+        for host in ["evil.com", "evil.com:80", "127.0.0.1.evil.com"] {
+            assert!(!host_is_loopback(host), "expected {host:?} to be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_a_missing_host_header() {
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(test_server(), Some(token.clone()));
+        let resp = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("authorization", format!("Bearer {}", token.as_str()))
+                    .header("content-type", "application/json")
+                    .body(call_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
