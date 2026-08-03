@@ -412,6 +412,81 @@ mod tests {
         assert_eq!(seen[0].1, "denied");
     }
 
+    /// Sibling of `every_tool_call_is_audited_with_its_decision`, pinning the
+    /// `"approved"` value: without this, `"approved"` and `"auto"` could be
+    /// swapped in the implementation and no test would notice — `decision` is
+    /// the whole point of the audit log.
+    #[tokio::test]
+    async fn a_destructive_call_approved_by_policy_is_audited_as_approved() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<(String, &'static str, &'static str)>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push((rec.tool, rec.decision, rec.outcome));
+            }
+        }
+        struct AlwaysApprove;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for AlwaysApprove {
+            async fn confirm(&self, _tool: &str, _args: &Value) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+
+        let spy = Arc::new(Spy::default());
+        let server = server_with_destructive()
+            .with_policy(Arc::new(AlwaysApprove))
+            .with_audit(spy.clone());
+
+        let _ = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "danger", "arguments": {} }
+            }),
+            Transport::Http,
+        )
+        .await;
+
+        let seen = spy.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
+        assert_eq!(seen[0].0, "danger");
+        assert_eq!(seen[0].1, "approved");
+    }
+
+    /// Sibling pinning the `"auto"` value: a read-only tool never consults
+    /// the policy, so it must be recorded as `"auto"`, not `"approved"`.
+    #[tokio::test]
+    async fn a_read_only_call_is_audited_as_auto() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<(String, &'static str, &'static str)>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push((rec.tool, rec.decision, rec.outcome));
+            }
+        }
+
+        let spy = Arc::new(Spy::default());
+        let server = server_with_readonly().with_audit(spy.clone());
+
+        let _ = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "readit", "arguments": {} }
+            }),
+            Transport::Stdio,
+        )
+        .await;
+
+        let seen = spy.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
+        assert_eq!(seen[0].0, "readit");
+        assert_eq!(seen[0].1, "auto");
+    }
+
     #[tokio::test]
     async fn serve_processes_a_session_over_the_stream() {
         let input = concat!(
