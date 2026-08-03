@@ -32,8 +32,24 @@ async fn rpc(State(server): State<Arc<McpServer>>, Json(req): Json<Value>) -> Js
 fn host_is_loopback(host: &str) -> bool {
     let h: &str = if let Some(rest) = host.strip_prefix('[') {
         // Bracketed IPv6, with or without a trailing `:port`. Split on `]`,
-        // never on `:`, so the address's own colons are never touched.
-        rest.split(']').next().unwrap_or("")
+        // never on `:`, so the address's own colons are never touched. The
+        // bracket must actually close, and whatever follows the `]` must be
+        // either nothing or a numeric `:port` — anything else (a bare
+        // trailing hostname, a stray `.evil.com`, a non-numeric "port") is
+        // not a valid authority and must reject, not fall through as if the
+        // bracketed address were the whole story.
+        let Some((inside, tail)) = rest.split_once(']') else {
+            return false;
+        };
+        let tail_ok = tail.is_empty()
+            || tail
+                .strip_prefix(':')
+                .map(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .unwrap_or(false);
+        if !tail_ok {
+            return false;
+        }
+        inside
     } else if host.matches(':').count() > 1 {
         // Unbracketed IPv6 (e.g. bare "::1"): more than one colon means
         // there's no unambiguous port suffix, so treat it all as the host.
@@ -282,7 +298,21 @@ mod tests {
 
     #[test]
     fn host_is_loopback_rejects_non_loopback_forms() {
-        for host in ["evil.com", "evil.com:80", "127.0.0.1.evil.com"] {
+        for host in [
+            "evil.com",
+            "evil.com:80",
+            "127.0.0.1.evil.com",
+            "localhost.evil.com",
+            "",
+            // A closed bracket doesn't end the authority: anything after
+            // it other than a numeric `:port` must still reject, or a
+            // spoofed Host slips through as if `[::1]` were the whole
+            // story.
+            "[::1]evil.com",
+            "[::1].evil.com",
+            "[::1]:notaport",
+            "[::1]:",
+        ] {
             assert!(!host_is_loopback(host), "expected {host:?} to be rejected");
         }
     }
