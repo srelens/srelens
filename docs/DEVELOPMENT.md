@@ -88,7 +88,7 @@ cargo run -p srelens-desktop --no-default-features -- --mcp-stdio
 cargo run -p srelens-desktop --no-default-features -- --mcp-http 127.0.0.1:8765
 ```
 
-The HTTP transport binds to loopback and serves MCP at `/mcp`. Tools annotated `destructive` reject calls without an explicit `_confirm` argument.
+The HTTP transport binds to loopback, requires a bearer token (`crates/mcp/src/auth.rs`), and checks the `Host` header to block DNS rebinding. Tools annotated `destructive` are gated by an injected `ConfirmPolicy` (`crates/mcp/src/policy.rs`): the desktop app prompts in-app, and headless runs need `--mcp-allow-destructive` **and** `"_confirm": true` on the call — `_confirm` alone never authorizes anything. See the [user guide](USAGE.md#mcp-server-for-ai-agents) for the full security model.
 
 ## Testing standards
 

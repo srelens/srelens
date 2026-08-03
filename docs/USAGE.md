@@ -327,9 +327,46 @@ srelens --mcp-stdio
 srelens --mcp-http 127.0.0.1:8765
 ```
 
-Mutating and destructive tools require an explicit `"_confirm": true` argument
-before they run. Review tool calls and use appropriate Kubernetes RBAC,
-especially with critical clusters.
+### Security model
+
+- **HTTP requires a bearer token.** The transport never serves unauthenticated.
+  Settings → MCP shows the current token (masked, with reveal/copy) plus
+  **Rotate** and **Revoke** buttons. Rotating replaces the token immediately, so
+  any client already configured with the old value stops working until it gets
+  the new one. Revoking also stops the server — it must never run without a
+  valid token.
+- A **Host header check** rejects requests whose `Host` isn't a loopback value
+  (`127.0.0.1`, `::1`, or `localhost`). Binding loopback alone doesn't stop a
+  page on another domain from resolving to 127.0.0.1 and posting to the port;
+  the Host check does.
+- **stdio needs no token** — the client spawned the `srelens --mcp-stdio`
+  process itself and already holds your privileges.
+- **Destructive tools prompt in the app.** The MCP call blocks until you approve
+  or deny the dialog that pops up. Letting it time out, dismissing it, or
+  having no srelens window open at all count as **deny**. Confirmation
+  requests from concurrent calls queue rather than colliding.
+- **Headless use** (`--mcp-stdio` / `--mcp-http` with no GUI to show a dialog)
+  needs an explicit opt-in instead: `--mcp-allow-destructive` on the process
+  *and* `"_confirm": true` on the individual tool call. Neither alone is
+  enough — `_confirm` states intent, it does not authorize anything by itself.
+  Pass `--mcp-token <hex>` to supply your own token; otherwise srelens reads
+  one from the store, or generates one and prints it to stderr.
+- **There is no GUI toggle for stdio.** A GUI can't govern a process a client
+  spawned directly, so those two CLI flags are the entire stdio control
+  surface.
+- Every call is recorded to an **audit log** at `<app config dir>/mcp/audit.jsonl`
+  (rotated once to `.1` past 5 MB), viewable in Settings → MCP under recent
+  agent activity. Argument values are redacted before they're written:
+  sensitive capabilities redact every value, and keys that look like
+  credentials (`token`, `secret`, `password`, `key`) are redacted at any
+  nesting depth.
+- The bearer token lives in your **OS keychain** where one is available,
+  falling back to a `0600` file otherwise (headless Linux, minimal window
+  managers). Settings → MCP shows which is in use — when it says file, the
+  token sits on disk unencrypted.
+
+Review tool calls and use appropriate Kubernetes RBAC, especially with
+critical clusters.
 
 ## Settings reference
 

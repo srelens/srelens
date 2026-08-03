@@ -128,8 +128,11 @@ MCP-capable clients without creating a separate cluster integration layer.
 
 Open **Settings → MCP** to:
 
-- run the MCP server over loopback HTTP;
-- install the `srelens` CLI for stdio connections;
+- run the MCP server over loopback HTTP, protected by a bearer token you can
+  reveal, rotate, or revoke (rotating invalidates configs that used the old
+  value; revoking also stops the server);
+- install the `srelens` CLI for stdio connections, which need no token — the
+  client already holds your privileges by spawning the process;
 - copy client configuration for supported MCP clients.
 
 You can also start the server directly:
@@ -139,7 +142,12 @@ srelens --mcp-stdio
 srelens --mcp-http 127.0.0.1:8765
 ```
 
-Mutating tools require an explicit `_confirm: true` argument before they run.
+Destructive tools prompt for confirmation in the app. Headless runs have no
+dialog to show, so they need both `--mcp-allow-destructive` on the process
+*and* `"_confirm": true` on the call — neither alone authorizes anything, and
+there's no GUI toggle for stdio. See the
+[user guide](docs/USAGE.md#mcp-server-for-ai-agents) for the full security
+model, including the Host-header check, audit log, and token storage.
 
 Example stdio configuration:
 

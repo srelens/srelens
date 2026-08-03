@@ -70,8 +70,12 @@ clusters. Open **Settings → MCP** to:
   (ensure `~/.local/bin` is on your `PATH`).
 - **Copy client config** for Claude Code, Claude Desktop, Cursor, Codex, Antigravity, and others.
 
-Destructive tools require an explicit `_confirm` — an agent can't delete or drain anything
-without approval.
+The HTTP server requires a bearer token, shown (and rotatable) from that same
+Settings page. Destructive tools prompt for confirmation in the app — an agent
+can't delete or drain anything without your approval. Headless CLI use needs
+both `--mcp-allow-destructive` on the process and `"_confirm": true` on the
+call; see the [user guide](USAGE.md#mcp-server-for-ai-agents) for the full
+security model.
 
 ## Updating
 
