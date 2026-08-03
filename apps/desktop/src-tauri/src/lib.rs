@@ -10,6 +10,7 @@ mod forward;
 mod helm;
 mod logs;
 mod mcp;
+mod mcp_confirm;
 mod settings;
 mod sink;
 mod terminal;
@@ -25,8 +26,9 @@ use forward::{start_port_forward, stop_port_forward};
 use helm::{helm_op_close, start_helm_op};
 use logs::{start_log_stream, stop_log_stream};
 use mcp::{
-    install_srelens_cli, mcp_http_start, mcp_http_status, mcp_http_stop, srelens_cli_status,
-    McpHttpManager,
+    install_srelens_cli, mcp_audit_tail, mcp_confirm_respond, mcp_http_start, mcp_http_status,
+    mcp_http_stop, mcp_token_get, mcp_token_revoke, mcp_token_rotate, srelens_cli_status,
+    McpAuditPath, McpHttpManager,
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
@@ -320,6 +322,27 @@ pub fn run() {
                 Err(e) => log::warn!("cluster OIDC unavailable: {e}"),
             }
 
+            // MCP: the token store and audit log live under the app config
+            // dir, same convention as cluster OIDC above. Absence of a
+            // resolvable config dir is logged and skipped — the MCP token/
+            // audit commands simply error until the app is restarted somewhere
+            // that dir resolution succeeds, rather than aborting startup.
+            match app.path().app_config_dir().map(|d| d.join("mcp")) {
+                Ok(dir) => {
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        log::warn!("could not create MCP config dir {}: {e}", dir.display());
+                    }
+                    let token_store: std::sync::Arc<dyn srelens_mcp::auth::TokenStore> =
+                        std::sync::Arc::new(srelens_mcp::auth::FileTokenStore::new(
+                            dir.join("token"),
+                        ));
+                    app.manage(token_store);
+                    app.manage(McpAuditPath(dir.join("audit.jsonl")));
+                }
+                Err(e) => log::warn!("MCP config dir unavailable: {e}"),
+            }
+            app.manage(std::sync::Arc::new(mcp_confirm::Pending::default()));
+
             Ok(())
         })
         .manage(AppRegistry(registry))
@@ -353,6 +376,11 @@ pub fn run() {
             mcp_http_start,
             mcp_http_stop,
             mcp_http_status,
+            mcp_confirm_respond,
+            mcp_token_get,
+            mcp_token_rotate,
+            mcp_token_revoke,
+            mcp_audit_tail,
             install_srelens_cli,
             srelens_cli_status,
             start_terminal,

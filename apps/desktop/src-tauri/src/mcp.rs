@@ -34,7 +34,11 @@ impl McpHttpManager {
     }
 }
 
-fn stop_running(manager: &McpHttpManager) {
+fn stop_running(manager: &McpHttpManager, pending: &crate::mcp_confirm::Pending) {
+    // Release every in-flight confirm as denied first, so a call blocked on a
+    // dialog fails fast instead of hanging until its timeout once the
+    // transport it belongs to is gone.
+    pending.deny_all();
     if let Some(mut running) = manager.running.lock().unwrap().take() {
         if let Some(tx) = running.shutdown.take() {
             let _ = tx.send(());
@@ -49,8 +53,15 @@ fn url_for(addr: SocketAddr) -> String {
 
 /// Start (or restart) the loopback MCP HTTP server on `port`. Returns its URL.
 #[tauri::command]
-pub async fn mcp_http_start(port: u16, manager: State<'_, McpHttpManager>) -> Result<String, String> {
-    stop_running(&manager);
+pub async fn mcp_http_start(
+    port: u16,
+    app: tauri::AppHandle,
+    manager: State<'_, McpHttpManager>,
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+    token_store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
+    audit_path: State<'_, McpAuditPath>,
+) -> Result<String, String> {
+    stop_running(&manager, &pending);
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     // Bind up front so a port conflict is reported to the UI immediately.
@@ -58,8 +69,28 @@ pub async fn mcp_http_start(port: u16, manager: State<'_, McpHttpManager>) -> Re
         .await
         .map_err(|e| format!("Could not bind {addr}: {e}"))?;
 
+    // The HTTP transport must never serve unauthenticated: mint a token on
+    // first use if one hasn't been generated yet.
+    let token = match token_store.load() {
+        Some(t) => t,
+        None => {
+            let t = srelens_mcp::auth::Token::generate();
+            token_store.save(&t).map_err(|e| e.to_string())?;
+            t
+        }
+    };
+
     let registry = build_registry_with(manager.cache.clone());
-    let server = srelens_mcp::McpServer::new(Arc::new(registry));
+    let server = srelens_mcp::McpServer::new(Arc::new(registry))
+        .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
+            app.clone(),
+            pending.inner().clone(),
+            std::time::Duration::from_secs(60),
+        )))
+        .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+            audit_path.0.clone(),
+            5 * 1024 * 1024,
+        )));
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
         let _ = srelens_mcp::http::serve_http_with_shutdown(
@@ -68,7 +99,7 @@ pub async fn mcp_http_start(port: u16, manager: State<'_, McpHttpManager>) -> Re
             async {
                 let _ = rx.await;
             },
-            None,
+            Some(token),
         )
         .await;
     });
@@ -83,8 +114,11 @@ pub async fn mcp_http_start(port: u16, manager: State<'_, McpHttpManager>) -> Re
 
 /// Stop the MCP HTTP server if running.
 #[tauri::command]
-pub fn mcp_http_stop(manager: State<'_, McpHttpManager>) -> Result<(), String> {
-    stop_running(&manager);
+pub fn mcp_http_stop(
+    manager: State<'_, McpHttpManager>,
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+) -> Result<(), String> {
+    stop_running(&manager, &pending);
     Ok(())
 }
 
@@ -98,6 +132,67 @@ pub fn mcp_http_status(manager: State<'_, McpHttpManager>) -> Option<String> {
         .as_ref()
         .map(|running| url_for(running.addr))
 }
+
+/// Resolve a pending MCP confirm dialog. `approved` decides whether the
+/// blocked tool call proceeds or is refused.
+#[tauri::command]
+pub fn mcp_confirm_respond(
+    id: String,
+    approved: bool,
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+) -> Result<(), String> {
+    if pending.resolve(&id, approved) {
+        Ok(())
+    } else {
+        Err("that confirmation is no longer waiting (it timed out or was already answered)".into())
+    }
+}
+
+/// The current MCP bearer token, if one has been generated.
+#[tauri::command]
+pub fn mcp_token_get(store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>) -> Option<String> {
+    store.load().map(|t| t.as_str().to_string())
+}
+
+/// Generate and persist a fresh MCP bearer token, replacing any existing one.
+#[tauri::command]
+pub fn mcp_token_rotate(
+    store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
+) -> Result<String, String> {
+    let t = srelens_mcp::auth::Token::generate();
+    store.save(&t).map_err(|e| e.to_string())?;
+    Ok(t.as_str().to_string())
+}
+
+/// Revoke the MCP bearer token and stop the HTTP transport — it must never
+/// serve unauthenticated.
+#[tauri::command]
+pub fn mcp_token_revoke(
+    store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
+    manager: State<'_, McpHttpManager>,
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+) -> Result<(), String> {
+    store.clear().map_err(|e| e.to_string())?;
+    stop_running(&manager, &pending);
+    Ok(())
+}
+
+/// The most recent `limit` MCP audit records, newest first.
+#[tauri::command]
+pub fn mcp_audit_tail(limit: usize, path: State<'_, McpAuditPath>) -> Vec<serde_json::Value> {
+    let body = std::fs::read_to_string(&path.0).unwrap_or_default();
+    let mut lines: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    lines.reverse(); // newest first
+    lines.truncate(limit);
+    lines
+}
+
+/// Path to the audit log, managed so the command can read it without
+/// reconstructing the app config dir.
+pub struct McpAuditPath(pub std::path::PathBuf);
 
 /// Where the `srelens` CLI symlink is installed, and whether it points at us.
 #[derive(Debug, Serialize)]

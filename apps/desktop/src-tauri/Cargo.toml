@@ -33,6 +33,8 @@ srelens-streams = { path = "../../../crates/streams" }
 srelens-server = { path = "../../../crates/server" }
 srelens-registry = { path = "../../../crates/registry" }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
 # Blocking HTTP for Toolbox tool downloads (run inside spawn_blocking).
 # rustls-no-provider matches tauri-plugin-updater's reqwest so no second TLS
 # crypto provider (aws-lc-rs) enters the tree — the workspace standardises on
