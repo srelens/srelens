@@ -46,17 +46,34 @@ export function McpSettingsSection() {
   const [cliMessage, setCliMessage] = useState("");
   const [tool, setTool] = useState<McpTool>("claude-code");
   const [transport, setTransport] = useState<McpTransport>("stdio");
+  // `token` is `null` both while it's still loading and once we know for
+  // certain there isn't one yet (e.g. the server has never been enabled, so
+  // `mcp_http_start` — the only place that mints one — hasn't run). `tokenLoading`
+  // tells those two apart so the row can show "Loading…" only for the former
+  // and a real "generate one" action for the latter, instead of getting stuck
+  // on "Loading…" forever.
   const [token, setToken] = useState<string | null>(null);
+  const [tokenLoading, setTokenLoading] = useState(true);
   const [tokenRevealed, setTokenRevealed] = useState(false);
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState("");
   const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
   const [tokenStorage, setTokenStorage] = useState<"keychain" | "file" | null>(null);
 
+  async function refreshToken() {
+    try {
+      setToken(await getMcpToken());
+    } catch {
+      setToken(null);
+    } finally {
+      setTokenLoading(false);
+    }
+  }
+
   useEffect(() => {
     void mcpHttpStatus().then(setRunningUrl).catch(() => {});
     void srelensCliStatus().then(setCli).catch(() => {});
-    void getMcpToken().then(setToken).catch(() => {});
+    void refreshToken();
     void getMcpTokenStorage().then(setTokenStorage).catch(() => {});
   }, []);
 
@@ -69,8 +86,13 @@ export function McpSettingsSection() {
     setServerError("");
     persist({ ...settings, enabled });
     try {
-      if (enabled) setRunningUrl(await startMcpHttp(settings.port));
-      else {
+      if (enabled) {
+        setRunningUrl(await startMcpHttp(settings.port));
+        // Starting the server for the first time is also the first place a
+        // token can get minted (`mcp_http_start` mints one on first use), so
+        // the previously-fetched `null` may now be stale.
+        void refreshToken();
+      } else {
         await stopMcpHttp();
         setRunningUrl(null);
       }
@@ -128,7 +150,7 @@ export function McpSettingsSection() {
     setTokenError("");
     try {
       await revokeMcpToken();
-      setToken(null);
+      await refreshToken();
       setTokenRevealed(false);
       notify.success("Token revoked. The MCP HTTP server has stopped.");
       // The server stops as a side effect of revocation; reflect that instead
@@ -145,7 +167,7 @@ export function McpSettingsSection() {
   }
 
   const url = runningUrl ?? `http://127.0.0.1:${settings.port}/mcp`;
-  const config = mcpClientConfig(tool, transport, { url });
+  const config = mcpClientConfig(tool, transport, { url, token });
 
   return (
     <div className="flex flex-col gap-6">
@@ -230,7 +252,7 @@ export function McpSettingsSection() {
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <code className="fl-mono rounded-md border border-border bg-muted/40 px-2 py-1 text-sm">
-            {token ? (tokenRevealed ? token : maskToken(token)) : "Loading…"}
+            {tokenLoading ? "Loading…" : token ? (tokenRevealed ? token : maskToken(token)) : "No token yet"}
           </code>
           <Button
             variant="ghost"
@@ -255,11 +277,15 @@ export function McpSettingsSection() {
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setTokenConfirm("rotate")}
-            disabled={!token || tokenBusy}
+            // Rotating an existing token restarts a running server and drops
+            // in-flight requests, so that path still confirms first. Minting
+            // the very first token has nothing to warn about — there's no
+            // previous value to invalidate — so it just runs.
+            onClick={() => (token ? setTokenConfirm("rotate") : void confirmRotate())}
+            disabled={tokenLoading || tokenBusy}
           >
             <RefreshCw data-icon="inline-start" />
-            Rotate token
+            {token ? "Rotate token" : "Generate token"}
           </Button>
           <Button
             variant="danger"
@@ -271,6 +297,12 @@ export function McpSettingsSection() {
             Revoke token
           </Button>
         </div>
+        {!tokenLoading && !token && (
+          <p className="text-sm text-muted-foreground">
+            No token has been generated yet. Generate one to connect over HTTP — stdio connections
+            don't need it.
+          </p>
+        )}
         {tokenStorage === "file" && (
           <p className="text-sm text-amber-600 dark:text-amber-500">
             No OS keychain is available here, so this token is stored in a plain file on disk

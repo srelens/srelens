@@ -36,25 +36,37 @@ export interface McpClientConfig {
 
 const DEFAULT_URL = "http://127.0.0.1:8765/mcp";
 
+/** Emitted instead of a real bearer value when http config is generated
+ * before a token exists. Deliberately not a plausible-looking token: a
+ * config that quietly 401s because it copied an empty/undefined value would
+ * be worse than one that's obviously incomplete. */
+const NO_TOKEN_PLACEHOLDER = "<enable the MCP server to generate a token>";
+
 /** Pretty mcpServers JSON block for a stdio or http entry. */
 function mcpServersJson(entry: Record<string, unknown>): string {
   return JSON.stringify({ mcpServers: { srelens: entry } }, null, 2);
 }
 
-/** Config for connecting `tool` to srelens over `transport`. */
+/**
+ * Config for connecting `tool` to srelens over `transport`. `opts.token` is
+ * the current MCP bearer token (or `null`/absent if none has been generated
+ * yet) — the HTTP transport requires it on every request, so an http config
+ * without it would 401. Ignored for stdio, which needs no token at all.
+ */
 export function mcpClientConfig(
   tool: McpTool,
   transport: McpTransport,
-  opts: { url?: string },
+  opts: { url?: string; token?: string | null },
 ): McpClientConfig {
   const url = opts.url || DEFAULT_URL;
+  const authValue = transport === "http" ? (opts.token ? `Bearer ${opts.token}` : NO_TOKEN_PLACEHOLDER) : "";
   const hint = MCP_TOOLS.find((t) => t.id === tool)?.hint ?? "";
 
   if (tool === "claude-code") {
     const snippet =
       transport === "stdio"
         ? "claude mcp add srelens -- srelens --mcp-stdio"
-        : `claude mcp add --transport http srelens ${url}`;
+        : `claude mcp add --transport http srelens ${url} --header "Authorization: ${authValue}"`;
     return { format: "shell", snippet, hint };
   }
 
@@ -62,11 +74,14 @@ export function mcpClientConfig(
     const snippet =
       transport === "stdio"
         ? `[mcp_servers.srelens]\ncommand = "srelens"\nargs = ["--mcp-stdio"]`
-        : `[mcp_servers.srelens]\nurl = "${url}"`;
+        : `[mcp_servers.srelens]\nurl = "${url}"\n\n[mcp_servers.srelens.headers]\nAuthorization = "${authValue}"`;
     return { format: "toml", snippet, hint };
   }
 
   // JSON mcpServers tools: Claude Desktop, Cursor, Antigravity, generic.
-  const entry = transport === "stdio" ? { command: "srelens", args: ["--mcp-stdio"] } : { url };
+  const entry =
+    transport === "stdio"
+      ? { command: "srelens", args: ["--mcp-stdio"] }
+      : { url, headers: { Authorization: authValue } };
   return { format: "json", snippet: mcpServersJson(entry), hint };
 }
