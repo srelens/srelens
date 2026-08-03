@@ -268,16 +268,47 @@ mod tests {
         assert_eq!(resp["result"]["isError"], json!(true));
     }
 
+    /// The pair of assertions here is the point: the tool must never see
+    /// `_confirm`, while the policy must. A regression that reordered the
+    /// strip, or that started passing the stripped `args` to the policy
+    /// instead of `raw_args`, would silently break `FlagGated` in production
+    /// with nothing else in this suite catching it.
     #[tokio::test]
     async fn approving_policy_lets_the_tool_run_and_strips_confirm() {
-        struct Yes;
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+
+        // Captures what each side actually received, rather than trusting
+        // that "the tool ran" and "the policy approved" implies either saw
+        // the right shape of arguments.
+        let policy_saw: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let tool_saw: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+
+        struct Yes(Arc<Mutex<Option<Value>>>);
         #[async_trait::async_trait]
         impl crate::policy::ConfirmPolicy for Yes {
-            async fn confirm(&self, _t: &str, _a: &serde_json::Value) -> crate::policy::Decision {
+            async fn confirm(&self, _t: &str, a: &serde_json::Value) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(a.clone());
                 crate::policy::Decision::Approved
             }
         }
-        let server = server_with_destructive().with_policy(std::sync::Arc::new(Yes));
+
+        let mut reg = Registry::new();
+        let mut cap = {
+            let tool_saw = tool_saw.clone();
+            Capability::read_only("danger", "destructive", move |args| {
+                let tool_saw = tool_saw.clone();
+                async move {
+                    *tool_saw.lock().unwrap() = Some(args.clone());
+                    Ok(json!({ "done": true }))
+                }
+            })
+        };
+        cap.annotations = Annotations::DESTRUCTIVE;
+        reg.register(cap);
+        let server =
+            McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(policy_saw.clone())));
+
         let resp = handle_request(
             &server,
             &json!({
@@ -289,6 +320,19 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(resp["result"]["isError"], json!(false), "got {resp}");
+
+        let seen_by_tool = tool_saw.lock().unwrap().clone().expect("tool ran");
+        assert!(
+            seen_by_tool.get("_confirm").is_none(),
+            "tool must not see _confirm, got {seen_by_tool}"
+        );
+
+        let seen_by_policy = policy_saw.lock().unwrap().clone().expect("policy consulted");
+        assert_eq!(
+            seen_by_policy.get("_confirm"),
+            Some(&json!(true)),
+            "policy must see _confirm, got {seen_by_policy}"
+        );
     }
 
     #[tokio::test]
