@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use srelens_mcp::auth::TokenStore as _;
+
 fn main() {
     // GUI launches (Finder/Dock) inherit launchd's minimal PATH, not the
     // user's shell PATH — kubeconfig exec plugins (kubectl, kubectl-oidc_login,
@@ -116,13 +118,12 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) 
     // The HTTP transport must never serve unauthenticated: resolve a token
     // from the flag, then the store, then generate and persist one. Uses the
     // same keychain-or-file resolution as the GUI (`token_store.rs`) so a
-    // token provisioned in one is usable from the other; only the fallback
-    // path (never the token itself) is logged.
-    let (store, file_fallback) =
-        srelens_desktop_lib::token_store::keychain_or_file(mcp_token_path());
-    if file_fallback {
-        eprintln!("srelens: no OS keychain available, storing the MCP token in a 0600 file");
-    }
+    // token provisioned in one is usable from the other. The store itself
+    // absorbs a genuinely failed keychain call and falls back to the file
+    // rather than erroring — it only ever returns `Err` from `save` for a
+    // real file-write failure, so `.expect` below can't panic just because
+    // there's no D-Bus session on this host.
+    let store = srelens_desktop_lib::token_store::keychain_or_file(mcp_token_path());
     let token = match cli_token {
         Some(hex) => srelens_mcp::auth::Token::from_hex(&hex)
             .expect("--mcp-token must be 64 hex characters"),
@@ -139,6 +140,12 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) 
             }
         },
     };
+    // Checked after the load/save attempt above (not before): only then do
+    // we know whether the keychain actually served this call, rather than
+    // guessing from whether it merely looked reachable.
+    if store.current_backend() == "file" {
+        eprintln!("srelens: no OS keychain available, storing the MCP token in a 0600 file");
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -330,17 +330,22 @@ pub fn run() {
             // that dir resolution succeeds, rather than aborting startup.
             //
             // The token store itself prefers the OS keychain, falling back to
-            // a 0600 file (same path `main.rs`'s headless CLI resolves) where
-            // no keychain is available — see `token_store::keychain_or_file`.
+            // a 0600 file (same path `main.rs`'s headless CLI resolves) the
+            // first time a keychain operation genuinely fails — see
+            // `token_store::keychain_or_file`. Managed both as the concrete
+            // `Arc<ResilientTokenStore>` (so `mcp_token_storage` can read the
+            // live backend flag) and, via unsized coercion, as the
+            // `Arc<dyn TokenStore>` the other MCP commands take.
             match app.path().app_config_dir().map(|d| d.join("mcp")) {
                 Ok(dir) => {
                     if let Err(e) = std::fs::create_dir_all(&dir) {
                         log::warn!("could not create MCP config dir {}: {e}", dir.display());
                     }
-                    let (token_store, file_fallback) =
-                        token_store::keychain_or_file(dir.join("token"));
+                    let resilient_store = token_store::keychain_or_file(dir.join("token"));
+                    let token_store: std::sync::Arc<dyn srelens_mcp::auth::TokenStore> =
+                        resilient_store.clone();
                     app.manage(token_store);
-                    app.manage(token_store::TokenStorage::for_fallback(file_fallback));
+                    app.manage(resilient_store);
                     app.manage(McpAuditPath(dir.join("audit.jsonl")));
                 }
                 Err(e) => log::warn!("MCP config dir unavailable: {e}"),
