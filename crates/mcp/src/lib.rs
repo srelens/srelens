@@ -38,6 +38,7 @@ impl Transport {
 pub struct McpServer {
     registry: Arc<Registry>,
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
+    audit: Arc<dyn crate::audit::AuditSink>,
 }
 
 impl McpServer {
@@ -46,6 +47,7 @@ impl McpServer {
             registry,
             // Fail closed: a host that wires nothing permits nothing.
             confirm_policy: Arc::new(crate::policy::AlwaysDeny),
+            audit: Arc::new(crate::audit::NoopAudit),
         }
     }
 
@@ -56,6 +58,24 @@ impl McpServer {
 
     pub fn confirm_policy(&self) -> &Arc<dyn crate::policy::ConfirmPolicy> {
         &self.confirm_policy
+    }
+
+    pub fn with_audit(mut self, audit: Arc<dyn crate::audit::AuditSink>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    pub fn audit(&self) -> &Arc<dyn crate::audit::AuditSink> {
+        &self.audit
+    }
+
+    /// Whether a tool reads sensitive material, so the audit log can redact
+    /// its arguments wholesale.
+    pub fn is_sensitive(&self, name: &str) -> bool {
+        self.registry
+            .get(name)
+            .map(|c| c.annotations.sensitive)
+            .unwrap_or(false)
     }
 
     pub fn list_tools(&self) -> Vec<ToolDescriptor> {

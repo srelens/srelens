@@ -79,10 +79,21 @@ pub async fn handle_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
+            let sensitive = server.is_sensitive(name);
+            let mut decision = "auto";
+
             if server.requires_confirm(name) {
                 if let crate::policy::Decision::Denied(reason) =
                     server.confirm_policy().confirm(name, &raw_args).await
                 {
+                    server.audit().record(crate::audit::AuditRecord {
+                        transport,
+                        tool: name.to_string(),
+                        args: crate::audit::redact(&args, sensitive),
+                        decision: "denied",
+                        outcome: "error",
+                        error: Some(reason.clone()),
+                    });
                     // A result, not a transport error, so the agent can adapt.
                     return Some(ok(
                         id?,
@@ -92,10 +103,19 @@ pub async fn handle_request(
                         }),
                     ));
                 }
+                decision = "approved";
             }
-            let _ = transport; // consumed by the audit task
 
-            let result = match server.call_tool(name, args).await {
+            let called = server.call_tool(name, args.clone()).await;
+            server.audit().record(crate::audit::AuditRecord {
+                transport,
+                tool: name.to_string(),
+                args: crate::audit::redact(&args, sensitive),
+                decision,
+                outcome: if called.is_ok() { "ok" } else { "error" },
+                error: called.as_ref().err().map(|e| e.to_string()),
+            });
+            let result = match called {
                 Ok(v) => json!({
                     "content": [{ "type": "text", "text": v.to_string() }],
                     "isError": false
@@ -361,6 +381,35 @@ mod tests {
         )
         .await;
         assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn every_tool_call_is_audited_with_its_decision() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<(String, &'static str, &'static str)>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push((rec.tool, rec.decision, rec.outcome));
+            }
+        }
+        let spy = Arc::new(Spy::default());
+        let server = server_with_destructive().with_audit(spy.clone());
+
+        let _ = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "danger", "arguments": {} }
+            }),
+            Transport::Http,
+        )
+        .await;
+
+        let seen = spy.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
+        assert_eq!(seen[0].0, "danger");
+        assert_eq!(seen[0].1, "denied");
     }
 
     #[tokio::test]
