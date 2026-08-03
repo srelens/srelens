@@ -331,10 +331,12 @@ srelens --mcp-http 127.0.0.1:8765
 
 - **HTTP requires a bearer token.** The transport never serves unauthenticated.
   Settings → MCP shows the current token (masked, with reveal/copy) plus
-  **Rotate** and **Revoke** buttons. Rotating replaces the token immediately, so
-  any client already configured with the old value stops working until it gets
-  the new one. Revoking also stops the server — it must never run without a
-  valid token.
+  **Rotate** and **Revoke** buttons. If the server is running, rotating
+  restarts it immediately so the new token takes effect — any in-flight agent
+  request is dropped, and every client still configured with the old value
+  needs the new one before it works again. (Rotating while the server is
+  stopped just replaces the stored token; it does not start the server.)
+  Revoking also stops the server — it must never run without a valid token.
 - A **Host header check** rejects requests whose `Host` isn't a loopback value
   (`127.0.0.1`, `::1`, or `localhost`). Binding loopback alone doesn't stop a
   page on another domain from resolving to 127.0.0.1 and posting to the port;
@@ -349,8 +351,10 @@ srelens --mcp-http 127.0.0.1:8765
   needs an explicit opt-in instead: `--mcp-allow-destructive` on the process
   *and* `"_confirm": true` on the individual tool call. Neither alone is
   enough — `_confirm` states intent, it does not authorize anything by itself.
-  Pass `--mcp-token <hex>` to supply your own token; otherwise srelens reads
-  one from the store, or generates one and prints it to stderr.
+  This applies to both transports; `--mcp-token <hex>`, however, is
+  `--mcp-http`-only (stdio takes no token at all) and supplies your own token —
+  otherwise srelens reads one from the store, or generates one and prints it
+  to stderr.
 - **There is no GUI toggle for stdio.** A GUI can't govern a process a client
   spawned directly, so those two CLI flags are the entire stdio control
   surface.
@@ -362,8 +366,10 @@ srelens --mcp-http 127.0.0.1:8765
   nesting depth.
 - The bearer token lives in your **OS keychain** where one is available,
   falling back to a `0600` file otherwise (headless Linux, minimal window
-  managers). Settings → MCP shows which is in use — when it says file, the
-  token sits on disk unencrypted.
+  managers). Settings → MCP only speaks up about this when it has fallen back:
+  a warning appears saying the token is stored in a plain file on disk
+  (readable only by your user account) instead of the keychain. No warning
+  means the keychain is serving.
 
 Review tool calls and use appropriate Kubernetes RBAC, especially with
 critical clusters.

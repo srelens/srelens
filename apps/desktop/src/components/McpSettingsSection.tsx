@@ -114,7 +114,7 @@ export function McpSettingsSection() {
       const next = await rotateMcpToken();
       setToken(next);
       setTokenRevealed(false);
-      notify.success("Token rotated — connected clients need the new value.");
+      notify.success("Token rotated — the server restarted and connected clients need the new value.");
       setTokenConfirm(null);
     } catch (e) {
       setTokenError(String(e));
@@ -285,7 +285,7 @@ export function McpSettingsSection() {
           title={tokenConfirm === "rotate" ? "Rotate access token?" : "Revoke access token?"}
           message={
             tokenConfirm === "rotate" ? (
-              "Connected clients are using the current token — once you rotate it, they'll need the new value or they'll stop working."
+              "If the MCP HTTP server is running, rotating restarts it immediately so the new token takes effect — any in-flight agent request is dropped. Connected clients need the new value or they'll stop working."
             ) : (
               "Revoking also stops the MCP HTTP server: it never serves without a valid token. Any clients connected over HTTP will disconnect."
             )

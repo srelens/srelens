@@ -129,8 +129,9 @@ MCP-capable clients without creating a separate cluster integration layer.
 Open **Settings → MCP** to:
 
 - run the MCP server over loopback HTTP, protected by a bearer token you can
-  reveal, rotate, or revoke (rotating invalidates configs that used the old
-  value; revoking also stops the server);
+  reveal, rotate, or revoke — rotating restarts the running server so the new
+  token takes effect at once (dropping any in-flight request and invalidating
+  configs that used the old value); revoking also stops the server;
 - install the `srelens` CLI for stdio connections, which need no token — the
   client already holds your privileges by spawning the process;
 - copy client configuration for supported MCP clients.

@@ -51,44 +51,36 @@ fn url_for(addr: SocketAddr) -> String {
     format!("http://{addr}/mcp")
 }
 
-/// Start (or restart) the loopback MCP HTTP server on `port`. Returns its URL.
-#[tauri::command]
-pub async fn mcp_http_start(
+/// Bind `port` and serve the MCP HTTP transport on it, replacing whatever was
+/// previously running. Shared by `mcp_http_start` (a fresh start/restart from
+/// the toggle) and `mcp_token_rotate` (a same-port restart so a freshly
+/// rotated token takes effect at once instead of leaving the old token
+/// accepted by an already-running listener). Bind happens before anything
+/// else so a port conflict is reported to the caller immediately.
+async fn start_server(
     port: u16,
-    app: tauri::AppHandle,
-    manager: State<'_, McpHttpManager>,
-    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
-    token_store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
-    audit_path: State<'_, McpAuditPath>,
+    app: &tauri::AppHandle,
+    manager: &McpHttpManager,
+    pending: &Arc<crate::mcp_confirm::Pending>,
+    token: srelens_mcp::auth::Token,
+    audit_path: &std::path::Path,
 ) -> Result<String, String> {
-    stop_running(&manager, &pending);
+    stop_running(manager, pending);
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    // Bind up front so a port conflict is reported to the UI immediately.
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("Could not bind {addr}: {e}"))?;
-
-    // The HTTP transport must never serve unauthenticated: mint a token on
-    // first use if one hasn't been generated yet.
-    let token = match token_store.load() {
-        Some(t) => t,
-        None => {
-            let t = srelens_mcp::auth::Token::generate();
-            token_store.save(&t).map_err(|e| e.to_string())?;
-            t
-        }
-    };
 
     let registry = build_registry_with(manager.cache.clone());
     let server = srelens_mcp::McpServer::new(Arc::new(registry))
         .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
             app.clone(),
-            pending.inner().clone(),
+            pending.clone(),
             std::time::Duration::from_secs(60),
         )))
         .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-            audit_path.0.clone(),
+            audit_path.to_path_buf(),
             5 * 1024 * 1024,
         )));
     let (tx, rx) = oneshot::channel();
@@ -110,6 +102,30 @@ pub async fn mcp_http_start(
         handle,
     });
     Ok(url_for(addr))
+}
+
+/// Start (or restart) the loopback MCP HTTP server on `port`. Returns its URL.
+#[tauri::command]
+pub async fn mcp_http_start(
+    port: u16,
+    app: tauri::AppHandle,
+    manager: State<'_, McpHttpManager>,
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+    token_store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
+    audit_path: State<'_, McpAuditPath>,
+) -> Result<String, String> {
+    // The HTTP transport must never serve unauthenticated: mint a token on
+    // first use if one hasn't been generated yet.
+    let token = match token_store.load() {
+        Some(t) => t,
+        None => {
+            let t = srelens_mcp::auth::Token::generate();
+            token_store.save(&t).map_err(|e| e.to_string())?;
+            t
+        }
+    };
+
+    start_server(port, &app, &manager, pending.inner(), token, &audit_path.0).await
 }
 
 /// Stop the MCP HTTP server if running.
@@ -155,12 +171,29 @@ pub fn mcp_token_get(store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>) -
 }
 
 /// Generate and persist a fresh MCP bearer token, replacing any existing one.
+/// If the HTTP server is currently running, restarts it on the same port so
+/// the new token takes effect immediately — the previously running listener
+/// had the old token baked into its middleware state and would otherwise
+/// keep accepting it until the app restarted. If the server is not running,
+/// it is left stopped: rotating a token must never switch the server on.
 #[tauri::command]
-pub fn mcp_token_rotate(
+pub async fn mcp_token_rotate(
+    app: tauri::AppHandle,
     store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
+    manager: State<'_, McpHttpManager>,
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+    audit_path: State<'_, McpAuditPath>,
 ) -> Result<String, String> {
     let t = srelens_mcp::auth::Token::generate();
     store.save(&t).map_err(|e| e.to_string())?;
+
+    // Read the running port (if any) and drop the lock before restarting —
+    // `start_server` takes it again via `stop_running`.
+    let running_port = manager.running.lock().unwrap().as_ref().map(|r| r.addr.port());
+    if let Some(port) = running_port {
+        start_server(port, &app, &manager, pending.inner(), t.clone(), &audit_path.0).await?;
+    }
+
     Ok(t.as_str().to_string())
 }
 
