@@ -14,11 +14,20 @@ vi.mock("@tauri-apps/api/event", () => ({
     return Promise.resolve(() => {});
   },
 }));
+const { notify } = vi.hoisted(() => ({
+  notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+}));
+vi.mock("../lib/notify", () => ({ notify }));
 
 import { McpConfirmDialog } from "./McpConfirmDialog";
 
 describe("McpConfirmDialog", () => {
-  beforeEach(() => respondToConfirm.mockReset());
+  beforeEach(() => {
+    respondToConfirm.mockReset();
+    notify.success.mockReset();
+    notify.error.mockReset();
+    notify.info.mockReset();
+  });
 
   it("renders nothing until a request arrives", () => {
     const { container } = render(<McpConfirmDialog />);
@@ -49,5 +58,18 @@ describe("McpConfirmDialog", () => {
     await screen.findByText(/toolA/);
     await userEvent.click(screen.getByRole("button", { name: /deny/i }));
     await screen.findByText(/toolB/);
+  });
+
+  it("surfaces an error instead of silently swallowing a failed response", async () => {
+    respondToConfirm.mockRejectedValue(new Error("already timed out"));
+    render(<McpConfirmDialog />);
+    emit({ id: "r3", tool: "k8s_deletePod", args: {} });
+    await screen.findByText(/k8s_deletePod/);
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(notify.error).toHaveBeenCalled());
+    // The user must not be left believing the call was actioned: the
+    // request is still dropped from the queue (nothing left to retry), but
+    // the failure is surfaced rather than silent.
+    expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
+import { notify } from "../lib/notify";
 import { ConfirmDialog } from "../ui";
 
 /**
@@ -30,9 +31,14 @@ export function McpConfirmDialog() {
     setBusy(true);
     try {
       await respondToConfirm(current.id, approved);
-    } catch {
-      // The request already timed out or was answered elsewhere — there's
-      // nothing left to respond to, so just drop it and move to the next.
+    } catch (e) {
+      // The request already timed out or was answered elsewhere (e.g. it
+      // timed out server-side while queued behind another dialog) — the
+      // user's click didn't actually take effect, and silently swallowing
+      // this would let them believe they approved (or denied) a call that
+      // was in fact already resolved without them. Surface it, then drop the
+      // request and move to the next: there's nothing left here to retry.
+      notify.error("Could not respond to that confirmation", String(e));
     } finally {
       setBusy(false);
       setQueue((q) => q.slice(1));
