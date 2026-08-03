@@ -1,6 +1,7 @@
 //! Bridges the capability registry to the Model Context Protocol.
 
 pub mod audit;
+pub mod auth;
 pub mod completeness;
 pub mod http;
 pub mod policy;
