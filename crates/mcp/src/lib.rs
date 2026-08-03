@@ -96,12 +96,16 @@ impl McpServer {
         self.registry.invoke(name, args).await
     }
 
-    /// Whether a tool mutates the cluster and should be consent-gated over
-    /// remote transports (destructive or confirmation-requiring capabilities).
+    /// Whether a tool should be consent-gated over remote transports: it
+    /// mutates the cluster (destructive or confirmation-requiring), or it
+    /// reads sensitive material (e.g. `k8s.getSecret`) — a read causes no
+    /// cluster damage, but handing raw Secret material to whichever client
+    /// happens to be connected is exactly the kind of call a human should see
+    /// first.
     pub fn requires_confirm(&self, name: &str) -> bool {
         self.registry
             .get(name)
-            .map(|c| c.annotations.requires_confirm || c.annotations.destructive)
+            .map(|c| c.annotations.requires_confirm || c.annotations.destructive || c.annotations.sensitive)
             .unwrap_or(false)
     }
 }
@@ -134,5 +138,30 @@ mod tests {
         let server = McpServer::new(registry_with_ping());
         let out = server.call_tool("ping", json!("hi")).await.unwrap();
         assert_eq!(out, json!({ "echo": "hi" }));
+    }
+
+    /// The vulnerability this closes: a `SENSITIVE_READ` capability like
+    /// `k8s.getSecret` mutates nothing, so `destructive`/`requires_confirm`
+    /// alone let it run with no prompt at all. `sensitive` must gate it too.
+    #[tokio::test]
+    async fn sensitive_read_capability_requires_confirm() {
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("k8s.getSecret", "reads a secret", |_| async {
+            Ok(json!({}))
+        });
+        cap.annotations = srelens_capability::Annotations::SENSITIVE_READ;
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg));
+
+        assert!(
+            server.requires_confirm("k8s.getSecret"),
+            "a sensitive-read capability must be consent-gated"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_read_only_capability_does_not_require_confirm() {
+        let server = McpServer::new(registry_with_ping());
+        assert!(!server.requires_confirm("ping"));
     }
 }
