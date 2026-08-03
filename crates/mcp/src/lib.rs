@@ -17,13 +17,44 @@ pub struct ToolDescriptor {
     pub input_schema: Value,
 }
 
+/// Which transport a request arrived on. Recorded in the audit log and used to
+/// tell an operator how an agent reached them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Stdio,
+    Http,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Stdio => "stdio",
+            Transport::Http => "http",
+        }
+    }
+}
+
 pub struct McpServer {
     registry: Arc<Registry>,
+    confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
 }
 
 impl McpServer {
     pub fn new(registry: Arc<Registry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            // Fail closed: a host that wires nothing permits nothing.
+            confirm_policy: Arc::new(crate::policy::AlwaysDeny),
+        }
+    }
+
+    pub fn with_policy(mut self, policy: Arc<dyn crate::policy::ConfirmPolicy>) -> Self {
+        self.confirm_policy = policy;
+        self
+    }
+
+    pub fn confirm_policy(&self) -> &Arc<dyn crate::policy::ConfirmPolicy> {
+        &self.confirm_policy
     }
 
     pub fn list_tools(&self) -> Vec<ToolDescriptor> {

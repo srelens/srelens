@@ -6,7 +6,7 @@
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::McpServer;
+use crate::{McpServer, Transport};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -20,7 +20,11 @@ fn err(id: Value, code: i64, message: &str) -> Value {
 
 /// Handle a single JSON-RPC request. Returns `None` for notifications (no id),
 /// which must not produce a response.
-pub async fn handle_request(server: &McpServer, req: &Value) -> Option<Value> {
+pub async fn handle_request(
+    server: &McpServer,
+    req: &Value,
+    transport: Transport,
+) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let id = req.get("id").cloned();
 
@@ -61,26 +65,35 @@ pub async fn handle_request(server: &McpServer, req: &Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            // Consent gate: a mutating tool must carry `"_confirm": true`.
-            let confirmed = args.get("_confirm").and_then(Value::as_bool).unwrap_or(false);
+            // `_confirm` is a caller-supplied hint, never authorization: strip it
+            // before the tool sees it, and let the injected policy decide.
             if let Some(obj) = args.as_object_mut() {
                 obj.remove("_confirm");
             }
-            if server.requires_confirm(name) && !confirmed {
-                return Some(ok(
-                    id?,
-                    json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!(
-                                "Tool `{name}` mutates the cluster and requires confirmation. \
-                                 Re-send the call with \"_confirm\": true in arguments."
-                            )
-                        }],
-                        "isError": true
-                    }),
-                ));
+            // Deliberately re-read from `params` rather than reusing `args`: the
+            // policy (e.g. `FlagGated`) needs to see `_confirm` to make its
+            // decision, but the tool must never receive it. Two views of the
+            // same call, scoped to who is allowed to see what.
+            let raw_args = params
+                .and_then(|p| p.get("arguments"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+
+            if server.requires_confirm(name) {
+                if let crate::policy::Decision::Denied(reason) =
+                    server.confirm_policy().confirm(name, &raw_args).await
+                {
+                    // A result, not a transport error, so the agent can adapt.
+                    return Some(ok(
+                        id?,
+                        json!({
+                            "content": [{ "type": "text", "text": reason }],
+                            "isError": true
+                        }),
+                    ));
+                }
             }
+            let _ = transport; // consumed by the audit task
 
             let result = match server.call_tool(name, args).await {
                 Ok(v) => json!({
@@ -115,7 +128,7 @@ where
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(resp) = handle_request(&server, &req).await {
+        if let Some(resp) = handle_request(&server, &req, crate::Transport::Stdio).await {
             let s = serde_json::to_string(&resp)?;
             writer.write_all(s.as_bytes()).await?;
             writer.write_all(b"\n").await?;
@@ -142,18 +155,26 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_returns_protocol_and_server_info() {
-        let resp = handle_request(&server_with_ping(), &json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
-            .await
-            .unwrap();
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
         assert_eq!(resp["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(resp["result"]["serverInfo"]["name"], "srelens");
     }
 
     #[tokio::test]
     async fn tools_list_includes_registry_capabilities() {
-        let resp = handle_request(&server_with_ping(), &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
-            .await
-            .unwrap();
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "ping");
@@ -165,6 +186,7 @@ mod tests {
         let resp = handle_request(
             &server_with_ping(),
             &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ping","arguments":"hi"}}),
+            Transport::Stdio,
         )
         .await
         .unwrap();
@@ -184,32 +206,106 @@ mod tests {
         McpServer::new(Arc::new(reg))
     }
 
+    // `Capability`'s field set in this codebase includes `output_schema`,
+    // which the brief's literal omits — so this mirrors `server_with_destructive`
+    // (build via `Capability::read_only`, then override only what differs)
+    // rather than constructing the struct literal directly.
+    fn server_with_readonly() -> McpServer {
+        use srelens_capability::{Annotations, Capability};
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("readit", "reads", |_| async {
+            Ok(json!({ "ok": true }))
+        });
+        cap.annotations = Annotations::READ_ONLY;
+        reg.register(cap);
+        McpServer::new(Arc::new(reg))
+    }
+
     #[tokio::test]
     async fn destructive_tool_is_gated_without_confirm() {
         let server = server_with_destructive();
         let resp = handle_request(
             &server,
             &json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"danger","arguments":{}}}),
+            Transport::Http,
         )
         .await
         .unwrap();
         assert_eq!(resp["result"]["isError"], true);
-        assert!(resp["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("_confirm"));
     }
 
+    /// The bug this closes: the gate used to read `_confirm` from the caller's
+    /// own arguments, so any client could authorize itself.
     #[tokio::test]
-    async fn destructive_tool_runs_with_confirm() {
+    async fn caller_supplied_confirm_does_not_authorize() {
         let server = server_with_destructive();
         let resp = handle_request(
             &server,
-            &json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"danger","arguments":{"_confirm":true}}}),
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "danger", "arguments": { "_confirm": true } }
+            }),
+            Transport::Http,
         )
         .await
-        .unwrap();
-        assert_eq!(resp["result"]["isError"], false);
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(true), "expected denial, got {resp}");
+    }
+
+    #[tokio::test]
+    async fn destructive_denied_when_no_policy_wired() {
+        let server = server_with_destructive(); // default policy = AlwaysDeny
+        let resp = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "danger", "arguments": {} }
+            }),
+            Transport::Http,
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn approving_policy_lets_the_tool_run_and_strips_confirm() {
+        struct Yes;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, _t: &str, _a: &serde_json::Value) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+        let server = server_with_destructive().with_policy(std::sync::Arc::new(Yes));
+        let resp = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "danger", "arguments": { "_confirm": true } }
+            }),
+            Transport::Http,
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(false), "got {resp}");
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_never_consults_the_policy() {
+        // AlwaysDeny is the default; a read-only tool must still work.
+        let server = server_with_readonly();
+        let resp = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "readit", "arguments": {} }
+            }),
+            Transport::Stdio,
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(false), "got {resp}");
     }
 
     #[tokio::test]
@@ -217,6 +313,7 @@ mod tests {
         let resp = handle_request(
             &server_with_ping(),
             &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            Transport::Stdio,
         )
         .await;
         assert!(resp.is_none());

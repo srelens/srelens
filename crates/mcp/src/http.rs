@@ -14,7 +14,7 @@ use crate::stdio::handle_request;
 use crate::McpServer;
 
 async fn rpc(State(server): State<Arc<McpServer>>, Json(req): Json<Value>) -> Json<Value> {
-    match handle_request(&server, &req).await {
+    match handle_request(&server, &req, crate::Transport::Http).await {
         Some(resp) => Json(resp),
         None => Json(json!({})), // notification — no response body
     }
