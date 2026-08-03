@@ -62,9 +62,14 @@ pub async fn mcp_http_start(port: u16, manager: State<'_, McpHttpManager>) -> Re
     let server = srelens_mcp::McpServer::new(Arc::new(registry));
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
-        let _ = srelens_mcp::http::serve_http_with_shutdown(server, listener, async {
-            let _ = rx.await;
-        })
+        let _ = srelens_mcp::http::serve_http_with_shutdown(
+            server,
+            listener,
+            async {
+                let _ = rx.await;
+            },
+            None,
+        )
         .await;
     });
 

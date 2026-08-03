@@ -5,7 +5,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -20,18 +23,77 @@ async fn rpc(State(server): State<Arc<McpServer>>, Json(req): Json<Value>) -> Js
     }
 }
 
-/// Build the MCP HTTP router (POST /mcp for JSON-RPC, GET /healthz).
-pub fn router(server: McpServer) -> Router {
+/// True for `127.0.0.1[:port]`, `[::1]:port` and `localhost[:port]`.
+fn host_is_loopback(host: &str) -> bool {
+    let h = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    let h = h.trim_start_matches('[').trim_end_matches(']');
+    h == "127.0.0.1" || h == "::1" || h == "localhost"
+}
+
+async fn guard(
+    State(token): State<Option<crate::auth::Token>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // DNS rebinding: a page on evil.com can resolve to 127.0.0.1 and post
+    // here. Binding loopback does not stop it; checking Host does.
+    let host_ok = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_is_loopback)
+        .unwrap_or(false);
+    if !host_ok {
+        return (StatusCode::FORBIDDEN, "non-loopback Host rejected").into_response();
+    }
+
+    if let Some(expected) = token {
+        let presented = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if !expected.matches(presented) {
+            // No detail in the body: do not reveal whether a token is set.
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                "unauthorized",
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Build the MCP HTTP router (POST /mcp for JSON-RPC, GET /healthz). `token`
+/// of `None` disables auth and is for tests only — production hosts always
+/// pass a token.
+pub fn router_with_auth(server: McpServer, token: Option<crate::auth::Token>) -> Router {
     Router::new()
         .route("/mcp", post(rpc))
+        .route_layer(middleware::from_fn_with_state(token, guard))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(Arc::new(server))
 }
 
+/// Test-only convenience: a router with authentication disabled. Never
+/// available to production code — a public no-auth constructor is exactly
+/// the kind of thing that gets called by accident later.
+#[cfg(test)]
+pub(crate) fn router(server: McpServer) -> Router {
+    router_with_auth(server, None)
+}
+
 /// Serve the MCP HTTP transport on `addr` (use a loopback address).
-pub async fn serve_http(server: McpServer, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve_http(
+    server: McpServer,
+    addr: SocketAddr,
+    token: Option<crate::auth::Token>,
+) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(server)).await
+    axum::serve(listener, router_with_auth(server, token)).await
 }
 
 /// Serve on an already-bound `listener` until `shutdown` resolves. Lets a host
@@ -42,11 +104,12 @@ pub async fn serve_http_with_shutdown<F>(
     server: McpServer,
     listener: tokio::net::TcpListener,
     shutdown: F,
+    token: Option<crate::auth::Token>,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router(server))
+    axum::serve(listener, router_with_auth(server, token))
         .with_graceful_shutdown(shutdown)
         .await
 }
@@ -58,7 +121,7 @@ mod tests {
     use srelens_capability::{Capability, Registry};
     use tower::ServiceExt; // oneshot
 
-    fn server() -> McpServer {
+    fn test_server() -> McpServer {
         let mut reg = Registry::new();
         reg.register(Capability::read_only("ping", "health", |v| async move {
             Ok(json!({ "echo": v }))
@@ -71,7 +134,7 @@ mod tests {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
 
-        let app = router(server());
+        let app = router(test_server());
         let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"ping","arguments":"hi"}});
         let resp = app
@@ -79,6 +142,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/mcp")
+                    .header("host", "127.0.0.1:8765")
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -90,5 +154,100 @@ mod tests {
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["result"]["isError"], false);
         assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("echo"));
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+
+    fn call_body() -> Body {
+        Body::from(
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn rejects_a_request_with_no_token() {
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(test_server(), Some(token));
+        let resp = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("content-type", "application/json")
+                    .body(call_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().get("www-authenticate").is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_wrong_token() {
+        let app = router_with_auth(test_server(), Some(crate::auth::Token::generate()));
+        let resp = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("authorization", format!("Bearer {}", "a".repeat(64)))
+                    .header("content-type", "application/json")
+                    .body(call_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn accepts_the_right_token() {
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(test_server(), Some(token.clone()));
+        let resp = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("authorization", format!("Bearer {}", token.as_str()))
+                    .header("content-type", "application/json")
+                    .body(call_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Loopback binding does NOT stop a page on evil.com that resolves to
+    /// 127.0.0.1 from posting here. A Host check does.
+    #[tokio::test]
+    async fn rejects_a_non_loopback_host_header() {
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(test_server(), Some(token.clone()));
+        let resp = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("host", "evil.com")
+                    .header("authorization", format!("Bearer {}", token.as_str()))
+                    .header("content-type", "application/json")
+                    .body(call_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn healthz_needs_no_token() {
+        let app = router_with_auth(test_server(), Some(crate::auth::Token::generate()));
+        let resp = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

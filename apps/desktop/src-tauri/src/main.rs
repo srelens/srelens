@@ -80,7 +80,7 @@ fn run_mcp_http(addr: &str) {
         let registry = srelens_desktop_lib::build_registry();
         let server = srelens_mcp::McpServer::new(Arc::new(registry));
         eprintln!("MCP HTTP listening on http://{addr}/mcp (loopback; destructive tools need _confirm)");
-        if let Err(e) = srelens_mcp::http::serve_http(server, addr).await {
+        if let Err(e) = srelens_mcp::http::serve_http(server, addr, None).await {
             eprintln!("mcp http server error: {e}");
         }
     });
