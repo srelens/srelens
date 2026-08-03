@@ -3,8 +3,6 @@
 
 use std::sync::Arc;
 
-use srelens_mcp::auth::TokenStore as _;
-
 fn main() {
     // GUI launches (Finder/Dock) inherit launchd's minimal PATH, not the
     // user's shell PATH — kubeconfig exec plugins (kubectl, kubectl-oidc_login,
@@ -95,12 +93,14 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     })
 }
 
-/// Where the desktop app keeps its MCP bearer token (Task 8's
-/// `FileTokenStore`, under the app config dir). Headless mode never boots a
-/// Tauri `App`, so `app.path().app_config_dir()` (used in `lib.rs`'s setup)
-/// isn't callable here. This reproduces that resolver's formula —
-/// `dirs::config_dir()/<bundle identifier>` — directly, so the CLI and the
-/// GUI share one token file instead of each minting their own.
+/// Where the desktop app keeps its MCP bearer token's file fallback, under
+/// the app config dir. Headless mode never boots a Tauri `App`, so
+/// `app.path().app_config_dir()` (used in `lib.rs`'s setup) isn't callable
+/// here. This reproduces that resolver's formula — `dirs::config_dir()/<bundle
+/// identifier>` — directly, so the CLI and the GUI resolve to the same
+/// fallback file when the OS keychain isn't available, and to the same
+/// keychain entry (same service/account, see `token_store.rs`) when it is —
+/// either way, a token provisioned in one is usable from the other.
 fn mcp_token_path() -> std::path::PathBuf {
     dirs::config_dir()
         .expect("could not resolve the platform config directory")
@@ -114,8 +114,15 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) 
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(allow_destructive));
 
     // The HTTP transport must never serve unauthenticated: resolve a token
-    // from the flag, then the store, then generate and persist one.
-    let store = srelens_mcp::auth::FileTokenStore::new(mcp_token_path());
+    // from the flag, then the store, then generate and persist one. Uses the
+    // same keychain-or-file resolution as the GUI (`token_store.rs`) so a
+    // token provisioned in one is usable from the other; only the fallback
+    // path (never the token itself) is logged.
+    let (store, file_fallback) =
+        srelens_desktop_lib::token_store::keychain_or_file(mcp_token_path());
+    if file_fallback {
+        eprintln!("srelens: no OS keychain available, storing the MCP token in a 0600 file");
+    }
     let token = match cli_token {
         Some(hex) => srelens_mcp::auth::Token::from_hex(&hex)
             .expect("--mcp-token must be 64 hex characters"),

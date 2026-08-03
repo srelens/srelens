@@ -15,7 +15,7 @@ import {
   srelensCliStatus,
   type CliStatus,
 } from "../lib/mcp";
-import { getMcpToken, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
+import { getMcpToken, getMcpTokenStorage, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "../lib/mcpClients";
 import { McpAuditList } from "./McpAuditList";
 
@@ -51,11 +51,13 @@ export function McpSettingsSection() {
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState("");
   const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
+  const [tokenStorage, setTokenStorage] = useState<"keychain" | "file" | null>(null);
 
   useEffect(() => {
     void mcpHttpStatus().then(setRunningUrl).catch(() => {});
     void srelensCliStatus().then(setCli).catch(() => {});
     void getMcpToken().then(setToken).catch(() => {});
+    void getMcpTokenStorage().then(setTokenStorage).catch(() => {});
   }, []);
 
   function persist(next: McpSettings) {
@@ -269,6 +271,12 @@ export function McpSettingsSection() {
             Revoke token
           </Button>
         </div>
+        {tokenStorage === "file" && (
+          <p className="text-sm text-amber-600 dark:text-amber-500">
+            No OS keychain is available here, so this token is stored in a plain file on disk
+            (readable only by your user account) rather than the OS keychain.
+          </p>
+        )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}
       </section>
 

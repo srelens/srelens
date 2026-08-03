@@ -17,6 +17,7 @@ vi.mock("../lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), in
 const { mcpSecurity } = vi.hoisted(() => ({
   mcpSecurity: {
     getMcpToken: vi.fn(),
+    getMcpTokenStorage: vi.fn(),
     rotateMcpToken: vi.fn(),
     revokeMcpToken: vi.fn(),
     auditTail: vi.fn(),
@@ -38,6 +39,7 @@ beforeEach(() => {
   });
   Object.values(mcpSecurity).forEach((m) => m.mockReset());
   mcpSecurity.getMcpToken.mockResolvedValue(null);
+  mcpSecurity.getMcpTokenStorage.mockResolvedValue("keychain");
   mcpSecurity.auditTail.mockResolvedValue([]);
 });
 
@@ -116,5 +118,18 @@ describe("McpSettingsSection", () => {
 
     // The freshly rotated token is masked again until explicitly revealed.
     expect(screen.queryByText(token)).toBeNull();
+  });
+
+  it("warns when the token fell back to the plain file, and stays quiet for the keychain", async () => {
+    mcpSecurity.getMcpTokenStorage.mockResolvedValue("file");
+    render(<McpSettingsSection />);
+    expect(await screen.findByText(/stored in a plain file on disk/)).toBeDefined();
+  });
+
+  it("shows no fallback warning when the token is in the OS keychain", async () => {
+    mcpSecurity.getMcpTokenStorage.mockResolvedValue("keychain");
+    render(<McpSettingsSection />);
+    await waitFor(() => expect(mcpSecurity.getMcpTokenStorage).toHaveBeenCalled());
+    expect(screen.queryByText(/stored in a plain file on disk/)).toBeNull();
   });
 });

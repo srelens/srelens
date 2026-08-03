@@ -14,6 +14,7 @@ mod mcp_confirm;
 mod settings;
 mod sink;
 mod terminal;
+pub mod token_store;
 mod toolbox;
 mod updater;
 mod watch;
@@ -27,8 +28,8 @@ use helm::{helm_op_close, start_helm_op};
 use logs::{start_log_stream, stop_log_stream};
 use mcp::{
     install_srelens_cli, mcp_audit_tail, mcp_confirm_respond, mcp_http_start, mcp_http_status,
-    mcp_http_stop, mcp_token_get, mcp_token_revoke, mcp_token_rotate, srelens_cli_status,
-    McpAuditPath, McpHttpManager,
+    mcp_http_stop, mcp_token_get, mcp_token_revoke, mcp_token_rotate, mcp_token_storage,
+    srelens_cli_status, McpAuditPath, McpHttpManager,
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
@@ -327,16 +328,19 @@ pub fn run() {
             // resolvable config dir is logged and skipped — the MCP token/
             // audit commands simply error until the app is restarted somewhere
             // that dir resolution succeeds, rather than aborting startup.
+            //
+            // The token store itself prefers the OS keychain, falling back to
+            // a 0600 file (same path `main.rs`'s headless CLI resolves) where
+            // no keychain is available — see `token_store::keychain_or_file`.
             match app.path().app_config_dir().map(|d| d.join("mcp")) {
                 Ok(dir) => {
                     if let Err(e) = std::fs::create_dir_all(&dir) {
                         log::warn!("could not create MCP config dir {}: {e}", dir.display());
                     }
-                    let token_store: std::sync::Arc<dyn srelens_mcp::auth::TokenStore> =
-                        std::sync::Arc::new(srelens_mcp::auth::FileTokenStore::new(
-                            dir.join("token"),
-                        ));
+                    let (token_store, file_fallback) =
+                        token_store::keychain_or_file(dir.join("token"));
                     app.manage(token_store);
+                    app.manage(token_store::TokenStorage::for_fallback(file_fallback));
                     app.manage(McpAuditPath(dir.join("audit.jsonl")));
                 }
                 Err(e) => log::warn!("MCP config dir unavailable: {e}"),
@@ -380,6 +384,7 @@ pub fn run() {
             mcp_token_get,
             mcp_token_rotate,
             mcp_token_revoke,
+            mcp_token_storage,
             mcp_audit_tail,
             install_srelens_cli,
             srelens_cli_status,

@@ -37,6 +37,19 @@ srelens-kube = { path = "../../../crates/kube" }
 srelens-streams = { path = "../../../crates/streams" }
 srelens-server = { path = "../../../crates/server" }
 srelens-registry = { path = "../../../crates/registry" }
+# MCP bearer token storage: prefer the OS keychain, falling back to the 0600
+# file (`FileTokenStore`) where none exists. Feature selection:
+#   - apple-native: macOS/iOS Keychain via `security-framework`.
+#   - windows-native: Windows Credential Manager via `windows-sys`.
+#   - sync-secret-service: Linux/BSD D-Bus Secret Service via `dbus-secret-service`,
+#     synchronous — matches `TokenStore`'s sync API without pulling in an async
+#     D-Bus runtime (the `async-secret-service` alternative needs zbus/tokio).
+#   - crypto-rust: the Secret Service session is encrypted; this backs that
+#     with a pure-Rust implementation instead of `crypto-openssl`, so we don't
+#     need a system OpenSSL dev package at build time.
+# Each backend's transitive deps are already gated to their own target by the
+# keyring crate itself, so enabling all four is safe cross-platform.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"

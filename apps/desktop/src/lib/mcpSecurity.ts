@@ -33,6 +33,13 @@ export async function revokeMcpToken(): Promise<void> {
   await invoke("mcp_token_revoke");
 }
 
+/** Where the token actually lives right now: the OS keychain, or (when none
+ * is available) the 0600 fallback file — so Settings can say plainly when
+ * it's on disk unencrypted rather than implying it's always protected. */
+export async function getMcpTokenStorage(): Promise<"keychain" | "file"> {
+  return await invoke<"keychain" | "file">("mcp_token_storage");
+}
+
 /** Newest first. Returns [] rather than throwing: a missing log is not an error. */
 export async function auditTail(limit: number): Promise<AuditEntry[]> {
   try {
