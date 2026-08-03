@@ -22,6 +22,11 @@ tauri-build = { version = "2.6.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
+# Headless MCP (`--mcp-http`/`--mcp-stdio`) never boots a Tauri `App`, so
+# `app.path().app_config_dir()` isn't callable there. `dirs` reproduces that
+# resolver's formula directly (see `mcp_token_path` in main.rs) so the CLI and
+# the GUI resolve to the same config dir and share one token file.
+dirs = "6"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"

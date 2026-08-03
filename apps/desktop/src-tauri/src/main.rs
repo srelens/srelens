@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use srelens_mcp::auth::TokenStore as _;
+
 fn main() {
     // GUI launches (Finder/Dock) inherit launchd's minimal PATH, not the
     // user's shell PATH — kubeconfig exec plugins (kubectl, kubectl-oidc_login,
@@ -57,30 +59,92 @@ fn main() {
         return;
     }
     // `--mcp-stdio` / `--mcp-http [addr]` run the MCP server instead of the GUI,
-    // so external MCP clients/agents can drive every capability.
+    // so external MCP clients/agents can drive every capability. Headless runs
+    // get no GUI to prompt for consent, so destructive tools are gated behind
+    // an explicit process-level opt-in (`--mcp-allow-destructive`) rather than
+    // the GUI's per-call dialog.
+    let allow_destructive = args.iter().any(|a| a == "--mcp-allow-destructive");
     if args.iter().any(|a| a == "--mcp-stdio") {
-        run_mcp_stdio();
+        run_mcp_stdio(allow_destructive);
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--mcp-http") {
-        let addr = args.get(i + 1).cloned().unwrap_or_else(|| "127.0.0.1:8765".into());
-        run_mcp_http(&addr);
+        // The next arg is the address unless it's itself a flag (e.g.
+        // `--mcp-http --mcp-token ...` with no address given).
+        let addr = args
+            .get(i + 1)
+            .filter(|a| !a.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1:8765".into());
+        let cli_token = flag_value(&args, "--mcp-token");
+        run_mcp_http(&addr, allow_destructive, cli_token);
         return;
     }
     srelens_desktop_lib::run();
 }
 
-fn run_mcp_http(addr: &str) {
+/// The value following `flag` in `args`, e.g. `flag_value(&args, "--mcp-token")`
+/// for `--mcp-token abc123`. Exits loudly if the flag is present but bare —
+/// matches the `--data` handling in the `serve` branch above.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).map(|i| {
+        args.get(i + 1).cloned().unwrap_or_else(|| {
+            eprintln!("{flag} requires a value");
+            std::process::exit(2);
+        })
+    })
+}
+
+/// Where the desktop app keeps its MCP bearer token (Task 8's
+/// `FileTokenStore`, under the app config dir). Headless mode never boots a
+/// Tauri `App`, so `app.path().app_config_dir()` (used in `lib.rs`'s setup)
+/// isn't callable here. This reproduces that resolver's formula —
+/// `dirs::config_dir()/<bundle identifier>` — directly, so the CLI and the
+/// GUI share one token file instead of each minting their own.
+fn mcp_token_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .expect("could not resolve the platform config directory")
+        .join("app.srelens.desktop") // tauri.conf.json "identifier"
+        .join("mcp")
+        .join("token")
+}
+
+fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) {
     let addr: std::net::SocketAddr = addr.parse().expect("invalid --mcp-http address");
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(allow_destructive));
+
+    // The HTTP transport must never serve unauthenticated: resolve a token
+    // from the flag, then the store, then generate and persist one.
+    let store = srelens_mcp::auth::FileTokenStore::new(mcp_token_path());
+    let token = match cli_token {
+        Some(hex) => srelens_mcp::auth::Token::from_hex(&hex)
+            .expect("--mcp-token must be 64 hex characters"),
+        None => match store.load() {
+            Some(t) => t,
+            None => {
+                let t = srelens_mcp::auth::Token::generate();
+                store.save(&t).expect("could not persist the MCP token");
+                // stderr, not stdout: stdout is the JSON-RPC channel on the
+                // stdio transport and must stay parseable. HTTP has no such
+                // constraint but stays consistent with stdio here.
+                eprintln!("srelens: generated MCP token: {}", t.as_str());
+                t
+            }
+        },
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime");
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
-        let server = srelens_mcp::McpServer::new(Arc::new(registry));
-        eprintln!("MCP HTTP listening on http://{addr}/mcp (loopback; destructive tools need _confirm)");
-        if let Err(e) = srelens_mcp::http::serve_http(server, addr, None).await {
+        let server = srelens_mcp::McpServer::new(Arc::new(registry)).with_policy(policy);
+        eprintln!(
+            "MCP HTTP listening on http://{addr}/mcp (loopback; destructive tools need \
+             --mcp-allow-destructive and _confirm)"
+        );
+        if let Err(e) = srelens_mcp::http::serve_http(server, addr, Some(token)).await {
             eprintln!("mcp http server error: {e}");
         }
     });
@@ -107,14 +171,15 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
     });
 }
 
-fn run_mcp_stdio() {
+fn run_mcp_stdio(allow_destructive: bool) {
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(allow_destructive));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime");
     runtime.block_on(async {
         let registry = srelens_desktop_lib::build_registry();
-        let server = srelens_mcp::McpServer::new(Arc::new(registry));
+        let server = srelens_mcp::McpServer::new(Arc::new(registry)).with_policy(policy);
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         let writer = tokio::io::stdout();
         if let Err(e) = srelens_mcp::stdio::serve(server, reader, writer).await {
