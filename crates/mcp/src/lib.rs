@@ -97,15 +97,13 @@ impl McpServer {
     }
 
     /// Whether a tool should be consent-gated over remote transports: it
-    /// mutates the cluster (destructive or confirmation-requiring), or it
-    /// reads sensitive material (e.g. `k8s.getSecret`) — a read causes no
-    /// cluster damage, but handing raw Secret material to whichever client
-    /// happens to be connected is exactly the kind of call a human should see
-    /// first.
+    /// mutates the cluster (destructive), or otherwise requires explicit
+    /// confirmation (e.g. `k8s.getSecret`, which is a `SENSITIVE_READ` and so
+    /// sets `requires_confirm` itself even though it's read-only).
     pub fn requires_confirm(&self, name: &str) -> bool {
         self.registry
             .get(name)
-            .map(|c| c.annotations.requires_confirm || c.annotations.destructive || c.annotations.sensitive)
+            .map(|c| c.annotations.requires_confirm || c.annotations.destructive)
             .unwrap_or(false)
     }
 }
@@ -141,8 +139,9 @@ mod tests {
     }
 
     /// The vulnerability this closes: a `SENSITIVE_READ` capability like
-    /// `k8s.getSecret` mutates nothing, so `destructive`/`requires_confirm`
-    /// alone let it run with no prompt at all. `sensitive` must gate it too.
+    /// `k8s.getSecret` mutates nothing, so plain `destructive` gating alone
+    /// would let it run with no prompt at all. `SENSITIVE_READ` sets
+    /// `requires_confirm: true` itself to close that gap.
     #[tokio::test]
     async fn sensitive_read_capability_requires_confirm() {
         let mut reg = Registry::new();
@@ -163,5 +162,33 @@ mod tests {
     async fn plain_read_only_capability_does_not_require_confirm() {
         let server = McpServer::new(registry_with_ping());
         assert!(!server.requires_confirm("ping"));
+    }
+
+    /// Regression test for the collateral gating this branch fixes:
+    /// `k8s.diffManifest` is read-only and sets `sensitive: true` (its diff
+    /// output can echo Secret data, so it's redacted in the audit log) but is
+    /// NOT `requires_confirm` and NOT `destructive` — it makes no cluster
+    /// change (a server dry-run apply). `sensitive` alone must not gate it,
+    /// or a purely read-only tool gets denied over headless MCP with a
+    /// mutation warning it doesn't deserve.
+    #[tokio::test]
+    async fn sensitive_but_not_confirm_gated_capability_is_not_gated() {
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("k8s.diffManifest", "diff a manifest", |_| async {
+            Ok(json!({}))
+        });
+        cap.annotations = srelens_capability::Annotations {
+            read_only: true,
+            destructive: false,
+            requires_confirm: false,
+            sensitive: true,
+        };
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg));
+
+        assert!(
+            !server.requires_confirm("k8s.diffManifest"),
+            "a read-only, non-confirm-requiring capability must not be gated just because it is sensitive"
+        );
     }
 }
