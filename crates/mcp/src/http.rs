@@ -64,6 +64,17 @@ fn host_is_loopback(host: &str) -> bool {
     h.eq_ignore_ascii_case("127.0.0.1") || h == "::1" || h.eq_ignore_ascii_case("localhost")
 }
 
+/// Strip a leading `Bearer ` auth scheme from an `Authorization` header value.
+/// RFC 7235 §2.1 makes the scheme name case-insensitive ("bearer", "BEARER",
+/// "Bearer" all name the same scheme) — only the scheme, not the credentials
+/// that follow, so this does a case-insensitive match on `"Bearer"` alone and
+/// leaves the token half untouched for `Token::matches`'s constant-time
+/// comparison.
+fn strip_bearer_prefix(header: &str) -> Option<&str> {
+    let (scheme, rest) = header.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(rest)
+}
+
 async fn guard(
     State(token): State<Option<crate::auth::Token>>,
     req: Request,
@@ -86,7 +97,7 @@ async fn guard(
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(strip_bearer_prefix)
             .unwrap_or("");
         if !expected.matches(presented) {
             // No detail in the body: do not reveal whether a token is set.
@@ -231,6 +242,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// RFC 7235 §2.1: the auth scheme name is case-insensitive, so a client
+    /// sending `bearer <token>` (lowercase) must still authenticate — not get
+    /// a 401 that reads as a wrong token.
+    #[tokio::test]
+    async fn accepts_a_lowercase_bearer_scheme() {
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(test_server(), Some(token.clone()));
+        let resp = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("authorization", format!("bearer {}", token.as_str()))
+                    .header("content-type", "application/json")
+                    .body(call_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
