@@ -44,6 +44,8 @@ export { StatusPill } from "./StatusPill";
 export type { StatusPillProps, StatusKind } from "./StatusPill";
 export { IconButton } from "./IconButton";
 export type { IconButtonProps } from "./IconButton";
+export { KubectlPreview } from "./KubectlPreview";
+export type { KubectlPreviewProps } from "./KubectlPreview";
 export { Sparkline } from "./Sparkline";
 export type { SparklineProps } from "./Sparkline";
 export { avatarColor, avatarInitials } from "./avatar";

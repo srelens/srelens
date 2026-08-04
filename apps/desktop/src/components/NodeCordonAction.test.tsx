@@ -19,6 +19,11 @@ beforeEach(() => {
     known: () => true,
     loading: false,
   });
+  // jsdom has no clipboard API; stub it fresh per test (issue #158).
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    configurable: true,
+  });
 });
 
 describe("NodeCordonAction", () => {
@@ -56,6 +61,50 @@ describe("NodeCordonAction", () => {
     // dialog open → the dialog's Drain button is the only reachable one
     fireEvent.click(screen.getByRole("button", { name: "Drain" }));
     await waitFor(() => expect(drainFn).toHaveBeenCalledWith("kind-dev", "node-a"));
+  });
+
+  it("copies the kubectl get and describe commands for the node", async () => {
+    const getObjectFn = vi.fn().mockResolvedValue({ object: { spec: {} } });
+    render(<NodeCordonAction context="kind-dev" name="node-a" getObjectFn={getObjectFn} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy get" })).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "Copy get" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("kubectl get node node-a --context kind-dev -o yaml");
+    fireEvent.click(screen.getByRole("button", { name: "Copy describe" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("kubectl describe node node-a --context kind-dev");
+  });
+
+  it("shows the kubectl equivalent in the cordon confirm dialog", async () => {
+    const getObjectFn = vi.fn().mockResolvedValue({ object: { spec: {} } });
+    render(<NodeCordonAction context="kind-dev" name="node-a" getObjectFn={getObjectFn} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cordon" }));
+    expect(screen.getByText("kubectl cordon node-a --context kind-dev")).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the uncordon confirm dialog", async () => {
+    const getObjectFn = vi.fn().mockResolvedValue({ object: { spec: { unschedulable: true } } });
+    render(<NodeCordonAction context="kind-dev" name="node-a" getObjectFn={getObjectFn} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Uncordon" }));
+    expect(screen.getByText("kubectl uncordon node-a --context kind-dev")).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the drain confirm dialog", async () => {
+    const getObjectFn = vi.fn().mockResolvedValue({ object: { spec: {} } });
+    render(<NodeCordonAction context="kind-dev" name="node-a" getObjectFn={getObjectFn} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Drain" }));
+    expect(
+      screen.getByText("kubectl drain node-a --ignore-daemonsets --delete-emptydir-data --context kind-dev"),
+    ).toBeDefined();
+  });
+
+  it("does not throw or report success when the clipboard write fails", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+      configurable: true,
+    });
+    const getObjectFn = vi.fn().mockResolvedValue({ object: { spec: {} } });
+    render(<NodeCordonAction context="kind-dev" name="node-a" getObjectFn={getObjectFn} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Copy get" }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
   });
 });
 

@@ -85,6 +85,11 @@ beforeEach(() => {
     known: () => true,
     loading: false,
   });
+  // jsdom has no clipboard API; stub it fresh per test (issue #158).
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    configurable: true,
+  });
 });
 
 describe("PodActions", () => {
@@ -142,6 +147,43 @@ describe("PodActions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Evict" }));
     await waitFor(() => expect(evictPodMock).toHaveBeenCalledWith("kind-dev", "default", "web-1"));
     await waitFor(() => expect(onDeleted).toHaveBeenCalled());
+  });
+
+  it("copies the kubectl get and describe commands for the pod", () => {
+    render(<PodActions context="kind-dev" pod={pod} onDeleted={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy get" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "kubectl get pod web-1 -n default --context kind-dev -o yaml",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Copy describe" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "kubectl describe pod web-1 -n default --context kind-dev",
+    );
+  });
+
+  it("shows the kubectl equivalent in the delete confirm dialog", () => {
+    render(<PodActions context="kind-dev" pod={pod} onDeleted={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByText("kubectl delete pod web-1 -n default --context kind-dev")).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the evict confirm dialog", () => {
+    render(<PodActions context="kind-dev" pod={pod} onDeleted={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Evict" }));
+    expect(
+      screen.getByText("kubectl delete pod web-1 --grace-period=0 -n default --context kind-dev"),
+    ).toBeDefined();
+  });
+
+  it("does not report success when the clipboard write fails", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+      configurable: true,
+    });
+    render(<PodActions context="kind-dev" pod={pod} onDeleted={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy get" }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
+    expect(notifyMock.success).not.toHaveBeenCalledWith("Copied kubectl command");
   });
 });
 
@@ -282,6 +324,110 @@ describe("ResourceActions", () => {
     await waitFor(() =>
       expect(cronjobSetSuspendMock).toHaveBeenCalledWith("kind-dev", "ops", "nightly", true),
     );
+  });
+
+  it("copies the kubectl get and describe commands for the resource", () => {
+    render(
+      <ResourceActions context="kind-dev" kind="Deployment" namespace="default" name="web" onDeleted={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Copy get" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "kubectl get deployment web -n default --context kind-dev -o yaml",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Copy describe" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "kubectl describe deployment web -n default --context kind-dev",
+    );
+  });
+
+  it("shows the kubectl equivalent in the restart confirm dialog", () => {
+    render(
+      <ResourceActions context="kind-dev" kind="Deployment" namespace="default" name="web" onDeleted={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+    expect(
+      screen.getByText("kubectl rollout restart deployment/web -n default --context kind-dev"),
+    ).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the delete confirm dialog", () => {
+    render(
+      <ResourceActions context="kind-dev" kind="Deployment" namespace="default" name="web" onDeleted={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByText("kubectl delete deployment web -n default --context kind-dev")).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the scale confirm dialog only once a valid replica count is entered", () => {
+    render(
+      <ResourceActions context="kind-dev" kind="Deployment" namespace="default" name="web" onDeleted={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    expect(screen.queryByText(/kubectl scale/)).toBeNull();
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "5" } });
+    expect(
+      screen.getByText("kubectl scale deployment/web --replicas=5 -n default --context kind-dev"),
+    ).toBeDefined();
+    // An invalid (non-integer) entry hides the preview again rather than showing a bogus command.
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "abc" } });
+    expect(screen.queryByText(/kubectl scale/)).toBeNull();
+  });
+
+  it("shows the kubectl equivalent in the cronjob trigger confirm dialog", () => {
+    render(
+      <ResourceActions context="kind-dev" kind="CronJob" namespace="ops" name="nightly" onDeleted={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    expect(
+      screen.getByText("kubectl create job --from=cronjob/nightly nightly-manual -n ops --context kind-dev"),
+    ).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the cronjob suspend confirm dialog", () => {
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="CronJob"
+        namespace="ops"
+        name="nightly"
+        cronjobSuspended={false}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Suspend" }));
+    expect(
+      screen.getByText('kubectl patch cronjob nightly -p \'{"spec":{"suspend":true}}\' -n ops --context kind-dev'),
+    ).toBeDefined();
+  });
+
+  it("shows the kubectl equivalent in the cronjob resume confirm dialog", () => {
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="CronJob"
+        namespace="ops"
+        name="nightly"
+        cronjobSuspended
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(
+      screen.getByText('kubectl patch cronjob nightly -p \'{"spec":{"suspend":false}}\' -n ops --context kind-dev'),
+    ).toBeDefined();
+  });
+
+  it("does not report success when the clipboard write fails", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+      configurable: true,
+    });
+    render(
+      <ResourceActions context="kind-dev" kind="Deployment" namespace="default" name="web" onDeleted={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Copy get" }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
+    expect(notifyMock.success).not.toHaveBeenCalledWith("Copied kubectl command");
   });
 });
 
