@@ -154,6 +154,13 @@ pub async fn mcp_http_start(
     token_store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
     audit_path: State<'_, McpAuditPath>,
 ) -> Result<String, String> {
+    // Taken BEFORE the token is read, not just around the restart: a rotate
+    // that lands in between would persist a new token and restart the server
+    // with it, and then this start would rebind with the token it had already
+    // loaded — leaving the transport serving a value the store no longer holds,
+    // so every client configured from Settings gets a 401.
+    let lifecycle = manager.lifecycle().await;
+
     // The HTTP transport must never serve unauthenticated: mint a token on
     // first use if one hasn't been generated yet.
     let token = match token_store.load() {
@@ -165,7 +172,6 @@ pub async fn mcp_http_start(
         }
     };
 
-    let lifecycle = manager.lifecycle().await;
     start_server(
         port,
         &app,
@@ -235,13 +241,15 @@ pub async fn mcp_token_rotate(
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
     audit_path: State<'_, McpAuditPath>,
 ) -> Result<String, String> {
+    // Held across persist-then-restart, not just the restart: a revoke landing
+    // between the two would clear the store and stop the server, and this
+    // rotate would then leave a freshly persisted token behind it — Settings
+    // showing a live token for a server that was deliberately switched off.
+    let lifecycle = manager.lifecycle().await;
+
     let t = srelens_mcp::auth::Token::generate();
     store.save(&t).map_err(|e| e.to_string())?;
 
-    // Held across the read-port-then-restart sequence, so a concurrent toggle
-    // can't stop the server between the two and leave us restarting one the
-    // user just switched off.
-    let lifecycle = manager.lifecycle().await;
     let running_port = manager.running.lock().unwrap().as_ref().map(|r| r.addr.port());
     if let Some(port) = running_port {
         start_server(
@@ -280,8 +288,11 @@ pub async fn mcp_token_revoke(
     manager: State<'_, McpHttpManager>,
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
 ) -> Result<(), String> {
-    store.clear().map_err(|e| e.to_string())?;
+    // Same ordering rule as rotate: clear and stop are one transition, so a
+    // concurrent start can't load the token between them and bring the server
+    // back up on a value that has just been revoked.
     let lifecycle = manager.lifecycle().await;
+    store.clear().map_err(|e| e.to_string())?;
     stop_running(&manager, &pending, &lifecycle).await;
     Ok(())
 }
