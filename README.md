@@ -144,11 +144,13 @@ srelens --mcp-http 127.0.0.1:8765
 ```
 
 Destructive tools prompt for confirmation in the app. Headless runs have no
-dialog to show, so they need both `--mcp-allow-destructive` on the process
-*and* `"_confirm": true` on the call — neither alone authorizes anything, and
-there's no GUI toggle for stdio. See the
-[user guide](docs/USAGE.md#mcp-server-for-ai-agents) for the full security
-model, including the Host-header check, audit log, and token storage.
+dialog to show, so they need `"_confirm": true` on the call *and* a
+process-level opt-in — `--mcp-allow-destructive` to change anything, or
+`--mcp-allow-sensitive-reads` to read Secrets. The two are independent, so
+reading a Secret never implies permission to drain a node, and neither flag
+alone authorizes anything without `_confirm`. There's no GUI toggle for stdio.
+See the [user guide](docs/USAGE.md#mcp-server-for-ai-agents) for the full
+security model, including the Host-header check, audit log, and token storage.
 
 Example stdio configuration:
 

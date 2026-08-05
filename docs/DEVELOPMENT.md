@@ -88,7 +88,7 @@ cargo run -p srelens-desktop --no-default-features -- --mcp-stdio
 cargo run -p srelens-desktop --no-default-features -- --mcp-http 127.0.0.1:8765
 ```
 
-The HTTP transport binds to loopback, requires a bearer token (`crates/mcp/src/auth.rs`), and checks the `Host` header to block DNS rebinding. Tools annotated `destructive` are gated by an injected `ConfirmPolicy` (`crates/mcp/src/policy.rs`): the desktop app prompts in-app, and headless runs need `--mcp-allow-destructive` **and** `"_confirm": true` on the call — `_confirm` alone never authorizes anything. See the [user guide](USAGE.md#mcp-server-for-ai-agents) for the full security model.
+The HTTP transport binds to loopback, requires a bearer token (`crates/mcp/src/auth.rs`, supplied via `SRELENS_MCP_TOKEN` — never a flag, since argv is readable via `ps`), and checks the `Host` header on every route to block DNS rebinding. Gated tools go through an injected `ConfirmPolicy` (`crates/mcp/src/policy.rs`), which receives a `ConsentKind` derived from the capability's annotations: a gated capability that is `read_only` is a `SensitiveRead`, anything else gated is `Destructive`. The desktop app prompts in-app for both; headless runs need `"_confirm": true` on the call plus the matching flag (`--mcp-allow-destructive` or `--mcp-allow-sensitive-reads`) — `_confirm` alone never authorizes anything, and neither flag implies the other. See the [user guide](USAGE.md#mcp-server-for-ai-agents) for the full security model.
 
 ## Testing standards
 
