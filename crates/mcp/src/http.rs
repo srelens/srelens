@@ -75,13 +75,11 @@ fn strip_bearer_prefix(header: &str) -> Option<&str> {
     scheme.eq_ignore_ascii_case("Bearer").then_some(rest)
 }
 
-async fn guard(
-    State(token): State<Option<crate::auth::Token>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    // DNS rebinding: a page on evil.com can resolve to 127.0.0.1 and post
-    // here. Binding loopback does not stop it; checking Host does.
+/// Applied to EVERY route, including `/healthz`. DNS rebinding: a page on
+/// evil.com can resolve to 127.0.0.1 and reach this port. Binding loopback does
+/// not stop it; checking Host does. An unauthenticated route is still a signal
+/// — "something is listening here" — so the Host check has to cover it too.
+async fn host_guard(req: Request, next: Next) -> Response {
     let host_ok = req
         .headers()
         .get(axum::http::header::HOST)
@@ -91,7 +89,16 @@ async fn guard(
     if !host_ok {
         return (StatusCode::FORBIDDEN, "non-loopback Host rejected").into_response();
     }
+    next.run(req).await
+}
 
+/// Applied to `/mcp` only: `/healthz` is deliberately reachable without a
+/// token so a client can probe liveness before it has been configured.
+async fn token_guard(
+    State(token): State<Option<crate::auth::Token>>,
+    req: Request,
+    next: Next,
+) -> Response {
     if let Some(expected) = token {
         let presented = req
             .headers()
@@ -112,14 +119,22 @@ async fn guard(
     next.run(req).await
 }
 
-/// Build the MCP HTTP router (POST /mcp for JSON-RPC, GET /healthz). `token`
-/// of `None` disables auth and is for tests only — production hosts always
-/// pass a token.
-pub fn router_with_auth(server: McpServer, token: Option<crate::auth::Token>) -> Router {
+/// Build the MCP HTTP router (POST /mcp for JSON-RPC, GET /healthz). Requires a
+/// token: there is no way to ask this crate for an unauthenticated production
+/// server, because an `Option` here is an invitation to pass `None` by accident.
+pub fn router_with_auth(server: McpServer, token: crate::auth::Token) -> Router {
+    router_inner(server, Some(token))
+}
+
+/// Layering: the token check is a `route_layer` on `/mcp` alone, while the Host
+/// check is an outer `layer` covering every route (and unmatched paths), so
+/// nothing this server exposes answers a non-loopback caller.
+fn router_inner(server: McpServer, token: Option<crate::auth::Token>) -> Router {
     Router::new()
         .route("/mcp", post(rpc))
-        .route_layer(middleware::from_fn_with_state(token, guard))
+        .route_layer(middleware::from_fn_with_state(token, token_guard))
         .route("/healthz", get(|| async { "ok" }))
+        .layer(middleware::from_fn(host_guard))
         .with_state(Arc::new(server))
 }
 
@@ -128,14 +143,14 @@ pub fn router_with_auth(server: McpServer, token: Option<crate::auth::Token>) ->
 /// the kind of thing that gets called by accident later.
 #[cfg(test)]
 pub(crate) fn router(server: McpServer) -> Router {
-    router_with_auth(server, None)
+    router_inner(server, None)
 }
 
 /// Serve the MCP HTTP transport on `addr` (use a loopback address).
 pub async fn serve_http(
     server: McpServer,
     addr: SocketAddr,
-    token: Option<crate::auth::Token>,
+    token: crate::auth::Token,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router_with_auth(server, token)).await
@@ -149,7 +164,7 @@ pub async fn serve_http_with_shutdown<F>(
     server: McpServer,
     listener: tokio::net::TcpListener,
     shutdown: F,
-    token: Option<crate::auth::Token>,
+    token: crate::auth::Token,
 ) -> std::io::Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -212,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_request_with_no_token() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), Some(token));
+        let app = router_with_auth(test_server(), token);
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -229,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_a_wrong_token() {
-        let app = router_with_auth(test_server(), Some(crate::auth::Token::generate()));
+        let app = router_with_auth(test_server(), crate::auth::Token::generate());
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -250,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_a_lowercase_bearer_scheme() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), Some(token.clone()));
+        let app = router_with_auth(test_server(), token.clone());
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -268,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_the_right_token() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), Some(token.clone()));
+        let app = router_with_auth(test_server(), token.clone());
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -288,7 +303,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_non_loopback_host_header() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), Some(token.clone()));
+        let app = router_with_auth(test_server(), token.clone());
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -305,12 +320,37 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_needs_no_token() {
-        let app = router_with_auth(test_server(), Some(crate::auth::Token::generate()));
+        let app = router_with_auth(test_server(), crate::auth::Token::generate());
         let resp = app
-            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/healthz")
+                    .header("host", "127.0.0.1:8765")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `/healthz` deliberately needs no token, but that must not make it a
+    /// free "is srelens listening on this port?" oracle for any process or web
+    /// page sweeping loopback ports. The Host check is what makes the answer
+    /// unavailable to a caller that isn't genuinely local, so it has to cover
+    /// every route, not just `/mcp`.
+    #[tokio::test]
+    async fn healthz_rejects_a_non_loopback_host() {
+        let app = router_with_auth(test_server(), crate::auth::Token::generate());
+        let resp = app
+            .oneshot(
+                Request::get("/healthz")
+                    .header("host", "evil.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -352,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_missing_host_header() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), Some(token.clone()));
+        let app = router_with_auth(test_server(), token.clone());
         let resp = app
             .oneshot(
                 Request::post("/mcp")

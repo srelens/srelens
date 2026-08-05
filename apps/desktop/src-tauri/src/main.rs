@@ -60,40 +60,39 @@ fn main() {
     }
     // `--mcp-stdio` / `--mcp-http [addr]` run the MCP server instead of the GUI,
     // so external MCP clients/agents can drive every capability. Headless runs
-    // get no GUI to prompt for consent, so destructive tools are gated behind
-    // an explicit process-level opt-in (`--mcp-allow-destructive`) rather than
-    // the GUI's per-call dialog.
+    // get no GUI to prompt for consent, so gated tools need an explicit
+    // process-level opt-in rather than the GUI's per-call dialog.
+    //
+    // Two independent flags, because they are two different risks: mutating the
+    // cluster and reading out its secrets. Granting one must not grant the
+    // other, so an agent allowed to read a Secret still cannot drain a node.
     let allow_destructive = args.iter().any(|a| a == "--mcp-allow-destructive");
+    let allow_sensitive_reads = args.iter().any(|a| a == "--mcp-allow-sensitive-reads");
     if args.iter().any(|a| a == "--mcp-stdio") {
-        run_mcp_stdio(allow_destructive);
+        run_mcp_stdio(allow_destructive, allow_sensitive_reads);
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--mcp-http") {
         // The next arg is the address unless it's itself a flag (e.g.
-        // `--mcp-http --mcp-token ...` with no address given).
+        // `--mcp-http --mcp-allow-destructive` with no address given).
         let addr = args
             .get(i + 1)
             .filter(|a| !a.starts_with("--"))
             .cloned()
             .unwrap_or_else(|| "127.0.0.1:8765".into());
-        let cli_token = flag_value(&args, "--mcp-token");
-        run_mcp_http(&addr, allow_destructive, cli_token);
+        run_mcp_http(&addr, allow_destructive, allow_sensitive_reads);
         return;
     }
     srelens_desktop_lib::run();
 }
 
-/// The value following `flag` in `args`, e.g. `flag_value(&args, "--mcp-token")`
-/// for `--mcp-token abc123`. Exits loudly if the flag is present but bare —
-/// matches the `--data` handling in the `serve` branch above.
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).map(|i| {
-        args.get(i + 1).cloned().unwrap_or_else(|| {
-            eprintln!("{flag} requires a value");
-            std::process::exit(2);
-        })
-    })
-}
+/// Environment variable carrying a caller-supplied MCP bearer token.
+///
+/// Deliberately NOT a `--mcp-token` flag: argv is world-readable through `ps`
+/// on both Linux and macOS, so a flag would hand the token to every other
+/// account on the machine — the exact local-process threat the token exists to
+/// stop. A process's environment is readable only by its own user.
+const TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 
 /// Where the desktop app keeps its MCP bearer token's file fallback, under
 /// the app config dir. Headless mode never boots a Tauri `App`, so
@@ -127,22 +126,29 @@ fn mcp_audit_path() -> std::path::PathBuf {
 /// identically.
 const MCP_AUDIT_CAP_BYTES: u64 = 5 * 1024 * 1024;
 
-fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) {
+fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool) {
     let addr: std::net::SocketAddr = addr.parse().expect("invalid --mcp-http address");
-    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(allow_destructive));
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(
+        allow_destructive,
+        allow_sensitive_reads,
+    ));
 
     // The HTTP transport must never serve unauthenticated: resolve a token
-    // from the flag, then the store, then generate and persist one. Uses the
-    // same keychain-or-file resolution as the GUI (`token_store.rs`) so a
+    // from the environment, then the store, then generate and persist one. Uses
+    // the same keychain-or-file resolution as the GUI (`token_store.rs`) so a
     // token provisioned in one is usable from the other. The store itself
     // absorbs a genuinely failed keychain call and falls back to the file
     // rather than erroring — it only ever returns `Err` from `save` for a
     // real file-write failure, so `.expect` below can't panic just because
     // there's no D-Bus session on this host.
     let store = srelens_desktop_lib::token_store::keychain_or_file(mcp_token_path());
-    let token = match cli_token {
-        Some(hex) => srelens_mcp::auth::Token::from_hex(&hex)
-            .expect("--mcp-token must be 64 hex characters"),
+    let token = match std::env::var(TOKEN_ENV).ok().filter(|v| !v.trim().is_empty()) {
+        Some(hex) => srelens_mcp::auth::Token::from_hex(&hex).unwrap_or_else(|| {
+            // The value itself is never echoed — that's the whole point of
+            // keeping it out of argv.
+            eprintln!("{TOKEN_ENV} must be 64 hex characters");
+            std::process::exit(2);
+        }),
         None => match store.load() {
             Some(t) => t,
             None => {
@@ -176,10 +182,10 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, cli_token: Option<String>) 
                 MCP_AUDIT_CAP_BYTES,
             )));
         eprintln!(
-            "MCP HTTP listening on http://{addr}/mcp (loopback; destructive tools need \
-             --mcp-allow-destructive and _confirm)"
+            "MCP HTTP listening on http://{addr}/mcp (loopback; gated tools need _confirm plus \
+             --mcp-allow-destructive to mutate or --mcp-allow-sensitive-reads to read secrets)"
         );
-        if let Err(e) = srelens_mcp::http::serve_http(server, addr, Some(token)).await {
+        if let Err(e) = srelens_mcp::http::serve_http(server, addr, token).await {
             eprintln!("mcp http server error: {e}");
         }
     });
@@ -206,8 +212,11 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
     });
 }
 
-fn run_mcp_stdio(allow_destructive: bool) {
-    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(allow_destructive));
+fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(
+        allow_destructive,
+        allow_sensitive_reads,
+    ));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

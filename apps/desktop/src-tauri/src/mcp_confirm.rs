@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use srelens_mcp::policy::{ConfirmPolicy, Decision};
+use srelens_mcp::policy::{ConfirmPolicy, ConsentKind, Decision};
 use tokio::sync::oneshot;
 
 #[derive(Default)]
@@ -53,7 +53,11 @@ impl PromptUser {
 
 #[async_trait::async_trait]
 impl ConfirmPolicy for PromptUser {
-    async fn confirm(&self, tool: &str, args: &Value) -> Decision {
+    /// `kind` is deliberately unused: a human being shown the tool name and its
+    /// arguments is the consent mechanism either way, so the GUI prompts for a
+    /// sensitive read exactly as it does for a mutation. The distinction exists
+    /// for headless policies, which have no human to look at the call.
+    async fn confirm(&self, tool: &str, args: &Value, _kind: ConsentKind) -> Decision {
         use tauri::{Emitter, Manager};
 
         let id = uuid::Uuid::new_v4().to_string();

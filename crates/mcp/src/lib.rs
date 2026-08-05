@@ -101,10 +101,28 @@ impl McpServer {
     /// confirmation (e.g. `k8s.getSecret`, which is a `SENSITIVE_READ` and so
     /// sets `requires_confirm` itself even though it's read-only).
     pub fn requires_confirm(&self, name: &str) -> bool {
-        self.registry
-            .get(name)
-            .map(|c| c.annotations.requires_confirm || c.annotations.destructive)
-            .unwrap_or(false)
+        self.consent_kind(name).is_some()
+    }
+
+    /// *Why* a tool needs consent, or `None` if it doesn't — the single source
+    /// of truth for the gate in `handle_request`.
+    ///
+    /// The split reads off `read_only`, not `sensitive`: a gated capability
+    /// that changes nothing is gated because of what it *returns*
+    /// (`SENSITIVE_READ`), while anything else gated mutates something. Using
+    /// `sensitive` here would misfile `k8s.diffManifest`, which is `sensitive`
+    /// (its output can echo Secret data, so the audit log redacts it) but
+    /// isn't gated at all.
+    pub fn consent_kind(&self, name: &str) -> Option<crate::policy::ConsentKind> {
+        let cap = self.registry.get(name)?;
+        if !(cap.annotations.requires_confirm || cap.annotations.destructive) {
+            return None;
+        }
+        Some(if cap.annotations.read_only {
+            crate::policy::ConsentKind::SensitiveRead
+        } else {
+            crate::policy::ConsentKind::Destructive
+        })
     }
 }
 
@@ -156,6 +174,90 @@ mod tests {
             server.requires_confirm("k8s.getSecret"),
             "a sensitive-read capability must be consent-gated"
         );
+    }
+
+    /// A gated capability that changes nothing is gated for what it RETURNS,
+    /// so it must classify as a sensitive read — otherwise headless operators
+    /// are back to needing `--mcp-allow-destructive` to read a Secret.
+    #[tokio::test]
+    async fn a_gated_read_only_capability_is_a_sensitive_read() {
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("k8s.getSecret", "reads a secret", |_| async {
+            Ok(json!({}))
+        });
+        cap.annotations = srelens_capability::Annotations::SENSITIVE_READ;
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg));
+
+        assert_eq!(
+            server.consent_kind("k8s.getSecret"),
+            Some(crate::policy::ConsentKind::SensitiveRead)
+        );
+    }
+
+    /// A gated capability that mutates classifies as destructive, whether or
+    /// not it is flagged `destructive` — `MUTATING` (e.g. `k8s.applyManifest`,
+    /// `k8s.helmRepoUpdate`) changes state and belongs behind the write flag.
+    #[tokio::test]
+    async fn a_gated_mutating_capability_is_destructive() {
+        let mut reg = Registry::new();
+        let mut destructive = Capability::read_only("k8s.deletePod", "deletes", |_| async {
+            Ok(json!({}))
+        });
+        destructive.annotations = srelens_capability::Annotations::DESTRUCTIVE;
+        reg.register(destructive);
+        let mut mutating = Capability::read_only("k8s.applyManifest", "applies", |_| async {
+            Ok(json!({}))
+        });
+        mutating.annotations = srelens_capability::Annotations::MUTATING;
+        reg.register(mutating);
+        let server = McpServer::new(Arc::new(reg));
+
+        assert_eq!(
+            server.consent_kind("k8s.deletePod"),
+            Some(crate::policy::ConsentKind::Destructive)
+        );
+        assert_eq!(
+            server.consent_kind("k8s.applyManifest"),
+            Some(crate::policy::ConsentKind::Destructive),
+            "a non-destructive mutation still belongs behind the write flag"
+        );
+    }
+
+    /// The case that pins WHICH annotation drives the split. `SENSITIVE_READ`
+    /// happens to set both `read_only` and `sensitive`, so the two readings
+    /// agree there and neither of the tests above can tell them apart. They
+    /// diverge on a capability that mutates AND handles sensitive material —
+    /// a Secret write, say. Classifying that as a sensitive read would mean
+    /// `--mcp-allow-sensitive-reads` alone authorizes *modifying* Secrets:
+    /// read permission escalating to write. It mutates, so it is destructive.
+    #[tokio::test]
+    async fn a_gated_capability_that_mutates_sensitive_data_is_destructive() {
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("k8s.updateConfigData", "writes a Secret", |_| async {
+            Ok(json!({}))
+        });
+        cap.annotations = srelens_capability::Annotations {
+            read_only: false,
+            destructive: false,
+            requires_confirm: true,
+            sensitive: true,
+        };
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg));
+
+        assert_eq!(
+            server.consent_kind("k8s.updateConfigData"),
+            Some(crate::policy::ConsentKind::Destructive),
+            "a sensitive WRITE must not be unlocked by the sensitive-read flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ungated_capability_has_no_consent_kind() {
+        let server = McpServer::new(registry_with_ping());
+        assert_eq!(server.consent_kind("ping"), None);
+        assert_eq!(server.consent_kind("no-such-tool"), None);
     }
 
     #[tokio::test]

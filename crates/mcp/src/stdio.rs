@@ -82,9 +82,9 @@ pub async fn handle_request(
             let sensitive = server.is_sensitive(name);
             let mut decision = "auto";
 
-            if server.requires_confirm(name) {
+            if let Some(kind) = server.consent_kind(name) {
                 if let crate::policy::Decision::Denied(reason) =
-                    server.confirm_policy().confirm(name, &raw_args).await
+                    server.confirm_policy().confirm(name, &raw_args, kind).await
                 {
                     server.audit().record(crate::audit::AuditRecord {
                         transport,
@@ -307,7 +307,12 @@ mod tests {
         struct Yes(Arc<Mutex<Option<Value>>>);
         #[async_trait::async_trait]
         impl crate::policy::ConfirmPolicy for Yes {
-            async fn confirm(&self, _t: &str, a: &serde_json::Value) -> crate::policy::Decision {
+            async fn confirm(
+                &self,
+                _t: &str,
+                a: &serde_json::Value,
+                _kind: crate::policy::ConsentKind,
+            ) -> crate::policy::Decision {
                 *self.0.lock().unwrap() = Some(a.clone());
                 crate::policy::Decision::Approved
             }
@@ -429,7 +434,12 @@ mod tests {
         struct AlwaysApprove;
         #[async_trait::async_trait]
         impl crate::policy::ConfirmPolicy for AlwaysApprove {
-            async fn confirm(&self, _tool: &str, _args: &Value) -> crate::policy::Decision {
+            async fn confirm(
+                &self,
+                _tool: &str,
+                _args: &Value,
+                _kind: crate::policy::ConsentKind,
+            ) -> crate::policy::Decision {
                 crate::policy::Decision::Approved
             }
         }

@@ -23,6 +23,14 @@ struct Running {
 pub struct McpHttpManager {
     cache: Arc<ClientCache>,
     running: Mutex<Option<Running>>,
+    /// Serializes whole lifecycle transitions. `running` is a std mutex that
+    /// cannot be held across an await, so on its own it only makes each
+    /// individual read/write atomic — not the stop-then-rebind sequence around
+    /// them. Two overlapping transitions (the Settings toggle and a token
+    /// rotate are separate controls) could therefore both pass teardown and
+    /// then both bind the same port, or the later one could overwrite a live
+    /// `Running` and orphan a task still holding the listener.
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 impl McpHttpManager {
@@ -30,9 +38,21 @@ impl McpHttpManager {
         Self {
             cache,
             running: Mutex::new(None),
+            lifecycle: tokio::sync::Mutex::new(()),
         }
     }
+
+    /// Take the lifecycle lock for the duration of a start/stop/rotate. The
+    /// resulting guard is threaded into [`stop_running`] and [`start_server`]
+    /// as a witness, so neither can be called without it being held.
+    async fn lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lifecycle.lock().await
+    }
 }
+
+/// Proof that the caller holds `McpHttpManager::lifecycle`. Only exists to make
+/// "you must hold the lock" a compile-time requirement rather than a comment.
+type Lifecycle<'a> = tokio::sync::MutexGuard<'a, ()>;
 
 /// Stop whatever server is currently registered, if any, and wait for its
 /// task to actually finish before returning. Signals graceful shutdown first
@@ -41,7 +61,11 @@ impl McpHttpManager {
 /// if that doesn't finish promptly — aborting alone does not synchronously
 /// drop the task's future, so the old listener fd can still be open when the
 /// caller immediately tries to rebind the same port.
-async fn stop_running(manager: &McpHttpManager, pending: &crate::mcp_confirm::Pending) {
+async fn stop_running(
+    manager: &McpHttpManager,
+    pending: &crate::mcp_confirm::Pending,
+    _lifecycle: &Lifecycle<'_>,
+) {
     // Release every in-flight confirm as denied first, so a call blocked on a
     // dialog fails fast instead of hanging until its timeout once the
     // transport it belongs to is gone.
@@ -79,8 +103,9 @@ async fn start_server(
     pending: &Arc<crate::mcp_confirm::Pending>,
     token: srelens_mcp::auth::Token,
     audit_path: &std::path::Path,
+    lifecycle: &Lifecycle<'_>,
 ) -> Result<String, String> {
-    stop_running(manager, pending).await;
+    stop_running(manager, pending, lifecycle).await;
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -106,7 +131,7 @@ async fn start_server(
             async {
                 let _ = rx.await;
             },
-            Some(token),
+            token,
         )
         .await;
     });
@@ -140,7 +165,17 @@ pub async fn mcp_http_start(
         }
     };
 
-    start_server(port, &app, &manager, pending.inner(), token, &audit_path.0).await
+    let lifecycle = manager.lifecycle().await;
+    start_server(
+        port,
+        &app,
+        &manager,
+        pending.inner(),
+        token,
+        &audit_path.0,
+        &lifecycle,
+    )
+    .await
 }
 
 /// Stop the MCP HTTP server if running.
@@ -149,7 +184,8 @@ pub async fn mcp_http_stop(
     manager: State<'_, McpHttpManager>,
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
 ) -> Result<(), String> {
-    stop_running(&manager, &pending).await;
+    let lifecycle = manager.lifecycle().await;
+    stop_running(&manager, &pending, &lifecycle).await;
     Ok(())
 }
 
@@ -202,11 +238,22 @@ pub async fn mcp_token_rotate(
     let t = srelens_mcp::auth::Token::generate();
     store.save(&t).map_err(|e| e.to_string())?;
 
-    // Read the running port (if any) and drop the lock before restarting —
-    // `start_server` takes it again via `stop_running`.
+    // Held across the read-port-then-restart sequence, so a concurrent toggle
+    // can't stop the server between the two and leave us restarting one the
+    // user just switched off.
+    let lifecycle = manager.lifecycle().await;
     let running_port = manager.running.lock().unwrap().as_ref().map(|r| r.addr.port());
     if let Some(port) = running_port {
-        start_server(port, &app, &manager, pending.inner(), t.clone(), &audit_path.0).await?;
+        start_server(
+            port,
+            &app,
+            &manager,
+            pending.inner(),
+            t.clone(),
+            &audit_path.0,
+            &lifecycle,
+        )
+        .await?;
     }
 
     Ok(t.as_str().to_string())
@@ -234,21 +281,17 @@ pub async fn mcp_token_revoke(
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
 ) -> Result<(), String> {
     store.clear().map_err(|e| e.to_string())?;
-    stop_running(&manager, &pending).await;
+    let lifecycle = manager.lifecycle().await;
+    stop_running(&manager, &pending, &lifecycle).await;
     Ok(())
 }
 
-/// The most recent `limit` MCP audit records, newest first.
+/// The most recent `limit` MCP audit records, newest first. Reading is owned by
+/// `srelens_mcp::audit`, which also writes the format and so knows how to tail
+/// it without parsing the whole 5 MB file.
 #[tauri::command]
 pub fn mcp_audit_tail(limit: usize, path: State<'_, McpAuditPath>) -> Vec<serde_json::Value> {
-    let body = std::fs::read_to_string(&path.0).unwrap_or_default();
-    let mut lines: Vec<serde_json::Value> = body
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    lines.reverse(); // newest first
-    lines.truncate(limit);
-    lines
+    srelens_mcp::audit::tail(&path.0, limit)
 }
 
 /// Path to the audit log, managed so the command can read it without
@@ -348,6 +391,86 @@ mod tests {
     /// `stop_running`, rebind the identical port) 50 times in a row; with the
     /// fix (`await` the handle, with a bounded `abort()` fallback) every
     /// rebind must succeed.
+    /// Mirrors `start_server`'s lifecycle shape (take the lock, tear the old
+    /// server down, rebind, register) without the Tauri bits `start_server`
+    /// needs — an `AppHandle` can't be built in a unit test. The listener-owning
+    /// task stands in for axum holding the socket.
+    async fn restart_on(
+        manager: &McpHttpManager,
+        pending: &crate::mcp_confirm::Pending,
+        addr: SocketAddr,
+    ) -> std::io::Result<()> {
+        let guard = manager.lifecycle().await;
+        stop_running(manager, pending, &guard).await;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let (tx, rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = rx.await;
+            drop(listener);
+        });
+        *manager.running.lock().unwrap() = Some(Running {
+            addr,
+            shutdown: Some(tx),
+            handle,
+        });
+        Ok(())
+    }
+
+    /// Rotating a token restarts the server, and the Settings toggle starts and
+    /// stops it — two separate controls that can overlap. Without a lock around
+    /// the whole transition, both can complete teardown (each seeing no running
+    /// server) and then race to bind the same port, so one loses with
+    /// `Address already in use` and the user sees a spurious failure.
+    #[tokio::test]
+    async fn concurrent_lifecycle_transitions_do_not_race_the_bind() {
+        let manager = Arc::new(McpHttpManager::new(ClientCache::new(
+            std::path::PathBuf::from("/dev/null"),
+        )));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        // Start with a server ALREADY running on the port. This is what opens
+        // the window: the first transition's teardown awaits the old task's
+        // JoinHandle, and that await is where the second transition gets in —
+        // finding `running` already taken, so it sails past teardown and binds
+        // the port the first one is about to rebind. With no server running
+        // there is no await in teardown, the two never interleave, and the test
+        // would pass against the racy code.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                0,
+            )))
+            .await
+            .unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (tx, rx) = oneshot::channel::<()>();
+            let handle = tokio::spawn(async move {
+                let _ = rx.await;
+                // Mirror axum's unhurried release of the socket.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                drop(listener);
+            });
+            *manager.running.lock().unwrap() = Some(Running {
+                addr,
+                shutdown: Some(tx),
+                handle,
+            });
+            addr
+        };
+
+        let a = tokio::spawn({
+            let (m, p) = (manager.clone(), pending.clone());
+            async move { restart_on(&m, &p, addr).await }
+        });
+        let b = tokio::spawn({
+            let (m, p) = (manager.clone(), pending.clone());
+            async move { restart_on(&m, &p, addr).await }
+        });
+
+        a.await.unwrap().expect("first transition must bind");
+        b.await.unwrap().expect("second transition must bind after the first tore down");
+    }
+
     #[tokio::test]
     async fn stop_running_releases_the_port_before_returning() {
         let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
@@ -372,7 +495,10 @@ mod tests {
                 handle,
             });
 
-            stop_running(&manager, &pending).await;
+            {
+                let guard = manager.lifecycle().await;
+                stop_running(&manager, &pending, &guard).await;
+            }
 
             tokio::net::TcpListener::bind(bound_addr).await.unwrap_or_else(|e| {
                 panic!("rebind attempt {i} on {bound_addr} failed: {e}")
