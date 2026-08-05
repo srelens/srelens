@@ -115,6 +115,12 @@ impl TokenStore for ResilientTokenStore {
             // D-Bus session into a process-killing panic in the caller.
             Err(_) => {
                 self.file_fallback.store(true, Ordering::Relaxed);
+                // Best-effort: drop whatever entry the keychain still holds.
+                // `load()` prefers the keychain, so leaving a stale entry
+                // behind would let a later process (with a working keychain)
+                // read the OLD token in preference to the file written just
+                // below — silently reinstating a token this save replaced.
+                let _ = self.keychain.delete_credential();
                 self.file.save(t)
             }
         }
@@ -200,6 +206,49 @@ mod tests {
             *self.stored.lock().unwrap() = None;
             Ok(())
         }
+    }
+
+    /// A keychain that is readable-but-empty and fails every write, recording
+    /// whether it was asked to delete its entry.
+    struct FailingWrites(Arc<Mutex<bool>>);
+
+    impl KeychainBackend for FailingWrites {
+        fn get_password(&self) -> Result<String, keyring::Error> {
+            Err(keyring::Error::NoEntry)
+        }
+        fn set_password(&self, _value: &str) -> Result<(), keyring::Error> {
+            Err(keyring::Error::NoStorageAccess(Box::new(std::io::Error::other(
+                "stub: keychain write failed",
+            ))))
+        }
+        fn delete_credential(&self) -> Result<(), keyring::Error> {
+            *self.0.lock().unwrap() = true;
+            Ok(())
+        }
+    }
+
+    /// The stale-token hazard: a keychain that fails *this* save (a transient
+    /// D-Bus hiccup, a locked login keychain) sends the token to the file, but
+    /// any entry already in the keychain survives. The next process starts
+    /// with a healthy keychain, `load()` prefers it, and the OLD token comes
+    /// back — so a rotate looks undone and a token the user believed replaced
+    /// still authenticates. `clear()` already clears both backends; `save()`
+    /// has to as well.
+    #[test]
+    fn falling_back_on_save_clears_the_stale_keychain_entry() {
+        let deleted = Arc::new(Mutex::new(false));
+        let store = ResilientTokenStore::with_backend(
+            Box::new(FailingWrites(deleted.clone())),
+            temp_dir("stale").join("token"),
+        );
+
+        store.save(&Token::generate()).expect("save falls back to the file");
+
+        assert_eq!(store.current_backend(), "file");
+        assert!(
+            *deleted.lock().unwrap(),
+            "a save that fell back to the file must clear the keychain entry it could not update"
+        );
     }
 
     fn temp_dir(label: &str) -> PathBuf {
