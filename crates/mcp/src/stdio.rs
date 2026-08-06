@@ -161,17 +161,22 @@ pub async fn handle_request(
                 .unwrap_or("");
             // MCP prompt arguments are strings; anything else is stringified
             // rather than rejected, so a client sending a number still works.
+            // A JSON `null`, though, is dropped instead of becoming the string
+            // "null": null means the argument is absent, and inserting it as
+            // a value would let it pass the required/target presence checks
+            // it should fail.
             let supplied: std::collections::BTreeMap<String, String> = params
                 .and_then(|p| p.get("arguments"))
                 .and_then(Value::as_object)
                 .map(|m| {
                     m.iter()
-                        .map(|(k, v)| {
+                        .filter_map(|(k, v)| {
                             let s = match v {
+                                Value::Null => return None,
                                 Value::String(s) => s.clone(),
                                 other => other.to_string(),
                             };
-                            (k.clone(), s)
+                            Some((k.clone(), s))
                         })
                         .collect()
                 })
@@ -696,5 +701,69 @@ mod tests {
             .await;
         }
         assert_eq!(*spy.0.lock().unwrap(), 0, "prompts must not be audited");
+    }
+
+    /// A JSON `null` is the absence of a value, not the string "null". A
+    /// client whose templating omits an unset variable by emitting `null`
+    /// (common) must trip the same required-argument error an omitted key
+    /// would.
+    #[tokio::test]
+    async fn prompts_get_rejects_a_null_required_argument() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":6,"method":"prompts/get","params":{
+                "name":"pod-crashloop","arguments":{"context": null}
+            }}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32602, "got {resp}");
+        assert!(resp["error"]["message"].as_str().unwrap().contains("context"));
+    }
+
+    /// A `null` target argument must not count as "supplied": it must fall
+    /// back to discover mode rather than rendering a targeted flow with a
+    /// null-ish resource name baked in.
+    #[tokio::test]
+    async fn prompts_get_treats_a_null_target_as_absent_and_uses_discover_mode() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":7,"method":"prompts/get","params":{
+                "name":"pod-crashloop",
+                "arguments":{"context":"kind","pod":null}
+            }}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        let text = resp["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("k8s.listPods"),
+            "expected discover-mode body, got {text}"
+        );
+    }
+
+    /// Sibling of the two null-handling tests above, pinning that a
+    /// non-null coercion (a JSON number) still stringifies and is accepted
+    /// as a supplied target — only `null` is special-cased.
+    #[tokio::test]
+    async fn prompts_get_still_coerces_a_non_null_target_value() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":8,"method":"prompts/get","params":{
+                "name":"pod-crashloop",
+                "arguments":{"context":"kind","pod":123}
+            }}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        let text = resp["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("123"), "got {text}");
     }
 }
