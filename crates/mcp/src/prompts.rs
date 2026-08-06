@@ -306,6 +306,86 @@ pub fn builtins() -> (Vec<PromptFile>, Vec<LoadIssue>) {
     (files, issues)
 }
 
+/// Prompt text becomes instructions in an agent's context, so both the number of
+/// files and their size are bounded — unbounded content here is a footgun, not
+/// a feature.
+pub const MAX_USER_PROMPT_FILES: usize = 100;
+pub const MAX_USER_PROMPT_BYTES: u64 = 64 * 1024;
+
+/// Read `*.md` from `dir`. Never fails as a whole: each file's problem is
+/// recorded and the remaining files still load. A missing directory is silent —
+/// a user who never created one has nothing wrong with their setup.
+pub fn load_dir(dir: &std::path::Path) -> (Vec<PromptFile>, Vec<LoadIssue>) {
+    let mut files = Vec::new();
+    let mut issues = Vec::new();
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (files, issues);
+    };
+
+    // Sorted so the priority tie-break in `resolve` is deterministic and so the
+    // file-count cap keeps a stable subset rather than whatever the OS listed first.
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    paths.sort();
+
+    if paths.len() > MAX_USER_PROMPT_FILES {
+        issues.push(LoadIssue {
+            file: dir.display().to_string(),
+            problem: format!(
+                "{} prompt files found; only the first {MAX_USER_PROMPT_FILES} \
+                 (by filename) were loaded",
+                paths.len()
+            ),
+        });
+        paths.truncate(MAX_USER_PROMPT_FILES);
+    }
+
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut fail = |problem: String| {
+            issues.push(LoadIssue { file: name.clone(), problem });
+        };
+
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > MAX_USER_PROMPT_BYTES => {
+                fail(format!(
+                    "file is {} bytes; the limit is {} KB",
+                    meta.len(),
+                    MAX_USER_PROMPT_BYTES / 1024
+                ));
+                continue;
+            }
+            Err(e) => {
+                fail(format!("could not read: {e}"));
+                continue;
+            }
+            _ => {}
+        }
+
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                fail(format!("could not read: {e}"));
+                continue;
+            }
+        };
+
+        match parse_prompt_file(&name, &text).and_then(|f| validate(&f).map(|()| f)) {
+            Ok(f) => files.push(f),
+            Err(problem) => fail(problem),
+        }
+    }
+
+    (files, issues)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +505,92 @@ mod tests {
             body: "body".into(),
             source: source.into(),
         }
+    }
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("srelens-prompts-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &std::path::Path, name: &str, text: &str) {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+
+    const GOOD: &str = "---\nname: mine\npriority: 5\narguments:\n  - { name: context, required: true }\n---\nCheck `{{context}}`.\n";
+
+    #[test]
+    fn load_dir_reads_markdown_files() {
+        let dir = temp_dir("read");
+        write(&dir, "mine.md", GOOD);
+        let (files, issues) = load_dir(&dir);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "mine");
+        assert_eq!(files[0].priority, 5);
+        assert_eq!(files[0].source, "mine.md", "source is the filename");
+        assert!(issues.is_empty(), "got: {issues:?}");
+    }
+
+    #[test]
+    fn load_dir_ignores_non_markdown_files() {
+        let dir = temp_dir("ext");
+        write(&dir, "mine.md", GOOD);
+        write(&dir, "notes.txt", "not a prompt");
+        write(&dir, "README", "not a prompt");
+        let (files, issues) = load_dir(&dir);
+        assert_eq!(files.len(), 1);
+        assert!(issues.is_empty(), "a non-.md file is not an error, got: {issues:?}");
+    }
+
+    /// A directory the user never created is not a problem to report.
+    #[test]
+    fn load_dir_of_a_missing_directory_is_silent() {
+        let (files, issues) = load_dir(&std::env::temp_dir().join("srelens-no-such-dir-xyz"));
+        assert!(files.is_empty());
+        assert!(issues.is_empty());
+    }
+
+    /// The load-bearing behaviour: one bad file must not take the others down.
+    #[test]
+    fn load_dir_skips_a_bad_file_and_keeps_the_rest() {
+        let dir = temp_dir("bad");
+        write(&dir, "good.md", GOOD);
+        write(&dir, "broken.md", "no front matter here\n");
+        write(&dir, "typo.md", "---\nname: t\n---\nuses {{undeclared}}\n");
+        let (files, issues) = load_dir(&dir);
+        assert_eq!(files.len(), 1, "the good file must still load");
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().any(|i| i.file == "broken.md"));
+        assert!(issues.iter().any(|i| i.file == "typo.md" && i.problem.contains("undeclared")));
+    }
+
+    #[test]
+    fn load_dir_skips_a_file_over_the_size_cap() {
+        let dir = temp_dir("size");
+        let padding = "x".repeat(MAX_USER_PROMPT_BYTES as usize + 1);
+        write(&dir, "huge.md", &format!("---\nname: h\n---\n{padding}\n"));
+        write(&dir, "good.md", GOOD);
+        let (files, issues) = load_dir(&dir);
+        assert_eq!(files.len(), 1, "only the small file loads");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].file, "huge.md");
+        assert!(issues[0].problem.contains("64"), "the cap must be stated, got: {}", issues[0].problem);
+    }
+
+    #[test]
+    fn load_dir_stops_at_the_file_count_cap() {
+        let dir = temp_dir("count");
+        for i in 0..(MAX_USER_PROMPT_FILES + 5) {
+            write(&dir, &format!("p{i:04}.md"), &GOOD.replace("name: mine", &format!("name: p{i}")));
+        }
+        let (files, issues) = load_dir(&dir);
+        assert_eq!(files.len(), MAX_USER_PROMPT_FILES);
+        assert!(
+            issues.iter().any(|i| i.problem.contains("100")),
+            "the cap must be reported, got: {issues:?}"
+        );
     }
 
     #[test]
