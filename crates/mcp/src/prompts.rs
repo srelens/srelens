@@ -204,6 +204,53 @@ pub fn render(
     out
 }
 
+/// A file that could not be loaded, or was loaded with a caveat. Surfaced in
+/// Settings → MCP: a silently-skipped file is a miserable authoring experience.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LoadIssue {
+    /// Filename, not a full path — the path is the user's own config dir.
+    pub file: String,
+    pub problem: String,
+}
+
+/// Pick one winner per (name, mode): highest priority, then filename order.
+/// Ties are reported because a silent choice between two files is a trap.
+pub fn resolve(mut candidates: Vec<PromptFile>) -> (Vec<PromptFile>, Vec<LoadIssue>) {
+    let mut issues = Vec::new();
+    candidates.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.mode.cmp(&b.mode))
+            .then(b.priority.cmp(&a.priority)) // higher priority first
+            .then(a.source.cmp(&b.source))
+    });
+    let mut kept: Vec<PromptFile> = Vec::new();
+    for candidate in candidates {
+        match kept.last() {
+            Some(winner) if winner.name == candidate.name && winner.mode == candidate.mode => {
+                if winner.priority == candidate.priority {
+                    issues.push(LoadIssue {
+                        file: candidate.source.clone(),
+                        problem: format!(
+                            "`{}` ({}) is defined by both `{}` and `{}`; \
+                             they have the same priority {}; `{}` wins by filename order",
+                            candidate.name,
+                            candidate.mode.as_str(),
+                            winner.source,
+                            candidate.source,
+                            candidate.priority,
+                            winner.source
+                        ),
+                    });
+                }
+                // Lower priority, or the loser of a tie: discarded.
+            }
+            _ => kept.push(candidate),
+        }
+    }
+    (kept, issues)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +358,65 @@ mod tests {
 
     fn args(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn named(name: &str, mode: Mode, priority: i64, source: &str) -> PromptFile {
+        PromptFile {
+            name: name.into(),
+            description: String::new(),
+            mode,
+            priority,
+            arguments: Vec::new(),
+            body: "body".into(),
+            source: source.into(),
+        }
+    }
+
+    #[test]
+    fn resolve_keeps_the_highest_priority_for_a_name_and_mode() {
+        let (kept, issues) = resolve(vec![
+            named("pod-crashloop", Mode::Targeted, 0, "builtin.md"),
+            named("pod-crashloop", Mode::Targeted, 10, "mine.md"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, "mine.md", "a higher priority must win");
+        assert!(issues.is_empty(), "a clean override is not an issue");
+    }
+
+    #[test]
+    fn resolve_keeps_both_modes_of_one_name() {
+        let (kept, _) = resolve(vec![
+            named("pod-crashloop", Mode::Targeted, 0, "a.md"),
+            named("pod-crashloop", Mode::Discover, 0, "b.md"),
+        ]);
+        assert_eq!(kept.len(), 2, "(name, mode) is the identity, not name alone");
+    }
+
+    #[test]
+    fn resolve_overrides_only_the_mode_it_collides_with() {
+        let (kept, _) = resolve(vec![
+            named("pod-crashloop", Mode::Targeted, 0, "builtin-t.md"),
+            named("pod-crashloop", Mode::Discover, 0, "builtin-d.md"),
+            named("pod-crashloop", Mode::Discover, 5, "mine-d.md"),
+        ]);
+        assert_eq!(kept.len(), 2);
+        let targeted = kept.iter().find(|f| f.mode == Mode::Targeted).unwrap();
+        let discover = kept.iter().find(|f| f.mode == Mode::Discover).unwrap();
+        assert_eq!(targeted.source, "builtin-t.md", "the untouched mode is inherited");
+        assert_eq!(discover.source, "mine-d.md");
+    }
+
+    #[test]
+    fn resolve_breaks_a_priority_tie_by_filename_and_reports_it() {
+        let (kept, issues) = resolve(vec![
+            named("x", Mode::Targeted, 3, "b.md"),
+            named("x", Mode::Targeted, 3, "a.md"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, "a.md", "filename order breaks the tie");
+        assert_eq!(issues.len(), 1, "a silent tie-break would be a trap");
+        assert!(issues[0].problem.contains("a.md"), "got: {}", issues[0].problem);
+        assert!(issues[0].problem.contains("b.md"), "got: {}", issues[0].problem);
     }
 
     #[test]
