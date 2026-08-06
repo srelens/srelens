@@ -121,6 +121,16 @@ fn mcp_audit_path() -> std::path::PathBuf {
         .join("audit.jsonl")
 }
 
+/// Where a headless run reads user prompt files — `prompts/` in the same `mcp/`
+/// directory `mcp_token_path()` resolves, so a prompt authored while the GUI is
+/// running is visible to `--mcp-stdio` and `--mcp-http` too.
+fn mcp_prompts_dir() -> std::path::PathBuf {
+    mcp_token_path()
+        .parent()
+        .expect("mcp_token_path() always has a parent directory")
+        .join("prompts")
+}
+
 /// Same rotation cap the desktop app's in-process MCP server uses (see
 /// `McpAuditPath` wiring in `mcp.rs`), so a headless run and the GUI behave
 /// identically.
@@ -180,6 +190,9 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
             .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
                 mcp_audit_path(),
                 MCP_AUDIT_CAP_BYTES,
+            )))
+            .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
+                mcp_prompts_dir(),
             )));
         eprintln!(
             "MCP HTTP listening on http://{addr}/mcp (loopback; gated tools need _confirm plus \
@@ -228,6 +241,9 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
             .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
                 mcp_audit_path(),
                 MCP_AUDIT_CAP_BYTES,
+            )))
+            .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
+                mcp_prompts_dir(),
             )));
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         let writer = tokio::io::stdout();

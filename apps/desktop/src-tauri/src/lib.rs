@@ -28,8 +28,8 @@ use helm::{helm_op_close, start_helm_op};
 use logs::{start_log_stream, stop_log_stream};
 use mcp::{
     install_srelens_cli, mcp_audit_tail, mcp_confirm_respond, mcp_http_start, mcp_http_status,
-    mcp_http_stop, mcp_token_get, mcp_token_revoke, mcp_token_rotate, mcp_token_storage,
-    srelens_cli_status, McpAuditPath, McpHttpManager,
+    mcp_http_stop, mcp_prompt_issues, mcp_token_get, mcp_token_revoke, mcp_token_rotate,
+    mcp_token_storage, srelens_cli_status, McpAuditPath, McpHttpManager, McpPromptsDir,
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
@@ -347,6 +347,15 @@ pub fn run() {
                     app.manage(token_store);
                     app.manage(resilient_store);
                     app.manage(McpAuditPath(dir.join("audit.jsonl")));
+
+                    let prompts_dir = dir.join("prompts");
+                    if let Err(e) = std::fs::create_dir_all(&prompts_dir) {
+                        log::warn!(
+                            "could not create MCP prompts dir {}: {e}",
+                            prompts_dir.display()
+                        );
+                    }
+                    app.manage(McpPromptsDir(prompts_dir));
                 }
                 Err(e) => log::warn!("MCP config dir unavailable: {e}"),
             }
@@ -391,6 +400,7 @@ pub fn run() {
             mcp_token_revoke,
             mcp_token_storage,
             mcp_audit_tail,
+            mcp_prompt_issues,
             install_srelens_cli,
             srelens_cli_status,
             start_terminal,

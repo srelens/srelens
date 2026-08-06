@@ -103,6 +103,7 @@ async fn start_server(
     pending: &Arc<crate::mcp_confirm::Pending>,
     token: srelens_mcp::auth::Token,
     audit_path: &std::path::Path,
+    prompts_dir: &std::path::Path,
     lifecycle: &Lifecycle<'_>,
 ) -> Result<String, String> {
     stop_running(manager, pending, lifecycle).await;
@@ -122,6 +123,9 @@ async fn start_server(
         .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
             audit_path.to_path_buf(),
             5 * 1024 * 1024,
+        )))
+        .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
+            prompts_dir.to_path_buf(),
         )));
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
@@ -153,6 +157,7 @@ pub async fn mcp_http_start(
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
     token_store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>,
     audit_path: State<'_, McpAuditPath>,
+    prompts_dir: State<'_, McpPromptsDir>,
 ) -> Result<String, String> {
     // Taken BEFORE the token is read, not just around the restart: a rotate
     // that lands in between would persist a new token and restart the server
@@ -179,6 +184,7 @@ pub async fn mcp_http_start(
         pending.inner(),
         token,
         &audit_path.0,
+        &prompts_dir.0,
         &lifecycle,
     )
     .await
@@ -240,6 +246,7 @@ pub async fn mcp_token_rotate(
     manager: State<'_, McpHttpManager>,
     pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
     audit_path: State<'_, McpAuditPath>,
+    prompts_dir: State<'_, McpPromptsDir>,
 ) -> Result<String, String> {
     // Held across persist-then-restart, not just the restart: a revoke landing
     // between the two would clear the store and stop the server, and this
@@ -259,6 +266,7 @@ pub async fn mcp_token_rotate(
             pending.inner(),
             t.clone(),
             &audit_path.0,
+            &prompts_dir.0,
             &lifecycle,
         )
         .await?;
@@ -308,6 +316,20 @@ pub fn mcp_audit_tail(limit: usize, path: State<'_, McpAuditPath>) -> Vec<serde_
 /// Path to the audit log, managed so the command can read it without
 /// reconstructing the app config dir.
 pub struct McpAuditPath(pub std::path::PathBuf);
+
+/// Where user-authored prompt files live, managed so the commands and the
+/// server builder agree on one path without recomputing the config dir.
+pub struct McpPromptsDir(pub std::path::PathBuf);
+
+/// Prompt files that could not be loaded, so Settings can say which file was
+/// skipped and why — a silently-ignored file is a miserable authoring
+/// experience. Re-reads the directory, so it reflects the files on disk now.
+#[tauri::command]
+pub fn mcp_prompt_issues(
+    dir: State<'_, McpPromptsDir>,
+) -> Vec<srelens_mcp::prompts::LoadIssue> {
+    srelens_mcp::prompts::PromptLibrary::new(Some(dir.0.clone())).issues()
+}
 
 /// Where the `srelens` CLI symlink is installed, and whether it points at us.
 #[derive(Debug, Serialize)]
@@ -393,6 +415,35 @@ pub fn install_srelens_cli() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The desktop and headless paths must resolve the same directory, or a
+    /// prompt authored while the GUI is running vanishes under `--mcp-stdio`.
+    #[test]
+    fn the_prompts_dir_sits_beside_the_token_and_audit_log() {
+        let mcp_dir = std::path::PathBuf::from("/tmp/cfg/mcp");
+        let prompts = McpPromptsDir(mcp_dir.join("prompts"));
+        assert_eq!(prompts.0, std::path::PathBuf::from("/tmp/cfg/mcp/prompts"));
+        assert_eq!(
+            prompts.0.parent().unwrap(),
+            mcp_dir,
+            "prompts live under the same mcp/ dir as token and audit.jsonl"
+        );
+    }
+
+    #[test]
+    fn a_library_pointed_at_a_user_dir_reports_that_dirs_issues() {
+        let dir = std::env::temp_dir().join(format!("srelens-pd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.md"), "not a prompt\n").unwrap();
+
+        let lib = srelens_mcp::prompts::PromptLibrary::new(Some(dir));
+        let issues = lib.issues();
+        assert!(
+            issues.iter().any(|i| i.file == "broken.md"),
+            "Settings needs the reason a file was skipped, got: {issues:?}"
+        );
+    }
 
     /// The bug this closes: `stop_running` used to send the shutdown signal
     /// and `abort()` the task without waiting for either to actually finish,
