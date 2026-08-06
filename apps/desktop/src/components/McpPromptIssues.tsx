@@ -1,12 +1,23 @@
 import { useEffect, useState } from "react";
 import { promptIssues, type PromptIssue } from "../lib/mcpSecurity";
 
+interface McpPromptIssuesProps {
+  /**
+   * Bumped by the parent to force a re-read. Editing a prompt file takes
+   * effect without restarting srelens, but a panel that only fetches on
+   * mount would keep showing a stale error after the user fixes their file
+   * — the one workflow this panel exists for. Driven by the same Refresh
+   * affordance `McpAuditList` already uses for the same reason.
+   */
+  nonce?: number;
+}
+
 /**
  * Prompt files that failed to load. Renders nothing when there are none — the
  * normal case shouldn't occupy space in Settings, but a file that silently
  * failed to appear is the single most confusing thing about authoring prompts.
  */
-export function McpPromptIssues() {
+export function McpPromptIssues({ nonce = 0 }: McpPromptIssuesProps = {}) {
   const [issues, setIssues] = useState<PromptIssue[]>([]);
 
   useEffect(() => {
@@ -17,7 +28,7 @@ export function McpPromptIssues() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [nonce]);
 
   if (issues.length === 0) return null;
 

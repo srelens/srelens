@@ -49,4 +49,21 @@ describe("McpPromptIssues", () => {
     await act(async () => {});
     expect(container.textContent).not.toBe("");
   });
+
+  /// Editing a prompt file takes effect without restarting srelens, so a
+  /// panel that only fetches once on mount would keep showing a fixed file's
+  /// stale error forever. The parent bumps `nonce` (driven by the Refresh
+  /// button next to `McpAuditList`) to force a re-read.
+  it("re-reads when its nonce prop changes", async () => {
+    promptIssues.mockResolvedValue([
+      { file: "mine.md", problem: "body uses undeclared argument(s): pod" },
+    ]);
+    const { rerender } = render(<McpPromptIssues nonce={0} />);
+    expect(await screen.findByText(/mine\.md/)).toBeTruthy();
+    expect(promptIssues).toHaveBeenCalledTimes(1);
+
+    promptIssues.mockResolvedValue([]);
+    rerender(<McpPromptIssues nonce={1} />);
+    await waitFor(() => expect(promptIssues).toHaveBeenCalledTimes(2));
+  });
 });

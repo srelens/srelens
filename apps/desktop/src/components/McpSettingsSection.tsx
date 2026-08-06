@@ -60,6 +60,11 @@ export function McpSettingsSection() {
   const [tokenError, setTokenError] = useState("");
   const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
   const [tokenStorage, setTokenStorage] = useState<"keychain" | "file" | null>(null);
+  // Bumped by McpAuditList's own Refresh button so the prompt-issues panel
+  // re-reads too: a user who fixes their prompt file should see that
+  // reflected without restarting srelens, and without a second Refresh
+  // button next to the one that already exists.
+  const [promptIssuesNonce, setPromptIssuesNonce] = useState(0);
 
   async function refreshToken() {
     try {
@@ -334,8 +339,8 @@ export function McpSettingsSection() {
       {/* Recent agent activity */}
       <section className="flex flex-col gap-2">
         <h4 className="text-sm font-medium">Recent agent activity</h4>
-        <McpPromptIssues />
-        <McpAuditList />
+        <McpPromptIssues nonce={promptIssuesNonce} />
+        <McpAuditList onRefresh={() => setPromptIssuesNonce((n) => n + 1)} />
       </section>
 
       {/* Per-tool config */}

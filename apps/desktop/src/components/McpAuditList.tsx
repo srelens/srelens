@@ -34,8 +34,17 @@ const columns: Column<Row>[] = [
   },
 ];
 
+interface McpAuditListProps {
+  /**
+   * Called after the Refresh button bumps this list's own nonce, so a parent
+   * can piggyback another stale-data panel (`McpPromptIssues`) on the same
+   * affordance instead of growing a second Refresh button next to it.
+   */
+  onRefresh?: () => void;
+}
+
 /** Recent MCP tool calls — what an agent actually did, and whether it was allowed. */
-export function McpAuditList() {
+export function McpAuditList({ onRefresh }: McpAuditListProps = {}) {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   // Bumped to re-run the fetch. Settings can sit open for a long while as
   // agents keep calling, and a list read once on mount quietly goes stale —
@@ -52,7 +61,10 @@ export function McpAuditList() {
     };
   }, [nonce]);
 
-  const refresh = useCallback(() => setNonce((n) => n + 1), []);
+  const refresh = useCallback(() => {
+    setNonce((n) => n + 1);
+    onRefresh?.();
+  }, [onRefresh]);
 
   return (
     <div className="flex flex-col gap-2">
