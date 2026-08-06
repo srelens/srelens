@@ -144,6 +144,26 @@ pub fn validate(file: &PromptFile) -> Result<(), String> {
     Ok(())
 }
 
+/// Substitute `{{name}}` for every declared argument. Iterating the DECLARED
+/// arguments rather than the supplied ones is what guarantees no placeholder
+/// survives: `validate` has already proved every token in the body is declared,
+/// and each declared argument resolves to a supplied value, its default, or "".
+pub fn render(
+    file: &PromptFile,
+    supplied: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut out = file.body.clone();
+    for spec in &file.arguments {
+        let value = supplied
+            .get(&spec.name)
+            .cloned()
+            .or_else(|| spec.default.clone())
+            .unwrap_or_default();
+        out = out.replace(&format!("{{{{{}}}}}", spec.name), &value);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +267,42 @@ mod tests {
             body: body.into(),
             source: "t.md".into(),
         }
+    }
+
+    fn args(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn render_substitutes_supplied_values() {
+        let f = file_with("pod {{pod}} in {{namespace}}", &["pod", "namespace"]);
+        let out = render(&f, &args(&[("pod", "web-0"), ("namespace", "prod")]));
+        assert_eq!(out, "pod web-0 in prod");
+    }
+
+    /// No `{{token}}` may survive: an omitted optional argument falls back to
+    /// its declared default, and to an empty string if it has none.
+    #[test]
+    fn render_falls_back_to_the_declared_default() {
+        let mut f = file_with("ns {{namespace}} pod {{pod}}", &["namespace", "pod"]);
+        f.arguments[0].default = Some("default".into());
+        let out = render(&f, &args(&[("pod", "web-0")]));
+        assert_eq!(out, "ns default pod web-0");
+        assert!(!out.contains("{{"), "no placeholder may survive rendering");
+    }
+
+    #[test]
+    fn render_leaves_no_placeholder_when_an_argument_has_no_default() {
+        let f = file_with("ns [{{namespace}}]", &["namespace"]);
+        let out = render(&f, &args(&[]));
+        assert_eq!(out, "ns []");
+        assert!(!out.contains("{{"));
+    }
+
+    #[test]
+    fn render_replaces_every_occurrence() {
+        let f = file_with("{{pod}} and {{pod}}", &["pod"]);
+        assert_eq!(render(&f, &args(&[("pod", "web-0")])), "web-0 and web-0");
     }
 
     #[test]
