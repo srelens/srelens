@@ -21,6 +21,7 @@ const { mcpSecurity } = vi.hoisted(() => ({
     rotateMcpToken: vi.fn(),
     revokeMcpToken: vi.fn(),
     auditTail: vi.fn(),
+    promptIssues: vi.fn(),
   },
 }));
 vi.mock("../lib/mcpSecurity", () => mcpSecurity);
@@ -41,6 +42,7 @@ beforeEach(() => {
   mcpSecurity.getMcpToken.mockResolvedValue(null);
   mcpSecurity.getMcpTokenStorage.mockResolvedValue("keychain");
   mcpSecurity.auditTail.mockResolvedValue([]);
+  mcpSecurity.promptIssues.mockResolvedValue([]);
 });
 
 describe("McpSettingsSection", () => {

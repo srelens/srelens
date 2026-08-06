@@ -48,3 +48,18 @@ export async function auditTail(limit: number): Promise<AuditEntry[]> {
     return [];
   }
 }
+
+/** A prompt file srelens could not load, and why. */
+export interface PromptIssue {
+  file: string;
+  problem: string;
+}
+
+/** Returns [] rather than throwing: no prompts directory is not an error. */
+export async function promptIssues(): Promise<PromptIssue[]> {
+  try {
+    return await invoke<PromptIssue[]>("mcp_prompt_issues");
+  } catch {
+    return [];
+  }
+}

@@ -18,6 +18,7 @@ import {
 import { getMcpToken, getMcpTokenStorage, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "../lib/mcpClients";
 import { McpAuditList } from "./McpAuditList";
+import { McpPromptIssues } from "./McpPromptIssues";
 
 /** Masked by default: only the last 4 characters are shown until revealed. */
 function maskToken(token: string): string {
@@ -333,6 +334,7 @@ export function McpSettingsSection() {
       {/* Recent agent activity */}
       <section className="flex flex-col gap-2">
         <h4 className="text-sm font-medium">Recent agent activity</h4>
+        <McpPromptIssues />
         <McpAuditList />
       </section>
 
