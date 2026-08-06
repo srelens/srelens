@@ -2028,7 +2028,7 @@ async fn mcp_prompts_name_only_real_capabilities() {
                 // backtick) at the token's edge gets stripped. Mirrors
                 // `tool_tokens` in `crates/mcp/src/prompts.rs`.
                 let candidate = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-                if candidate.starts_with("k8s.") {
+                if candidate.starts_with("k8s.") || candidate.starts_with("toolbox.") {
                     assert!(
                         ids.iter().any(|id| id == candidate),
                         "{name} names `{candidate}`, which is not a registered capability"
