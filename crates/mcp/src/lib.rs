@@ -41,6 +41,7 @@ pub struct McpServer {
     registry: Arc<Registry>,
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
     audit: Arc<dyn crate::audit::AuditSink>,
+    prompts: crate::prompts::PromptLibrary,
 }
 
 impl McpServer {
@@ -50,6 +51,8 @@ impl McpServer {
             // Fail closed: a host that wires nothing permits nothing.
             confirm_policy: Arc::new(crate::policy::AlwaysDeny),
             audit: Arc::new(crate::audit::NoopAudit),
+            // Built-ins only until a host supplies a user prompt directory.
+            prompts: crate::prompts::PromptLibrary::new(None),
         }
     }
 
@@ -69,6 +72,15 @@ impl McpServer {
 
     pub fn audit(&self) -> &Arc<dyn crate::audit::AuditSink> {
         &self.audit
+    }
+
+    pub fn with_prompts(mut self, prompts: crate::prompts::PromptLibrary) -> Self {
+        self.prompts = prompts;
+        self
+    }
+
+    pub fn prompts(&self) -> &crate::prompts::PromptLibrary {
+        &self.prompts
     }
 
     /// Whether a tool reads sensitive material, so the audit log can redact
