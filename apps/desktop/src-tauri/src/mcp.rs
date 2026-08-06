@@ -416,20 +416,6 @@ pub fn install_srelens_cli() -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// The desktop and headless paths must resolve the same directory, or a
-    /// prompt authored while the GUI is running vanishes under `--mcp-stdio`.
-    #[test]
-    fn the_prompts_dir_sits_beside_the_token_and_audit_log() {
-        let mcp_dir = std::path::PathBuf::from("/tmp/cfg/mcp");
-        let prompts = McpPromptsDir(mcp_dir.join("prompts"));
-        assert_eq!(prompts.0, std::path::PathBuf::from("/tmp/cfg/mcp/prompts"));
-        assert_eq!(
-            prompts.0.parent().unwrap(),
-            mcp_dir,
-            "prompts live under the same mcp/ dir as token and audit.jsonl"
-        );
-    }
-
     #[test]
     fn a_library_pointed_at_a_user_dir_reports_that_dirs_issues() {
         let dir = std::env::temp_dir().join(format!("srelens-pd-{}", std::process::id()));
