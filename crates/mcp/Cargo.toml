@@ -8,6 +8,8 @@ async-trait = "0.1"
 getrandom = "0.2"
 srelens-capability = { path = "../capability" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros"] }
 axum = "0.7"
