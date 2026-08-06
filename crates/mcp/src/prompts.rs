@@ -334,7 +334,11 @@ pub fn load_dir(dir: &std::path::Path) -> (Vec<PromptFile>, Vec<LoadIssue>) {
 
     if paths.len() > MAX_USER_PROMPT_FILES {
         issues.push(LoadIssue {
-            file: dir.display().to_string(),
+            // Not a filename: the cap is a property of the directory, not of
+            // any one file. Using the real path would leak the user's local
+            // filesystem layout into a field the Settings UI renders as a
+            // filename (see `LoadIssue::file`'s doc comment).
+            file: "<prompts directory>".to_string(),
             problem: format!(
                 "{} prompt files found; only the first {MAX_USER_PROMPT_FILES} \
                  (by filename) were loaded",
@@ -587,9 +591,25 @@ mod tests {
         }
         let (files, issues) = load_dir(&dir);
         assert_eq!(files.len(), MAX_USER_PROMPT_FILES);
+        assert_eq!(
+            files.iter().map(|f| f.source.as_str()).max(),
+            Some("p0099.md"),
+            "the kept files must be the first MAX_USER_PROMPT_FILES by filename"
+        );
+        assert_eq!(issues.len(), 1, "exactly one cap issue, got: {issues:?}");
         assert!(
-            issues.iter().any(|i| i.problem.contains("100")),
+            issues[0].problem.contains("100"),
             "the cap must be reported, got: {issues:?}"
+        );
+        assert_eq!(
+            issues[0].file, "<prompts directory>",
+            "LoadIssue.file must never be an absolute path; got: {}",
+            issues[0].file
+        );
+        assert!(
+            !issues[0].file.contains(dir.to_string_lossy().as_ref()),
+            "the local temp dir path must not leak into the issue, got: {}",
+            issues[0].file
         );
     }
 
