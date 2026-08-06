@@ -98,6 +98,41 @@ pub fn parse_prompt_file(source: &str, text: &str) -> Result<PromptFile, String>
     })
 }
 
+/// Every distinct `{{token}}` in `body`, in order of first appearance.
+pub fn placeholders(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        let token = after[..end].trim().to_string();
+        if !token.is_empty() && !out.contains(&token) {
+            out.push(token);
+        }
+        rest = &after[end + 2..];
+    }
+    out
+}
+
+/// Reject a file that could not render safely.
+pub fn validate(file: &PromptFile) -> Result<(), String> {
+    if file.body.trim().is_empty() {
+        return Err("prompt body is empty".to_string());
+    }
+    let declared: Vec<&str> = file.arguments.iter().map(|a| a.name.as_str()).collect();
+    let undeclared: Vec<String> = placeholders(&file.body)
+        .into_iter()
+        .filter(|t| !declared.contains(&t.as_str()))
+        .collect();
+    if !undeclared.is_empty() {
+        return Err(format!(
+            "body uses undeclared argument(s): {}",
+            undeclared.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +215,58 @@ mod tests {
         assert_eq!(f.name, "y");
         assert_eq!(f.mode, Mode::Discover);
         assert_eq!(f.body, "body line\n", "body should be normalized");
+    }
+
+    fn file_with(body: &str, args: &[&str]) -> PromptFile {
+        PromptFile {
+            name: "t".into(),
+            description: String::new(),
+            mode: Mode::Targeted,
+            priority: 0,
+            arguments: args
+                .iter()
+                .map(|n| ArgSpec {
+                    name: (*n).into(),
+                    description: None,
+                    required: false,
+                    target: false,
+                    default: None,
+                })
+                .collect(),
+            body: body.into(),
+            source: "t.md".into(),
+        }
+    }
+
+    #[test]
+    fn placeholders_are_found_in_order_without_duplicates() {
+        let found = placeholders("a {{one}} b {{two}} c {{one}}");
+        assert_eq!(found, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn placeholders_tolerate_whitespace_and_ignore_unclosed() {
+        assert_eq!(placeholders("{{ spaced }}"), vec!["spaced".to_string()]);
+        assert_eq!(placeholders("{{unclosed"), Vec::<String>::new());
+        assert_eq!(placeholders("no tokens"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn validate_accepts_a_body_using_only_declared_arguments() {
+        assert!(validate(&file_with("hi {{context}}", &["context"])).is_ok());
+    }
+
+    /// The important one: rendering an undeclared token would ship literal
+    /// `{{foo}}` to the agent AS INSTRUCTIONS.
+    #[test]
+    fn validate_rejects_an_undeclared_placeholder() {
+        let e = validate(&file_with("hi {{typo}}", &["context"])).unwrap_err();
+        assert!(e.contains("typo"), "the message must name the offender, got: {e}");
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_body() {
+        let e = validate(&file_with("   \n", &["context"])).unwrap_err();
+        assert!(e.contains("empty"), "got: {e}");
     }
 }
