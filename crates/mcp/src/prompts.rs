@@ -251,6 +251,61 @@ pub fn resolve(mut candidates: Vec<PromptFile>) -> (Vec<PromptFile>, Vec<LoadIss
     (kept, issues)
 }
 
+/// The prompts srelens ships. Embedded, so they need no filesystem at runtime.
+const BUILTIN_FILES: &[(&str, &str)] = &[
+    (
+        "pod-crashloop.targeted.md",
+        include_str!("prompts/pod-crashloop.targeted.md"),
+    ),
+    (
+        "pod-crashloop.discover.md",
+        include_str!("prompts/pod-crashloop.discover.md"),
+    ),
+    (
+        "pod-pending.targeted.md",
+        include_str!("prompts/pod-pending.targeted.md"),
+    ),
+    (
+        "pod-pending.discover.md",
+        include_str!("prompts/pod-pending.discover.md"),
+    ),
+    (
+        "node-pressure.targeted.md",
+        include_str!("prompts/node-pressure.targeted.md"),
+    ),
+    (
+        "node-pressure.discover.md",
+        include_str!("prompts/node-pressure.discover.md"),
+    ),
+    (
+        "service-no-endpoints.targeted.md",
+        include_str!("prompts/service-no-endpoints.targeted.md"),
+    ),
+    (
+        "service-no-endpoints.discover.md",
+        include_str!("prompts/service-no-endpoints.discover.md"),
+    ),
+];
+
+/// Parse and validate the embedded built-ins. Returns issues rather than
+/// panicking so a bad build degrades to "that prompt is missing" instead of
+/// taking the process down — `every_builtin_parses_and_validates` is what keeps
+/// the issue list empty in practice.
+pub fn builtins() -> (Vec<PromptFile>, Vec<LoadIssue>) {
+    let mut files = Vec::new();
+    let mut issues = Vec::new();
+    for (source, text) in BUILTIN_FILES {
+        match parse_prompt_file(source, text).and_then(|f| validate(&f).map(|()| f)) {
+            Ok(f) => files.push(f),
+            Err(problem) => issues.push(LoadIssue {
+                file: (*source).to_string(),
+                problem,
+            }),
+        }
+    }
+    (files, issues)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +595,84 @@ mod tests {
     fn validate_rejects_whitespace_only_placeholders() {
         let e = validate(&file_with("check {{ }}", &["context"])).unwrap_err();
         assert!(e.contains("empty placeholder"), "the message must indicate an empty placeholder, got: {e}");
+    }
+
+    /// Every embedded built-in must parse and validate. This is the build-time
+    /// guard standing in for the compile-time checks we lost by moving argument
+    /// specs into markdown — a malformed built-in fails the build rather than
+    /// shipping and being skipped at runtime.
+    #[test]
+    fn every_builtin_parses_and_validates() {
+        let (files, issues) = builtins();
+        assert!(issues.is_empty(), "built-ins must be clean, got: {issues:?}");
+        assert_eq!(files.len(), 8, "four flows x targeted/discover");
+    }
+
+    #[test]
+    fn builtins_cover_the_four_documented_flows() {
+        let (files, _) = builtins();
+        for name in ["pod-crashloop", "pod-pending", "node-pressure", "service-no-endpoints"] {
+            let modes: Vec<Mode> = files.iter().filter(|f| f.name == name).map(|f| f.mode).collect();
+            assert!(modes.contains(&Mode::Targeted), "{name} needs a targeted variant");
+            assert!(modes.contains(&Mode::Discover), "{name} needs a discover variant");
+        }
+    }
+
+    #[test]
+    fn every_builtin_requires_context_and_ships_at_priority_zero() {
+        let (files, _) = builtins();
+        for f in &files {
+            assert_eq!(f.priority, 0, "{} must ship at priority 0", f.source);
+            let ctx = f.arguments.iter().find(|a| a.name == "context");
+            let ctx = ctx.unwrap_or_else(|| panic!("{} must declare context", f.source));
+            assert!(ctx.required, "{}: context must be required", f.source);
+        }
+    }
+
+    /// Built-ins diagnose and recommend; they never drive a mutation. Guarding
+    /// by name means adding a fifth flow that says "call k8s.deletePod" fails
+    /// the build instead of quietly shipping.
+    #[test]
+    fn no_builtin_instructs_a_mutating_tool_call() {
+        let (files, _) = builtins();
+        let mutating = [
+            "k8s.deletePod", "k8s.deleteResource", "k8s.evictPod", "k8s.drainNode",
+            "k8s.cordonNode", "k8s.scale", "k8s.rolloutRestart", "k8s.applyManifest",
+            "k8s.updateConfigData", "k8s.helmInstall", "k8s.helmUpgrade",
+            "k8s.helmUninstall", "k8s.helmRollback", "k8s.getSecret",
+        ];
+        for f in &files {
+            for tool in mutating {
+                assert!(
+                    !f.body.contains(tool),
+                    "{} names the mutating tool {tool}; built-ins must recommend a \
+                     kubectl command instead",
+                    f.source
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_declared_argument_is_used_by_some_mode() {
+        // The other direction of the drift guard: `validate` catches a body
+        // using an undeclared argument; this catches a declared argument that no
+        // body of that prompt uses, which is dead metadata in the client's form.
+        let (files, _) = builtins();
+        for name in ["pod-crashloop", "pod-pending", "node-pressure", "service-no-endpoints"] {
+            let group: Vec<&PromptFile> = files.iter().filter(|f| f.name == name).collect();
+            let used: Vec<String> =
+                group.iter().flat_map(|f| placeholders(&f.body)).collect();
+            for f in &group {
+                for spec in &f.arguments {
+                    assert!(
+                        used.contains(&spec.name),
+                        "{} declares `{}` but no {name} body uses it",
+                        f.source,
+                        spec.name
+                    );
+                }
+            }
+        }
     }
 }
