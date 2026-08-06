@@ -427,6 +427,132 @@ pub fn load_dir(dir: &std::path::Path) -> (Vec<PromptFile>, Vec<LoadIssue>) {
     (files, issues)
 }
 
+/// One prompt as a client sees it: modes are an internal detail, so both
+/// variants of a name collapse into a single entry whose arguments are the
+/// union across modes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptSpec {
+    pub name: String,
+    pub description: String,
+    pub arguments: Vec<ArgSpec>,
+}
+
+/// A rendered prompt, ready to become an MCP `prompts/get` result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rendered {
+    pub description: String,
+    pub text: String,
+}
+
+/// The built-ins plus any user files, resolved by priority.
+pub struct PromptLibrary {
+    user_dir: Option<std::path::PathBuf>,
+}
+
+impl PromptLibrary {
+    pub fn new(user_dir: Option<std::path::PathBuf>) -> Self {
+        Self { user_dir }
+    }
+
+    /// Re-read on every call so editing a file takes effect without restarting
+    /// srelens. A handful of small files, and callers are infrequent.
+    fn all(&self) -> (Vec<PromptFile>, Vec<LoadIssue>) {
+        let (mut files, mut issues) = builtins();
+        if let Some(dir) = &self.user_dir {
+            let (user_files, user_issues) = load_dir(dir);
+            files.extend(user_files);
+            issues.extend(user_issues);
+        }
+        let (kept, resolve_issues) = resolve(files);
+        issues.extend(resolve_issues);
+        (kept, issues)
+    }
+
+    pub fn issues(&self) -> Vec<LoadIssue> {
+        self.all().1
+    }
+
+    pub fn list(&self) -> Vec<PromptSpec> {
+        let (files, _) = self.all();
+        let mut specs: Vec<PromptSpec> = Vec::new();
+        // `files` is sorted by (name, mode) out of `resolve`, and Targeted sorts
+        // before Discover, so the targeted variant is seen first and supplies the
+        // description.
+        for file in files {
+            match specs.iter_mut().find(|s| s.name == file.name) {
+                Some(spec) => {
+                    if spec.description.is_empty() {
+                        spec.description = file.description.clone();
+                    }
+                    for arg in file.arguments {
+                        if !spec.arguments.iter().any(|a| a.name == arg.name) {
+                            spec.arguments.push(arg);
+                        }
+                    }
+                }
+                None => specs.push(PromptSpec {
+                    name: file.name,
+                    description: file.description,
+                    arguments: file.arguments,
+                }),
+            }
+        }
+        specs
+    }
+
+    /// Render `name` for `supplied`. The error string is the JSON-RPC -32602
+    /// message, so it must be actionable on its own.
+    pub fn get(
+        &self,
+        name: &str,
+        supplied: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Rendered, String> {
+        let (files, _) = self.all();
+        let variants: Vec<&PromptFile> = files.iter().filter(|f| f.name == name).collect();
+        if variants.is_empty() {
+            return Err(format!("unknown prompt `{name}`"));
+        }
+
+        // Required arguments are checked across variants: `context` is required
+        // whichever mode ends up selected.
+        for spec in variants.iter().flat_map(|f| f.arguments.iter()) {
+            if spec.required && !supplied.contains_key(&spec.name) {
+                return Err(format!("`{name}` requires the `{}` argument", spec.name));
+            }
+        }
+
+        // Targeted iff every target-marked argument was supplied. The marker is
+        // what makes this unambiguous — the target is `pod` for one flow and
+        // `node` or `service` for another.
+        let targets: Vec<&str> = variants
+            .iter()
+            .flat_map(|f| f.arguments.iter())
+            .filter(|a| a.target)
+            .map(|a| a.name.as_str())
+            .collect();
+        let all_targets_supplied =
+            !targets.is_empty() && targets.iter().all(|t| supplied.contains_key(*t));
+        let wanted = if all_targets_supplied {
+            Mode::Targeted
+        } else {
+            Mode::Discover
+        };
+
+        let chosen = variants.iter().find(|f| f.mode == wanted).ok_or_else(|| {
+            let missing = targets.join(", ");
+            format!(
+                "`{name}` has no {} variant; supply the `{missing}` argument",
+                wanted.as_str()
+            )
+        })?;
+
+        Ok(Rendered {
+            description: chosen.description.clone(),
+            text: render(chosen, supplied),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,5 +1147,117 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn list_collapses_modes_to_one_entry_per_name() {
+        let lib = PromptLibrary::new(None);
+        let specs = lib.list();
+        assert_eq!(specs.len(), 4, "four flows, not eight files");
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"pod-crashloop"));
+        assert!(names.contains(&"service-no-endpoints"));
+    }
+
+    #[test]
+    fn list_unions_arguments_across_modes() {
+        let lib = PromptLibrary::new(None);
+        let spec = lib.list().into_iter().find(|s| s.name == "pod-crashloop").unwrap();
+        let names: Vec<&str> = spec.arguments.iter().map(|a| a.name.as_str()).collect();
+        // `pod` is declared only by the targeted file, `namespace` by both —
+        // the client's form needs all of them.
+        assert!(names.contains(&"context"));
+        assert!(names.contains(&"namespace"));
+        assert!(names.contains(&"pod"));
+        assert!(!spec.description.is_empty());
+    }
+
+    #[test]
+    fn get_uses_the_targeted_mode_when_the_target_is_supplied() {
+        let lib = PromptLibrary::new(None);
+        let out = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "web-0")]))
+            .unwrap();
+        assert!(out.text.contains("web-0"), "the pod name must be substituted");
+        assert!(out.text.contains("previous"), "targeted triage reads previous logs");
+        assert!(!out.text.contains("{{"), "no placeholder may survive");
+    }
+
+    #[test]
+    fn get_uses_the_discover_mode_when_the_target_is_omitted() {
+        let lib = PromptLibrary::new(None);
+        let out = lib.get("pod-crashloop", &args(&[("context", "kind")])).unwrap();
+        assert!(out.text.contains("k8s.listPods"), "discovery starts by listing pods");
+        assert!(!out.text.contains("{{"));
+    }
+
+    #[test]
+    fn get_rejects_an_unknown_prompt() {
+        let lib = PromptLibrary::new(None);
+        let e = lib.get("nope", &args(&[("context", "kind")])).unwrap_err();
+        assert!(e.contains("nope"), "got: {e}");
+    }
+
+    #[test]
+    fn get_rejects_a_missing_required_argument() {
+        let lib = PromptLibrary::new(None);
+        let e = lib.get("pod-crashloop", &args(&[])).unwrap_err();
+        assert!(e.contains("context"), "the message must name the argument, got: {e}");
+    }
+
+    #[test]
+    fn a_user_file_with_higher_priority_overrides_a_builtin() {
+        let dir = temp_dir("override");
+        write(
+            &dir,
+            "mine.md",
+            "---\nname: pod-crashloop\ndescription: Mine\nmode: targeted\npriority: 10\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true }\n---\nMy own triage for `{{pod}}` on `{{context}}`.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let out = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "web-0")]))
+            .unwrap();
+        assert!(out.text.contains("My own triage"), "the override must win");
+        // The discover mode was not overridden, so it is inherited.
+        let disc = lib.get("pod-crashloop", &args(&[("context", "kind")])).unwrap();
+        assert!(disc.text.contains("k8s.listPods"));
+    }
+
+    #[test]
+    fn a_user_file_at_default_priority_does_not_override_a_builtin() {
+        let dir = temp_dir("nooverride");
+        write(
+            &dir,
+            "mine.md",
+            "---\nname: pod-crashloop\nmode: targeted\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true }\n---\nMy own triage for `{{pod}}` on `{{context}}`.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let out = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "web-0")]))
+            .unwrap();
+        assert!(!out.text.contains("My own triage"), "priority 0 must not shadow a built-in");
+        assert!(lib.issues().iter().any(|i| i.file == "mine.md"), "the tie must be reported");
+    }
+
+    #[test]
+    fn issues_from_a_bad_user_file_are_exposed() {
+        let dir = temp_dir("issues");
+        write(&dir, "broken.md", "not a prompt\n");
+        let lib = PromptLibrary::new(Some(dir));
+        assert!(lib.issues().iter().any(|i| i.file == "broken.md"));
+        assert_eq!(lib.list().len(), 4, "the built-ins still work");
+    }
+
+    #[test]
+    fn get_rejects_a_prompt_whose_needed_mode_is_absent() {
+        let dir = temp_dir("nomode");
+        write(
+            &dir,
+            "only.md",
+            "---\nname: only-targeted\nmode: targeted\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true }\n---\nTriage `{{pod}}` on `{{context}}`.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let e = lib.get("only-targeted", &args(&[("context", "kind")])).unwrap_err();
+        assert!(e.contains("pod"), "must name the argument that would select a mode, got: {e}");
     }
 }
