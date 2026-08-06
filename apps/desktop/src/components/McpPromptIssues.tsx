@@ -11,15 +11,9 @@ export function McpPromptIssues() {
 
   useEffect(() => {
     let active = true;
-    // `promptIssues()` already swallows the underlying command's errors, but
-    // don't rely solely on that contract holding across every call site (e.g.
-    // a test that mocks this module wholesale) — an unguarded rejection here
-    // would surface as an unhandled promise rejection instead of empty state.
-    void promptIssues()
-      .then((out) => {
-        if (active) setIssues(out);
-      })
-      .catch(() => {});
+    void promptIssues().then((out) => {
+      if (active) setIssues(out);
+    });
     return () => {
       active = false;
     };

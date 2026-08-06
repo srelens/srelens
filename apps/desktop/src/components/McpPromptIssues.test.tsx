@@ -39,14 +39,6 @@ describe("McpPromptIssues", () => {
     expect(container.textContent).toBe("");
   });
 
-  it("stays silent when the command fails", async () => {
-    promptIssues.mockRejectedValue(new Error("no such command"));
-    const { container } = render(<McpPromptIssues />);
-    await waitFor(() => expect(promptIssues).toHaveBeenCalled());
-    await act(async () => {});
-    expect(container.textContent).toBe("");
-  });
-
   /// Guards the guard: with a non-empty result the same wait-then-assert shape
   /// must NOT see empty output. Without this, a bug that made the component
   /// always render null would leave both tests above green.
