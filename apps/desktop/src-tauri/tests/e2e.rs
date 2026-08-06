@@ -1955,3 +1955,75 @@ async fn teardown() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// MCP prompts, issue #25
+// ---------------------------------------------------------------------------
+
+/// #25's acceptance criterion: a client can run a CrashLoop triage end-to-end
+/// using only advertised tools. This checks the prompt half — the flow is
+/// advertised, renders against a real context, and every tool it names is a
+/// capability that actually exists in the registry. A prompt that instructs a
+/// call to a renamed tool sends the agent down a dead end, and nothing else in
+/// the suite would notice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live cluster and helm/kubectl on PATH"]
+async fn mcp_prompts_name_only_real_capabilities() {
+    let registry = srelens_desktop_lib::build_registry();
+    let ids: Vec<String> = registry.ids().into_iter().map(str::to_string).collect();
+    let server = srelens_mcp::McpServer::new(std::sync::Arc::new(registry))
+        .with_prompts(srelens_mcp::prompts::PromptLibrary::new(None));
+
+    let listed = srelens_mcp::stdio::handle_request(
+        &server,
+        &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"prompts/list"}),
+        srelens_mcp::Transport::Stdio,
+    )
+    .await
+    .expect("prompts/list responds");
+    let names: Vec<String> = listed["result"]["prompts"]
+        .as_array()
+        .expect("prompts array")
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.contains(&"pod-crashloop".to_string()), "got {names:?}");
+
+    for name in &names {
+        for arguments in [
+            serde_json::json!({ "context": context() }),
+            serde_json::json!({ "context": context(), "namespace": NS,
+                                "pod": "any", "node": "any", "service": "any" }),
+        ] {
+            let resp = srelens_mcp::stdio::handle_request(
+                &server,
+                &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"prompts/get",
+                    "params": { "name": name, "arguments": arguments }}),
+                srelens_mcp::Transport::Stdio,
+            )
+            .await
+            .expect("prompts/get responds");
+            let text = resp["result"]["messages"][0]["content"]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} did not render: {resp}"));
+            assert!(!text.contains("{{"), "{name} left a placeholder: {text}");
+
+            // Every `k8s.foo` the prompt tells the agent to call must exist.
+            for token in text.split_whitespace() {
+                // Trim all non-alphanumeric edge punctuation, including '.':
+                // an internal dot (`k8s.getObject`) sits between two
+                // alphanumeric runs, so it is never at an edge and survives
+                // the trim untouched. Only a glued sentence-ending period (or
+                // backtick) at the token's edge gets stripped. Mirrors
+                // `tool_tokens` in `crates/mcp/src/prompts.rs`.
+                let candidate = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                if candidate.starts_with("k8s.") {
+                    assert!(
+                        ids.iter().any(|id| id == candidate),
+                        "{name} names `{candidate}`, which is not a registered capability"
+                    );
+                }
+            }
+        }
+    }
+}
