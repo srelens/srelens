@@ -1966,8 +1966,19 @@ async fn teardown() {
 /// capability that actually exists in the registry. A prompt that instructs a
 /// call to a renamed tool sends the agent down a dead end, and nothing else in
 /// the suite would notice.
+///
+/// Unlike its neighbour above, this test is NOT `#[ignore]`d: `build_registry`
+/// only constructs a lazy client cache and registers capability closures (no
+/// connection attempt), `Registry::ids()` is a synchronous map-key read, and
+/// `PromptLibrary`/`prompts/list`/`prompts/get` are pure in-memory string
+/// work — nothing here touches a cluster, `helm`, or `kubectl`. It runs safely
+/// in CI with no kubeconfig at all (verified with a nonexistent `KUBECONFIG`
+/// and an empty `HOME`), and it is the only check that would notice a
+/// referenced capability being renamed or removed out from under a prompt
+/// body — `every_referenced_tool_is_on_the_read_only_allowlist` in
+/// `crates/mcp/src/prompts.rs` only checks against a hardcoded allowlist, so
+/// it can't see the registry drift.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live cluster and helm/kubectl on PATH"]
 async fn mcp_prompts_name_only_real_capabilities() {
     let registry = srelens_desktop_lib::build_registry();
     let ids: Vec<String> = registry.ids().into_iter().map(str::to_string).collect();
