@@ -119,6 +119,17 @@ pub fn validate(file: &PromptFile) -> Result<(), String> {
     if file.body.trim().is_empty() {
         return Err("prompt body is empty".to_string());
     }
+    // Check for empty placeholders that would leak into the agent instructions
+    let mut rest = file.body.as_str();
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        let token = after[..end].trim();
+        if token.is_empty() {
+            return Err("body contains empty placeholder (e.g. {{}} or {{ }}), which would leak literally into the agent instructions".to_string());
+        }
+        rest = &after[end + 2..];
+    }
     let declared: Vec<&str> = file.arguments.iter().map(|a| a.name.as_str()).collect();
     let undeclared: Vec<String> = placeholders(&file.body)
         .into_iter()
@@ -268,5 +279,17 @@ mod tests {
     fn validate_rejects_an_empty_body() {
         let e = validate(&file_with("   \n", &["context"])).unwrap_err();
         assert!(e.contains("empty"), "got: {e}");
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_placeholder() {
+        let e = validate(&file_with("please check {{}}", &["context"])).unwrap_err();
+        assert!(e.contains("empty placeholder"), "the message must indicate an empty placeholder, got: {e}");
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_only_placeholders() {
+        let e = validate(&file_with("check {{ }}", &["context"])).unwrap_err();
+        assert!(e.contains("empty placeholder"), "the message must indicate an empty placeholder, got: {e}");
     }
 }
