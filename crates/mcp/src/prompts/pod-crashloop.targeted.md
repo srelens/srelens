@@ -19,7 +19,7 @@ repeatedly. Work out why, using only srelens tools.
    logs will say why. A `CrashLoopBackOff` waiting reason only tells you Kubernetes
    is backing off; the terminated block says what actually happened.
 2. Call `k8s.podLogs` with `pod: {{pod}}`, `namespace: {{namespace}}`,
-   `previous: true`, `tailLines: 200`. The **previous** instance's output is where
+   `previous: true`, `tail_lines: 200`. The **previous** instance's output is where
    the crash reason is — the current instance may not have failed yet.
 3. Call `k8s.listEvents` with `objectKind: Pod`, `objectName: {{pod}}`,
    `namespace: {{namespace}}`. Look for failing probes, image pull failures, and

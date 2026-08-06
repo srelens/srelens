@@ -23,7 +23,7 @@ endpoints, then explain why.
    `spec.ports`, then `k8s.podsForSelector` with that selector. No match means a
    selector/label mismatch — compare against `k8s.listPods`. A match that is not
    ready means a failing readiness probe: call `k8s.getObject` with `kind: Pod` and
-   `k8s.podLogs` with `tailLines: 100` for one of them.
+   `k8s.podLogs` with `tail_lines: 100` for one of them.
 5. If every service has healthy endpoints, say so plainly.
 
 Then report per service: which link is broken — selector, readiness, or target port —

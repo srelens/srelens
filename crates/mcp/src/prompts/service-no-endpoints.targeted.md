@@ -26,7 +26,7 @@ endpoints, so nothing is receiving its traffic. Work out where the chain breaks.
    - Pods matched but are not ready → their readiness probe is failing. Call
      `k8s.getObject` with `kind: Pod` for one of them, read
      `status.conditions` and `spec.containers[].readinessProbe`, then
-     `k8s.podLogs` with `tailLines: 100`.
+     `k8s.podLogs` with `tail_lines: 100`.
 4. Check that the Service's `spec.ports[].targetPort` matches a `containerPort` the
    pods actually expose — a correct selector with the wrong target port still yields
    no usable endpoint.

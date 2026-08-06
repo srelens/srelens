@@ -629,24 +629,67 @@ mod tests {
         }
     }
 
-    /// Built-ins diagnose and recommend; they never drive a mutation. Guarding
-    /// by name means adding a fifth flow that says "call k8s.deletePod" fails
-    /// the build instead of quietly shipping.
+    /// The only tools a built-in prompt body may reference: enough to diagnose
+    /// the four documented flows, and nothing that mutates cluster state. This
+    /// is a positive list rather than a denylist of known-bad tools — a
+    /// denylist is only ever as complete as the last audit, whereas this list
+    /// catches a mutating tool AND a typo'd tool name, in CI, with no cluster
+    /// required. Adding a genuinely read-only tool a new prompt needs means
+    /// adding it here deliberately.
+    const ALLOWED_TOOLS: &[&str] = &[
+        "k8s.getObject",
+        "k8s.listEndpointSlices",
+        "k8s.listEvents",
+        "k8s.listIngresses",
+        "k8s.listLimitRanges",
+        "k8s.listNodes",
+        "k8s.listPersistentVolumeClaims",
+        "k8s.listPods",
+        "k8s.listResourceQuotas",
+        "k8s.listServices",
+        "k8s.listStorageClasses",
+        "k8s.nodeMetrics",
+        "k8s.podLogs",
+        "k8s.podMetrics",
+        "k8s.podsForPvc",
+        "k8s.podsForSelector",
+    ];
+
+    /// Every `k8s.*` / `toolbox.*` token mentioned in `body`, with surrounding
+    /// markdown punctuation (backticks, commas, trailing sentence periods,
+    /// parens, colons) trimmed off. Same scan-and-trim idea as `placeholders`,
+    /// just hunting tool-name tokens instead of `{{...}}` ones.
+    fn tool_tokens(body: &str) -> Vec<String> {
+        // Trimming '.' along with everything else is safe here: the '.' inside
+        // a real token (`k8s.getObject`) sits between two alphanumeric runs, so
+        // it is never at either edge and survives the trim. Only an edge '.' —
+        // a sentence-ending period glued to the token — gets stripped.
+        body.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+            .filter(|w| w.starts_with("k8s.") || w.starts_with("toolbox."))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Built-ins diagnose and recommend; they never drive a mutation, and every
+    /// tool they name must actually exist. This replaced a denylist
+    /// (`no_builtin_instructs_a_mutating_tool_call`) that only caught tools
+    /// someone remembered to list — it missed `toolbox.installKubectl` and
+    /// several `k8s.*` mutators entirely. The allowlist below is strictly
+    /// stronger: it also catches a typo'd tool name that would otherwise reach
+    /// users unnoticed until the ignored, cluster-requiring integration test
+    /// happened to be run.
     #[test]
-    fn no_builtin_instructs_a_mutating_tool_call() {
+    fn every_referenced_tool_is_on_the_read_only_allowlist() {
         let (files, _) = builtins();
-        let mutating = [
-            "k8s.deletePod", "k8s.deleteResource", "k8s.evictPod", "k8s.drainNode",
-            "k8s.cordonNode", "k8s.scale", "k8s.rolloutRestart", "k8s.applyManifest",
-            "k8s.updateConfigData", "k8s.helmInstall", "k8s.helmUpgrade",
-            "k8s.helmUninstall", "k8s.helmRollback", "k8s.getSecret",
-        ];
         for f in &files {
-            for tool in mutating {
+            for tool in tool_tokens(&f.body) {
                 assert!(
-                    !f.body.contains(tool),
-                    "{} names the mutating tool {tool}; built-ins must recommend a \
-                     kubectl command instead",
+                    ALLOWED_TOOLS.contains(&tool.as_str()),
+                    "{} references `{tool}`, which is not in ALLOWED_TOOLS; it is \
+                     either a mutating tool (built-ins must not instruct one) or a \
+                     typo. If it is genuinely a new read-only tool this prompt \
+                     needs, add it to ALLOWED_TOOLS deliberately.",
                     f.source
                 );
             }

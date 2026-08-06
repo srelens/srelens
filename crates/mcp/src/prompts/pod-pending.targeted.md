@@ -16,7 +16,7 @@ Pending, which means the scheduler has not placed it. Work out what is blocking 
    messages name the exact predicate that failed. Start with this, not the manifest.
 2. Call `k8s.getObject` with `kind: Pod`, `namespace: {{namespace}}`, `name: {{pod}}`
    and read `spec.nodeSelector`, `spec.affinity`, `spec.tolerations`,
-   `spec.resources.requests` and `spec.volumes`.
+   `spec.containers[].resources.requests` and `spec.volumes`.
 3. Match the event against the cause:
    - insufficient cpu/memory → call `k8s.listNodes` and `k8s.nodeMetrics` and compare
      the request against what nodes have free;

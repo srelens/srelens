@@ -19,7 +19,7 @@ then explain why.
 3. For each representative, call `k8s.listEvents` with `objectKind: Pod` and that
    pod's name — `FailedScheduling` names the failed predicate — then
    `k8s.getObject` with `kind: Pod` for its `nodeSelector`, `affinity`,
-   `tolerations`, `resources.requests` and `volumes`.
+   `tolerations`, `containers[].resources.requests` and `volumes`.
 4. Depending on the predicate, call `k8s.listNodes` and `k8s.nodeMetrics` for
    capacity and labels, `k8s.listPersistentVolumeClaims` and
    `k8s.listStorageClasses` for volume binding, or `k8s.listResourceQuotas` and

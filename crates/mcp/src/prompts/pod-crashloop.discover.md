@@ -17,7 +17,7 @@ triage them. Use only srelens tools.
    count is below its total as suspect even if `restarts` is low.
 3. Take the top three at most. For each, call `k8s.getObject` with `kind: Pod` to
    read `status.containerStatuses[].lastState.terminated` (exit code and reason),
-   then `k8s.podLogs` with `previous: true` and `tailLines: 200`, then
+   then `k8s.podLogs` with `previous: true` and `tail_lines: 200`, then
    `k8s.listEvents` filtered with `objectKind: Pod` and that pod's name.
 4. If nothing has restarted, say so plainly rather than inventing a problem.
 
