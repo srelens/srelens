@@ -485,8 +485,18 @@ impl PromptLibrary {
                         spec.description = file.description.clone();
                     }
                     for arg in file.arguments {
-                        if !spec.arguments.iter().any(|a| a.name == arg.name) {
-                            spec.arguments.push(arg);
+                        match spec.arguments.iter_mut().find(|a| a.name == arg.name) {
+                            // `required` is serialized to the client, so its union must
+                            // be safe: an argument is required in the merged spec only
+                            // if EVERY mode that declares it marks it required. Taking
+                            // the first-seen mode's value (or OR-ing across modes) could
+                            // mark it required because the targeted file does, which
+                            // would force every caller to always supply it — making
+                            // discover mode unreachable for this prompt. `description`
+                            // and `default` are not serialized, so no such hazard
+                            // applies to them; first-seen is fine there.
+                            Some(existing) => existing.required = existing.required && arg.required,
+                            None => spec.arguments.push(arg),
                         }
                     }
                 }
@@ -521,17 +531,22 @@ impl PromptLibrary {
             }
         }
 
-        // Targeted iff every target-marked argument was supplied. The marker is
-        // what makes this unambiguous — the target is `pod` for one flow and
-        // `node` or `service` for another.
+        // Targeted iff every target-marked argument was supplied with a
+        // non-empty value. The marker is what makes this unambiguous — the
+        // target is `pod` for one flow and `node` or `service` for another.
+        // A present-but-blank value (`""`, or whitespace-only from an unfilled
+        // form field) is not a target: it must fall back to discover mode
+        // rather than render instructions that name an empty resource.
         let targets: Vec<&str> = variants
             .iter()
             .flat_map(|f| f.arguments.iter())
             .filter(|a| a.target)
             .map(|a| a.name.as_str())
             .collect();
-        let all_targets_supplied =
-            !targets.is_empty() && targets.iter().all(|t| supplied.contains_key(*t));
+        let all_targets_supplied = !targets.is_empty()
+            && targets
+                .iter()
+                .all(|t| supplied.get(*t).is_some_and(|v| !v.trim().is_empty()));
         let wanted = if all_targets_supplied {
             Mode::Targeted
         } else {
@@ -1172,6 +1187,34 @@ mod tests {
         assert!(!spec.description.is_empty());
     }
 
+    /// `required` is serialized to the client, so its union across modes must
+    /// not accidentally force an argument that discover mode leaves optional:
+    /// that would make discover mode unreachable for the prompt. An argument
+    /// is required in the merged spec only if every mode declaring it does.
+    #[test]
+    fn list_reports_an_argument_as_required_only_if_every_mode_requires_it() {
+        let dir = temp_dir("required-union");
+        write(
+            &dir,
+            "mixed.targeted.md",
+            "---\nname: mixed\nmode: targeted\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true, required: true }\n---\nTriage `{{pod}}` on `{{context}}`.\n",
+        );
+        write(
+            &dir,
+            "mixed.discover.md",
+            "---\nname: mixed\nmode: discover\narguments:\n  - { name: context, required: true }\n  - { name: pod, required: false }\n---\nFind candidates on `{{context}}`, maybe `{{pod}}`.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let spec = lib.list().into_iter().find(|s| s.name == "mixed").unwrap();
+        let pod = spec.arguments.iter().find(|a| a.name == "pod").unwrap();
+        assert!(
+            !pod.required,
+            "pod is optional in discover mode, so the merged spec must not require it"
+        );
+        let context = spec.arguments.iter().find(|a| a.name == "context").unwrap();
+        assert!(context.required, "context is required in both modes");
+    }
+
     #[test]
     fn get_uses_the_targeted_mode_when_the_target_is_supplied() {
         let lib = PromptLibrary::new(None);
@@ -1187,6 +1230,30 @@ mod tests {
     fn get_uses_the_discover_mode_when_the_target_is_omitted() {
         let lib = PromptLibrary::new(None);
         let out = lib.get("pod-crashloop", &args(&[("context", "kind")])).unwrap();
+        assert!(out.text.contains("k8s.listPods"), "discovery starts by listing pods");
+        assert!(!out.text.contains("{{"));
+    }
+
+    /// A present-but-empty target (an unfilled form field submitted as `""`)
+    /// is not a target: it must fall back to discover rather than rendering
+    /// instructions that name an empty resource.
+    #[test]
+    fn get_uses_the_discover_mode_when_the_target_is_an_empty_string() {
+        let lib = PromptLibrary::new(None);
+        let out = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "")]))
+            .unwrap();
+        assert!(out.text.contains("k8s.listPods"), "discovery starts by listing pods");
+        assert!(!out.text.contains("{{"));
+    }
+
+    /// Same as above, for whitespace-only values.
+    #[test]
+    fn get_uses_the_discover_mode_when_the_target_is_whitespace_only() {
+        let lib = PromptLibrary::new(None);
+        let out = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "   ")]))
+            .unwrap();
         assert!(out.text.contains("k8s.listPods"), "discovery starts by listing pods");
         assert!(!out.text.contains("{{"));
     }
