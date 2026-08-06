@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { ArrowDownToLine, CircleCheck, CircleSlash2, Copy, ScrollText, SquareTerminal } from "lucide-react";
+import { ArrowDownToLine, CircleCheck, CircleSlash2, SquareTerminal } from "lucide-react";
 import { getObject } from "../lib/manifest";
 import { cordonNode, drainNode, createNodeDebugPod } from "../lib/actions";
 import { notify } from "../lib/notify";
 import { useAccess, rbac, denyReason, reportActionError } from "../lib/access";
 import { IconButton, ConfirmDialog, KubectlPreview } from "../ui";
 import { toKubectl } from "../lib/kubectlMapper";
+import { copyKubectlCommand } from "../lib/copyKubectl";
 
 /** Enter the host's namespaces from the privileged debug pod for a real node
  *  shell — run via exec (the pod itself just stays alive). */
@@ -117,21 +118,14 @@ export function NodeCordonAction({
     setCordoned(true); // drain cordons the node
   }
 
-  async function copyKubectl(action: "get" | "describe") {
-    try {
-      await navigator.clipboard?.writeText(
-        toKubectl({ action, kind: "Node", name, context, output: action === "get" ? "yaml" : undefined }),
-      );
-      notify.success("Copied kubectl command");
-    } catch {
-      /* clipboard unavailable — ignore, matching ResourceOverview's copy affordance */
-    }
-  }
+  // ResourceActions already renders a "Copy as kubectl" affordance for Node
+  // (ResourceBrowser.tsx mounts both alongside each other), so this component
+  // only needs the cordon/drain previews below.
+  const cordonCmd = toKubectl({ action: cordoned ? "uncordon" : "cordon", kind: "Node", name, context });
+  const drainCmd = toKubectl({ action: "drain", kind: "Node", name, context });
 
   return (
     <>
-      <IconButton icon={Copy} label="Copy get" onClick={() => void copyKubectl("get")} />
-      <IconButton icon={ScrollText} label="Copy describe" onClick={() => void copyKubectl("describe")} />
       <IconButton
         icon={cordoned ? CircleCheck : CircleSlash2}
         label={cordoned ? "Uncordon" : "Cordon"}
@@ -193,7 +187,7 @@ export function NodeCordonAction({
               <p style={{ marginTop: 0 }}>
                 {cordoned ? "Allow" : "Stop"} scheduling new pods on <code>{name}</code>?
               </p>
-              <KubectlPreview command={toKubectl({ action: cordoned ? "uncordon" : "cordon", kind: "Node", name, context })} />
+              <KubectlPreview command={cordonCmd} onCopy={() => void copyKubectlCommand(cordonCmd)} />
               {err && <p className="text-destructive">Error: {err}</p>}
             </>
           }
@@ -212,7 +206,7 @@ export function NodeCordonAction({
               <p style={{ marginTop: 0 }}>
                 Cordon <code>{name}</code> and evict its pods (DaemonSet and static pods stay)?
               </p>
-              <KubectlPreview command={toKubectl({ action: "drain", kind: "Node", name, context })} />
+              <KubectlPreview command={drainCmd} onCopy={() => void copyKubectlCommand(drainCmd)} />
               {err && <p className="text-destructive">Error: {err}</p>}
             </>
           }
