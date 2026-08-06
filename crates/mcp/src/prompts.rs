@@ -144,23 +144,63 @@ pub fn validate(file: &PromptFile) -> Result<(), String> {
     Ok(())
 }
 
-/// Substitute `{{name}}` for every declared argument. Iterating the DECLARED
-/// arguments rather than the supplied ones is what guarantees no placeholder
-/// survives: `validate` has already proved every token in the body is declared,
-/// and each declared argument resolves to a supplied value, its default, or "".
+/// Substitute `{{name}}` for every declared argument. Uses a single forward pass
+/// to avoid both padded-placeholder misses ({{ pod }} not matching {{pod}}) and
+/// chained re-substitution (supplied values containing other placeholders).
+///
+/// For each `{{...}}` span in the body:
+/// - TRIM the token between the braces
+/// - If a declared argument matches: append its resolved value (supplied → default → "")
+///   and continue scanning AFTER the `}}`
+/// - If no match or empty token: append the original span verbatim (braces included)
+/// - If no closing `}}`: append the remainder verbatim and stop
+///
+/// This guarantees supplied values are treated as opaque literals and the output
+/// is not affected by argument declaration order.
 pub fn render(
     file: &PromptFile,
     supplied: &std::collections::BTreeMap<String, String>,
 ) -> String {
-    let mut out = file.body.clone();
-    for spec in &file.arguments {
-        let value = supplied
-            .get(&spec.name)
-            .cloned()
-            .or_else(|| spec.default.clone())
-            .unwrap_or_default();
-        out = out.replace(&format!("{{{{{}}}}}", spec.name), &value);
+    let mut out = String::new();
+    let mut body = file.body.as_str();
+
+    while let Some(start) = body.find("{{") {
+        // Copy everything before the placeholder verbatim
+        out.push_str(&body[..start]);
+
+        let after_braces = &body[start + 2..];
+        if let Some(end) = after_braces.find("}}") {
+            let token = after_braces[..end].trim();
+
+            // Look up the token in declared arguments
+            let found = file.arguments.iter().find(|spec| spec.name == token);
+
+            if let Some(spec) = found {
+                // Append the resolved value: supplied → default → ""
+                let value = supplied
+                    .get(&spec.name)
+                    .cloned()
+                    .or_else(|| spec.default.clone())
+                    .unwrap_or_default();
+                out.push_str(&value);
+            } else {
+                // Token is undeclared or empty: append the original span verbatim
+                out.push_str("{{");
+                out.push_str(&after_braces[..end]);
+                out.push_str("}}");
+            }
+
+            // Continue scanning after the closing braces
+            body = &after_braces[end + 2..];
+        } else {
+            // No closing `}}`: append `{{` and continue from after it
+            out.push_str("{{");
+            body = after_braces;
+        }
     }
+
+    // Append any remaining text
+    out.push_str(body);
     out
 }
 
@@ -303,6 +343,53 @@ mod tests {
     fn render_replaces_every_occurrence() {
         let f = file_with("{{pod}} and {{pod}}", &["pod"]);
         assert_eq!(render(&f, &args(&[("pod", "web-0")])), "web-0 and web-0");
+    }
+
+    #[test]
+    fn render_handles_padded_placeholders() {
+        let f = file_with("ns [{{ pod }}]", &["pod"]);
+        assert!(validate(&f).is_ok());
+        let out = render(&f, &args(&[("pod", "web-0")]));
+        assert_eq!(out, "ns [web-0]");
+    }
+
+    #[test]
+    fn render_preserves_supplied_values_as_opaque_literals() {
+        let f = file_with("{{pod}} {{namespace}}", &["pod", "namespace"]);
+        let out = render(&f, &args(&[("pod", "{{namespace}}"), ("namespace", "prod")]));
+        assert_eq!(out, "{{namespace}} prod", "pod's value is opaque text, not re-substituted");
+    }
+
+    #[test]
+    fn render_is_order_independent() {
+        let f1 = file_with("{{pod}} {{namespace}}", &["pod", "namespace"]);
+        let out1 = render(&f1, &args(&[("pod", "{{namespace}}"), ("namespace", "prod")]));
+
+        let f2 = file_with("{{pod}} {{namespace}}", &["namespace", "pod"]);
+        let out2 = render(&f2, &args(&[("pod", "{{namespace}}"), ("namespace", "prod")]));
+
+        assert_eq!(out1, out2, "output should not depend on argument declaration order");
+    }
+
+    #[test]
+    fn render_handles_prefix_collision_correctly() {
+        let f = file_with("{{pod}} {{pod_name}}", &["pod", "pod_name"]);
+        let out = render(&f, &args(&[("pod", "web-0"), ("pod_name", "web")]));
+        assert_eq!(out, "web-0 web");
+    }
+
+    #[test]
+    fn render_preserves_unclosed_placeholder_verbatim() {
+        let f = file_with("a {{unclosed", &[]);
+        let out = render(&f, &args(&[]));
+        assert_eq!(out, "a {{unclosed");
+    }
+
+    #[test]
+    fn render_preserves_undeclared_placeholder_verbatim() {
+        let f = file_with("{{pod}} {{undeclared}}", &["pod"]);
+        let out = render(&f, &args(&[("pod", "web-0")]));
+        assert_eq!(out, "web-0 {{undeclared}}", "undeclared placeholders remain as-is");
     }
 
     #[test]
