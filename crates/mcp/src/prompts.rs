@@ -72,6 +72,10 @@ pub struct PromptFile {
 
 /// Split `---\n<yaml>\n---\n<body>` and parse the header.
 pub fn parse_prompt_file(source: &str, text: &str) -> Result<PromptFile, String> {
+    // Normalize line endings: convert CRLF to LF so the parser works on
+    // Windows-authored files without misleading error messages.
+    let text = text.replace("\r\n", "\n");
+
     let rest = text
         .strip_prefix("---\n")
         .ok_or("missing front matter: the file must start with `---`")?;
@@ -157,5 +161,24 @@ mod tests {
         let text = "---\nname: x\nfutureField: 3\n---\nbody\n";
         let f = parse_prompt_file("x.md", text).unwrap();
         assert_eq!(f.name, "x");
+    }
+
+    #[test]
+    fn parses_crlf_line_endings() {
+        // Windows files with CRLF line endings should parse successfully.
+        let text = "---\r\nname: x\r\n---\r\nbody\r\n";
+        let f = parse_prompt_file("x.md", text).unwrap();
+        assert_eq!(f.name, "x");
+        assert_eq!(f.body, "body\n", "body should not retain stray \\r");
+    }
+
+    #[test]
+    fn parses_mixed_line_endings() {
+        // Some editors mix LF and CRLF; should still parse.
+        let text = "---\r\nname: y\nmode: discover\r\n---\nbody line\r\n";
+        let f = parse_prompt_file("y.md", text).unwrap();
+        assert_eq!(f.name, "y");
+        assert_eq!(f.mode, Mode::Discover);
+        assert_eq!(f.body, "body line\n", "body should be normalized");
     }
 }
