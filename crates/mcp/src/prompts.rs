@@ -365,7 +365,7 @@ pub fn load_dir(dir: &std::path::Path) -> (Vec<PromptFile>, Vec<LoadIssue>) {
     let mut paths: Vec<std::path::PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")))
         .collect();
     paths.sort();
 
@@ -492,9 +492,11 @@ impl PromptLibrary {
                             // the first-seen mode's value (or OR-ing across modes) could
                             // mark it required because the targeted file does, which
                             // would force every caller to always supply it — making
-                            // discover mode unreachable for this prompt. `description`
-                            // and `default` are not serialized, so no such hazard
-                            // applies to them; first-seen is fine there.
+                            // discover mode unreachable for this prompt. `default` is
+                            // not serialized, so its merge is unobservable and first-seen
+                            // is fine there. `description` IS serialized, and first-seen
+                            // (targeted, since it sorts first) deliberately wins: a
+                            // reasonable choice of one merged form field's text.
                             Some(existing) => existing.required = existing.required && arg.required,
                             None => spec.arguments.push(arg),
                         }
@@ -521,14 +523,6 @@ impl PromptLibrary {
         let variants: Vec<&PromptFile> = files.iter().filter(|f| f.name == name).collect();
         if variants.is_empty() {
             return Err(format!("unknown prompt `{name}`"));
-        }
-
-        // Required arguments are checked across variants: `context` is required
-        // whichever mode ends up selected.
-        for spec in variants.iter().flat_map(|f| f.arguments.iter()) {
-            if spec.required && !supplied.contains_key(&spec.name) {
-                return Err(format!("`{name}` requires the `{}` argument", spec.name));
-            }
         }
 
         // Targeted iff every target-marked argument was supplied with a
@@ -560,6 +554,19 @@ impl PromptLibrary {
                 wanted.as_str()
             )
         })?;
+
+        // Required arguments are checked only against the variant actually
+        // being rendered: `list()` ANDs `required` across modes (an argument
+        // required in one mode but optional in another is advertised as NOT
+        // required), so `get()` must honor that by validating only `chosen`'s
+        // own arguments — otherwise a bare call that `list()` says is legal
+        // (omitting an argument that's required only in the targeted variant)
+        // would still be rejected here, making discover mode unreachable.
+        for spec in &chosen.arguments {
+            if spec.required && !supplied.contains_key(&spec.name) {
+                return Err(format!("`{name}` requires the `{}` argument", spec.name));
+            }
+        }
 
         Ok(Rendered {
             description: chosen.description.clone(),
@@ -734,6 +741,21 @@ mod tests {
         let (files, issues) = load_dir(&dir);
         assert_eq!(files.len(), 1);
         assert!(issues.is_empty(), "a non-.md file is not an error, got: {issues:?}");
+    }
+
+    /// macOS and Windows filesystems treat `.md` and `.MD` as the same
+    /// extension, so a case-sensitive filter would skip a same-file rename
+    /// while presenting it as an unrelated non-prompt file.
+    #[test]
+    fn load_dir_matches_the_extension_case_insensitively() {
+        let dir = temp_dir("case");
+        write(&dir, "UPPER.MD", &GOOD.replace("name: mine", "name: upper"));
+        write(&dir, "Mixed.Md", &GOOD.replace("name: mine", "name: mixed"));
+        let (files, issues) = load_dir(&dir);
+        assert_eq!(files.len(), 2, "both uppercase and mixed-case .md must load, got: {files:?}");
+        assert!(files.iter().any(|f| f.name == "upper"));
+        assert!(files.iter().any(|f| f.name == "mixed"));
+        assert!(issues.is_empty(), "got: {issues:?}");
     }
 
     /// A directory the user never created is not a problem to report.
@@ -1197,7 +1219,7 @@ mod tests {
         write(
             &dir,
             "mixed.targeted.md",
-            "---\nname: mixed\nmode: targeted\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true, required: true }\n---\nTriage `{{pod}}` on `{{context}}`.\n",
+            "---\nname: mixed\nmode: targeted\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true, required: true }\n  - { name: urgency, required: true }\n---\nTriage `{{pod}}` on `{{context}}`.\n",
         );
         write(
             &dir,
@@ -1213,6 +1235,32 @@ mod tests {
         );
         let context = spec.arguments.iter().find(|a| a.name == "context").unwrap();
         assert!(context.required, "context is required in both modes");
+
+        // The other half of the contract: `get()` must actually accept what
+        // `list()` advertised as legal. Before the fix, `get()` validated
+        // `pod` (required only in the targeted variant) across every variant,
+        // so this exact bare call was rejected with `-32602` even though
+        // `list()` says `pod` is optional — discover mode was unreachable.
+        let bare = lib
+            .get("mixed", &args(&[("context", "kind")]))
+            .expect("a bare call list() advertises as legal must succeed");
+        assert!(
+            bare.text.contains("Find candidates"),
+            "the discover body must be the one rendered, got: {}",
+            bare.text
+        );
+
+        // A targeted call must still enforce the targeted variant's OWN
+        // required arguments — `urgency` here, which the discover variant
+        // does not declare at all, so it can only ever be checked against
+        // `chosen`, never unioned across variants.
+        let err = lib
+            .get("mixed", &args(&[("context", "kind"), ("pod", "web-0")]))
+            .unwrap_err();
+        assert!(
+            err.contains("urgency"),
+            "the targeted variant's own required argument must still be enforced, got: {err}"
+        );
     }
 
     #[test]
