@@ -394,6 +394,66 @@ srelens --mcp-http 127.0.0.1:8765
 Review tool calls and use appropriate Kubernetes RBAC, especially with
 critical clusters.
 
+### Prompts
+
+srelens ships a handful of MCP **prompts** — ready-made diagnostic flows for
+an agent to run instead of improvising one. Four built-ins cover common
+failure modes: `pod-crashloop`, `pod-pending`, `node-pressure`, and
+`service-no-endpoints`. An MCP client that supports prompts shows them in its
+prompt picker.
+
+Every prompt takes one required argument, `context`; everything else is
+optional. Naming the object it's about — `pod`, `node`, or `service` —
+triages that specific object. Omitting it runs the prompt's discovery half
+instead, which lists candidates first and lets you pick one. Built-ins only
+diagnose: they read cluster state and end by recommending a `kubectl` command
+for you to run yourself, never a call that changes anything — so headless
+triage needs neither `--mcp-allow-destructive` nor `--mcp-allow-sensitive-reads`.
+
+**Writing your own prompts.** Drop `*.md` files into
+`<app config dir>/mcp/prompts/`. Each file is a YAML front-matter header
+followed by the prompt body:
+
+```md
+---
+name: high-restart-count
+description: Investigate a pod restarting more than expected
+mode: targeted
+priority: 10
+arguments:
+  - { name: context, required: true }
+  - { name: pod, target: true, description: Pod to investigate }
+---
+Check `{{pod}}` on `{{context}}` for its restart count and recent events.
+```
+
+Front-matter fields:
+
+- `name` — identifies the prompt. Give a targeted and a discover file the
+  same `name` to offer both halves of one flow.
+- `description` — shown to the client alongside the prompt.
+- `mode` — `targeted` (default) or `discover`.
+- `priority` — an integer; built-ins ship at `0`. On a name/mode collision the
+  higher `priority` wins, and a built-in wins an equal-priority tie — so
+  overriding a built-in prompt requires declaring a `priority` above `0`.
+- `arguments` — a list of `{ name, description, required, target, default }`.
+  `target` marks the argument whose presence switches the prompt into
+  targeted mode (`pod` for the pod flows, `node` or `service` for the
+  others). `default` fills in an omitted optional argument so no
+  `{{token}}` survives into the rendered instructions.
+
+Caps: at most 100 prompt files, 64 KB each. A body may only reference
+`{{name}}` placeholders declared in `arguments` — pasting in helm-style
+example text such as `{{ .Values.foo }}` is rejected as an undeclared
+placeholder rather than rendered literally.
+
+Files that fail to load are listed in **Settings → MCP** with the reason, and
+edits to a prompt file take effect immediately — no restart needed.
+
+Retrieving a prompt is not itself an audited event — nothing touches a
+cluster to fetch one. The tool calls an agent makes while following it are
+audited exactly like any other MCP call.
+
 ## Settings reference
 
 **Settings** (gear icon in the hotbar) has seven sections:
