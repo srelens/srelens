@@ -68,6 +68,12 @@ pub struct PromptFile {
     pub arguments: Vec<ArgSpec>,
     pub body: String,
     pub source: String,
+    /// Set only by `builtins()`, never by parsing front matter — `FrontMatter`
+    /// has no `builtin` field, so a user file cannot claim this status for
+    /// itself by writing `builtin: true` in its own header. This is what lets
+    /// `resolve` give built-ins the win on an equal-priority tie without a
+    /// user being able to spoof that outcome.
+    pub builtin: bool,
 }
 
 /// Split `---\n<yaml>\n---\n<body>` and parse the header.
@@ -95,6 +101,11 @@ pub fn parse_prompt_file(source: &str, text: &str) -> Result<PromptFile, String>
         arguments: fm.arguments,
         body: body.to_string(),
         source: source.to_string(),
+        // Always false here: `FrontMatter` (the struct serde deserializes
+        // into) has no `builtin` field at all, so there is no YAML key a
+        // user file could set to become true. Only `builtins()` below ever
+        // flips this.
+        builtin: false,
     })
 }
 
@@ -213,8 +224,16 @@ pub struct LoadIssue {
     pub problem: String,
 }
 
-/// Pick one winner per (name, mode): highest priority, then filename order.
-/// Ties are reported because a silent choice between two files is a trap.
+/// Pick one winner per (name, mode): highest priority, then built-in status,
+/// then filename order. Ties are reported because a silent choice between two
+/// files is a trap.
+///
+/// Overriding a shipped prompt must be an EXPLICIT, declared act — that is the
+/// whole point of the numeric `priority` field. So on an equal-priority tie a
+/// built-in beats a user file regardless of filename: a user file that
+/// declares nothing must never silently replace a built-in triage flow whose
+/// body an AI agent is about to follow as instructions. A user-vs-user tie
+/// still breaks by filename order, unchanged.
 pub fn resolve(mut candidates: Vec<PromptFile>) -> (Vec<PromptFile>, Vec<LoadIssue>) {
     let mut issues = Vec::new();
     candidates.sort_by(|a, b| {
@@ -222,6 +241,7 @@ pub fn resolve(mut candidates: Vec<PromptFile>) -> (Vec<PromptFile>, Vec<LoadIss
             .cmp(&b.name)
             .then(a.mode.cmp(&b.mode))
             .then(b.priority.cmp(&a.priority)) // higher priority first
+            .then(b.builtin.cmp(&a.builtin)) // built-in first on a tie
             .then(a.source.cmp(&b.source))
     });
     let mut kept: Vec<PromptFile> = Vec::new();
@@ -229,9 +249,19 @@ pub fn resolve(mut candidates: Vec<PromptFile>) -> (Vec<PromptFile>, Vec<LoadIss
         match kept.last() {
             Some(winner) if winner.name == candidate.name && winner.mode == candidate.mode => {
                 if winner.priority == candidate.priority {
-                    issues.push(LoadIssue {
-                        file: candidate.source.clone(),
-                        problem: format!(
+                    let problem = if winner.builtin && !candidate.builtin {
+                        format!(
+                            "`{}` ({}) in `{}` did not take effect: it ties the built-in \
+                             prompt's priority ({}), and a built-in wins that tie; declare \
+                             a higher `priority` in `{}` to override it",
+                            candidate.name,
+                            candidate.mode.as_str(),
+                            candidate.source,
+                            candidate.priority,
+                            candidate.source
+                        )
+                    } else {
+                        format!(
                             "`{}` ({}) is defined by both `{}` and `{}`; \
                              they have the same priority {}; `{}` wins by filename order",
                             candidate.name,
@@ -240,7 +270,11 @@ pub fn resolve(mut candidates: Vec<PromptFile>) -> (Vec<PromptFile>, Vec<LoadIss
                             candidate.source,
                             candidate.priority,
                             winner.source
-                        ),
+                        )
+                    };
+                    issues.push(LoadIssue {
+                        file: candidate.source.clone(),
+                        problem,
                     });
                 }
                 // Lower priority, or the loser of a tie: discarded.
@@ -296,7 +330,10 @@ pub fn builtins() -> (Vec<PromptFile>, Vec<LoadIssue>) {
     let mut issues = Vec::new();
     for (source, text) in BUILTIN_FILES {
         match parse_prompt_file(source, text).and_then(|f| validate(&f).map(|()| f)) {
-            Ok(f) => files.push(f),
+            Ok(mut f) => {
+                f.builtin = true;
+                files.push(f);
+            }
             Err(problem) => issues.push(LoadIssue {
                 file: (*source).to_string(),
                 problem,
@@ -492,6 +529,7 @@ mod tests {
                 .collect(),
             body: body.into(),
             source: "t.md".into(),
+            builtin: false,
         }
     }
 
@@ -508,7 +546,16 @@ mod tests {
             arguments: Vec::new(),
             body: "body".into(),
             source: source.into(),
+            builtin: false,
         }
+    }
+
+    /// Same as `named`, but marked as a built-in — for pinning `resolve`'s
+    /// provenance-aware tie-break.
+    fn named_builtin(name: &str, mode: Mode, priority: i64, source: &str) -> PromptFile {
+        let mut f = named(name, mode, priority, source);
+        f.builtin = true;
+        f
     }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
@@ -660,6 +707,73 @@ mod tests {
         assert!(issues[0].problem.contains("b.md"), "got: {}", issues[0].problem);
     }
 
+    /// Case 1 of the provenance tie-break: builtin@0 vs user@0 -> the builtin
+    /// wins even though "mine.md" would have sorted first alphabetically, and
+    /// the warning names the user's file and tells them what to do about it.
+    #[test]
+    fn resolve_prefers_a_builtin_over_a_user_file_on_an_equal_priority_tie() {
+        let (kept, issues) = resolve(vec![
+            named("pod-crashloop", Mode::Targeted, 0, "mine.md"),
+            named_builtin("pod-crashloop", Mode::Targeted, 0, "pod-crashloop.targeted.md"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, "pod-crashloop.targeted.md", "the built-in must win the tie");
+        assert_eq!(issues.len(), 1, "the tie must be reported");
+        assert_eq!(issues[0].file, "mine.md", "the issue must name the file that lost");
+        assert!(
+            issues[0].problem.contains("mine.md"),
+            "got: {}",
+            issues[0].problem
+        );
+        assert!(
+            issues[0].problem.to_lowercase().contains("priority"),
+            "the warning must say what to do about it (declare a higher priority), got: {}",
+            issues[0].problem
+        );
+    }
+
+    /// Case 2: builtin@0 vs user@10 -> a declared, higher priority is a clean
+    /// override, with no warning at all.
+    #[test]
+    fn resolve_lets_a_higher_priority_user_file_cleanly_override_a_builtin() {
+        let (kept, issues) = resolve(vec![
+            named_builtin("pod-crashloop", Mode::Targeted, 0, "pod-crashloop.targeted.md"),
+            named("pod-crashloop", Mode::Targeted, 10, "mine.md"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, "mine.md", "the higher priority must win");
+        assert!(issues.is_empty(), "a clean override must not warn");
+    }
+
+    /// Case 3: user@5 vs user@5 -> unchanged behaviour, filename order breaks
+    /// the tie (this is `resolve_breaks_a_priority_tie_by_filename_and_reports_it`
+    /// above in spirit; restated here to pin it as one of the four provenance
+    /// cases explicitly).
+    #[test]
+    fn resolve_breaks_a_tie_between_two_user_files_by_filename() {
+        let (kept, issues) = resolve(vec![
+            named("x", Mode::Targeted, 5, "b.md"),
+            named("x", Mode::Targeted, 5, "a.md"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source, "a.md", "filename order still breaks a user-vs-user tie");
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].problem.contains("filename order"),
+            "a user-vs-user tie keeps the old wording, got: {}",
+            issues[0].problem
+        );
+    }
+
+    /// Case 4: `builtin` is not a front-matter field, so a user cannot forge
+    /// built-in status for their own file by writing `builtin: true` in it.
+    #[test]
+    fn a_user_file_cannot_claim_builtin_status_via_front_matter() {
+        let text = "---\nname: x\nbuiltin: true\n---\nbody\n";
+        let f = parse_prompt_file("x.md", text).unwrap();
+        assert!(!f.builtin, "parse_prompt_file must never set builtin: true");
+    }
+
     #[test]
     fn render_substitutes_supplied_values() {
         let f = file_with("pod {{pod}} in {{namespace}}", &["pod", "namespace"]);
@@ -792,6 +906,10 @@ mod tests {
         let (files, issues) = builtins();
         assert!(issues.is_empty(), "built-ins must be clean, got: {issues:?}");
         assert_eq!(files.len(), 8, "four flows x targeted/discover");
+        assert!(
+            files.iter().all(|f| f.builtin),
+            "builtins() must mark every file it returns as builtin: true"
+        );
     }
 
     #[test]
