@@ -49,12 +49,16 @@ then explain why.
      `name: <that pod's name>` and sum `spec.containers[].resources.requests`
      — no capability reports free capacity directly;
    - for volume binding: Call `k8s.listPersistentVolumeClaims` with
-     `context: {{context}}`, `namespace: {{namespace}}`. Call
-     `k8s.listStorageClasses` with `context: {{context}}`;
+     `context: {{context}}`, `namespace: <the pod's namespace>`.
+     `{{namespace}}` is the optional SEARCH filter from step 1 and defaults
+     to `""`, which lists cluster-wide — use the pod's own namespace here
+     instead, or every claim in the cluster gets scanned for one pod's
+     problem. Call `k8s.listStorageClasses` with `context: {{context}}`;
    - for admission limits: Call `k8s.listResourceQuotas` with
-     `context: {{context}}`, `namespace: {{namespace}}`. Call
+     `context: {{context}}`, `namespace: <the pod's namespace>`. Call
      `k8s.listLimitRanges` with `context: {{context}}`,
-     `namespace: {{namespace}}`.
+     `namespace: <the pod's namespace>`. Same reason: these must be scoped to
+     the pod under triage, not to step 1's search filter.
 5. If nothing is Pending, say so plainly.
 
 Then report per group: the blocking reason, the evidence, and the minimal fix as a
