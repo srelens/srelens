@@ -478,36 +478,56 @@ impl PromptLibrary {
         // `files` is sorted by (name, mode) out of `resolve`, and Targeted sorts
         // before Discover, so the targeted variant is seen first and supplies the
         // description.
-        for file in files {
-            match specs.iter_mut().find(|s| s.name == file.name) {
-                Some(spec) => {
-                    if spec.description.is_empty() {
-                        spec.description = file.description.clone();
-                    }
-                    for arg in file.arguments {
-                        match spec.arguments.iter_mut().find(|a| a.name == arg.name) {
-                            // `required` is serialized to the client, so its union must
-                            // be safe: an argument is required in the merged spec only
-                            // if EVERY mode that declares it marks it required. Taking
-                            // the first-seen mode's value (or OR-ing across modes) could
-                            // mark it required because the targeted file does, which
-                            // would force every caller to always supply it — making
-                            // discover mode unreachable for this prompt. `default` is
-                            // not serialized, so its merge is unobservable and first-seen
-                            // is fine there. `description` IS serialized, and first-seen
-                            // (targeted, since it sorts first) deliberately wins: a
-                            // reasonable choice of one merged form field's text.
-                            Some(existing) => existing.required = existing.required && arg.required,
-                            None => spec.arguments.push(arg),
-                        }
-                    }
-                }
-                None => specs.push(PromptSpec {
-                    name: file.name,
-                    description: file.description,
-                    arguments: file.arguments,
-                }),
+        for file in &files {
+            if specs.iter().any(|s| s.name == file.name) {
+                continue;
             }
+
+            // Every resolved variant of this prompt name (targeted and/or
+            // discover — there are at most these two, one per `Mode`).
+            let variants: Vec<&PromptFile> = files.iter().filter(|f| f.name == file.name).collect();
+
+            let description = variants
+                .iter()
+                .map(|v| v.description.clone())
+                .find(|d| !d.is_empty())
+                .unwrap_or_default();
+
+            // `required` is serialized to the client, so its union must be safe:
+            // an argument is required in the merged spec only if EVERY variant
+            // of this prompt requires it. A variant that does not declare the
+            // argument AT ALL does not require it — it simply has no opinion —
+            // so a `target: true, required: true` argument declared only by the
+            // targeted file must not be advertised as always required: that
+            // would force every caller to always supply it, making discover
+            // mode unreachable for this prompt. `default` is not serialized, so
+            // taking the first-seen variant's value for it is unobservable.
+            // `description` IS serialized, and first-seen non-empty (targeted,
+            // since it sorts first) deliberately wins: a reasonable choice of
+            // one merged form field's text.
+            let mut arguments: Vec<ArgSpec> = Vec::new();
+            for variant in &variants {
+                for arg in &variant.arguments {
+                    if arguments.iter().any(|a| a.name == arg.name) {
+                        continue;
+                    }
+                    let required = variants.iter().all(|v| {
+                        v.arguments
+                            .iter()
+                            .find(|a| a.name == arg.name)
+                            .is_some_and(|a| a.required)
+                    });
+                    let mut merged = arg.clone();
+                    merged.required = required;
+                    arguments.push(merged);
+                }
+            }
+
+            specs.push(PromptSpec {
+                name: file.name.clone(),
+                description,
+                arguments,
+            });
         }
         specs
     }
@@ -1374,6 +1394,45 @@ mod tests {
         assert!(
             err.contains("urgency"),
             "the targeted variant's own required argument must still be enforced, got: {err}"
+        );
+    }
+
+    /// The specific shape of the round-2 regression: the discover variant
+    /// does not merely mark `pod` `required: false` (covered above) — it
+    /// omits the argument from its front matter entirely, which is the
+    /// common case (a discover file has no target to declare at all). Before
+    /// the fix, the `None` branch of the merge pushed `pod` with its
+    /// originally-declared `required: true` from the targeted file and
+    /// nothing ever relaxed it, so `list()` advertised `pod` as always
+    /// required and a conforming client could never invoke discover mode.
+    #[test]
+    fn list_does_not_require_an_argument_a_variant_omits_entirely() {
+        let dir = temp_dir("omitted-argument");
+        write(
+            &dir,
+            "solo.targeted.md",
+            "---\nname: solo\nmode: targeted\narguments:\n  - { name: context, required: true }\n  - { name: pod, target: true, required: true }\n---\nTriage `{{pod}}` on `{{context}}`.\n",
+        );
+        write(
+            &dir,
+            "solo.discover.md",
+            "---\nname: solo\nmode: discover\narguments:\n  - { name: context, required: true }\n---\nFind candidates on `{{context}}`.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let spec = lib.list().into_iter().find(|s| s.name == "solo").unwrap();
+        let pod = spec.arguments.iter().find(|a| a.name == "pod").unwrap();
+        assert!(
+            !pod.required,
+            "discover doesn't declare `pod` at all, so the merged spec must not require it"
+        );
+
+        let out = lib
+            .get("solo", &args(&[("context", "kind")]))
+            .expect("a bare call with only `context` must succeed and render discover mode");
+        assert!(
+            out.text.contains("Find candidates"),
+            "the discover body must be the one rendered, got: {}",
+            out.text
         );
     }
 
