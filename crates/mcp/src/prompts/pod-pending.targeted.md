@@ -9,16 +9,28 @@ arguments:
   - { name: pod, target: true, description: the pod stuck in Pending }
 ---
 Pod `{{pod}}` in namespace `{{namespace}}` on context `{{context}}` is stuck in
-Pending, which means the scheduler has not placed it. Work out what is blocking it.
+Pending. Work out what is blocking it.
 
-1. Call `k8s.listEvents` with `context: {{context}}`, `objectKind: Pod`,
+1. Call `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
+   `namespace: {{namespace}}`, `name: {{pod}}`. Read `spec.nodeName` first.
+   - If `spec.nodeName` is NON-EMPTY, the scheduler has already placed this
+     pod: `Pending` here is not a scheduling failure, it means something else
+     is blocking readiness on the node it was already assigned — an image
+     pull, an init container, a volume mount, or sandbox creation. `Pending`
+     is not a synonym for `FailedScheduling`, so do not run this pod through
+     the predicate steps below. Instead, Call `k8s.listEvents` with
+     `context: {{context}}`, `objectKind: Pod`, `objectName: {{pod}}`,
+     `namespace: {{namespace}}`. Look for `Pulling`/`Failed`/`BackOff` events
+     (image pull), an `Init` container status, or a mount/volume error, and
+     report that instead of a scheduling predicate. Stop here.
+   - If `spec.nodeName` is EMPTY, the pod is genuinely unscheduled. Read
+     `spec.nodeSelector`, `spec.affinity`, `spec.tolerations`,
+     `spec.containers[].resources.requests` and `spec.volumes`, then continue
+     with the predicate-based triage below.
+2. Call `k8s.listEvents` with `context: {{context}}`, `objectKind: Pod`,
    `objectName: {{pod}}`, `namespace: {{namespace}}`. The scheduler explains itself
    here — `FailedScheduling` messages name the exact predicate that failed. Start
    with this, not the manifest.
-2. Call `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
-   `namespace: {{namespace}}`, `name: {{pod}}`. Read `spec.nodeSelector`,
-   `spec.affinity`, `spec.tolerations`, `spec.containers[].resources.requests`
-   and `spec.volumes`.
 3. Match the event against the cause. None of this is available from
    `k8s.listNodes` or `k8s.nodeMetrics` alone — they report neither labels,
    taint detail, nor capacity — so the pattern below is always: Call
