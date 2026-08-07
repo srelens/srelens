@@ -34,7 +34,10 @@ then explain why.
    predicate. Call `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
    `namespace: <the pod's namespace>`, `name: <the pod>`. Read its
    `nodeSelector`, `affinity`, `tolerations` and `volumes`.
-4. Depending on the predicate:
+4. For a capacity or a label/taint predicate, first Call `k8s.listNodes` with
+   `context: {{context}}` to enumerate candidate nodes — the per-node
+   `getObject` calls below need a real node name to read, and `listNodes` is
+   the only call that supplies one. Then, depending on the predicate:
    - for capacity: the `FailedScheduling` event from step 3 is already the
      scheduler's own authoritative statement of which resource is short and
      on how many nodes; treat it as the source of truth rather than trying to
@@ -47,11 +50,10 @@ then explain why.
      `k8s.nodeMetrics` with `context: {{context}}` to judge the SCALE of the
      shortfall and whether it is cluster-wide or limited to a handful of
      nodes;
-   - for labels or taints: Call `k8s.listNodes` with `context: {{context}}`
-     to enumerate candidate nodes. Call `k8s.getObject` with
-     `context: {{context}}`, `kind: Node`, `name: <candidate>`. Read
-     `metadata.labels` and `spec.taints` — `k8s.listNodes` returns neither,
-     only a taint COUNT and no labels at all;
+   - for labels or taints: Call `k8s.getObject` with `context: {{context}}`,
+     `kind: Node`, `name: <candidate>`. Read `metadata.labels` and
+     `spec.taints` — `k8s.listNodes` returns neither, only a taint COUNT and
+     no labels at all;
    - for volume binding: Call `k8s.listPersistentVolumeClaims` with
      `context: {{context}}`, `namespace: <the pod's namespace>`.
      `{{namespace}}` is the optional SEARCH filter from step 1 and defaults
