@@ -33,7 +33,19 @@ pub async fn handle_request(
             id?,
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {}, "prompts": {} },
+                // `subscribe` is transport-dependent: stdio can push
+                // notifications on its own stdout, the POST-only HTTP transport
+                // has no server-to-client channel at all (see issue #193).
+                // `listChanged` is false because the resource list is two fixed
+                // entries plus templates and never changes at runtime.
+                "capabilities": {
+                    "tools": {},
+                    "prompts": {},
+                    "resources": {
+                        "subscribe": transport == Transport::Stdio,
+                        "listChanged": false
+                    }
+                },
                 "serverInfo": { "name": "srelens", "version": env!("CARGO_PKG_VERSION") }
             }),
         )),
@@ -197,6 +209,110 @@ pub async fn handle_request(
                 // argument set this server cannot serve.
                 Err(message) => Some(err(id?, -32602, &message)),
             }
+        }
+        "resources/list" => Some(ok(
+            id?,
+            json!({ "resources": crate::resources::fixed_resources() }),
+        )),
+        "resources/templates/list" => Some(ok(
+            id?,
+            json!({ "resourceTemplates": crate::resources::templates() }),
+        )),
+        "resources/read" => {
+            let uri_str = req
+                .get("params")
+                .and_then(|p| p.get("uri"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+
+            let planned = crate::resources::ResourceUri::parse(uri_str)
+                .and_then(|uri| crate::resources::plan_read(&uri, server.resources().as_ref()));
+
+            let read = match planned {
+                Ok(r) => r,
+                Err(message) => return Some(err(id?, -32602, &message)),
+            };
+
+            // The catalog is assembled here rather than by invoking a
+            // capability: it describes this server, not the cluster.
+            let text = if read.capability == crate::resources::CATALOG_IN_PROCESS {
+                json!({
+                    "tools": server.list_tools().into_iter().map(|t| t.name).collect::<Vec<_>>(),
+                    "prompts": server.prompts().list().into_iter().map(|p| p.name).collect::<Vec<_>>(),
+                    "resourceTemplates": crate::resources::templates(),
+                })
+                .to_string()
+            } else {
+                // `McpServer::call_tool` is a bare registry invocation with no
+                // gating or auditing of its own — that lives in the
+                // `tools/call` arm, wrapped around the same call. This arm
+                // reproduces both here so a resource read leaves the same
+                // audit trail as the identical read via `tools/call`.
+                if server.consent_kind(read.capability).is_some() {
+                    // Unreachable today: `plan_read` only ever names the four
+                    // hardcoded, unconditionally-read-only capabilities in
+                    // `MAPPED_CAPABILITIES`, none of which are consent-gated.
+                    // Guarded explicitly anyway, fail-closed, rather than
+                    // assuming that stays true — clients auto-fetch
+                    // resources, so raising a confirm dialog here (as
+                    // `tools/call` does) would be exactly the consent-fatigue
+                    // vector the design avoids.
+                    let message = format!(
+                        "{} is consent-gated and must be called as a tool, not read as a resource",
+                        read.capability
+                    );
+                    server.audit().record(crate::audit::AuditRecord {
+                        transport,
+                        tool: read.capability.to_string(),
+                        args: crate::audit::redact(
+                            &read.args,
+                            server.is_sensitive(read.capability),
+                        ),
+                        decision: "denied",
+                        outcome: "error",
+                        error: Some(message.clone()),
+                    });
+                    return Some(err(id?, -32602, &message));
+                }
+
+                let sensitive = server.is_sensitive(read.capability);
+                let redacted_args = crate::audit::redact(&read.args, sensitive);
+                let called = server.call_tool(read.capability, read.args.clone()).await;
+                server.audit().record(crate::audit::AuditRecord {
+                    transport,
+                    tool: read.capability.to_string(),
+                    args: redacted_args,
+                    decision: "auto",
+                    outcome: if called.is_ok() { "ok" } else { "error" },
+                    error: called.as_ref().err().map(|e| e.to_string()),
+                });
+
+                match called {
+                    Ok(v) => match &v {
+                        // `getManifest` returns `{ yaml }` and `podLogs`
+                        // `{ logs }`; unwrap those so the client gets the
+                        // document, not a wrapper object. Keyed on the
+                        // planned mime rather than "one string-valued key":
+                        // a future capability that returns a single-key JSON
+                        // object (e.g. `{ "currentContext": "prod" }`) must
+                        // pass through as JSON, not be silently stripped to
+                        // a bare string.
+                        Value::Object(m) if read.mime != "application/json" && m.len() == 1 => m
+                            .values()
+                            .next()
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.to_string()),
+                        _ => v.to_string(),
+                    },
+                    Err(e) => return Some(err(id?, -32603, &e.to_string())),
+                }
+            };
+
+            Some(ok(
+                id?,
+                json!({ "contents": [{ "uri": uri_str, "mimeType": read.mime, "text": text }] }),
+            ))
         }
         _ => id.map(|id| err(id, -32601, "method not found")),
     }
@@ -784,5 +900,219 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(text.contains("123"), "got {text}");
+    }
+
+    fn server_with_kinds() -> McpServer {
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                match kind {
+                    "Pod" => Some(crate::resources::KindScope::Namespaced),
+                    "Node" => Some(crate::resources::KindScope::ClusterScoped),
+                    _ => None,
+                }
+            }
+        }
+        server_with_ping().with_resources(Arc::new(Kinds))
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_resources_with_subscribe_true_on_stdio() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        let caps = &resp["result"]["capabilities"];
+        assert_eq!(caps["resources"]["subscribe"], json!(true));
+        assert_eq!(caps["resources"]["listChanged"], json!(false));
+        assert!(caps["tools"].is_object(), "tools must survive");
+        assert!(caps["prompts"].is_object(), "prompts must survive");
+    }
+
+    /// The HTTP transport is POST-only with no server-to-client channel, so it
+    /// must not claim a capability it cannot honour.
+    #[tokio::test]
+    async fn initialize_advertises_subscribe_false_on_http() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+            Transport::Http,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["capabilities"]["resources"]["subscribe"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn resources_list_returns_the_fixed_pair() {
+        let resp = handle_request(
+            &server_with_kinds(),
+            &json!({"jsonrpc":"2.0","id":2,"method":"resources/list"}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["resources"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn resources_templates_list_returns_three_templates() {
+        let resp = handle_request(
+            &server_with_kinds(),
+            &json!({"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["resourceTemplates"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn resources_read_rejects_a_secret_uri_with_invalid_params() {
+        let resp = handle_request(
+            &server_with_kinds(),
+            &json!({"jsonrpc":"2.0","id":4,"method":"resources/read",
+                    "params":{"uri":"k8s://c/ns/Secret/db-creds"}}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("k8s.getSecret"));
+    }
+
+    #[tokio::test]
+    async fn resources_read_rejects_a_malformed_uri() {
+        let resp = handle_request(
+            &server_with_kinds(),
+            &json!({"jsonrpc":"2.0","id":5,"method":"resources/read",
+                    "params":{"uri":"not-a-uri"}}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    /// `k8s://catalog` is assembled in-process, so it works with no cluster.
+    #[tokio::test]
+    async fn resources_read_serves_the_catalog_without_a_cluster() {
+        let resp = handle_request(
+            &server_with_kinds(),
+            &json!({"jsonrpc":"2.0","id":6,"method":"resources/read",
+                    "params":{"uri":"k8s://catalog"}}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        let contents = &resp["result"]["contents"][0];
+        assert_eq!(contents["uri"], "k8s://catalog");
+        assert_eq!(contents["mimeType"], "application/json");
+        let text = contents["text"].as_str().unwrap();
+        assert!(text.contains("ping"), "the catalog must list tools: {text}");
+    }
+
+    #[tokio::test]
+    async fn resources_read_without_a_resolver_addresses_no_objects() {
+        // `server_with_ping()` wires no resolver, so `NoKinds` applies.
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":7,"method":"resources/read",
+                    "params":{"uri":"k8s://c/ns/Pod/web-0"}}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    fn server_with_kinds_and_manifest(
+        handler: impl Fn(Value) -> Result<Value, srelens_capability::CapabilityError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> McpServer {
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                match kind {
+                    "Pod" => Some(crate::resources::KindScope::Namespaced),
+                    _ => None,
+                }
+            }
+        }
+        let handler = Arc::new(handler);
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("k8s.getManifest", "reads a manifest", move |v| {
+            let handler = handler.clone();
+            async move { handler(v) }
+        }));
+        McpServer::new(Arc::new(reg)).with_resources(Arc::new(Kinds))
+    }
+
+    /// The vulnerability Finding 1 closes: `McpServer::call_tool` is a bare
+    /// registry invocation with no gating or auditing of its own, so a
+    /// resource read that skipped straight to it would leave zero trail
+    /// while the identical read via `tools/call` is logged. The audit
+    /// record must name the underlying capability, not `"resources/read"`,
+    /// since that is what an operator needs to see what actually touched
+    /// the cluster.
+    #[tokio::test]
+    async fn resources_read_records_one_audit_entry_naming_the_underlying_capability() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<(String, &'static str, &'static str)>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push((rec.tool, rec.decision, rec.outcome));
+            }
+        }
+
+        let spy = Arc::new(Spy::default());
+        let server = server_with_kinds_and_manifest(|_| Ok(json!({ "yaml": "kind: Pod" })))
+            .with_audit(spy.clone());
+
+        let resp = handle_request(
+            &server,
+            &json!({"jsonrpc":"2.0","id":10,"method":"resources/read",
+                    "params":{"uri":"k8s://c/ns/Pod/web-0"}}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["result"]["contents"][0]["text"], "kind: Pod", "got {resp}");
+
+        let seen = spy.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected exactly one audit record, got {seen:?}");
+        assert_eq!(seen[0].0, "k8s.getManifest", "must name the underlying capability");
+        assert_eq!(seen[0].1, "auto");
+        assert_eq!(seen[0].2, "ok");
+    }
+
+    /// Finding 2: no existing test reached a real `call_tool` failure through
+    /// the read path — every other case is either the in-process catalog or
+    /// rejected earlier by `plan_read` with `-32602`.
+    #[tokio::test]
+    async fn resources_read_surfaces_a_capability_failure_as_internal_error() {
+        let server = server_with_kinds_and_manifest(|_| {
+            Err(srelens_capability::CapabilityError::Handler("no such pod".to_string()))
+        });
+
+        let resp = handle_request(
+            &server,
+            &json!({"jsonrpc":"2.0","id":11,"method":"resources/read",
+                    "params":{"uri":"k8s://c/ns/Pod/web-0"}}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32603, "got {resp}");
+        assert!(
+            resp["error"]["message"].as_str().unwrap().contains("no such pod"),
+            "got {resp}"
+        );
     }
 }

@@ -43,6 +43,7 @@ pub struct McpServer {
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
     audit: Arc<dyn crate::audit::AuditSink>,
     prompts: crate::prompts::PromptLibrary,
+    resources: std::sync::Arc<dyn crate::resources::KindResolver>,
 }
 
 impl McpServer {
@@ -54,6 +55,9 @@ impl McpServer {
             audit: Arc::new(crate::audit::NoopAudit),
             // Built-ins only until a host supplies a user prompt directory.
             prompts: crate::prompts::PromptLibrary::new(None),
+            // Fail closed: no resolver means no object resources, only the two
+            // fixed ones.
+            resources: std::sync::Arc::new(crate::resources::NoKinds),
         }
     }
 
@@ -82,6 +86,18 @@ impl McpServer {
 
     pub fn prompts(&self) -> &crate::prompts::PromptLibrary {
         &self.prompts
+    }
+
+    pub fn with_resources(
+        mut self,
+        kinds: std::sync::Arc<dyn crate::resources::KindResolver>,
+    ) -> Self {
+        self.resources = kinds;
+        self
+    }
+
+    pub fn resources(&self) -> &std::sync::Arc<dyn crate::resources::KindResolver> {
+        &self.resources
     }
 
     /// Whether a tool reads sensitive material, so the audit log can redact
