@@ -130,11 +130,23 @@ pub fn validate(file: &PromptFile) -> Result<(), String> {
     if file.body.trim().is_empty() {
         return Err("prompt body is empty".to_string());
     }
-    // Check for empty placeholders that would leak into the agent instructions
+    // Check for empty or unterminated placeholders that would leak into the
+    // agent instructions. An unclosed `{{` must be rejected here, not merely
+    // tolerated: `placeholders` stops scanning at it (so it never gets
+    // declared/undeclared-checked below) while `render` copies everything
+    // from that point on verbatim, so a body like `Check {{context` with no
+    // closing `}}` would otherwise validate cleanly and still ship malformed
+    // template text straight into the agent's instructions.
     let mut rest = file.body.as_str();
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
-        let Some(end) = after.find("}}") else { break };
+        let Some(end) = after.find("}}") else {
+            return Err(
+                "body contains an unterminated `{{` with no matching `}}`, which would \
+                 leak literally into the agent instructions"
+                    .to_string(),
+            );
+        };
         let token = after[..end].trim();
         if token.is_empty() {
             return Err("body contains empty placeholder (e.g. {{}} or {{ }}), which would leak literally into the agent instructions".to_string());
@@ -1105,6 +1117,29 @@ mod tests {
     fn validate_rejects_whitespace_only_placeholders() {
         let e = validate(&file_with("check {{ }}", &["context"])).unwrap_err();
         assert!(e.contains("empty placeholder"), "the message must indicate an empty placeholder, got: {e}");
+    }
+
+    /// Round-3 finding: `Check {{context` with no closing `}}` used to pass
+    /// `validate` cleanly — `placeholders` stops scanning at the unclosed
+    /// delimiter (so it never reaches the undeclared-argument check) while
+    /// `render` copies the remainder verbatim, so the literal `{{` reached
+    /// agent-facing output with no load issue reported anywhere.
+    #[test]
+    fn validate_rejects_an_unterminated_placeholder() {
+        let e = validate(&file_with("Check {{context on the node", &["context"])).unwrap_err();
+        assert!(
+            e.contains("unterminated") && e.contains("{{"),
+            "the message must say the placeholder is unterminated, got: {e}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_a_body_with_multiple_balanced_placeholders() {
+        assert!(validate(&file_with(
+            "Check {{context}} then {{namespace}} then {{context}} again",
+            &["context", "namespace"]
+        ))
+        .is_ok());
     }
 
     /// Every embedded built-in must parse and validate. This is the build-time
