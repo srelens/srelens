@@ -6,6 +6,13 @@ edition.workspace = true
 [dependencies]
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
+# `kind_resolver` returns `dyn srelens_mcp::resources::KindResolver`, so this is
+# real API surface, not test-only. `crates/mcp` also has `srelens-registry` as
+# a dev-dependency (for its own e2e prompt test), making this a dev-only cycle:
+# registry's real dependency on mcp, plus mcp's dev-only dependency on
+# registry. Cargo permits this because neither library build depends on the
+# other; confirmed via `cargo check -p srelens-registry -p srelens-mcp`.
+srelens-mcp = { path = "../mcp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Blocking HTTP for toolbox downloads (run inside spawn_blocking). rustls with
@@ -15,5 +22,4 @@ serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 
 [dev-dependencies]
-srelens-mcp = { path = "../mcp" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

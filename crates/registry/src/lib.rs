@@ -338,6 +338,28 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
     build_registry_with_paths(cache, default_kubeconfig_paths())
 }
 
+/// The real resource kind resolver, over `srelens_kube::manifest::gvk_for`.
+///
+/// `Secret` is excluded deliberately: it is the one read-only kind that is
+/// consent-gated (`k8s.getSecret` is `SENSITIVE_READ`), and resource reads must
+/// never trip the consent gate — clients auto-fetch resources to populate
+/// context, so a confirm dialog there would be a consent-fatigue vector.
+pub fn kind_resolver() -> std::sync::Arc<dyn srelens_mcp::resources::KindResolver> {
+    struct GvkKinds;
+    impl srelens_mcp::resources::KindResolver for GvkKinds {
+        fn scope(&self, kind: &str) -> Option<srelens_mcp::resources::KindScope> {
+            use srelens_mcp::resources::KindScope;
+            if kind == "Secret" {
+                return None;
+            }
+            srelens_kube::manifest::gvk_for(kind).map(|(_, namespaced)| {
+                if namespaced { KindScope::Namespaced } else { KindScope::ClusterScoped }
+            })
+        }
+    }
+    std::sync::Arc::new(GvkKinds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +411,26 @@ mod tests {
         let mut default_ids = default_reg.ids();
         default_ids.sort();
         assert_eq!(ids, default_ids, "same capabilities regardless of paths");
+    }
+
+    #[test]
+    fn the_real_kind_resolver_covers_namespaced_and_cluster_scoped_kinds() {
+        use srelens_mcp::resources::{KindResolver, KindScope};
+        let r = crate::kind_resolver();
+        assert_eq!(r.scope("Pod"), Some(KindScope::Namespaced));
+        assert_eq!(r.scope("Deployment"), Some(KindScope::Namespaced));
+        assert_eq!(r.scope("Node"), Some(KindScope::ClusterScoped));
+        assert_eq!(r.scope("PersistentVolume"), Some(KindScope::ClusterScoped));
+        assert_eq!(r.scope("Nonsense"), None);
+    }
+
+    /// The curation that makes "the consent gate never fires on a resource
+    /// read" true: Secrets are reachable only through the gated
+    /// `k8s.getSecret` tool, never as an addressable resource.
+    #[test]
+    fn the_real_kind_resolver_excludes_secrets() {
+        use srelens_mcp::resources::KindResolver;
+        assert_eq!(crate::kind_resolver().scope("Secret"), None);
     }
 
     #[test]

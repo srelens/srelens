@@ -112,6 +112,33 @@ impl ResourceUri {
     }
 }
 
+/// Whether a kind is namespaced. Returned only for kinds that are addressable
+/// as resources at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KindScope {
+    Namespaced,
+    ClusterScoped,
+}
+
+/// Answers "is this kind addressable as a resource, and is it namespaced".
+///
+/// Injected because `crates/mcp` cannot depend on `crates/kube`, where the kind
+/// table lives. `crates/registry` supplies the real implementation over
+/// `gvk_for`; a second table here would drift.
+pub trait KindResolver: Send + Sync {
+    fn scope(&self, kind: &str) -> Option<KindScope>;
+}
+
+/// The default. A host that wires no resolver exposes no object resources —
+/// only the two fixed ones. Fail closed, as `AlwaysDeny` is for consent.
+pub struct NoKinds;
+
+impl KindResolver for NoKinds {
+    fn scope(&self, _kind: &str) -> Option<KindScope> {
+        None
+    }
+}
+
 impl std::fmt::Display for ResourceUri {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -138,6 +165,34 @@ impl std::fmt::Display for ResourceUri {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StubKinds;
+    impl KindResolver for StubKinds {
+        fn scope(&self, kind: &str) -> Option<KindScope> {
+            match kind {
+                "Pod" | "Deployment" => Some(KindScope::Namespaced),
+                "Node" => Some(KindScope::ClusterScoped),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn a_stub_resolver_answers_scope_and_addressability() {
+        let r = StubKinds;
+        assert_eq!(r.scope("Pod"), Some(KindScope::Namespaced));
+        assert_eq!(r.scope("Node"), Some(KindScope::ClusterScoped));
+        assert_eq!(r.scope("Secret"), None, "not addressable");
+        assert_eq!(r.scope("Nonsense"), None);
+    }
+
+    /// Fail closed: a host that wires no resolver addresses nothing, mirroring
+    /// how `AlwaysDeny` is the default `ConfirmPolicy`.
+    #[test]
+    fn the_default_resolver_addresses_nothing() {
+        assert_eq!(NoKinds.scope("Pod"), None);
+        assert_eq!(NoKinds.scope("Node"), None);
+    }
 
     #[test]
     fn parses_a_namespaced_object() {
