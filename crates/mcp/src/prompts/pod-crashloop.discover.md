@@ -36,24 +36,28 @@ triage them. Use only srelens tools.
    earlier failure forever, and a native restartable init sidecar
    (`spec.initContainers[]` whose `restartPolicy` is `Always`) keeps running
    alongside the app containers indefinitely — app containers do NOT
-   necessarily wait for every init container to finish in that case. Never
-   use lifetime `restartCount` to decide which container is failing. Instead,
-   an entry in either array counts as a CURRENT crash source only if it shows
-   a `waiting.reason` of `CrashLoopBackOff`, or a `lastState.terminated` with
-   a non-zero `exitCode` and a `reason` other than `Completed`. Discard any
-   shortlisted candidate with no such entry in either array — for a
-   zero-restart candidate from step 2 this means it is genuinely out of scope
-   here (an image pull or a readiness stall, not a crash loop); for a
-   `restarts > 0` candidate this means its high lifetime count is an old
-   incident, not a finding — mention it to the user separately and move on
-   without calling `podLogs` or `listEvents` for it. Take the top three at
-   most of the pods that remain (the ones CURRENTLY failing). For each: pool
-   every current-crash-source entry across both arrays, then pick which
-   container's logs to read by CURRENT state: prefer whichever has a
-   `waiting.reason` of `CrashLoopBackOff`, falling back to the one with the
-   most recent `lastState.terminated` if none is currently in back-off — a
-   now-healthy container (init or app) with many past restarts is not the one
-   to read. Read its `lastState.terminated` block (exit code and reason).
+   necessarily wait for every init container to finish in that case. `state`
+   is what is true right now; `lastState` is what happened before and is
+   RETAINED even after the container recovers to `state.running` — so
+   neither `lastState` nor lifetime `restartCount` may decide which pod or
+   container is currently failing. An entry in either array counts as a
+   CURRENT crash source only if its own `state` shows a `waiting.reason` of
+   `CrashLoopBackOff`, or a `state.terminated` with a non-zero `exitCode` and
+   a `reason` other than `Completed`. Discard any shortlisted candidate with
+   no such entry in either array — for a zero-restart candidate from step 2
+   this means it is genuinely out of scope here (an image pull or a
+   readiness stall, not a crash loop); for a `restarts > 0` candidate this
+   means its high lifetime count is an old incident, not a finding — mention
+   it to the user separately and move on without calling `podLogs` or
+   `listEvents` for it. Order the pods that remain worst first —
+   `CrashLoopBackOff` in `state.waiting` first, then the most recent
+   `state.terminated.finishedAt`, lifetime `restartCount` only as a final
+   tie-break — and take the top three. For each: pool every
+   current-crash-source entry across both arrays and pick the one to read by
+   that same order: `CrashLoopBackOff` first, otherwise the most recent
+   `state.terminated.finishedAt`. Read its crash detail — `state.terminated`
+   if that is its current state, otherwise `lastState.terminated` (since
+   `state.waiting` on `CrashLoopBackOff` carries no exit code of its own).
    Call `k8s.podLogs` with `context: {{context}}`,
    `namespace: <the candidate's namespace>`, `pod: <the candidate's name>`,
    `container: <the crashing container>`, `previous: true`,
