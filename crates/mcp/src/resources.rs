@@ -143,10 +143,16 @@ impl KindResolver for NoKinds {
 /// from the registry and prompt library rather than by invoking a capability.
 pub const CATALOG_IN_PROCESS: &str = "<catalog>";
 
+/// Capability IDs named by plan_read. Private to keep the single source of truth
+/// centralized — both MAPPED_CAPABILITIES and plan_read use these.
+const CAP_MANIFEST: &str = "k8s.getManifest";
+const CAP_EVENTS: &str = "k8s.listEvents";
+const CAP_LOGS: &str = "k8s.podLogs";
+const CAP_CONTEXTS: &str = "k8s.listContexts";
+
 /// Every capability a resource read can invoke. Task 6's guard asserts each is
 /// registered, `read_only`, and NOT consent-gated.
-pub const MAPPED_CAPABILITIES: [&str; 4] =
-    ["k8s.getManifest", "k8s.listEvents", "k8s.podLogs", "k8s.listContexts"];
+pub const MAPPED_CAPABILITIES: [&str; 4] = [CAP_MANIFEST, CAP_EVENTS, CAP_LOGS, CAP_CONTEXTS];
 
 /// A resolved read: which capability to invoke, with what arguments, and the
 /// mimeType to report to the client.
@@ -167,7 +173,7 @@ pub fn plan_read(uri: &ResourceUri, kinds: &dyn KindResolver) -> Result<Resource
     let (context, namespace, kind, name, sub) = match uri {
         ResourceUri::Contexts => {
             return Ok(ResourceRead {
-                capability: "k8s.listContexts",
+                capability: CAP_CONTEXTS,
                 args: json!({}),
                 mime: "application/json",
             })
@@ -214,10 +220,10 @@ pub fn plan_read(uri: &ResourceUri, kinds: &dyn KindResolver) -> Result<Resource
             if let Some(ns) = namespace {
                 args["namespace"] = json!(ns);
             }
-            Ok(ResourceRead { capability: "k8s.getManifest", args, mime: "application/yaml" })
+            Ok(ResourceRead { capability: CAP_MANIFEST, args, mime: "application/yaml" })
         }
         Some(SubResource::Events) => Ok(ResourceRead {
-            capability: "k8s.listEvents",
+            capability: CAP_EVENTS,
             args: json!({
                 "context": context,
                 "namespace": namespace.clone().unwrap_or_default(),
@@ -233,7 +239,7 @@ pub fn plan_read(uri: &ResourceUri, kinds: &dyn KindResolver) -> Result<Resource
                 ));
             }
             Ok(ResourceRead {
-                capability: "k8s.podLogs",
+                capability: CAP_LOGS,
                 args: json!({
                     "context": context,
                     "namespace": namespace.clone().unwrap_or_default(),
@@ -551,5 +557,120 @@ mod tests {
             assert!(x["name"].is_string());
             assert!(x["description"].is_string());
         }
+    }
+
+    /// Every id in MAPPED_CAPABILITIES must be registered, read-only, and NOT
+    /// consent-gated. Clients auto-fetch resources to populate context, so a
+    /// resource read that raised a confirm dialog would be a consent-fatigue
+    /// vector — the hazard #23's design warns about. This test guards the
+    /// listed ids. The companion test `every_plan_read_branch_is_mapped_and_nothing_extra`
+    /// enforces that MAPPED_CAPABILITIES contains exactly the ids that plan_read
+    /// can actually name, preventing drift as the code changes.
+    #[test]
+    fn every_mapped_capability_is_read_only_and_ungated() {
+        let registry = std::sync::Arc::new(srelens_registry::build_registry());
+        let server = crate::McpServer::new(registry.clone());
+        for id in MAPPED_CAPABILITIES {
+            let cap = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} is mapped for resource reads but not registered"));
+            assert!(cap.annotations.read_only, "{id} must be read_only");
+            assert_eq!(
+                server.consent_kind(id),
+                None,
+                "{id} is consent-gated, so a resource read would raise a confirm dialog"
+            );
+        }
+    }
+
+    /// The curation that the guard above depends on. If this ever passes with
+    /// `Some(_)`, secrets became addressable and the gate could be bypassed.
+    #[test]
+    fn the_real_resolver_still_excludes_secrets() {
+        assert_eq!(srelens_registry::kind_resolver().scope("Secret"), None);
+    }
+
+    /// Every capability that plan_read can name must appear in MAPPED_CAPABILITIES,
+    /// and nothing in MAPPED_CAPABILITIES must be unreachable. This test uses
+    /// compiler-enforced exhaustive matching to ensure the property holds as
+    /// code changes: adding a new ResourceUri or SubResource variant fails the
+    /// build until this test is updated to cover it.
+    #[test]
+    fn every_plan_read_branch_is_mapped_and_nothing_extra() {
+        // Compiler enforcement: if a new SubResource variant is added,
+        // this match becomes non-exhaustive and the build fails.
+        match SubResource::Events {
+            SubResource::Events | SubResource::Logs => {}
+        }
+        let sub_variants = [None, Some(SubResource::Events), Some(SubResource::Logs)];
+
+        // Resolver that allows all kinds we need to exercise every plan_read path:
+        // Pod (namespaced, can have logs), and Node (cluster-scoped).
+        struct AllowPodAndNode;
+        impl KindResolver for AllowPodAndNode {
+            fn scope(&self, kind: &str) -> Option<KindScope> {
+                match kind {
+                    "Pod" => Some(KindScope::Namespaced),
+                    "Node" => Some(KindScope::ClusterScoped),
+                    _ => None,
+                }
+            }
+        }
+
+        let mut capabilities_named = std::collections::HashSet::new();
+
+        // Compiler enforcement: if a new ResourceUri variant is added,
+        // this match becomes non-exhaustive and the build fails.
+        match ResourceUri::Contexts {
+            ResourceUri::Contexts | ResourceUri::Catalog | ResourceUri::Object { .. } => {}
+        }
+
+        // ResourceUri::Contexts
+        let read = plan_read(&ResourceUri::Contexts, &AllowPodAndNode).unwrap();
+        assert_ne!(read.capability, CATALOG_IN_PROCESS, "Contexts should map to a real capability");
+        capabilities_named.insert(read.capability);
+
+        // ResourceUri::Catalog (should NOT be in MAPPED_CAPABILITIES; it's a sentinel)
+        let read = plan_read(&ResourceUri::Catalog, &AllowPodAndNode).unwrap();
+        assert_eq!(read.capability, CATALOG_IN_PROCESS);
+        // Don't add it to the set; MAPPED_CAPABILITIES explicitly excludes it.
+
+        // ResourceUri::Object with all sub variants
+        for sub in sub_variants {
+            // Use Pod (namespaced) for most tests
+            let kind = "Pod";
+            let uri = ResourceUri::Object {
+                context: "ctx".into(),
+                namespace: Some("ns".into()),
+                kind: kind.into(),
+                name: "obj".into(),
+                sub,
+            };
+            let read = plan_read(&uri, &AllowPodAndNode).unwrap();
+            capabilities_named.insert(read.capability);
+
+            // Also test cluster-scoped (Node) with the object endpoint (no sub)
+            if sub.is_none() {
+                let uri = ResourceUri::Object {
+                    context: "ctx".into(),
+                    namespace: None,
+                    kind: "Node".into(),
+                    name: "node1".into(),
+                    sub,
+                };
+                let read = plan_read(&uri, &AllowPodAndNode).unwrap();
+                capabilities_named.insert(read.capability);
+            }
+        }
+
+        // Now verify that the set of capabilities named by plan_read
+        // exactly equals MAPPED_CAPABILITIES.
+        let mapped_set: std::collections::HashSet<&str> = MAPPED_CAPABILITIES.iter().copied().collect();
+        assert_eq!(
+            capabilities_named, mapped_set,
+            "plan_read named capabilities differ from MAPPED_CAPABILITIES: \
+             named={:?}, mapped={:?}",
+            capabilities_named, mapped_set
+        );
     }
 }
