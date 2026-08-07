@@ -33,28 +33,28 @@ then explain why.
    `namespace: <the pod's namespace>`. `FailedScheduling` names the failed
    predicate. Call `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
    `namespace: <the pod's namespace>`, `name: <the pod>`. Read its
-   `nodeSelector`, `affinity`, `tolerations`, `containers[].resources.requests`,
-   `initContainers[].resources.requests`, `overhead` and `volumes`.
+   `nodeSelector`, `affinity`, `tolerations` and `volumes`.
 4. Depending on the predicate:
-   - for capacity, labels or taints: Call `k8s.listNodes` with
-     `context: {{context}}` to enumerate candidate nodes. Call
+   - for capacity: the `FailedScheduling` event from step 3 is already the
+     scheduler's own authoritative statement of which resource is short and
+     on how many nodes; treat it as the source of truth rather than trying to
+     second-guess it by recomputing what the scheduler reserved. Kubernetes'
+     exact reservation math — a per-resource maximum across init containers,
+     restartable sidecar init containers accumulating with the app
+     containers, and pod overhead — is not reproduced here. Call
      `k8s.getObject` with `context: {{context}}`, `kind: Node`,
-     `name: <candidate>`. Read `metadata.labels`, `spec.taints` and
-     `status.allocatable` — `k8s.listNodes` returns none of those, only a
-     taint COUNT and no labels or capacity at all. Reason about a node's free
-     capacity as `allocatable` minus the EFFECTIVE requests of the pods
-     already on it: Call `k8s.listPods` with `context: {{context}}`,
-     `namespace: ""` to find the pods on that node. For each, Call
-     `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
-     `namespace: <that pod's namespace>`, `name: <that pod's name>` and
-     compute its effective request as max(the largest init container's
-     `resources.requests`, the sum of `spec.containers[].resources.requests`)
-     plus `spec.overhead` — summing only `spec.containers[].resources.requests`
-     understates what the scheduler actually reserves. Sum those effective
-     requests and subtract from `allocatable` to get free capacity, then
-     compare the representative pod's own effective request — computed the
-     same way from the fields read above — against that free capacity; no
-     capability reports free capacity directly;
+     `name: <candidate>`. Read `status.allocatable`, and Call
+     `k8s.nodeMetrics` with `context: {{context}}` to judge the SCALE of the
+     shortfall and whether it is cluster-wide or limited to a handful of
+     nodes. If you want a rough sense of what a candidate node already has
+     reserved, Call `k8s.listPods` with `context: {{context}}`,
+     `namespace: ""`. Ignore any pod whose `phase` is `Succeeded` or `Failed`
+     — a terminal pod holds no allocatable capacity;
+   - for labels or taints: Call `k8s.listNodes` with `context: {{context}}`
+     to enumerate candidate nodes. Call `k8s.getObject` with
+     `context: {{context}}`, `kind: Node`, `name: <candidate>`. Read
+     `metadata.labels` and `spec.taints` — `k8s.listNodes` returns neither,
+     only a taint COUNT and no labels at all;
    - for volume binding: Call `k8s.listPersistentVolumeClaims` with
      `context: {{context}}`, `namespace: <the pod's namespace>`.
      `{{namespace}}` is the optional SEARCH filter from step 1 and defaults

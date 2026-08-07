@@ -24,10 +24,8 @@ Pending. Work out what is blocking it.
      (image pull), an `Init` container status, or a mount/volume error, and
      report that instead of a scheduling predicate. Stop here.
    - If `spec.nodeName` is EMPTY, the pod is genuinely unscheduled. Read
-     `spec.nodeSelector`, `spec.affinity`, `spec.tolerations`,
-     `spec.containers[].resources.requests`, `spec.initContainers[].resources.requests`,
-     `spec.overhead` and `spec.volumes`, then continue with the
-     predicate-based triage below.
+     `spec.nodeSelector`, `spec.affinity`, `spec.tolerations` and
+     `spec.volumes`, then continue with the predicate-based triage below.
 2. Call `k8s.listEvents` with `context: {{context}}`, `objectKind: Pod`,
    `objectName: {{pod}}`, `namespace: {{namespace}}`. The scheduler explains itself
    here — `FailedScheduling` messages name the exact predicate that failed. Start
@@ -39,22 +37,20 @@ Pending. Work out what is blocking it.
    Then, Call `k8s.getObject` with `context: {{context}}`, `kind: Node`,
    `name: <candidate>`. Read whichever field the cause below needs —
    `status.allocatable`, `metadata.labels`, or `spec.taints`.
-   - insufficient cpu/memory → read `status.allocatable` from the `getObject`
-     call above. Since no capability reports a node's FREE capacity directly,
-     reason it out: Call `k8s.listPods` with `context: {{context}}`,
-     `namespace: ""` to find the pods already on that node. For each, Call
-     `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
-     `namespace: <that pod's namespace>`, `name: <that pod's name>`. For each
-     pod, compute its EFFECTIVE request as max(the largest init container's
-     `resources.requests`, the sum of `spec.containers[].resources.requests`)
-     plus `spec.overhead` — init containers run one at a time before the app
-     containers start, so only the larger of the two counts, but
-     `spec.overhead` (set by the pod's RuntimeClass, if any) is additive on
-     top of both. Summing only `spec.containers[].resources.requests`
-     understates what the scheduler actually reserves. Sum the already-running
-     pods' effective requests and subtract from `allocatable` to get free
-     capacity, then compare `{{pod}}`'s own effective request — computed the
-     same way from the fields read in step 1 — against that free capacity;
+   - insufficient cpu/memory → the `FailedScheduling` event from step 2 is
+     already the scheduler's own authoritative statement of which resource is
+     short and on how many nodes; treat it as the source of truth rather than
+     trying to second-guess it by recomputing what the scheduler reserved.
+     Kubernetes' exact reservation math — a per-resource maximum across init
+     containers, restartable sidecar init containers accumulating with the
+     app containers, and pod overhead — is not reproduced here. Read
+     `status.allocatable` from the `getObject` call above, and Call
+     `k8s.nodeMetrics` with `context: {{context}}` to judge the SCALE of the
+     shortfall and whether it is cluster-wide or limited to a handful of
+     nodes. If you want a rough sense of what a candidate node already has
+     reserved, Call `k8s.listPods` with `context: {{context}}`,
+     `namespace: ""`. Ignore any pod whose `phase` is `Succeeded` or `Failed`
+     — a terminal pod holds no allocatable capacity;
    - node selector or affinity mismatch → read `metadata.labels` from the
      `getObject` call above and compare against the pod's `spec.nodeSelector`
      / `spec.affinity`;
