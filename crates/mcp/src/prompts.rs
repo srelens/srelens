@@ -1257,6 +1257,15 @@ mod tests {
     /// in that step — only that it belongs to the allowlisted set somewhere,
     /// which is what actually catches an invented or misspelled key.
     ///
+    /// This is still worth keeping alongside the exact, per-call guard below
+    /// (`every_call_supplies_every_required_field_of_its_capability`): that
+    /// one only checks that a call's REQUIRED fields are present, so it has
+    /// nothing to say about a bogus EXTRA key on an otherwise-complete call
+    /// line (e.g. a stray `tailLines` next to a correct `tail_lines`) or
+    /// about a mistyped key on a call line this test's stricter grammar
+    /// doesn't parse as a call at all. This one catches those, at the cost of
+    /// not knowing which specific tool a key belongs to.
+    ///
     /// Deterministic and cluster-free: `build_registry` only constructs a
     /// lazy client cache and registers capability closures (no connection
     /// attempt), and `input_schema` comes from `schemars::schema_for!` at
@@ -1295,6 +1304,117 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every canonical call site in `body`: `(tool, keys)` for each
+    /// `` Call `k8s.tool` with `k1: v1`, `k2: v2`. `` sentence, where `keys`
+    /// is every backtick `key:` token written between "with" and the period
+    /// that ends the sentence (found outside any backtick span, so a period
+    /// inside a value like `{{context}}` or `<candidate>` can't terminate it
+    /// early). A bare mention like "`k8s.listNodes` does not return any of
+    /// this" has no "Call" immediately before the backtick and no "with"
+    /// immediately after it, so it is not matched — that is deliberate: it's
+    /// what lets an informational mention skip this guard entirely without
+    /// special-casing it, per the canonical-form rules the built-in bodies
+    /// are held to.
+    fn call_sites(body: &str) -> Vec<(String, Vec<String>)> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(call_at) = rest.find("Call `") {
+            let after_call = &rest[call_at + "Call `".len()..];
+            let Some(tick_end) = after_call.find('`') else {
+                break;
+            };
+            let tool = after_call[..tick_end].to_string();
+            let after_tool = &after_call[tick_end + 1..];
+            let Some(with_rest) = after_tool.trim_start().strip_prefix("with") else {
+                // Not a call in the canonical shape (e.g. "Call `k8s.X`
+                // directly" with no "with" clause) — keep scanning past it
+                // rather than treating it as a call with zero keys.
+                rest = after_tool;
+                continue;
+            };
+
+            // The call's key list runs from here to the first '.' that is
+            // outside a backtick span.
+            let mut in_tick = false;
+            let mut end = with_rest.len();
+            for (i, c) in with_rest.char_indices() {
+                match c {
+                    '`' => in_tick = !in_tick,
+                    '.' if !in_tick => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let keys = argument_key_tokens(&with_rest[..end]);
+            out.push((tool, keys));
+            rest = &with_rest[end..];
+        }
+        out
+    }
+
+    /// The guard PART 1 of the round-2 review asked for: `every_argument_key_
+    /// in_a_builtin_body_is_a_real_capability_input_field` above can catch an
+    /// INVENTED key (one that belongs to no allowlisted capability at all),
+    /// but it has no notion of which tool a key belongs to, so it cannot
+    /// catch a call that's simply missing one of ITS tool's required fields —
+    /// that key might well be a real field of some *other* allowlisted
+    /// capability. This is what let `getObject` omit `name`/`namespace` and
+    /// `podLogs` omit `pod`/`namespace` ship across two review rounds.
+    ///
+    /// This test is exact instead: for every canonical `` Call `k8s.X` with
+    /// ... `` sentence (see `call_sites`), it looks up the REAL capability
+    /// `k8s.X` in the registry, reads its `input_schema`'s `required` array
+    /// (schemars emits this from schema_for!, listing every field that is
+    /// neither `Option<_>` nor `#[serde(default)]`), and asserts every one of
+    /// those fields appears as a backtick `key:` token on that same call.
+    #[test]
+    fn every_call_supplies_every_required_field_of_its_capability() {
+        let registry = srelens_registry::build_registry();
+        let (files, _) = builtins();
+
+        let mut total_calls = 0usize;
+        for f in &files {
+            let sites = call_sites(&f.body);
+            total_calls += sites.len();
+            for (tool, keys) in sites {
+                let cap = registry.get(&tool).unwrap_or_else(|| {
+                    panic!(
+                        "{}: `Call \\`{tool}\\` with ...` names a tool that does not exist \
+                         in the real capability registry — typo?",
+                        f.source
+                    )
+                });
+                let required: Vec<&str> = cap
+                    .input_schema
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                let missing: Vec<&str> = required
+                    .iter()
+                    .copied()
+                    .filter(|r| !keys.iter().any(|k| k == r))
+                    .collect();
+                assert!(
+                    missing.is_empty(),
+                    "{}: `Call \\`{tool}\\` with ...` is missing required field(s) {:?} \
+                     (supplied keys: {:?})",
+                    f.source,
+                    missing,
+                    keys
+                );
+            }
+        }
+        assert!(
+            total_calls >= 30,
+            "sanity check failed: only found {total_calls} canonical call sites across all \
+             built-ins — did `call_sites`'s parsing regress, or did a rewrite stop using the \
+             canonical `Call \\`k8s.X\\` with ...` form?"
+        );
     }
 
     #[test]
