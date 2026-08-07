@@ -268,6 +268,55 @@ impl std::fmt::Display for ResourceUri {
     }
 }
 
+/// The only resources `resources/list` returns. Enumerating cluster objects
+/// would be unbounded and would need a cluster round-trip to answer a
+/// discovery call, so object addressing is advertised via templates instead.
+pub fn fixed_resources() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    vec![
+        json!({
+            "uri": "k8s://contexts",
+            "name": "Kube contexts",
+            "description": "Contexts srelens can connect to, and which is current.",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "k8s://catalog",
+            "name": "srelens catalog",
+            "description": "Every tool, prompt and resource template this server exposes.",
+            "mimeType": "application/json"
+        }),
+    ]
+}
+
+/// Parameterised URI shapes, which is what makes object addressing
+/// discoverable without enumerating anything.
+pub fn templates() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    vec![
+        json!({
+            "uriTemplate": "k8s://{context}/{namespace}/{kind}/{name}",
+            "name": "Object manifest",
+            "description": "A resource's manifest as YAML. Use `-` as the namespace for \
+                            cluster-scoped kinds. Secrets are not addressable — read them \
+                            with the k8s.getSecret tool.",
+            "mimeType": "application/yaml"
+        }),
+        json!({
+            "uriTemplate": "k8s://{context}/{namespace}/{kind}/{name}/events",
+            "name": "Object events",
+            "description": "Events whose involved object is this resource.",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uriTemplate": "k8s://{context}/{namespace}/Pod/{name}/logs",
+            "name": "Pod logs",
+            "description": "Recent log output for a pod's default container.",
+            "mimeType": "text/plain"
+        }),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +522,34 @@ mod tests {
         ] {
             let e = ResourceUri::parse(uri).unwrap_err();
             assert!(e.contains(expect), "for {uri}, message {e:?} should mention {expect:?}");
+        }
+    }
+
+    #[test]
+    fn list_returns_only_the_two_fixed_resources() {
+        let list = fixed_resources();
+        assert_eq!(list.len(), 2, "cluster objects must never be enumerated: {list:?}");
+        let uris: Vec<&str> = list.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+        assert!(uris.contains(&"k8s://contexts"));
+        assert!(uris.contains(&"k8s://catalog"));
+        for r in &list {
+            assert!(r["name"].is_string());
+            assert!(r["description"].is_string());
+            assert!(r["mimeType"].is_string());
+        }
+    }
+
+    #[test]
+    fn templates_describe_the_three_parameterised_shapes() {
+        let t = templates();
+        assert_eq!(t.len(), 3);
+        let patterns: Vec<&str> = t.iter().map(|x| x["uriTemplate"].as_str().unwrap()).collect();
+        assert!(patterns.contains(&"k8s://{context}/{namespace}/{kind}/{name}"));
+        assert!(patterns.contains(&"k8s://{context}/{namespace}/{kind}/{name}/events"));
+        assert!(patterns.contains(&"k8s://{context}/{namespace}/Pod/{name}/logs"));
+        for x in &t {
+            assert!(x["name"].is_string());
+            assert!(x["description"].is_string());
         }
     }
 }
