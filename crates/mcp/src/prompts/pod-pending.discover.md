@@ -54,12 +54,14 @@ then explain why.
      to `""`, which lists cluster-wide — use the pod's own namespace here
      instead, or every claim in the cluster gets scanned for one pod's
      problem. Call `k8s.listStorageClasses` with `context: {{context}}`;
-   - for admission limits: Call `k8s.listResourceQuotas` with
-     `context: {{context}}`, `namespace: <the pod's namespace>`. Call
-     `k8s.listLimitRanges` with `context: {{context}}`,
-     `namespace: <the pod's namespace>`. Same reason: these must be scoped to
-     the pod under triage, not to step 1's search filter.
-5. If nothing is Pending, say so plainly.
+5. ResourceQuota and LimitRange are not scheduling predicates and cannot be
+   the cause here: both are enforced by an admission controller at CREATE
+   time, so a pod already existing in `Pending` state already passed them —
+   a violation would have been rejected before it was ever persisted, and
+   quota exhaustion surfaces instead as a controller event (for example on a
+   ReplicaSet) with no pod created, a different symptom from a Pending pod.
+   Do not check quota or limit ranges for this flow.
+6. If nothing is Pending, say so plainly.
 
 Then report per group: the blocking reason, the evidence, and the minimal fix as a
 `kubectl` command the user can review.

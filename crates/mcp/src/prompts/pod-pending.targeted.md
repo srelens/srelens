@@ -56,10 +56,13 @@ Pending. Work out what is blocking it.
      `k8s.listStorageClasses` with `context: {{context}}`. If the claim is
      shared, Call `k8s.podsForPvc` with `context: {{context}}`,
      `namespace: {{namespace}}`, `pvc: <the claim's name>`.
-4. Also Call `k8s.listResourceQuotas` with `context: {{context}}`,
-   `namespace: {{namespace}}`. Call `k8s.listLimitRanges` with
-   `context: {{context}}`, `namespace: {{namespace}}`. A quota that is
-   already at its ceiling blocks admission with no node in sight.
+4. ResourceQuota and LimitRange are not a scheduling blocker for a pod that
+   already exists in `Pending` state: both are enforced by an admission
+   controller at CREATE time, so a pod that violated either would have been
+   rejected and would never exist to triage here — a quota violation surfaces
+   instead as a controller event (for example on a ReplicaSet) with no pod
+   ever created, which is a different symptom from a Pending pod. Do not
+   check quota or limit ranges for this flow.
 
 Then tell the user the single blocking reason, the evidence for it, and the minimal
 fix as a `kubectl` command they can review.
