@@ -36,10 +36,15 @@ endpoints, then explain why.
    returned, Call `k8s.getObject` with `context: {{context}}`, `kind: Ingress`,
    `namespace: <the ingress's namespace>`, `name: <the ingress>`. Read
    `spec.rules[].http.paths[].backend.service.name` and
-   `spec.defaultBackend.service.name` to build the set of Service names that
-   are actually routed to.
+   `spec.defaultBackend.service.name` to build the routed-to set — but a
+   backend name is only ever resolved within its own Ingress's namespace, so
+   key each entry by the PAIR (the ingress's namespace, the backend service
+   name), never by name alone: in a cluster-wide search two different
+   namespaces can hold same-named Services, and keying on name only would
+   treat both as Ingress-backed.
 4. Take up to three of the broken services from step 2, worst first — a
-   service in step 3's routed-to set matters more than one that is not.
+   service whose (namespace, name) pair is in step 3's routed-to set matters
+   more than one that is not.
 5. For each, Call `k8s.getObject` with `context: {{context}}`,
    `kind: Service`, `namespace: <the service's namespace>`,
    `name: <the service>`. Read `spec.selector` and `spec.ports`. If
