@@ -5731,6 +5731,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "srelens-capability",
+ "srelens-registry",
  "subtle",
  "tokio",
  "tower",

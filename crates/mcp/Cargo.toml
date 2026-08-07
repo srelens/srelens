@@ -17,3 +17,10 @@ axum = "0.7"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
+# Dev-only, so this does not create a real dependency cycle: `registry`
+# depends on `mcp` only as a dev-dependency too (for its own e2e prompt
+# test). Gives the built-in prompt bodies' argument keys a real schema to be
+# checked against instead of a hand-maintained field list — see
+# `every_argument_key_in_a_builtin_body_is_a_real_capability_input_field` in
+# `src/prompts.rs`.
+srelens-registry = { path = "../registry" }
