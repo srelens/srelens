@@ -13,8 +13,16 @@ triage them. Use only srelens tools.
 1. Call `k8s.listPods` with `context: {{context}}`, `namespace: {{namespace}}`.
    An empty namespace lists across all namespaces. Each entry carries
    `restarts`, `phase`, `ready`, `name` and `namespace`.
-2. Rank the candidates: highest `restarts` first, and treat any pod whose `ready`
-   count is below its total as suspect even if `restarts` is low.
+2. Rank the candidates: highest `restarts` first. A candidate must have
+   `restarts > 0` — a pod whose `ready` count is below its total but has
+   NEVER restarted is a different problem (an image pull, an init container,
+   or a failing readiness probe blocking its first startup) and is out of
+   scope for this crash-loop flow. Do not fold a zero-restart pod into the
+   candidate list: step 3's `podLogs` call with `previous: true` has no
+   previous instance to read and would fail, and the pod would displace a
+   genuinely restarting one from the three-candidate limit. Mention any such
+   pod to the user as a separate, out-of-scope issue rather than silently
+   dropping it.
 3. Take the top three at most. For each candidate, using its `name` and
    `namespace` from step 1: Call `k8s.getObject` with `context: {{context}}`,
    `kind: Pod`, `namespace: <the candidate's namespace>`,
