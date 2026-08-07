@@ -25,8 +25,9 @@ Pending. Work out what is blocking it.
      report that instead of a scheduling predicate. Stop here.
    - If `spec.nodeName` is EMPTY, the pod is genuinely unscheduled. Read
      `spec.nodeSelector`, `spec.affinity`, `spec.tolerations`,
-     `spec.containers[].resources.requests` and `spec.volumes`, then continue
-     with the predicate-based triage below.
+     `spec.containers[].resources.requests`, `spec.initContainers[].resources.requests`,
+     `spec.overhead` and `spec.volumes`, then continue with the
+     predicate-based triage below.
 2. Call `k8s.listEvents` with `context: {{context}}`, `objectKind: Pod`,
    `objectName: {{pod}}`, `namespace: {{namespace}}`. The scheduler explains itself
    here — `FailedScheduling` messages name the exact predicate that failed. Start
@@ -43,9 +44,17 @@ Pending. Work out what is blocking it.
      reason it out: Call `k8s.listPods` with `context: {{context}}`,
      `namespace: ""` to find the pods already on that node. For each, Call
      `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
-     `namespace: <that pod's namespace>`, `name: <that pod's name>`. Sum
-     `spec.containers[].resources.requests`, and subtract that sum from
-     `allocatable`;
+     `namespace: <that pod's namespace>`, `name: <that pod's name>`. For each
+     pod, compute its EFFECTIVE request as max(the largest init container's
+     `resources.requests`, the sum of `spec.containers[].resources.requests`)
+     plus `spec.overhead` — init containers run one at a time before the app
+     containers start, so only the larger of the two counts, but
+     `spec.overhead` (set by the pod's RuntimeClass, if any) is additive on
+     top of both. Summing only `spec.containers[].resources.requests`
+     understates what the scheduler actually reserves. Sum the already-running
+     pods' effective requests and subtract from `allocatable` to get free
+     capacity, then compare `{{pod}}`'s own effective request — computed the
+     same way from the fields read in step 1 — against that free capacity;
    - node selector or affinity mismatch → read `metadata.labels` from the
      `getObject` call above and compare against the pod's `spec.nodeSelector`
      / `spec.affinity`;

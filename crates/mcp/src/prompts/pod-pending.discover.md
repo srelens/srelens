@@ -33,8 +33,8 @@ then explain why.
    `namespace: <the pod's namespace>`. `FailedScheduling` names the failed
    predicate. Call `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
    `namespace: <the pod's namespace>`, `name: <the pod>`. Read its
-   `nodeSelector`, `affinity`, `tolerations`, `containers[].resources.requests`
-   and `volumes`.
+   `nodeSelector`, `affinity`, `tolerations`, `containers[].resources.requests`,
+   `initContainers[].resources.requests`, `overhead` and `volumes`.
 4. Depending on the predicate:
    - for capacity, labels or taints: Call `k8s.listNodes` with
      `context: {{context}}` to enumerate candidate nodes. Call
@@ -42,12 +42,19 @@ then explain why.
      `name: <candidate>`. Read `metadata.labels`, `spec.taints` and
      `status.allocatable` — `k8s.listNodes` returns none of those, only a
      taint COUNT and no labels or capacity at all. Reason about a node's free
-     capacity as `allocatable` minus the requests of the pods already on it:
-     Call `k8s.listPods` with `context: {{context}}`, `namespace: ""` to find
-     the pods on that node. For each, Call `k8s.getObject` with
-     `context: {{context}}`, `kind: Pod`, `namespace: <that pod's namespace>`,
-     `name: <that pod's name>` and sum `spec.containers[].resources.requests`
-     — no capability reports free capacity directly;
+     capacity as `allocatable` minus the EFFECTIVE requests of the pods
+     already on it: Call `k8s.listPods` with `context: {{context}}`,
+     `namespace: ""` to find the pods on that node. For each, Call
+     `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
+     `namespace: <that pod's namespace>`, `name: <that pod's name>` and
+     compute its effective request as max(the largest init container's
+     `resources.requests`, the sum of `spec.containers[].resources.requests`)
+     plus `spec.overhead` — summing only `spec.containers[].resources.requests`
+     understates what the scheduler actually reserves. Sum those effective
+     requests and subtract from `allocatable` to get free capacity, then
+     compare the representative pod's own effective request — computed the
+     same way from the fields read above — against that free capacity; no
+     capability reports free capacity directly;
    - for volume binding: Call `k8s.listPersistentVolumeClaims` with
      `context: {{context}}`, `namespace: <the pod's namespace>`.
      `{{namespace}}` is the optional SEARCH filter from step 1 and defaults
