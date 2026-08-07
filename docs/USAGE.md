@@ -445,7 +445,9 @@ Front-matter fields:
 Caps: at most 100 prompt files, 64 KB each. A body may only reference
 `{{name}}` placeholders declared in `arguments` — pasting in helm-style
 example text such as `{{ .Values.foo }}` is rejected as an undeclared
-placeholder rather than rendered literally.
+placeholder rather than rendered literally, and an unterminated `{{` with no
+matching `}}` is rejected outright rather than left in the rendered
+instructions.
 
 Files that fail to load are listed in **Settings → MCP** with the reason, and
 edits to a prompt file take effect immediately — no restart needed.

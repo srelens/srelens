@@ -14,13 +14,17 @@ endpoints, so nothing is receiving its traffic. Work out where the chain breaks.
 1. Call `k8s.getObject` with `context: {{context}}`, `kind: Service`,
    `namespace: {{namespace}}`, `name: {{service}}`. Read `spec.selector`,
    `spec.ports` and `spec.type`. A Service with no selector is fed by a manually
-   managed EndpointSlice — if so, say that and check the slices directly in step 2.
+   managed EndpointSlice — if so, say that and check the slices directly in step 2,
+   and skip step 3 entirely: do NOT call `k8s.podsForSelector` with an empty
+   selector, since it always returns zero pods and that empty result would
+   misread as a selector/label mismatch rather than "manually managed."
 2. Call `k8s.listEndpointSlices` with `context: {{context}}`,
    `namespace: {{namespace}}`. Find the slices owned by `{{service}}`. Empty
    slices mean no pod matched or none is ready; slices with addresses marked
    not-ready mean the pods exist but are failing readiness.
-3. Call `k8s.podsForSelector` with `context: {{context}}`,
-   `namespace: {{namespace}}`, `selector: <the Service's spec.selector map>`.
+3. If `spec.selector` from step 1 is non-empty, Call `k8s.podsForSelector` with
+   `context: {{context}}`, `namespace: {{namespace}}`,
+   `selector: <the Service's spec.selector map>`.
    - No pods matched → the selector does not match any pod's labels. Call
      `k8s.listPods` with `context: {{context}}`, `namespace: {{namespace}}`
      and compare labels with the selector; a single mismatched key is the
