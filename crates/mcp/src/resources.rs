@@ -139,6 +139,112 @@ impl KindResolver for NoKinds {
     }
 }
 
+/// Sentinel capability id for `k8s://catalog`, which is assembled in-process
+/// from the registry and prompt library rather than by invoking a capability.
+pub const CATALOG_IN_PROCESS: &str = "<catalog>";
+
+/// Every capability a resource read can invoke. Task 6's guard asserts each is
+/// registered, `read_only`, and NOT consent-gated.
+pub const MAPPED_CAPABILITIES: [&str; 4] =
+    ["k8s.getManifest", "k8s.listEvents", "k8s.podLogs", "k8s.listContexts"];
+
+/// A resolved read: which capability to invoke, with what arguments, and the
+/// mimeType to report to the client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceRead {
+    pub capability: &'static str,
+    pub args: serde_json::Value,
+    pub mime: &'static str,
+}
+
+/// Resolve a URI to the capability call that serves it.
+///
+/// Every error here is a `-32602` message the caller must be able to act on, so
+/// each names the offending value and, where there is one, the alternative.
+pub fn plan_read(uri: &ResourceUri, kinds: &dyn KindResolver) -> Result<ResourceRead, String> {
+    use serde_json::json;
+
+    let (context, namespace, kind, name, sub) = match uri {
+        ResourceUri::Contexts => {
+            return Ok(ResourceRead {
+                capability: "k8s.listContexts",
+                args: json!({}),
+                mime: "application/json",
+            })
+        }
+        ResourceUri::Catalog => {
+            return Ok(ResourceRead {
+                capability: CATALOG_IN_PROCESS,
+                args: json!({}),
+                mime: "application/json",
+            })
+        }
+        ResourceUri::Object { context, namespace, kind, name, sub } => {
+            (context, namespace, kind, name, sub)
+        }
+    };
+
+    let scope = kinds.scope(kind).ok_or_else(|| {
+        if kind == "Secret" {
+            "`Secret` is not addressable as a resource; read secrets with the \
+             `k8s.getSecret` tool, which is consent-gated"
+                .to_string()
+        } else {
+            format!("kind `{kind}` is not addressable as a resource")
+        }
+    })?;
+
+    match (scope, namespace) {
+        (KindScope::Namespaced, None) => {
+            return Err(format!(
+                "`{kind}` is namespaced; supply a namespace instead of `{CLUSTER_SCOPED}`"
+            ))
+        }
+        (KindScope::ClusterScoped, Some(ns)) => {
+            return Err(format!(
+                "`{kind}` is cluster-scoped; use `{CLUSTER_SCOPED}` for the namespace, not `{ns}`"
+            ))
+        }
+        _ => {}
+    }
+
+    match sub {
+        None => {
+            let mut args = json!({ "context": context, "kind": kind, "name": name });
+            if let Some(ns) = namespace {
+                args["namespace"] = json!(ns);
+            }
+            Ok(ResourceRead { capability: "k8s.getManifest", args, mime: "application/yaml" })
+        }
+        Some(SubResource::Events) => Ok(ResourceRead {
+            capability: "k8s.listEvents",
+            args: json!({
+                "context": context,
+                "namespace": namespace.clone().unwrap_or_default(),
+                "objectKind": kind,
+                "objectName": name,
+            }),
+            mime: "application/json",
+        }),
+        Some(SubResource::Logs) => {
+            if kind != "Pod" {
+                return Err(format!(
+                    "logs exist only for Pods; `{kind}` has none"
+                ));
+            }
+            Ok(ResourceRead {
+                capability: "k8s.podLogs",
+                args: json!({
+                    "context": context,
+                    "namespace": namespace.clone().unwrap_or_default(),
+                    "pod": name,
+                }),
+                mime: "text/plain",
+            })
+        }
+    }
+}
+
 impl std::fmt::Display for ResourceUri {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -192,6 +298,87 @@ mod tests {
     fn the_default_resolver_addresses_nothing() {
         assert_eq!(NoKinds.scope("Pod"), None);
         assert_eq!(NoKinds.scope("Node"), None);
+    }
+
+    use serde_json::json;
+
+    #[test]
+    fn a_manifest_read_maps_to_get_manifest_as_yaml() {
+        let u = ResourceUri::parse("k8s://c/ns/Pod/web-0").unwrap();
+        let r = plan_read(&u, &StubKinds).unwrap();
+        assert_eq!(r.capability, "k8s.getManifest");
+        assert_eq!(r.mime, "application/yaml");
+        assert_eq!(r.args, json!({"context":"c","kind":"Pod","namespace":"ns","name":"web-0"}));
+    }
+
+    #[test]
+    fn a_cluster_scoped_manifest_read_sends_no_namespace() {
+        let u = ResourceUri::parse("k8s://c/-/Node/node-1").unwrap();
+        let r = plan_read(&u, &StubKinds).unwrap();
+        assert_eq!(r.args, json!({"context":"c","kind":"Node","name":"node-1"}));
+    }
+
+    #[test]
+    fn an_events_read_filters_by_object() {
+        let u = ResourceUri::parse("k8s://c/ns/Pod/web-0/events").unwrap();
+        let r = plan_read(&u, &StubKinds).unwrap();
+        assert_eq!(r.capability, "k8s.listEvents");
+        assert_eq!(r.mime, "application/json");
+        assert_eq!(
+            r.args,
+            json!({"context":"c","namespace":"ns","objectKind":"Pod","objectName":"web-0"})
+        );
+    }
+
+    #[test]
+    fn a_logs_read_maps_to_pod_logs_as_text() {
+        let u = ResourceUri::parse("k8s://c/ns/Pod/web-0/logs").unwrap();
+        let r = plan_read(&u, &StubKinds).unwrap();
+        assert_eq!(r.capability, "k8s.podLogs");
+        assert_eq!(r.mime, "text/plain");
+        assert_eq!(r.args, json!({"context":"c","namespace":"ns","pod":"web-0"}));
+    }
+
+    #[test]
+    fn the_fixed_resources_map_to_their_readers() {
+        let c = plan_read(&ResourceUri::Contexts, &StubKinds).unwrap();
+        assert_eq!(c.capability, "k8s.listContexts");
+        let cat = plan_read(&ResourceUri::Catalog, &StubKinds).unwrap();
+        assert_eq!(cat.capability, CATALOG_IN_PROCESS);
+    }
+
+    #[test]
+    fn logs_are_rejected_for_a_non_pod_kind() {
+        let u = ResourceUri::parse("k8s://c/ns/Deployment/api/logs").unwrap();
+        let e = plan_read(&u, &StubKinds).unwrap_err();
+        assert!(e.contains("Pod"), "got: {e}");
+    }
+
+    /// The curation guarantee, surfaced as an actionable error rather than a
+    /// bare "unknown kind": the caller is told where secrets actually live.
+    #[test]
+    fn a_secret_uri_is_rejected_and_points_at_the_gated_tool() {
+        let u = ResourceUri::parse("k8s://c/ns/Secret/db-creds").unwrap();
+        let e = plan_read(&u, &StubKinds).unwrap_err();
+        assert!(e.contains("k8s.getSecret"), "got: {e}");
+    }
+
+    #[test]
+    fn an_unknown_kind_is_rejected() {
+        let u = ResourceUri::parse("k8s://c/ns/Nonsense/x").unwrap();
+        let e = plan_read(&u, &StubKinds).unwrap_err();
+        assert!(e.contains("Nonsense"), "got: {e}");
+    }
+
+    #[test]
+    fn a_scope_mismatch_is_rejected_in_both_directions() {
+        let cluster_kind_with_ns = ResourceUri::parse("k8s://c/ns/Node/n").unwrap();
+        let e = plan_read(&cluster_kind_with_ns, &StubKinds).unwrap_err();
+        assert!(e.contains("cluster-scoped"), "got: {e}");
+
+        let namespaced_without_ns = ResourceUri::parse("k8s://c/-/Pod/p").unwrap();
+        let e = plan_read(&namespaced_without_ns, &StubKinds).unwrap_err();
+        assert!(e.contains("namespaced"), "got: {e}");
     }
 
     #[test]
