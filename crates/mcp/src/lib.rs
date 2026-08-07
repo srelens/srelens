@@ -6,6 +6,7 @@ pub mod completeness;
 pub mod http;
 pub mod policy;
 pub mod prompts;
+pub mod resources;
 pub mod stdio;
 
 use std::sync::Arc;

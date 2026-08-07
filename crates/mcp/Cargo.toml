@@ -13,6 +13,10 @@ serde_yaml = "0.9"
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros"] }
 axum = "0.7"
+# URI segments are percent-encoded because kube context names are arbitrary —
+# EKS names contexts with ARNs containing `/` and `:`, which would otherwise
+# reshape the path. Already in the workspace lockfile via reqwest/url.
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "io-util"] }

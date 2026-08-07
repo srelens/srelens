@@ -5727,6 +5727,7 @@ dependencies = [
  "async-trait",
  "axum",
  "getrandom 0.2.17",
+ "percent-encoding",
  "serde",
  "serde_json",
  "serde_yaml",
