@@ -363,13 +363,28 @@ pub const MAX_USER_PROMPT_BYTES: u64 = 64 * 1024;
 
 /// Read `*.md` from `dir`. Never fails as a whole: each file's problem is
 /// recorded and the remaining files still load. A missing directory is silent —
-/// a user who never created one has nothing wrong with their setup.
+/// a user who never created one has nothing wrong with their setup. Any OTHER
+/// `read_dir` error (permission denied, or `dir` existing as a regular file)
+/// is a real I/O failure, not an absent directory, and must not be
+/// indistinguishable from "the user has no prompts" — it is recorded as a
+/// directory-level issue instead.
 pub fn load_dir(dir: &std::path::Path) -> (Vec<PromptFile>, Vec<LoadIssue>) {
     let mut files = Vec::new();
     let mut issues = Vec::new();
 
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (files, issues);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (files, issues),
+        Err(e) => {
+            issues.push(LoadIssue {
+                // Not a filename: same sentinel used for the file-count cap
+                // below, so the user's local path never leaks into a field
+                // the Settings UI renders as a filename.
+                file: "<prompts directory>".to_string(),
+                problem: format!("could not read prompts directory: {e}"),
+            });
+            return (files, issues);
+        }
     };
 
     // Sorted so the priority tie-break in `resolve` is deterministic and so the
@@ -823,6 +838,34 @@ mod tests {
         let (files, issues) = load_dir(&std::env::temp_dir().join("srelens-no-such-dir-xyz"));
         assert!(files.is_empty());
         assert!(issues.is_empty());
+    }
+
+    /// A real I/O failure (here: `dir` is actually a regular file, so
+    /// `read_dir` fails with `NotADirectory`/`ENOTDIR`, not `NotFound`) must
+    /// not be silently indistinguishable from "the user has no prompts" —
+    /// unlike a missing directory, this is a genuine problem to surface.
+    #[test]
+    fn load_dir_of_a_path_that_is_a_regular_file_reports_one_issue() {
+        let parent = std::env::temp_dir()
+            .join(format!("srelens-prompts-notadir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let file_path = parent.join("this-is-a-file-not-a-dir");
+        std::fs::write(&file_path, "not a directory").unwrap();
+
+        let (files, issues) = load_dir(&file_path);
+        assert!(files.is_empty(), "a regular file has no prompt files in it");
+        assert_eq!(issues.len(), 1, "got: {issues:?}");
+        assert_eq!(
+            issues[0].file, "<prompts directory>",
+            "must not leak the real path into the issue, got: {}",
+            issues[0].file
+        );
+        assert!(
+            !issues[0].problem.contains(file_path.to_string_lossy().as_ref()),
+            "the local path must not leak into the issue text, got: {}",
+            issues[0].problem
+        );
     }
 
     /// The load-bearing behaviour: one bad file must not take the others down.
