@@ -27,7 +27,14 @@ endpoints, so nothing is receiving its traffic. Work out where the chain breaks.
 2. Call `k8s.listEndpointSlices` with `context: {{context}}`,
    `namespace: {{namespace}}`. Find the slices owned by `{{service}}`. Empty
    slices mean no pod matched or none is ready; slices with addresses marked
-   not-ready mean the pods exist but are failing readiness.
+   not-ready mean the pods exist but are failing readiness — BUT the
+   not-ready count can over-count: an endpoint whose `conditions.ready` field
+   is absent is reported here as not-ready, though Kubernetes conventionally
+   treats an absent `conditions.ready` as ready. This matters most for a
+   manually managed slice (no `spec.selector` on the Service, see step 1),
+   which is more likely to omit the field entirely. Before concluding the
+   pods are failing readiness on this evidence alone, confirm against the
+   slice objects themselves (or the service's actual reachability).
 3. If `spec.selector` from step 1 is non-empty, Call `k8s.podsForSelector` with
    `context: {{context}}`, `namespace: {{namespace}}`,
    `selector: <the Service's spec.selector map>`.

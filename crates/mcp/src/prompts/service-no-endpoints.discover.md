@@ -20,7 +20,15 @@ endpoints, then explain why.
    managed slices. Exclude any service whose `type` (from step 1) is
    `ExternalName` from this candidate set entirely — it intentionally has no
    selector and no EndpointSlices, resolved instead via a DNS CNAME, so having
-   none is correct by design, not a fault this flow should surface.
+   none is correct by design, not a fault this flow should surface. The
+   ready count itself can UNDER-report: it treats an endpoint whose
+   `conditions.ready` field is absent as not-ready, though Kubernetes
+   conventionally treats an absent `conditions.ready` as ready — a manually
+   managed EndpointSlice that omits the field can show `0/N` here while its
+   endpoints are actually fine. Before concluding a service in this candidate
+   set is genuinely broken, especially one fed by a manually managed slice,
+   confirm against the slice objects themselves (or the service's actual
+   reachability) rather than trusting the ready count alone.
 3. Call `k8s.listIngresses` with `context: {{context}}`, `namespace: {{namespace}}`
    to enumerate Ingresses — but `IngressSummary` carries only name, namespace,
    class, hosts, address, ports and age, no backend service reference, so this
