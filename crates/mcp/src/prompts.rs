@@ -537,22 +537,43 @@ impl PromptLibrary {
             .filter(|a| a.target)
             .map(|a| a.name.as_str())
             .collect();
-        let all_targets_supplied = !targets.is_empty()
-            && targets
+
+        // With no target-marked argument declared, there is no discover-vs-
+        // targeted distinction a caller could even express — a prompt with a
+        // single variant and no `target: true` argument (the simplest legal
+        // prompt file) must render that one variant rather than being forced
+        // into Discover and failing because no Discover file exists. Prefer
+        // Targeted (matching `Mode`'s own default) when both happen to be
+        // present with no target declared; otherwise render whichever one
+        // variant the file actually ships.
+        let wanted = if targets.is_empty() {
+            variants
+                .iter()
+                .find(|f| f.mode == Mode::Targeted)
+                .or_else(|| variants.iter().find(|f| f.mode == Mode::Discover))
+                .map(|f| f.mode)
+                .unwrap_or_default()
+        } else {
+            let all_targets_supplied = targets
                 .iter()
                 .all(|t| supplied.get(*t).is_some_and(|v| !v.trim().is_empty()));
-        let wanted = if all_targets_supplied {
-            Mode::Targeted
-        } else {
-            Mode::Discover
+            if all_targets_supplied {
+                Mode::Targeted
+            } else {
+                Mode::Discover
+            }
         };
 
         let chosen = variants.iter().find(|f| f.mode == wanted).ok_or_else(|| {
-            let missing = targets.join(", ");
-            format!(
-                "`{name}` has no {} variant; supply the `{missing}` argument",
-                wanted.as_str()
-            )
+            if targets.is_empty() {
+                format!("`{name}` has no {} variant", wanted.as_str())
+            } else {
+                format!(
+                    "`{name}` has no {} variant; supply the `{}` argument",
+                    wanted.as_str(),
+                    targets.join(", ")
+                )
+            }
         })?;
 
         // Required arguments are checked only against the variant actually
@@ -561,9 +582,15 @@ impl PromptLibrary {
         // required), so `get()` must honor that by validating only `chosen`'s
         // own arguments — otherwise a bare call that `list()` says is legal
         // (omitting an argument that's required only in the targeted variant)
-        // would still be rejected here, making discover mode unreachable.
+        // would still be rejected here, making discover mode unreachable. A
+        // present-but-blank value (`""`, or whitespace-only) does not satisfy
+        // a required argument either — same predicate as the target check
+        // above, so e.g. a blank `context` can't sneak through and render
+        // instructions with an empty, multi-context-hazard value.
         for spec in &chosen.arguments {
-            if spec.required && !supplied.contains_key(&spec.name) {
+            if spec.required
+                && !supplied.get(&spec.name).is_some_and(|v| !v.trim().is_empty())
+            {
                 return Err(format!("`{name}` requires the `{}` argument", spec.name));
             }
         }
@@ -1163,6 +1190,93 @@ mod tests {
         }
     }
 
+    /// Every argument-KEY token a body writes for a tool call, e.g. the
+    /// `context` in `` `context: {{context}}` ``, the `tail_lines` in
+    /// `` `tail_lines: 200` ``, the `objectKind` in `` `objectKind: Pod` ``.
+    /// Bodies consistently write a call's arguments as backtick-quoted
+    /// `key: value` pairs, so scanning for that shape (backtick, an
+    /// identifier, a colon) extracts exactly the keys without needing to
+    /// parse which tool a given step is calling — the prose isn't structured
+    /// enough for that, and this doesn't need it: a key either belongs to
+    /// *some* allowlisted capability's input schema or it doesn't. A bare
+    /// field reference with no colon, like `` `node` `` (a PodSummary output
+    /// field, not an argument), is deliberately NOT matched.
+    fn argument_key_tokens(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(start) = rest.find('`') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('`') else { break };
+            let inside = &after[..end];
+            if let Some(colon) = inside.find(':') {
+                let key = inside[..colon].trim();
+                let is_identifier = !key.is_empty()
+                    && key
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if is_identifier {
+                    out.push(key.to_string());
+                }
+            }
+            rest = &after[end + 1..];
+        }
+        out
+    }
+
+    /// The guard for the class of bug that let `tailLines` (camelCase; the
+    /// real field is `tail_lines`) and the missing/invented keys in FIX 5/6
+    /// ship: tool NAMES are checked against `ALLOWED_TOOLS` above, but until
+    /// now argument KEYS were only hand-checked. This builds the real
+    /// registry (`srelens-registry` is a dev-dependency of this crate for
+    /// exactly this — see the comment in `Cargo.toml`) and asserts every key
+    /// a built-in body writes is a real `properties` field of at least one
+    /// allowlisted capability's `input_schema`. It does not, and cannot from
+    /// the prose alone, check that a key belongs to the SPECIFIC tool named
+    /// in that step — only that it belongs to the allowlisted set somewhere,
+    /// which is what actually catches an invented or misspelled key.
+    ///
+    /// Deterministic and cluster-free: `build_registry` only constructs a
+    /// lazy client cache and registers capability closures (no connection
+    /// attempt), and `input_schema` comes from `schemars::schema_for!` at
+    /// capability-construction time — see the doc comment on the sibling
+    /// `mcp_prompts_name_only_real_capabilities` e2e test, which relies on
+    /// the same guarantee.
+    #[test]
+    fn every_argument_key_in_a_builtin_body_is_a_real_capability_input_field() {
+        let registry = srelens_registry::build_registry();
+        let mut legal_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for cap in registry.entries() {
+            if !ALLOWED_TOOLS.contains(&cap.id.as_str()) {
+                continue;
+            }
+            if let Some(props) = cap.input_schema.get("properties").and_then(|p| p.as_object()) {
+                legal_fields.extend(props.keys().cloned());
+            }
+        }
+        assert!(
+            !legal_fields.is_empty(),
+            "sanity check failed: no fields collected from ALLOWED_TOOLS; \
+             did every allowlisted capability's input schema come back empty?"
+        );
+
+        let (files, _) = builtins();
+        for f in &files {
+            for key in argument_key_tokens(&f.body) {
+                assert!(
+                    legal_fields.contains(&key),
+                    "{} writes argument key `{key}` in a tool-call, which is not a \
+                     field of any ALLOWED_TOOLS capability's input schema. This is \
+                     either a typo (e.g. `tailLines` vs `tail_lines`) or a key that \
+                     belongs to a tool not on ALLOWED_TOOLS — check the step's tool \
+                     name and the real input struct in `crates/kube/src`.",
+                    f.source
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_declared_argument_is_used_by_some_mode() {
         // The other direction of the drift guard: `validate` catches a body
@@ -1304,6 +1418,86 @@ mod tests {
             .unwrap();
         assert!(out.text.contains("k8s.listPods"), "discovery starts by listing pods");
         assert!(!out.text.contains("{{"));
+    }
+
+    /// The simplest legal prompt file: one variant, `mode: targeted`, and no
+    /// `target: true` argument at all. Before the fix, `targets` was empty,
+    /// `all_targets_supplied` was false, `wanted` was forced to `Discover`,
+    /// and `get()` failed every single call with a message naming no
+    /// argument (`supply the `` argument`) because there was nothing to name.
+    #[test]
+    fn get_renders_a_single_targeted_variant_with_no_target_argument() {
+        let dir = temp_dir("single-targeted");
+        write(
+            &dir,
+            "solo.md",
+            "---\nname: solo\nmode: targeted\narguments:\n  - { name: context, required: true }\n---\nCheck `{{context}}` end to end.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let out = lib.get("solo", &args(&[("context", "kind")])).unwrap();
+        assert!(out.text.contains("Check `kind` end to end."), "got: {}", out.text);
+    }
+
+    /// Same, for the `mode: discover` variant of a no-target prompt.
+    #[test]
+    fn get_renders_a_single_discover_variant_with_no_target_argument() {
+        let dir = temp_dir("single-discover");
+        write(
+            &dir,
+            "solo.md",
+            "---\nname: solo\nmode: discover\narguments:\n  - { name: context, required: true }\n---\nSurvey `{{context}}` broadly.\n",
+        );
+        let lib = PromptLibrary::new(Some(dir));
+        let out = lib.get("solo", &args(&[("context", "kind")])).unwrap();
+        assert!(out.text.contains("Survey `kind` broadly."), "got: {}", out.text);
+    }
+
+    /// The two-mode, target-declared behaviour must be unchanged by the
+    /// no-target fix above: supplying the target still selects Targeted, and
+    /// omitting it still selects Discover.
+    #[test]
+    fn get_still_uses_targeted_or_discover_based_on_the_target_for_a_two_mode_prompt() {
+        let lib = PromptLibrary::new(None);
+        let targeted = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "web-0")]))
+            .unwrap();
+        assert!(targeted.text.contains("web-0"), "target supplied must pick targeted");
+
+        let discover = lib.get("pod-crashloop", &args(&[("context", "kind")])).unwrap();
+        assert!(
+            discover.text.contains("k8s.listPods"),
+            "target omitted must still pick discover"
+        );
+    }
+
+    #[test]
+    fn get_rejects_a_blank_required_argument() {
+        let lib = PromptLibrary::new(None);
+        let e = lib
+            .get("pod-crashloop", &args(&[("context", ""), ("pod", "web-0")]))
+            .unwrap_err();
+        assert!(e.contains("context"), "an empty required value must be treated as missing, got: {e}");
+    }
+
+    #[test]
+    fn get_rejects_a_whitespace_only_required_argument() {
+        let lib = PromptLibrary::new(None);
+        let e = lib
+            .get("pod-crashloop", &args(&[("context", "   "), ("pod", "web-0")]))
+            .unwrap_err();
+        assert!(
+            e.contains("context"),
+            "a whitespace-only required value must be treated as missing, got: {e}"
+        );
+    }
+
+    #[test]
+    fn get_accepts_a_normal_required_argument() {
+        let lib = PromptLibrary::new(None);
+        let out = lib
+            .get("pod-crashloop", &args(&[("context", "kind"), ("pod", "web-0")]))
+            .unwrap();
+        assert!(out.text.contains("kind"));
     }
 
     #[test]

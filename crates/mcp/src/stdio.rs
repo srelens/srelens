@@ -703,6 +703,25 @@ mod tests {
         assert_eq!(*spy.0.lock().unwrap(), 0, "prompts must not be audited");
     }
 
+    /// `context` is the one argument documented as never safe to guess, so a
+    /// present-but-blank value must be rejected the same as an absent one —
+    /// otherwise the agent renders instructions against an empty context and
+    /// either fails every downstream call or invents one.
+    #[tokio::test]
+    async fn prompts_get_rejects_a_blank_required_argument() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":9,"method":"prompts/get","params":{
+                "name":"pod-crashloop","arguments":{"context": "", "pod": "web-0"}
+            }}),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32602, "got {resp}");
+        assert!(resp["error"]["message"].as_str().unwrap().contains("context"));
+    }
+
     /// A JSON `null` is the absence of a value, not the string "null". A
     /// client whose templating omits an unset variable by emitting `null`
     /// (common) must trip the same required-argument error an omitted key
