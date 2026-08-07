@@ -12,11 +12,15 @@ endpoints, then explain why.
 
 1. Call `k8s.listServices` with `context: {{context}}`,
    `namespace: {{namespace}}`. An empty namespace lists across all namespaces.
+   Note each service's `type`.
 2. Call `k8s.listEndpointSlices` with `context: {{context}}`,
    `namespace: {{namespace}}`. Match slices to services. Collect the services
    with no slices, with empty slices, or whose addresses are all marked not-ready.
    Ignore headless services with no selector unless they also have no manually
-   managed slices.
+   managed slices. Exclude any service whose `type` (from step 1) is
+   `ExternalName` from this candidate set entirely — it intentionally has no
+   selector and no EndpointSlices, resolved instead via a DNS CNAME, so having
+   none is correct by design, not a fault this flow should surface.
 3. Call `k8s.listIngresses` with `context: {{context}}`, `namespace: {{namespace}}`
    to enumerate Ingresses — but `IngressSummary` carries only name, namespace,
    class, hosts, address, ports and age, no backend service reference, so this
