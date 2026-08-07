@@ -11,22 +11,25 @@ arguments:
 Service `{{service}}` in namespace `{{namespace}}` on context `{{context}}` has no
 endpoints, so nothing is receiving its traffic. Work out where the chain breaks.
 
-1. Call `k8s.getObject` with `kind: Service`, `namespace: {{namespace}}`,
-   `name: {{service}}` and read `spec.selector`, `spec.ports` and `spec.type`. A
-   Service with no selector is fed by a manually managed EndpointSlice — if so, say
-   that and check the slices directly in step 2.
-2. Call `k8s.listEndpointSlices` for `namespace: {{namespace}}` and find the slices
-   owned by `{{service}}`. Empty slices mean no pod matched or none is ready; slices
-   with addresses marked not-ready mean the pods exist but are failing readiness.
-3. Call `k8s.podsForSelector` with the Service's `spec.selector` and
-   `namespace: {{namespace}}`.
+1. Call `k8s.getObject` with `context: {{context}}`, `kind: Service`,
+   `namespace: {{namespace}}`, `name: {{service}}` and read `spec.selector`,
+   `spec.ports` and `spec.type`. A Service with no selector is fed by a manually
+   managed EndpointSlice — if so, say that and check the slices directly in step 2.
+2. Call `k8s.listEndpointSlices` with `context: {{context}}`,
+   `namespace: {{namespace}}` and find the slices owned by `{{service}}`. Empty
+   slices mean no pod matched or none is ready; slices with addresses marked
+   not-ready mean the pods exist but are failing readiness.
+3. Call `k8s.podsForSelector` with `context: {{context}}`,
+   `namespace: {{namespace}}` and the Service's `spec.selector`.
    - No pods matched → the selector does not match any pod's labels. Call
-     `k8s.listPods` for the namespace and compare labels with the selector; a single
-     mismatched key is the usual cause.
+     `k8s.listPods` with `context: {{context}}`, `namespace: {{namespace}}` and
+     compare labels with the selector; a single mismatched key is the usual cause.
    - Pods matched but are not ready → their readiness probe is failing. Call
-     `k8s.getObject` with `kind: Pod` for one of them, read
+     `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
+     `namespace: {{namespace}}`, `name: <the pod>` for one of them, read
      `status.conditions` and `spec.containers[].readinessProbe`, then
-     `k8s.podLogs` with `tail_lines: 100`.
+     `k8s.podLogs` with `context: {{context}}`, `namespace: {{namespace}}`,
+     `pod: <the pod>`, `tail_lines: 100`.
 4. Check that the Service's `spec.ports[].targetPort` matches a `containerPort` the
    pods actually expose — a correct selector with the wrong target port still yields
    no usable endpoint.
