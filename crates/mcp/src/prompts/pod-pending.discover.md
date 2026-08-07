@@ -46,10 +46,7 @@ then explain why.
      `name: <candidate>`. Read `status.allocatable`, and Call
      `k8s.nodeMetrics` with `context: {{context}}` to judge the SCALE of the
      shortfall and whether it is cluster-wide or limited to a handful of
-     nodes. If you want a rough sense of what a candidate node already has
-     reserved, Call `k8s.listPods` with `context: {{context}}`,
-     `namespace: ""`. Ignore any pod whose `phase` is `Succeeded` or `Failed`
-     — a terminal pod holds no allocatable capacity;
+     nodes;
    - for labels or taints: Call `k8s.listNodes` with `context: {{context}}`
      to enumerate candidate nodes. Call `k8s.getObject` with
      `context: {{context}}`, `kind: Node`, `name: <candidate>`. Read
