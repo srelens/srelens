@@ -139,6 +139,51 @@ impl KindResolver for NoKinds {
     }
 }
 
+/// Starts a watch for one object URI, calling `on_change` on every change.
+///
+/// A trait rather than a concrete type because the implementation needs kube,
+/// and `crates/mcp` must not depend on `crates/kube` — `crates/registry` wires
+/// the real one, exactly as it does for `KindResolver`.
+pub trait ObjectWatcher: Send + Sync {
+    fn watch(
+        &self,
+        uri: &ResourceUri,
+        on_change: Box<dyn FnMut() + Send>,
+    ) -> Result<tokio::task::AbortHandle, String>;
+}
+
+/// Fail-closed default: refuse a subscription rather than accept one that can
+/// never fire.
+pub struct NoWatcher;
+
+impl ObjectWatcher for NoWatcher {
+    fn watch(
+        &self,
+        _uri: &ResourceUri,
+        _on_change: Box<dyn FnMut() + Send>,
+    ) -> Result<tokio::task::AbortHandle, String> {
+        Err("this server has no cluster watcher wired, so resources cannot be subscribed to"
+            .to_string())
+    }
+}
+
+/// Whether a URI can be subscribed to. The catalog is static, and logs are a
+/// stream rather than a state change.
+pub fn is_subscribable(uri: &ResourceUri) -> Result<(), String> {
+    match uri {
+        ResourceUri::Catalog => {
+            Err("`k8s://catalog` is static and cannot be subscribed to".to_string())
+        }
+        ResourceUri::Contexts => Ok(()),
+        ResourceUri::Object { sub: Some(SubResource::Logs), .. } => {
+            Err("pod logs are a stream, not a state change; subscribe to the \
+                 pod's manifest instead"
+                .to_string())
+        }
+        ResourceUri::Object { .. } => Ok(()),
+    }
+}
+
 /// Sentinel capability id for `k8s://catalog`, which is assembled in-process
 /// from the registry and prompt library rather than by invoking a capability.
 pub const CATALOG_IN_PROCESS: &str = "<catalog>";
@@ -353,6 +398,24 @@ mod tests {
     fn the_default_resolver_addresses_nothing() {
         assert_eq!(NoKinds.scope("Pod"), None);
         assert_eq!(NoKinds.scope("Node"), None);
+    }
+
+    /// Fail closed: a host that wires no watcher refuses every subscription
+    /// rather than accepting one that can never fire, mirroring `NoKinds` and
+    /// `AlwaysDeny`.
+    #[test]
+    fn the_default_watcher_refuses_every_subscription() {
+        let uri = ResourceUri::parse("k8s://c/ns/Pod/web-0").unwrap();
+        let err = NoWatcher.watch(&uri, Box::new(|| {})).unwrap_err();
+        assert!(err.contains("no cluster watcher"), "got: {err}");
+    }
+
+    #[test]
+    fn only_state_bearing_uris_are_subscribable() {
+        assert!(is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p").unwrap()).is_ok());
+        assert!(is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p/events").unwrap()).is_ok());
+        assert!(is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p/logs").unwrap()).is_err());
+        assert!(is_subscribable(&ResourceUri::Catalog).is_err());
     }
 
     use serde_json::json;

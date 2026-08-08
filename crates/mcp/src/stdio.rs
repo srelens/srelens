@@ -18,6 +18,17 @@ fn err(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// A `notifications/resources/updated` message. Carries only the URI — the
+/// client re-reads to get content, which is what MCP specifies and what lets a
+/// summary-level watch back a manifest subscription.
+pub fn subscription_notification(uri: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": { "uri": uri }
+    })
+}
+
 /// Handle a single JSON-RPC request. Returns `None` for notifications (no id),
 /// which must not produce a response.
 pub async fn handle_request(
@@ -318,31 +329,169 @@ pub async fn handle_request(
     }
 }
 
-/// Run the MCP stdio loop: read newline-delimited JSON-RPC requests from
-/// `reader`, write responses to `writer`, until EOF.
+/// Subscription methods, handled in the serve loop rather than in
+/// `handle_request` — that function is shared with the POST-only HTTP transport,
+/// which must keep answering -32601 because it cannot push.
+///
+/// Synchronous: nothing here awaits. The watch it spawns signals changes by
+/// sending the canonical URI on `tx`, which the loop selects on.
+fn handle_subscription(
+    server: &std::sync::Arc<McpServer>,
+    subs: &std::sync::Arc<crate::subscriptions::SubscriptionRegistry>,
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    req: &Value,
+    method: &str,
+) -> Option<Value> {
+    let id = req.get("id").cloned()?;
+    let uri_str = req
+        .get("params")
+        .and_then(|p| p.get("uri"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let uri = match crate::resources::ResourceUri::parse(uri_str) {
+        Ok(u) => u,
+        Err(message) => return Some(err(id, -32602, &message)),
+    };
+    // Canonical form, so two spellings of one object cannot make two watches.
+    let canonical = uri.to_string();
+
+    if method == "resources/unsubscribe" {
+        subs.remove(&canonical);
+        return Some(ok(id, json!({})));
+    }
+
+    if let Err(message) = crate::resources::is_subscribable(&uri) {
+        return Some(err(id, -32602, &message));
+    }
+    // Reject anything unreadable up front, so a subscription cannot outlive a
+    // URI the server could never serve.
+    if let Err(message) = crate::resources::plan_read(&uri, server.resources().as_ref()) {
+        return Some(err(id, -32602, &message));
+    }
+
+    // The callback is sync and owns only a channel sender, so it needs no
+    // writer, no mutex and no spawn. A send failure means the loop is gone,
+    // which the watch's own abort will follow.
+    let tx = tx.clone();
+    let notify_uri = canonical.clone();
+    let on_change = Box::new(move || {
+        let _ = tx.send(notify_uri.clone());
+    });
+
+    let handle = match server.watcher().watch(&uri, on_change) {
+        Ok(h) => h,
+        Err(message) => return Some(err(id, -32602, &message)),
+    };
+    if let Err(message) = subs.insert(canonical, handle) {
+        return Some(err(id, -32602, &message));
+    }
+    Some(ok(id, json!({})))
+}
+
+/// Run the MCP stdio loop. Owns its writer and the subscription registry, so
+/// no watch outlives this session — stdio's client spawned the process, so loop
+/// exit *is* disconnect.
+///
+/// Watch callbacks are sync and cannot write asynchronously, so they send the
+/// changed URI over a channel; this loop selects on it alongside incoming
+/// requests. Responses and notifications are therefore written by one task and
+/// serialised by construction — no mutex, no spawn, and the writer bound stays
+/// `AsyncWrite + Unpin`.
 pub async fn serve<R, W>(server: McpServer, reader: R, mut writer: W) -> std::io::Result<()>
 where
     R: AsyncBufReadExt + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let server = std::sync::Arc::new(server);
+    let subs = std::sync::Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    let result = serve_loop(&server, &subs, &tx, &mut rx, reader, &mut writer).await;
+    // Release every watch however the loop ended — EOF or a write error. Doing
+    // this here rather than inside the loop means the `?` error path cannot skip
+    // it.
+    subs.abort_all();
+    result
+}
+
+async fn serve_loop<R, W>(
+    server: &std::sync::Arc<McpServer>,
+    subs: &std::sync::Arc<crate::subscriptions::SubscriptionRegistry>,
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    reader: R,
+    writer: &mut W,
+) -> std::io::Result<()>
+where
+    R: AsyncBufReadExt + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await? {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let req: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(resp) = handle_request(&server, &req, crate::Transport::Stdio).await {
-            let s = serde_json::to_string(&resp)?;
-            writer.write_all(s.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
+
+    loop {
+        tokio::select! {
+            // Biased so a pending request is always drained before
+            // notifications, keeping request/response ordering predictable.
+            biased;
+
+            line = lines.next_line() => {
+                let Some(line) = line? else {
+                    // EOF. Biased select means a notification queued during the
+                    // last request would otherwise be dropped here, so drain
+                    // what is already pending before leaving.
+                    while let Ok(uri) = rx.try_recv() {
+                        write_line(writer, &subscription_notification(&uri)).await?;
+                    }
+                    return Ok(());
+                };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(req) = serde_json::from_str::<Value>(trimmed) else { continue };
+
+                let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+                // Subscription methods are handled here, not in
+                // `handle_request`: that function is shared with the POST-only
+                // HTTP transport, which has no channel to push notifications and
+                // must keep answering -32601.
+                let resp = if method == "resources/subscribe" || method == "resources/unsubscribe" {
+                    handle_subscription(server, subs, tx, &req, method)
+                } else {
+                    handle_request(server, &req, crate::Transport::Stdio).await
+                };
+                if let Some(resp) = resp {
+                    write_line(writer, &resp).await?;
+                }
+                // A real stdio pipe naturally yields here whenever no more
+                // bytes are buffered, letting the executor poll a
+                // freshly-spawned watch task before the next request is
+                // handled. An in-memory reader/writer (`&[u8]` / `Vec<u8>`,
+                // as every test here uses) never returns `Pending`, so
+                // without an explicit yield point a current-thread runtime
+                // would never revisit its run queue and a watch's `on_change`
+                // could never fire before the session ends. This is a no-op
+                // in production and only matters for those in-memory
+                // fixtures.
+                tokio::task::yield_now().await;
+            }
+
+            Some(uri) = rx.recv() => {
+                write_line(writer, &subscription_notification(&uri)).await?;
+            }
         }
     }
-    Ok(())
+}
+
+async fn write_line<W>(writer: &mut W, value: &Value) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let s = serde_json::to_string(value)?;
+    writer.write_all(s.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
 }
 
 #[cfg(test)]
@@ -913,7 +1062,17 @@ mod tests {
                 }
             }
         }
-        server_with_ping().with_resources(Arc::new(Kinds))
+        struct StubWatcher;
+        impl crate::resources::ObjectWatcher for StubWatcher {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(Arc::new(StubWatcher))
     }
 
     #[tokio::test]
@@ -1114,5 +1273,184 @@ mod tests {
             resp["error"]["message"].as_str().unwrap().contains("no such pod"),
             "got {resp}"
         );
+    }
+
+    #[test]
+    fn a_subscription_notification_is_a_jsonrpc_notification_with_only_the_uri() {
+        let n = subscription_notification("k8s://c/ns/Pod/web-0");
+        assert_eq!(n["jsonrpc"], "2.0");
+        assert_eq!(n["method"], "notifications/resources/updated");
+        assert_eq!(n["params"]["uri"], "k8s://c/ns/Pod/web-0");
+        assert!(n.get("id").is_none(), "a notification must carry no id");
+        // Content is never pushed; the client re-reads.
+        assert!(n["params"].get("contents").is_none());
+        assert!(n["params"].get("text").is_none());
+    }
+
+    /// The HTTP transport has no server-to-client channel, so subscribe must
+    /// never be served there — `handle_request` (which HTTP uses) must not know
+    /// the method at all.
+    #[tokio::test]
+    async fn handle_request_does_not_serve_subscribe() {
+        let resp = handle_request(
+            &server_with_ping(),
+            &json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+                    "params":{"uri":"k8s://c/ns/Pod/p"}}),
+            Transport::Http,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    /// End-to-end over the real `serve` loop: subscribe, then unsubscribe, and
+    /// confirm both are answered. The watch itself needs a cluster, so this
+    /// asserts the protocol handling and registry bookkeeping.
+    #[tokio::test]
+    async fn serve_answers_subscribe_and_unsubscribe() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"resources/unsubscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
+            "\n",
+        );
+        let mut out: Vec<u8> = Vec::new();
+        serve(server_with_kinds(), BufReader::new(input.as_bytes()), &mut out)
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one response each: {text}");
+        for line in lines {
+            let v: Value = serde_json::from_str(line).unwrap();
+            assert!(v.get("result").is_some(), "expected success, got {line}");
+        }
+    }
+
+    /// The notification path end to end, without a cluster: a stub watcher
+    /// fires `on_change` immediately, so this proves a watch event actually
+    /// reaches the client's stream — not just that the message shape is right.
+    #[tokio::test]
+    async fn a_watch_event_pushes_a_notification_onto_the_stream() {
+        struct FiringWatcher;
+        impl crate::resources::ObjectWatcher for FiringWatcher {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                mut on_change: Box<dyn FnMut() + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                Ok(tokio::spawn(async move {
+                    on_change();
+                    std::future::pending::<()>().await
+                })
+                .abort_handle())
+            }
+        }
+
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+
+        let server = server_with_ping()
+            .with_resources(Arc::new(Kinds))
+            .with_watcher(Arc::new(FiringWatcher));
+
+        // A second line keeps the loop alive long enough for the spawned write
+        // to land before EOF ends the session.
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+            "\n",
+        );
+        let mut out: Vec<u8> = Vec::new();
+        serve(server, BufReader::new(input.as_bytes()), &mut out).await.unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("notifications/resources/updated"),
+            "a watch event must push a notification: {text}"
+        );
+        assert!(text.contains("k8s://c/ns/Pod/web-0"), "the notification must name the URI: {text}");
+    }
+
+    /// stdio's client spawned the process, so loop exit IS disconnect — nothing
+    /// may outlive it. This is the leak the registry exists to prevent.
+    ///
+    /// This does not assert `AbortHandle::is_finished()` synchronously after
+    /// `serve` returns: `crates/mcp/src/subscriptions.rs`'s test module
+    /// documents (see `spawn_forever_joined`) that under this crate's
+    /// current-thread `#[tokio::test]` runtime, a freshly spawned task is
+    /// never even polled before such a synchronous check runs — measured at
+    /// 0/50 passes, independently reproduced at 0/20. Instead this retains the
+    /// watch's `JoinHandle` too and awaits it under `assert_aborted`'s bound,
+    /// which synchronizes on the cancellation actually completing rather than
+    /// racing the executor, and fails fast with a named message rather than
+    /// hanging if the abort never happens.
+    #[tokio::test]
+    async fn serve_aborts_every_subscription_when_the_loop_exits() {
+        use std::sync::{Arc as StdArc, Mutex};
+
+        type RecordedHandles = StdArc<Mutex<Option<(tokio::task::AbortHandle, tokio::task::JoinHandle<()>)>>>;
+
+        // Records the handles the watcher handed out, so the test can check
+        // the watch was aborted after `serve` returned.
+        #[derive(Clone)]
+        struct Recording(RecordedHandles);
+        impl crate::resources::ObjectWatcher for Recording {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                let join = tokio::spawn(async { std::future::pending::<()>().await });
+                let abort = join.abort_handle();
+                *self.0.lock().unwrap() = Some((abort.clone(), join));
+                Ok(abort)
+            }
+        }
+
+        let recorded = StdArc::new(Mutex::new(None));
+        let server = server_with_kinds().with_watcher(Arc::new(Recording(recorded.clone())));
+
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
+            "\n",
+        );
+        let mut out: Vec<u8> = Vec::new();
+        serve(server, BufReader::new(input.as_bytes()), &mut out).await.unwrap();
+
+        let (_, join) = recorded.lock().unwrap().take().expect("a watch was started");
+        match tokio::time::timeout(std::time::Duration::from_secs(2), join).await {
+            Ok(Ok(())) => panic!("watch task ran to completion instead of being aborted"),
+            Ok(Err(join_err)) => assert!(
+                join_err.is_cancelled(),
+                "the watch must be aborted when the loop exits, but it ended for another reason: {join_err}"
+            ),
+            Err(_) => panic!(
+                "timed out after 2s waiting for the watch to be aborted — it was never cancelled"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_rejects_subscribing_to_a_non_subscribable_uri() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://catalog"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/p/logs"}}"#,
+            "\n",
+        );
+        let mut out: Vec<u8> = Vec::new();
+        serve(server_with_kinds(), BufReader::new(input.as_bytes()), &mut out)
+            .await
+            .unwrap();
+        for line in String::from_utf8(out).unwrap().lines() {
+            let v: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["error"]["code"], -32602, "got {line}");
+        }
     }
 }

@@ -45,6 +45,7 @@ pub struct McpServer {
     audit: Arc<dyn crate::audit::AuditSink>,
     prompts: crate::prompts::PromptLibrary,
     resources: std::sync::Arc<dyn crate::resources::KindResolver>,
+    watcher: std::sync::Arc<dyn crate::resources::ObjectWatcher>,
 }
 
 impl McpServer {
@@ -59,6 +60,9 @@ impl McpServer {
             // Fail closed: no resolver means no object resources, only the two
             // fixed ones.
             resources: std::sync::Arc::new(crate::resources::NoKinds),
+            // Fail closed: refuse subscriptions rather than accept ones that
+            // will never fire.
+            watcher: std::sync::Arc::new(crate::resources::NoWatcher),
         }
     }
 
@@ -99,6 +103,18 @@ impl McpServer {
 
     pub fn resources(&self) -> &std::sync::Arc<dyn crate::resources::KindResolver> {
         &self.resources
+    }
+
+    pub fn with_watcher(
+        mut self,
+        watcher: std::sync::Arc<dyn crate::resources::ObjectWatcher>,
+    ) -> Self {
+        self.watcher = watcher;
+        self
+    }
+
+    pub fn watcher(&self) -> &std::sync::Arc<dyn crate::resources::ObjectWatcher> {
+        &self.watcher
     }
 
     /// Whether a tool reads sensitive material, so the audit log can redact
