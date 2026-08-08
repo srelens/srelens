@@ -28,9 +28,17 @@ impl SubscriptionRegistry {
 
     /// Register a watch for `uri`. Re-subscribing to the same URI aborts the
     /// previous watch and replaces it, so one URI never has two.
+    ///
+    /// Takes ownership of `handle`, and disposes of it either way: on
+    /// success it is stored (and a displaced previous watch, if any, is
+    /// aborted); on `Err` — the cap was hit — `handle` itself is aborted
+    /// before returning, since a rejected watch is useless by definition and
+    /// the caller has no reference left to clean it up. Callers never need to
+    /// abort on `Err`.
     pub fn insert(&self, uri: String, handle: AbortHandle) -> Result<(), String> {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if !live.contains_key(&uri) && live.len() >= MAX_SUBSCRIPTIONS {
+            handle.abort();
             return Err(format!(
                 "too many subscriptions: the limit is {MAX_SUBSCRIPTIONS}; \
                  unsubscribe from something first"
@@ -102,6 +110,27 @@ mod tests {
         (abort, join)
     }
 
+    /// Awaits `join` under a short bound and asserts the task was actually
+    /// cancelled.
+    ///
+    /// A bare `join.await` here would hang the whole test binary forever
+    /// if a regression (e.g. deleting an `abort()` call) stops the task from
+    /// ever being cancelled — verified: doing exactly that during review made
+    /// the affected test hang past 20s instead of failing. Wrapping in
+    /// `tokio::time::timeout` turns that into a fast, explicit, named
+    /// failure instead of an indefinite stall that looks like an
+    /// infrastructure problem rather than a test failure.
+    async fn assert_aborted(join: tokio::task::JoinHandle<()>) {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), join).await {
+            Ok(Ok(())) => panic!("watch task ran to completion instead of being aborted"),
+            Ok(Err(err)) => assert!(
+                err.is_cancelled(),
+                "watch task ended for a reason other than cancellation: {err}"
+            ),
+            Err(_) => panic!("timed out after 2s waiting for the watch to be aborted — it was never cancelled"),
+        }
+    }
+
     #[tokio::test]
     async fn insert_then_remove_tracks_length() {
         let r = SubscriptionRegistry::new();
@@ -126,8 +155,7 @@ mod tests {
         r.insert("k8s://c/ns/Pod/a".into(), first).unwrap();
         r.insert("k8s://c/ns/Pod/a".into(), spawn_forever()).unwrap();
         assert_eq!(r.len(), 1, "one URI, one subscription");
-        let err = first_join.await.unwrap_err();
-        assert!(err.is_cancelled(), "the replaced watch must have been aborted");
+        assert_aborted(first_join).await;
     }
 
     #[tokio::test]
@@ -139,6 +167,27 @@ mod tests {
         let e = r.insert("k8s://c/ns/Pod/one-too-many".into(), spawn_forever()).unwrap_err();
         assert!(e.contains(&MAX_SUBSCRIPTIONS.to_string()), "got: {e}");
         assert_eq!(r.len(), MAX_SUBSCRIPTIONS);
+    }
+
+    /// `insert` takes ownership of `handle`; on the cap-rejection branch it
+    /// must dispose of it by aborting it, not merely drop it —
+    /// `AbortHandle`'s `Drop` does not cancel the underlying task, so a
+    /// dropped-but-not-aborted handle would leak a detached, permanently
+    /// running watch. The caller has already spawned the task and, once
+    /// ownership of the handle moved into `insert`, has no reference left to
+    /// clean it up — a client retrying against the cap would leak one watch
+    /// per attempt, exactly the resource exhaustion `MAX_SUBSCRIPTIONS`
+    /// exists to prevent.
+    #[tokio::test]
+    async fn cap_rejection_aborts_the_rejected_watch() {
+        let r = SubscriptionRegistry::new();
+        for i in 0..MAX_SUBSCRIPTIONS {
+            r.insert(format!("k8s://c/ns/Pod/p{i}"), spawn_forever()).unwrap();
+        }
+        let (rejected, rejected_join) = spawn_forever_joined();
+        r.insert("k8s://c/ns/Pod/one-too-many".into(), rejected)
+            .expect_err("the cap should reject the extra subscription");
+        assert_aborted(rejected_join).await;
     }
 
     /// The `!contains_key` half of the cap guard (`if !live.contains_key(&uri)
@@ -168,7 +217,7 @@ mod tests {
         r.insert("b".into(), b).unwrap();
         r.abort_all();
         assert_eq!(r.len(), 0);
-        assert!(a_join.await.unwrap_err().is_cancelled());
-        assert!(b_join.await.unwrap_err().is_cancelled());
+        assert_aborted(a_join).await;
+        assert_aborted(b_join).await;
     }
 }

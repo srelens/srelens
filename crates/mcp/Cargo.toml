@@ -19,7 +19,7 @@ axum = "0.7"
 percent-encoding = "2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt", "io-util", "time"] }
 tower = { version = "0.5", features = ["util"] }
 # Dev-only, so this does not create a real dependency cycle: `registry`
 # depends on `mcp` only as a dev-dependency too (for its own e2e prompt
