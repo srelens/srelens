@@ -1945,17 +1945,20 @@ async fn mcp_resource_reads(ctx: &str, pod: &str) {
 /// #24's subscription acceptance criterion: subscribe to a pod's manifest and
 /// see a notification when it changes.
 ///
-/// The initial list a subscribe triggers is DELIBERATELY silent:
-/// classification in `is_object_change` (`crates/kube/src/watch.rs`) only
-/// fires `on_change` for `Event::Apply`/`Event::Delete`, never for
-/// `Event::Init`/`InitApply`/`InitDone` — a subscribe must not immediately
-/// notify just because the client already read the resource once to get
-/// there. `is_object_change_fires_only_on_apply_and_delete` pins this. If
-/// this test ever reports zero hits, the fix is NOT to loosen that
-/// classification or weaken the assertion below to `>= 0` — either would
-/// silently undo that corrected behaviour. Instead this test causes a REAL
-/// change to the watched pod after the watch is confirmed running, and only
-/// then waits for a genuine notification.
+/// The initial list a subscribe triggers DOES notify: classification in
+/// `is_object_change` (`crates/kube/src/watch.rs`) fires `on_change` for
+/// every `InitDone`, including the very first one, because a read followed by
+/// a subscribe is not atomic — the object can already differ from what the
+/// client last saw by the time the subscription's first list completes, and
+/// staying silent would leave the client trusting stale state with no
+/// correction. So `hits` is already nonzero once the watch is confirmed
+/// running, before any mutation. To still prove that a REAL subsequent change
+/// produces its own notification (not just the guaranteed initial one), this
+/// test records the hit count as a baseline after the watch is up, then
+/// mutates the watched pod, and asserts the count rises *above that
+/// baseline* — not merely `> 0`, which the initial notification alone would
+/// already satisfy and would make this test pass without exercising the
+/// mutation path at all.
 ///
 /// The mutation is a label added via server-side apply (an `Apply` event)
 /// rather than deleting the pod: the pod is the live Deployment replica the
@@ -1992,6 +1995,11 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
         "the watch task ended before the mutation ran; it should still be watching"
     );
 
+    // Baseline after the initial list, which itself notifies (see the doc
+    // comment above) — the mutation must push the count *past* this, not
+    // merely make it nonzero.
+    let baseline = *hits.lock().unwrap();
+
     let label_yaml = format!(
         "apiVersion: v1\nkind: Pod\nmetadata:\n  name: {pod}\n  namespace: {NS}\n  labels:\n    e2e-subscription-marker: touched\n"
     );
@@ -2006,12 +2014,15 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
 
     let dl = deadline(30);
     loop {
-        if *hits.lock().unwrap() > 0 {
+        if *hits.lock().unwrap() > baseline {
             break;
         }
         if Instant::now() > dl {
             handle.abort();
-            panic!("expected at least one change notification after labeling {pod}");
+            panic!(
+                "expected the hit count to rise above the post-initial-list baseline \
+                 ({baseline}) after labeling {pod}, but it did not"
+            );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

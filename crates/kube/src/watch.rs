@@ -723,26 +723,43 @@ where
 }
 
 /// Classify a watcher event as an object change. `Apply`/`Delete` always are.
-/// `Init`/`InitApply` never are — they only ever replay the current list.
-/// `InitDone` closes an init sequence, and kube-runtime runs *another* init
-/// sequence (`Init` → `InitApply` → `InitDone`) every time it re-lists after a
-/// desync (410 GONE, etcd compaction, apiserver restart), so `InitDone` is a
-/// change exactly when this is not the first init sequence — i.e. `seen_init_done`
-/// (whether an earlier `InitDone` has already fired) is `true`. That keeps the
-/// very first list silent (a subscribe must not notify just because the
-/// client already read the resource) while still notifying once per relist, so
-/// a change that lands during the reconnect gap — and so arrives only as part
-/// of the replayed list, never as a standalone `Apply` — is not silently lost.
-/// Pulled out as a pure function taking the flag explicitly (rather than
-/// closing over mutable state) because `watch_object` itself cannot be
-/// unit-tested without an API server, and getting this classification wrong
-/// would either spuriously notify a fresh subscriber or under-notify from
-/// missing a change made during a relist.
-fn is_object_change<K>(event: &Event<K>, seen_init_done: bool) -> bool {
+/// `Init`/`InitApply` never are — they are just the replay of the current list
+/// building up in memory, with nothing yet to report. `InitDone` — which
+/// closes *every* init sequence, the very first list and every subsequent
+/// relist alike — always is a change.
+///
+/// That includes the first list deliberately. A subscribe is never atomic
+/// with the read that precedes it: the client reads the object at version A,
+/// the object changes to B, and only then does the client subscribe. If the
+/// initial list stayed silent, the client would be stuck believing A is
+/// current until some unrelated later change happened to notify it — a lost
+/// update with no bound on how long it lasts. Notifying on the first list
+/// costs one redundant re-read when nothing actually changed between the read
+/// and the subscribe; that is the correct direction to be wrong in. This
+/// module's documented contract is that the signal may over-notify but must
+/// never under-notify, and firing on every `InitDone` — not just relists — is
+/// what makes that hold.
+///
+/// kube-runtime also runs additional init sequences (`Init` → `InitApply`* →
+/// `InitDone`) whenever it re-lists after a desync (410 GONE, etcd
+/// compaction, apiserver restart), and a change that lands during that
+/// reconnect gap arrives only as part of the replayed list, never as a
+/// standalone `Apply`. Firing on every `InitDone` covers that case too, for
+/// the same reason.
+///
+/// Do not special-case the first `InitDone` back to silent "for tidiness" —
+/// that reintroduces the lost-update window this rule closes.
+///
+/// Pulled out as a pure function (rather than inlined in `watch_object`)
+/// because `watch_object` itself cannot be unit-tested without an API server,
+/// and getting this classification wrong would either under-notify from
+/// missing a change made before a subscribe or during a relist, or spuriously
+/// notify on a relist that changed nothing.
+fn is_object_change<K>(event: &Event<K>) -> bool {
     match event {
         Event::Apply(_) | Event::Delete(_) => true,
         Event::Init | Event::InitApply(_) => false,
-        Event::InitDone => seen_init_done,
+        Event::InitDone => true,
     }
 }
 
@@ -754,13 +771,17 @@ fn is_object_change<K>(event: &Event<K>, seen_init_done: bool) -> bool {
 /// payload deliberately: the MCP subscription it backs sends only a URI and the
 /// client re-reads, so this needs to detect *that* something changed.
 ///
-/// **First list silent, relists notify:** the very first `Init`/`InitApply`*/
-/// `InitDone` sequence is deliberately silent — a subscribe must not notify
-/// just because the client already read the resource. But kube-runtime resets
-/// and re-lists (another `Init`/`InitApply`*/`InitDone` sequence) after a watch
-/// desync, and that is the *only* way a change made during the reconnect gap
-/// ever arrives. So every init sequence after the first is treated as a
-/// change, notifying once on that relist's `InitDone`.
+/// **Every list notifies, initial and relists alike:** each init sequence
+/// (`Init` → `InitApply`* → `InitDone`) fires `on_change` once, on its
+/// `InitDone` — see `is_object_change`. The initial list is included
+/// deliberately: a read followed by a subscribe is not atomic, so the object
+/// can already differ from what the client last saw by the time the
+/// subscription's first list completes, and staying silent would leave the
+/// client trusting stale state with nothing to correct it. A redundant
+/// notification when nothing actually changed is the correct failure
+/// direction, not a bug to tidy away. The same rule also covers a relist after
+/// a watch desync, which is the only way a change made during the reconnect
+/// gap ever arrives.
 ///
 /// **Namespace contract:** `namespace: None` means the caller has already
 /// established that `gvk` is cluster-scoped. This function cannot detect a
@@ -817,7 +838,6 @@ where
     let config = Config::default().fields(&format!("metadata.name={name}"));
     let mut stream = kube::runtime::watcher(api, config).boxed();
     let mut reconnecting = false;
-    let mut seen_init_done = false;
 
     while let Some(item) = stream.next().await {
         match item {
@@ -826,11 +846,8 @@ where
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
-                if is_object_change(&event, seen_init_done) {
+                if is_object_change(&event) {
                     on_change();
-                }
-                if matches!(event, Event::InitDone) {
-                    seen_init_done = true;
                 }
             }
             Err(e) => {
@@ -1009,31 +1026,24 @@ mod tests {
 
     /// `Event` is generic; `()` is the cheapest `K` that still lets us
     /// construct every variant, since `is_object_change` never inspects the
-    /// payload. `Apply`/`Delete` are always changes and `Init`/`InitApply`
-    /// never are, regardless of `seen_init_done`; `InitDone` depends on it —
-    /// that's the relist-notification behaviour pinned separately below.
+    /// payload. `Apply`/`Delete` and `InitDone` are always changes;
+    /// `Init`/`InitApply` never are.
     #[test]
-    fn is_object_change_fires_only_on_apply_and_delete() {
-        for seen_init_done in [false, true] {
-            assert!(!is_object_change(&Event::<()>::Init, seen_init_done));
-            assert!(!is_object_change(&Event::InitApply(()), seen_init_done));
-            assert!(is_object_change(&Event::Apply(()), seen_init_done));
-            assert!(is_object_change(&Event::Delete(()), seen_init_done));
-        }
-        assert!(!is_object_change(&Event::<()>::InitDone, false));
-        assert!(is_object_change(&Event::<()>::InitDone, true));
+    fn is_object_change_fires_on_apply_delete_and_init_done() {
+        assert!(!is_object_change(&Event::<()>::Init));
+        assert!(!is_object_change(&Event::InitApply(())));
+        assert!(is_object_change(&Event::Apply(())));
+        assert!(is_object_change(&Event::Delete(())));
+        assert!(is_object_change(&Event::<()>::InitDone));
     }
 
-    /// The relist scenario that this fix exists for: a change that lands
+    /// The relist scenario this signal exists to cover: a change that lands
     /// during the reconnect gap arrives only as part of the replayed init
-    /// sequence, never as a standalone `Apply`. The first init sequence
-    /// (`Init`, `InitApply`, `InitDone`) must stay silent — that's just the
-    /// normal first list a subscribe triggers — but the second one (the
-    /// relist) must report exactly one change, on its `InitDone`, mirroring
-    /// how `reduce` emits once per relist.
+    /// sequence, never as a standalone `Apply`. Both the first list and the
+    /// relist must report a change, once each, on their respective
+    /// `InitDone` — mirroring how `reduce` emits once per list.
     #[test]
-    fn a_relist_after_the_first_init_sequence_is_reported_as_one_change() {
-        let mut seen_init_done = false;
+    fn every_init_sequence_including_the_first_is_reported_as_one_change() {
         let mut changes = 0;
 
         for event in [
@@ -1044,15 +1054,12 @@ mod tests {
             Event::InitApply(()),
             Event::InitDone,
         ] {
-            if is_object_change(&event, seen_init_done) {
+            if is_object_change(&event) {
                 changes += 1;
-            }
-            if matches!(event, Event::InitDone) {
-                seen_init_done = true;
             }
         }
 
-        assert_eq!(changes, 1, "expected exactly one change, from the second InitDone");
+        assert_eq!(changes, 2, "expected one change per InitDone, first list and relist alike");
     }
 
     #[test]
