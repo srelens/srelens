@@ -737,6 +737,14 @@ fn is_object_change<K>(event: &Event<K>) -> bool {
 /// streaming a whole namespace to observe one member. `on_change` takes no
 /// payload deliberately: the MCP subscription it backs sends only a URI and the
 /// client re-reads, so this needs to detect *that* something changed.
+///
+/// **Namespace contract:** `namespace: None` means the caller has already
+/// established that `gvk` is cluster-scoped. This function cannot detect a
+/// kind's scope itself, so passing `None` for a *namespaced* kind will watch
+/// with `Api::all_with` and the bare `metadata.name={name}` selector will
+/// match same-named objects in every namespace, silently firing `on_change`
+/// for a different object than the one the caller subscribed to. Establishing
+/// scope before calling is the caller's responsibility.
 pub async fn watch_object<F, G>(
     cache: Arc<ClientCache>,
     context: String,
@@ -751,6 +759,20 @@ where
     G: FnMut(WatchStatus) + Send,
 {
     use kube::api::{ApiResource, DynamicObject};
+
+    if name.is_empty() {
+        return Err(
+            "watch_object: object name must not be empty (an empty metadata.name \
+             selector matches nothing, so the watch would sit forever without firing)"
+                .into(),
+        );
+    }
+    if let Some(bad) = name.chars().find(|c| *c == ',' || *c == '=') {
+        return Err(format!(
+            "watch_object: object name {name:?} contains '{bad}', which is not valid in \
+             a Kubernetes object name and would corrupt the metadata.name field selector"
+        ));
+    }
 
     let client = cache.get(&context).await?;
     let ar = ApiResource::from_gvk(&gvk);
@@ -869,6 +891,58 @@ mod tests {
         .await
         .unwrap_err();
         assert!(!err.is_empty(), "the client failure must be surfaced as an error string");
+    }
+
+    #[tokio::test]
+    async fn watch_object_rejects_an_empty_name_before_touching_the_client() {
+        // An empty `metadata.name=` selector matches nothing, so the watch
+        // would sit forever without ever firing `on_change` or erroring — the
+        // worst possible failure shape for a subscription. Reject up front.
+        // Uses the same nonexistent kubeconfig as the client-error test above;
+        // if this reached `cache.get` it would still error, but for the wrong
+        // reason, so the assertion pins the *message*, not just `is_err()`.
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        let gvk = kube::api::GroupVersionKind::gvk("", "v1", "Pod");
+        let err = watch_object(
+            cache,
+            "no-such-context".into(),
+            Some("ns".into()),
+            gvk,
+            "".into(),
+            || {},
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("empty"), "expected an empty-name error, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn watch_object_rejects_a_name_containing_a_selector_metacharacter() {
+        // A `,` or `=` in `name` reshapes `metadata.name={name}` into extra or
+        // malformed field-selector terms. Neither character is valid in a real
+        // Kubernetes object name (RFC 1123), so reject both before any client
+        // work rather than silently producing a selector that matches the
+        // wrong thing (or nothing).
+        let gvk = kube::api::GroupVersionKind::gvk("", "v1", "Pod");
+        for bad_name in ["web-0,evil=1", "web=0"] {
+            let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+            let err = watch_object(
+                cache,
+                "no-such-context".into(),
+                Some("ns".into()),
+                gvk.clone(),
+                bad_name.into(),
+                || {},
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                err.contains(bad_name),
+                "expected the offending name {bad_name:?} to be named in the error, got: {err}"
+            );
+        }
     }
 
     /// `Event` is generic; `()` is the cheapest `K` that still lets us
