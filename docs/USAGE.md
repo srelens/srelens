@@ -456,6 +456,68 @@ Retrieving a prompt is not itself an audited event — nothing touches a
 cluster to fetch one. The tool calls an agent makes while following it are
 audited exactly like any other MCP call.
 
+### Resources
+
+Alongside tools and prompts, srelens exposes cluster state as MCP
+**resources** — addressable under `k8s://` URIs that a client can list, read,
+and (over stdio) subscribe to for change notifications.
+
+Two URIs are fixed:
+
+- `k8s://contexts` — the same contexts `k8s.listContexts` returns.
+- `k8s://catalog` — every tool, prompt and resource template this server
+  exposes, so a client can introspect the whole surface in one read.
+
+Everything else addresses a single object, using one of three URI shapes:
+
+```
+k8s://<context>/<namespace>/<kind>/<name>
+k8s://<context>/<namespace>/<kind>/<name>/events
+k8s://<context>/<namespace>/Pod/<name>/logs
+```
+
+The first reads the object's manifest as YAML; `/events` lists events whose
+involved object is that resource; `/logs` reads a pod's recent log output.
+Cluster-scoped kinds (`Node`, `PersistentVolume`, `ClusterRole`, and so on)
+have no namespace — use `-` in that slot rather than leaving it blank.
+
+**Secrets are not addressable.** A `k8s://.../Secret/...` read is refused
+with an error naming the alternative: fetch secret data with the
+`k8s.getSecret` tool instead, which is consent-gated. A resource is the kind
+of thing a client fetches automatically to build context, with no
+confirmation step in front of it, so routing Secret contents through that
+path would quietly bypass the one control that exists to gate secret
+material.
+
+Every segment is percent-encoded, so a context name containing `/` or `:` —
+an EKS cluster ARN, say — round-trips safely.
+
+`resources/list` returns only the two fixed entries above. Enumerating every
+object in a cluster would be unbounded, and would need a cluster round trip
+just to answer a discovery call. Object addressing is discoverable instead
+through `resources/templates/list`, which advertises the three URI shapes
+above as templates for a client to fill in.
+
+A resource read is resolved to the same capability call a tool invocation
+would make — `k8s.getManifest`, `k8s.listEvents`, `k8s.podLogs`, or
+`k8s.listContexts` — so it goes through the identical path and is **audited
+exactly like a tool call**, appearing in the same audit log under the
+underlying capability's name, with the same redaction rules.
+
+**Subscriptions work over stdio only.** A client can send
+`resources/subscribe` for an object URI and receive a
+`notifications/resources/updated` message whenever that object changes; the
+notification carries only the URI, and the client re-reads to get the new
+content. The HTTP transport is request/response only, with no channel for
+the server to push a notification back, so it advertises `subscribe: false`
+in `initialize` and answers `resources/subscribe` with an error rather than
+silently accepting a subscription that can never fire. Pushing resource
+updates to HTTP clients (via SSE or similar) is tracked as a follow-up in
+[issue #193](https://github.com/srelens/srelens/issues/193). Up to 32
+subscriptions can be live at once; re-subscribing to a URI you already hold
+replaces it in place rather than counting twice, and past the cap you need to
+unsubscribe from something before adding another.
+
 ## Settings reference
 
 **Settings** (gear icon in the hotbar) has seven sections:

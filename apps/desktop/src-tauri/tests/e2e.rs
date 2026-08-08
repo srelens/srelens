@@ -1221,6 +1221,17 @@ async fn run_suite() {
         "expected the busybox loop's output: {out}"
     );
 
+    // === MCP resources (#24) ===================================================
+    // srelens's k8s:// resource-addressing feature, exercised end to end
+    // against this real cluster. Reuses `pod_name`, the Deployment pod
+    // already discovered above for the logs check, rather than provisioning
+    // new cluster state: the fixtures create only a Deployment (no
+    // directly-named pod), so any pod used here has to be discovered via
+    // listPods the same way the logs check above does.
+    println!("=== mcp resources (#24) ===");
+    mcp_resource_reads(&ctx, &pod_name).await;
+    mcp_resource_subscription(&ctx, &pod_name).await;
+
     // === 6. Metrics ============================================================
     // A bare kind cluster ships no metrics-server, so the metrics API may be
     // absent. Don't let that make the happy path vacuous: probe once, and when
@@ -1876,6 +1887,136 @@ async fn delete_context_on_a_copy(h: &mut Harness, ctx: &str) {
 
     let _ = std::fs::remove_file(&tmp);
     println!("deleteContext: removed from the throwaway copy only; real kubeconfig untouched");
+}
+
+/// #24's read acceptance criterion: a manifest, an events list and pod logs
+/// all read successfully over MCP's `resources/read`, plus the curation
+/// guarantee that a Secret which genuinely exists in this cluster is still
+/// not addressable. CI can only exercise the error paths (parse/plan
+/// failures pinned by unit tests in `crates/mcp/src/resources.rs` and
+/// `stdio.rs`) since a successful read needs a real object; this is the
+/// real-cluster half.
+///
+/// The `logs` expectation is an empty string deliberately: a pod may
+/// legitimately have produced no output, so the assertion is that the read
+/// *succeeds* and returns text, not that the text contains anything specific
+/// (this suite's Deployment pods do log "hello", so the substring check
+/// against "" is trivially satisfied either way).
+async fn mcp_resource_reads(ctx: &str, pod: &str) {
+    println!("=== mcp resources: reads ===");
+    let server = srelens_mcp::McpServer::new(Arc::new(build_registry_with(cache())))
+        .with_resources(srelens_registry::kind_resolver());
+
+    for (uri, expect) in [
+        (format!("k8s://{ctx}/{NS}/Pod/{pod}"), "kind: Pod"),
+        (format!("k8s://{ctx}/{NS}/Pod/{pod}/events"), "["),
+        (format!("k8s://{ctx}/{NS}/Pod/{pod}/logs"), ""),
+    ] {
+        let resp = srelens_mcp::stdio::handle_request(
+            &server,
+            &json!({"jsonrpc":"2.0","id":1,"method":"resources/read",
+                                "params":{"uri":uri}}),
+            srelens_mcp::Transport::Stdio,
+        )
+        .await
+        .expect("a response");
+        let contents = &resp["result"]["contents"][0];
+        let text = contents["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("read of {uri} failed: {resp}"));
+        assert!(text.contains(expect), "read of {uri} returned {text}");
+        assert!(contents["mimeType"].is_string());
+    }
+
+    // The curation guarantee against a real cluster: the SECRET fixture
+    // genuinely exists in NS, and is still not addressable.
+    let resp = srelens_mcp::stdio::handle_request(
+        &server,
+        &json!({"jsonrpc":"2.0","id":2,"method":"resources/read",
+                            "params":{"uri":format!("k8s://{ctx}/{NS}/Secret/{SECRET}")}}),
+        srelens_mcp::Transport::Stdio,
+    )
+    .await
+    .expect("a response");
+    assert_eq!(resp["error"]["code"], -32602, "unexpected response: {resp}");
+    println!("mcp resources: manifest/events/logs read OK; Secret still unaddressable");
+}
+
+/// #24's subscription acceptance criterion: subscribe to a pod's manifest and
+/// see a notification when it changes.
+///
+/// The initial list a subscribe triggers is DELIBERATELY silent:
+/// classification in `is_object_change` (`crates/kube/src/watch.rs`) only
+/// fires `on_change` for `Event::Apply`/`Event::Delete`, never for
+/// `Event::Init`/`InitApply`/`InitDone` — a subscribe must not immediately
+/// notify just because the client already read the resource once to get
+/// there. `is_object_change_fires_only_on_apply_and_delete` pins this. If
+/// this test ever reports zero hits, the fix is NOT to loosen that
+/// classification or weaken the assertion below to `>= 0` — either would
+/// silently undo that corrected behaviour. Instead this test causes a REAL
+/// change to the watched pod after the watch is confirmed running, and only
+/// then waits for a genuine notification.
+///
+/// The mutation is a label added via server-side apply (an `Apply` event)
+/// rather than deleting the pod: the pod is the live Deployment replica the
+/// logs check above already exercised, and a label patch leaves it running
+/// under the same name, so nothing else in the suite has to wait for the
+/// Deployment to notice and recreate a differently-named replacement.
+async fn mcp_resource_subscription(ctx: &str, pod: &str) {
+    println!("=== mcp resources: subscription ===");
+    let server = srelens_mcp::McpServer::new(Arc::new(build_registry_with(cache())))
+        .with_resources(srelens_registry::kind_resolver())
+        .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
+            cache(),
+        )));
+
+    let uri = srelens_mcp::resources::ResourceUri::parse(&format!("k8s://{ctx}/{NS}/Pod/{pod}"))
+        .unwrap();
+
+    let hits = Arc::new(std::sync::Mutex::new(0usize));
+    let counter = hits.clone();
+    let handle = srelens_mcp::resources::ObjectWatcher::watch(
+        server.watcher().as_ref(),
+        &uri,
+        Box::new(move || *counter.lock().unwrap() += 1),
+    )
+    .expect("watch spawns");
+
+    // Establish the watch first, and confirm it is actually running, before
+    // mutating anything: the ordering is what makes the assertion below mean
+    // "the notification followed our change" rather than "something fired at
+    // some point".
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !handle.is_finished(),
+        "the watch task ended before the mutation ran; it should still be watching"
+    );
+
+    let label_yaml = format!(
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: {pod}\n  namespace: {NS}\n  labels:\n    e2e-subscription-marker: touched\n"
+    );
+    let out = server
+        .call_tool(
+            "k8s.applyManifest",
+            json!({ "context": ctx, "yaml": label_yaml }),
+        )
+        .await
+        .expect("labeling the watched pod must succeed");
+    assert_eq!(out["applied"], true, "label apply must succeed: {out}");
+
+    let dl = deadline(30);
+    loop {
+        if *hits.lock().unwrap() > 0 {
+            break;
+        }
+        if Instant::now() > dl {
+            handle.abort();
+            panic!("expected at least one change notification after labeling {pod}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    handle.abort();
+    println!("mcp resources: subscription fired on Apply after a label change");
 }
 
 /// Delete the `srelens-e2e` namespace and its CRD, and make sure the node(s)
