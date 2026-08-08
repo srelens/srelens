@@ -184,7 +184,19 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
         .build()
         .expect("build tokio runtime");
     runtime.block_on(async {
-        let registry = srelens_desktop_lib::build_registry();
+        // Built explicitly (rather than via `build_registry`, which creates
+        // its own cache internally and does not expose it) so the same cache
+        // backs both the registry's reads and the watcher's subscriptions —
+        // a second cache would authenticate independently, double the
+        // connections, and could diverge from the read path on credential
+        // refresh.
+        let cache = srelens_kube::client_cache::ClientCache::new_many(
+            srelens_registry::default_kubeconfig_paths(),
+        );
+        let registry = srelens_desktop_lib::build_registry_with_paths(
+            cache.clone(),
+            srelens_registry::default_kubeconfig_paths(),
+        );
         let server = srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(policy)
             .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
@@ -193,6 +205,10 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
             )))
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
+            )))
+            .with_resources(srelens_registry::kind_resolver())
+            .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
+                cache,
             )));
         eprintln!(
             "MCP HTTP listening on http://{addr}/mcp (loopback; gated tools need _confirm plus \
@@ -235,7 +251,16 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         .build()
         .expect("build tokio runtime");
     runtime.block_on(async {
-        let registry = srelens_desktop_lib::build_registry();
+        // Same reasoning as `run_mcp_http`: build the cache explicitly and
+        // share it between the registry and the watcher rather than letting
+        // `build_registry` create one it doesn't expose.
+        let cache = srelens_kube::client_cache::ClientCache::new_many(
+            srelens_registry::default_kubeconfig_paths(),
+        );
+        let registry = srelens_desktop_lib::build_registry_with_paths(
+            cache.clone(),
+            srelens_registry::default_kubeconfig_paths(),
+        );
         let server = srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(policy)
             .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
@@ -244,6 +269,10 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
             )))
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
+            )))
+            .with_resources(srelens_registry::kind_resolver())
+            .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
+                cache,
             )));
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         let writer = tokio::io::stdout();

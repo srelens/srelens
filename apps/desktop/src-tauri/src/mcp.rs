@@ -126,6 +126,10 @@ async fn start_server(
         )))
         .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
             prompts_dir.to_path_buf(),
+        )))
+        .with_resources(srelens_registry::kind_resolver())
+        .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(
+            manager.cache.clone(),
         )));
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {

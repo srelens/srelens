@@ -11,6 +11,7 @@ mod helm;
 mod logs;
 mod mcp;
 mod mcp_confirm;
+pub mod mcp_watch;
 mod settings;
 mod sink;
 mod terminal;
