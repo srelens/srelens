@@ -76,17 +76,37 @@ impl ObjectWatcher for CacheWatcher {
 
         let cache = self.cache.clone();
         let (context, namespace, name) = (context.clone(), namespace.clone(), name.clone());
+        // `watch` is synchronous and returns before the client is ever
+        // resolved, so it cannot validate the subscription up front — the
+        // best it can do is surface what happens once the task runs. stderr
+        // is free even on the stdio transport (stdout is the JSON-RPC
+        // channel there — see the precedent in `main.rs`), so a dead watch at
+        // least leaves a diagnostic instead of failing silently.
+        //
+        // NOTE: a failed watch (unknown context, or a namespace the identity
+        // cannot `watch`) still stays registered in the `SubscriptionRegistry`
+        // until the client unsubscribes or the session ends — it occupies one
+        // of the 32 slots without ever firing. Evicting it would mean
+        // plumbing the registry (owned by `crates/mcp`) into this watcher
+        // (owned by the desktop app), which crosses a layer boundary; that is
+        // being filed as a follow-up rather than done here.
+        let watch_uri = uri.to_string();
         let task = tokio::spawn(async move {
-            let _ = srelens_kube::watch::watch_object(
+            let result = srelens_kube::watch::watch_object(
                 cache,
                 context,
                 namespace,
                 gvk,
                 name,
                 on_change,
-                |_status| {},
+                |status| {
+                    eprintln!("srelens: mcp watch {watch_uri}: {}", status.as_str());
+                },
             )
             .await;
+            if let Err(e) = result {
+                eprintln!("srelens: mcp watch {watch_uri} ended with an error: {e}");
+            }
         });
         Ok(task.abort_handle())
     }

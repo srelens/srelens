@@ -364,8 +364,14 @@ fn handle_subscription(
     if let Err(message) = crate::resources::is_subscribable(&uri) {
         return Some(err(id, -32602, &message));
     }
-    // Reject anything unreadable up front, so a subscription cannot outlive a
-    // URI the server could never serve.
+    // `plan_read` is entirely offline: it validates the URI's shape, scope,
+    // and kind (and refuses Secrets) without checking that the capability it
+    // would invoke is actually registered on this server. So this guarantees
+    // the URI is well-formed and addressable — not that a later read will
+    // succeed; a subscription can still outlive a URI whose capability is
+    // missing or fails at call time. `server.resources()` matches the
+    // resolver `plan_read` and the real read path both use, so this and the
+    // eventual read agree on what's addressable.
     if let Err(message) = crate::resources::plan_read(&uri, server.resources().as_ref()) {
         return Some(err(id, -32602, &message));
     }

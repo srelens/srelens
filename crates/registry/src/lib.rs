@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn the_real_kind_resolver_covers_namespaced_and_cluster_scoped_kinds() {
-        use srelens_mcp::resources::{KindResolver, KindScope};
+        use srelens_mcp::resources::KindScope;
         let r = crate::kind_resolver();
         assert_eq!(r.scope("Pod"), Some(KindScope::Namespaced));
         assert_eq!(r.scope("Deployment"), Some(KindScope::Namespaced));
@@ -429,7 +429,6 @@ mod tests {
     /// `k8s.getSecret` tool, never as an addressable resource.
     #[test]
     fn the_real_kind_resolver_excludes_secrets() {
-        use srelens_mcp::resources::KindResolver;
         assert_eq!(crate::kind_resolver().scope("Secret"), None);
     }
 

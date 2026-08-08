@@ -722,21 +722,45 @@ where
     .await
 }
 
-/// Classify a watcher event as an object change (`Apply`/`Delete`) versus
-/// part of the initial list (`Init`/`InitApply`/`InitDone`). Pulled out as a
-/// pure function because `watch_object` itself cannot be unit-tested without
-/// an API server, and getting this classification wrong (e.g. treating the
-/// initial list as a change) would spuriously notify a fresh subscriber.
-fn is_object_change<K>(event: &Event<K>) -> bool {
-    matches!(event, Event::Apply(_) | Event::Delete(_))
+/// Classify a watcher event as an object change. `Apply`/`Delete` always are.
+/// `Init`/`InitApply` never are — they only ever replay the current list.
+/// `InitDone` closes an init sequence, and kube-runtime runs *another* init
+/// sequence (`Init` → `InitApply` → `InitDone`) every time it re-lists after a
+/// desync (410 GONE, etcd compaction, apiserver restart), so `InitDone` is a
+/// change exactly when this is not the first init sequence — i.e. `seen_init_done`
+/// (whether an earlier `InitDone` has already fired) is `true`. That keeps the
+/// very first list silent (a subscribe must not notify just because the
+/// client already read the resource) while still notifying once per relist, so
+/// a change that lands during the reconnect gap — and so arrives only as part
+/// of the replayed list, never as a standalone `Apply` — is not silently lost.
+/// Pulled out as a pure function taking the flag explicitly (rather than
+/// closing over mutable state) because `watch_object` itself cannot be
+/// unit-tested without an API server, and getting this classification wrong
+/// would either spuriously notify a fresh subscriber or under-notify from
+/// missing a change made during a relist.
+fn is_object_change<K>(event: &Event<K>, seen_init_done: bool) -> bool {
+    match event {
+        Event::Apply(_) | Event::Delete(_) => true,
+        Event::Init | Event::InitApply(_) => false,
+        Event::InitDone => seen_init_done,
+    }
 }
 
-/// Watch a single object by name, calling `on_change` on every apply or delete.
+/// Watch a single object by name, calling `on_change` on every apply, delete,
+/// or relist-that-changed-something.
 ///
 /// One API watch per object via a `metadata.name` field selector, rather than
 /// streaming a whole namespace to observe one member. `on_change` takes no
 /// payload deliberately: the MCP subscription it backs sends only a URI and the
 /// client re-reads, so this needs to detect *that* something changed.
+///
+/// **First list silent, relists notify:** the very first `Init`/`InitApply`*/
+/// `InitDone` sequence is deliberately silent — a subscribe must not notify
+/// just because the client already read the resource. But kube-runtime resets
+/// and re-lists (another `Init`/`InitApply`*/`InitDone` sequence) after a watch
+/// desync, and that is the *only* way a change made during the reconnect gap
+/// ever arrives. So every init sequence after the first is treated as a
+/// change, notifying once on that relist's `InitDone`.
 ///
 /// **Namespace contract:** `namespace: None` means the caller has already
 /// established that `gvk` is cluster-scoped. This function cannot detect a
@@ -773,10 +797,19 @@ where
              a Kubernetes object name and would corrupt the metadata.name field selector"
         ));
     }
+    if namespace.as_deref() == Some("") {
+        return Err(
+            "watch_object: namespace must not be an empty string; pass None for a \
+             cluster-scoped kind, not Some(\"\") — an empty namespace would silently \
+             widen the watch to Api::all_with, matching same-named objects in every \
+             namespace"
+                .into(),
+        );
+    }
 
     let client = cache.get(&context).await?;
     let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = match namespace.as_deref().filter(|s| !s.is_empty()) {
+    let api: Api<DynamicObject> = match namespace.as_deref() {
         Some(ns) => Api::namespaced_with(client, ns, &ar),
         None => Api::all_with(client, &ar),
     };
@@ -784,6 +817,7 @@ where
     let config = Config::default().fields(&format!("metadata.name={name}"));
     let mut stream = kube::runtime::watcher(api, config).boxed();
     let mut reconnecting = false;
+    let mut seen_init_done = false;
 
     while let Some(item) = stream.next().await {
         match item {
@@ -792,8 +826,11 @@ where
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
-                if is_object_change(&event) {
+                if is_object_change(&event, seen_init_done) {
                     on_change();
+                }
+                if matches!(event, Event::InitDone) {
+                    seen_init_done = true;
                 }
             }
             Err(e) => {
@@ -945,16 +982,77 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn watch_object_rejects_an_empty_namespace_instead_of_widening_the_watch() {
+        // `ResourceUri::parse` cannot currently produce `Some("")` (the `-`
+        // sentinel maps to `None`), so this is defence at the layer that
+        // documents the contract, not a live bug from the URI path. But
+        // silently coercing `Some("")` into `Api::all_with` would be exactly
+        // the cross-namespace wrong-object watch this function's own doc
+        // comment warns about, so it must be rejected like the empty-name and
+        // metacharacter cases above rather than swallowed.
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        let gvk = kube::api::GroupVersionKind::gvk("", "v1", "Pod");
+        let err = watch_object(
+            cache,
+            "no-such-context".into(),
+            Some("".into()),
+            gvk,
+            "web-0".into(),
+            || {},
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("namespace"), "expected a namespace error, got: {err}");
+    }
+
     /// `Event` is generic; `()` is the cheapest `K` that still lets us
     /// construct every variant, since `is_object_change` never inspects the
-    /// payload.
+    /// payload. `Apply`/`Delete` are always changes and `Init`/`InitApply`
+    /// never are, regardless of `seen_init_done`; `InitDone` depends on it —
+    /// that's the relist-notification behaviour pinned separately below.
     #[test]
     fn is_object_change_fires_only_on_apply_and_delete() {
-        assert!(!is_object_change(&Event::<()>::Init));
-        assert!(!is_object_change(&Event::InitApply(())));
-        assert!(!is_object_change(&Event::<()>::InitDone));
-        assert!(is_object_change(&Event::Apply(())));
-        assert!(is_object_change(&Event::Delete(())));
+        for seen_init_done in [false, true] {
+            assert!(!is_object_change(&Event::<()>::Init, seen_init_done));
+            assert!(!is_object_change(&Event::InitApply(()), seen_init_done));
+            assert!(is_object_change(&Event::Apply(()), seen_init_done));
+            assert!(is_object_change(&Event::Delete(()), seen_init_done));
+        }
+        assert!(!is_object_change(&Event::<()>::InitDone, false));
+        assert!(is_object_change(&Event::<()>::InitDone, true));
+    }
+
+    /// The relist scenario that this fix exists for: a change that lands
+    /// during the reconnect gap arrives only as part of the replayed init
+    /// sequence, never as a standalone `Apply`. The first init sequence
+    /// (`Init`, `InitApply`, `InitDone`) must stay silent — that's just the
+    /// normal first list a subscribe triggers — but the second one (the
+    /// relist) must report exactly one change, on its `InitDone`, mirroring
+    /// how `reduce` emits once per relist.
+    #[test]
+    fn a_relist_after_the_first_init_sequence_is_reported_as_one_change() {
+        let mut seen_init_done = false;
+        let mut changes = 0;
+
+        for event in [
+            Event::<()>::Init,
+            Event::InitApply(()),
+            Event::InitDone,
+            Event::Init,
+            Event::InitApply(()),
+            Event::InitDone,
+        ] {
+            if is_object_change(&event, seen_init_done) {
+                changes += 1;
+            }
+            if matches!(event, Event::InitDone) {
+                seen_init_done = true;
+            }
+        }
+
+        assert_eq!(changes, 1, "expected exactly one change, from the second InitDone");
     }
 
     #[test]

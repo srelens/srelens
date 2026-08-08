@@ -167,17 +167,36 @@ impl ObjectWatcher for NoWatcher {
     }
 }
 
-/// Whether a URI can be subscribed to. The catalog is static, and logs are a
-/// stream rather than a state change.
+/// Whether a URI can be subscribed to. The catalog and the context list are
+/// fixed listings rather than watchable objects, logs are a stream rather
+/// than a state change, and events would need to watch a different object
+/// than the one the URI names (see the `Events` arm below).
 pub fn is_subscribable(uri: &ResourceUri) -> Result<(), String> {
     match uri {
         ResourceUri::Catalog => {
             Err("`k8s://catalog` is static and cannot be subscribed to".to_string())
         }
-        ResourceUri::Contexts => Ok(()),
+        ResourceUri::Contexts => {
+            Err("`k8s://contexts` is a fixed listing, not a watchable object, and \
+                 cannot be subscribed to"
+                .to_string())
+        }
         ResourceUri::Object { sub: Some(SubResource::Logs), .. } => {
             Err("pod logs are a stream, not a state change; subscribe to the \
                  pod's manifest instead"
+                .to_string())
+        }
+        ResourceUri::Object { sub: Some(SubResource::Events), .. } => {
+            // A watcher keyed on the URI's (context, namespace, kind, name)
+            // would watch the *object* the URI names, not the Event objects
+            // that reference it via `involvedObject` — so an Event with no
+            // matching object mutation would never notify, and an unrelated
+            // change to the object itself would notify spuriously. Watching
+            // real Event objects filtered by involvedObject is the
+            // feature-complete answer, but that's new scope (a follow-up),
+            // not this fix.
+            Err("events are not subscribable; subscribe to the object's \
+                 manifest instead"
                 .to_string())
         }
         ResourceUri::Object { .. } => Ok(()),
@@ -413,9 +432,35 @@ mod tests {
     #[test]
     fn only_state_bearing_uris_are_subscribable() {
         assert!(is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p").unwrap()).is_ok());
-        assert!(is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p/events").unwrap()).is_ok());
         assert!(is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p/logs").unwrap()).is_err());
         assert!(is_subscribable(&ResourceUri::Catalog).is_err());
+        assert!(is_subscribable(&ResourceUri::Contexts).is_err());
+    }
+
+    /// `/events` is not subscribable: `CacheWatcher` destructures the URI with
+    /// `..` and drops `sub`, so a watch on an `/events` URI would actually
+    /// watch the named object, not the Event objects that reference it — an
+    /// Event with no matching object mutation would never notify, and an
+    /// unrelated object change would notify spuriously. Until real Event
+    /// objects are watched (a follow-up), refuse the subscription outright,
+    /// exactly as `/logs` already is.
+    #[test]
+    fn events_are_not_subscribable() {
+        let err = is_subscribable(&ResourceUri::parse("k8s://c/ns/Pod/p/events").unwrap())
+            .unwrap_err();
+        assert!(err.contains("not subscribable"), "got: {err}");
+        assert!(err.contains("manifest"), "got: {err}");
+    }
+
+    /// The predicate must not diverge from the real watcher: `k8s://contexts`
+    /// is a fixed listing, not a watchable object, and `CacheWatcher` already
+    /// rejects it with "only object URIs can be watched". A watcher less
+    /// strict than `CacheWatcher` (like the in-crate test stubs) would
+    /// otherwise accept a subscription that can never fire.
+    #[test]
+    fn contexts_is_not_subscribable() {
+        let err = is_subscribable(&ResourceUri::Contexts).unwrap_err();
+        assert!(err.contains("fixed listing"), "got: {err}");
     }
 
     use serde_json::json;
