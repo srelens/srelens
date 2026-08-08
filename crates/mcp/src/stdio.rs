@@ -431,18 +431,25 @@ where
 
     loop {
         tokio::select! {
-            // Biased so a pending request is always drained before
-            // notifications, keeping request/response ordering predictable.
+            // Biased so a pending request is always answered before
+            // notifications, keeping request/response ordering deterministic.
+            // The cost: `tokio::select!` with `biased` polls branches in
+            // written order and returns on the first `Ready` one *without
+            // polling the rest* — so whenever `lines.next_line()` resolves
+            // immediately (a pipelined client, or several lines arriving in
+            // one read), `rx.recv()` below is never polled that iteration,
+            // and would starve every queued notification until EOF's drain.
+            // The explicit `drain_notifications` call after each processed
+            // line is what closes that gap; removing it silently turns
+            // "pushed" notifications into "delivered whenever the client
+            // happens to pause or disconnect".
             biased;
 
             line = lines.next_line() => {
                 let Some(line) = line? else {
-                    // EOF. Biased select means a notification queued during the
-                    // last request would otherwise be dropped here, so drain
-                    // what is already pending before leaving.
-                    while let Ok(uri) = rx.try_recv() {
-                        write_line(writer, &subscription_notification(&uri)).await?;
-                    }
+                    // EOF. Same starvation as above, one last time: drain
+                    // whatever is already pending before leaving.
+                    drain_notifications(writer, rx).await?;
                     return Ok(());
                 };
                 let trimmed = line.trim();
@@ -464,17 +471,15 @@ where
                 if let Some(resp) = resp {
                     write_line(writer, &resp).await?;
                 }
-                // A real stdio pipe naturally yields here whenever no more
-                // bytes are buffered, letting the executor poll a
-                // freshly-spawned watch task before the next request is
-                // handled. An in-memory reader/writer (`&[u8]` / `Vec<u8>`,
-                // as every test here uses) never returns `Pending`, so
-                // without an explicit yield point a current-thread runtime
-                // would never revisit its run queue and a watch's `on_change`
-                // could never fire before the session ends. This is a no-op
-                // in production and only matters for those in-memory
-                // fixtures.
-                tokio::task::yield_now().await;
+                // `biased` means `rx.recv()` below is never polled while a
+                // line is ready — a pipelined client (several requests in one
+                // read, or a `try_recv` producer racing ahead) would starve
+                // every pending notification until EOF's drain otherwise.
+                // Draining here after every line bounds delivery to at most
+                // one request and keeps ordering deterministic: a request's
+                // own response is written before any notification a
+                // concurrent watch queued during its handling.
+                drain_notifications(writer, rx).await?;
             }
 
             Some(uri) = rx.recv() => {
@@ -482,6 +487,22 @@ where
             }
         }
     }
+}
+
+/// Write every notification already queued on `rx`, without waiting for more.
+/// Shared by the per-line and EOF paths so `biased` select's starvation gap
+/// (see `serve_loop`) is closed the same way in both places.
+async fn drain_notifications<W>(
+    writer: &mut W,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Ok(uri) = rx.try_recv() {
+        write_line(writer, &subscription_notification(&uri)).await?;
+    }
+    Ok(())
 }
 
 async fn write_line<W>(writer: &mut W, value: &Value) -> std::io::Result<()>
@@ -1327,23 +1348,149 @@ mod tests {
         }
     }
 
+    /// A watcher that records whether it fired, via a real async wakeup
+    /// rather than a flag a test would have to poll. Used by the two tests
+    /// below to synchronize deterministically on "the watch has run and
+    /// queued its notification" instead of racing a background task against
+    /// the test's own progress.
+    struct FiringWatcher(std::sync::Arc<tokio::sync::Notify>);
+    impl crate::resources::ObjectWatcher for FiringWatcher {
+        fn watch(
+            &self,
+            _uri: &crate::resources::ResourceUri,
+            mut on_change: Box<dyn FnMut() + Send>,
+        ) -> Result<tokio::task::AbortHandle, String> {
+            let fired = self.0.clone();
+            Ok(tokio::spawn(async move {
+                on_change();
+                fired.notify_one();
+                std::future::pending::<()>().await
+            })
+            .abort_handle())
+        }
+    }
+
+    /// Drives `serve` over a real async pipe pair (`tokio::io::duplex`)
+    /// rather than the in-memory `&[u8]`/`Vec<u8>` every other test in this
+    /// module uses.
+    ///
+    /// An in-memory reader/writer never returns `Pending`: `AsyncRead for
+    /// &[u8]` and `AsyncWrite for Vec<u8>` both resolve every poll
+    /// immediately. That gives a single-threaded executor no principled
+    /// reason to ever revisit its run queue, so a freshly `tokio::spawn`ed
+    /// watch task is never polled before the session ends — which is exactly
+    /// why `a_watch_event_pushes_a_notification_onto_the_stream` and the
+    /// pipelining test below need to observe a watch firing at all. An
+    /// earlier version of this fix tried `#[tokio::test(flavor =
+    /// "multi_thread")]` with the in-memory fixture instead, reasoning that
+    /// production (`apps/desktop/src-tauri/src/main.rs`'s `run_mcp_stdio`)
+    /// runs on a multi-thread runtime, so an idle worker would pick up the
+    /// spawned task regardless of whether this loop's own task ever yields.
+    /// That is true in isolation, but it is a race against OS thread
+    /// scheduling, not a `Pending`-driven guarantee: run as part of this
+    /// crate's full, highly parallel test binary (~200 concurrently
+    /// scheduled tests contending for CPU), it failed reliably (5/5), not
+    /// just occasionally. A `DuplexStream` genuinely returns `Pending` when
+    /// its peer has not written anything yet — exactly like a real stdio
+    /// pipe — so it gives the executor a real, load-independent reason to
+    /// poll the spawned watch task, making these tests deterministic under
+    /// any scheduling flavor or system load.
+    fn spawn_serve_over_duplex(
+        server: McpServer,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::io::Lines<BufReader<tokio::io::DuplexStream>>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        let (client_in, server_in) = tokio::io::duplex(8192);
+        let (server_out, client_out) = tokio::io::duplex(8192);
+        let serve_task = tokio::spawn(async move {
+            serve(server, BufReader::new(server_in), server_out).await
+        });
+        (client_in, BufReader::new(client_out).lines(), serve_task)
+    }
+
     /// The notification path end to end, without a cluster: a stub watcher
     /// fires `on_change` immediately, so this proves a watch event actually
     /// reaches the client's stream — not just that the message shape is right.
     #[tokio::test]
     async fn a_watch_event_pushes_a_notification_onto_the_stream() {
-        struct FiringWatcher;
-        impl crate::resources::ObjectWatcher for FiringWatcher {
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+
+        let fired = std::sync::Arc::new(tokio::sync::Notify::new());
+        let server = server_with_ping()
+            .with_resources(Arc::new(Kinds))
+            .with_watcher(Arc::new(FiringWatcher(fired.clone())));
+
+        let (mut client_in, mut out_lines, serve_task) = spawn_serve_over_duplex(server);
+
+        client_in
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}
+"#,
+            )
+            .await
+            .unwrap();
+
+        // Deterministic: wait for the watch to actually have run and queued
+        // its notification, rather than racing it against this test ending
+        // the session.
+        fired.notified().await;
+
+        drop(client_in); // EOF: nothing more is coming.
+        serve_task.await.unwrap().unwrap();
+
+        let mut text = String::new();
+        while let Some(line) = out_lines.next_line().await.unwrap() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        assert!(
+            text.contains("notifications/resources/updated"),
+            "a watch event must push a notification: {text}"
+        );
+        assert!(text.contains("k8s://c/ns/Pod/web-0"), "the notification must name the URI: {text}");
+    }
+
+    /// The bug the per-line drain in `serve_loop` closes: `biased` select
+    /// polls `rx.recv()` only when no line is ready, so a pipelined client —
+    /// several requests arriving in one read before the loop catches up —
+    /// would starve every queued notification until EOF, turning "pushed"
+    /// into "delivered whenever the client happens to pause or disconnect".
+    /// This asserts the notification is written right after the subscribe
+    /// response, well before the last of the pipelined responses — i.e. that
+    /// it did not wait for EOF's drain to appear.
+    ///
+    /// Unlike `a_watch_event_pushes_a_notification_onto_the_stream`, this
+    /// watcher fires `on_change` *synchronously inside `watch()` itself*,
+    /// before `handle_subscription` even returns, rather than from a spawned
+    /// task. That is deliberate, not a shortcut: it makes "the notification
+    /// is already in the channel by the time line 1 finishes processing" a
+    /// plain causal fact of call order, not a race against when some other
+    /// task happens to be scheduled — so this test is deterministic under
+    /// the default single-threaded `#[tokio::test]` runtime regardless of
+    /// how many other tests are contending for CPU, and can use the same
+    /// plain `&[u8]`/`Vec<u8>` fixture as every other non-watch test in this
+    /// module. It is still a faithful reproduction of the bug: what matters
+    /// for `biased` starvation is only that the notification is ready
+    /// *before* the loop finishes draining an already-buffered run of lines,
+    /// not how it got that way.
+    #[tokio::test]
+    async fn a_pipelined_client_still_gets_the_notification_before_the_session_ends() {
+        struct ImmediatelyFiringWatcher;
+        impl crate::resources::ObjectWatcher for ImmediatelyFiringWatcher {
             fn watch(
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 mut on_change: Box<dyn FnMut() + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
-                Ok(tokio::spawn(async move {
-                    on_change();
-                    std::future::pending::<()>().await
-                })
-                .abort_handle())
+                on_change();
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
             }
         }
 
@@ -1356,25 +1503,35 @@ mod tests {
 
         let server = server_with_ping()
             .with_resources(Arc::new(Kinds))
-            .with_watcher(Arc::new(FiringWatcher));
+            .with_watcher(Arc::new(ImmediatelyFiringWatcher));
 
-        // A second line keeps the loop alive long enough for the spawned write
-        // to land before EOF ends the session.
-        let input = concat!(
+        // Subscribe, then a burst of buffered requests arriving as one
+        // pipelined batch — exactly the shape that starves `rx.recv()` under
+        // `biased` select without a per-line drain, because `next_line()`
+        // resolves synchronously for every one of these without ever giving
+        // the executor cause to look elsewhere.
+        let mut input = String::from(
             r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
-            "\n",
-            r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
-            "\n",
         );
+        input.push('\n');
+        for i in 2..22 {
+            input.push_str(&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"ping"}}"#));
+            input.push('\n');
+        }
         let mut out: Vec<u8> = Vec::new();
         serve(server, BufReader::new(input.as_bytes()), &mut out).await.unwrap();
 
         let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let notification_pos = lines
+            .iter()
+            .position(|l| l.contains("notifications/resources/updated"))
+            .expect("a watch event must push a notification");
         assert!(
-            text.contains("notifications/resources/updated"),
-            "a watch event must push a notification: {text}"
+            notification_pos < lines.len() - 1,
+            "the notification must not be pushed only by the EOF drain, \
+             i.e. it must appear before the final response: {text}"
         );
-        assert!(text.contains("k8s://c/ns/Pod/web-0"), "the notification must name the URI: {text}");
     }
 
     /// stdio's client spawned the process, so loop exit IS disconnect — nothing
@@ -1452,5 +1609,41 @@ mod tests {
             let v: Value = serde_json::from_str(line).unwrap();
             assert_eq!(v["error"]["code"], -32602, "got {line}");
         }
+    }
+
+    /// `NoWatcher` is unit-tested directly in `resources.rs`, but that alone
+    /// does not prove the fail-closed default is actually reachable through
+    /// the real subscribe path — a wiring bug could leave it dead code while
+    /// every real server accidentally got a working watcher some other way.
+    /// This drives `resources/subscribe` through `serve` on a server built
+    /// with plain `McpServer::new` — no `.with_watcher(...)` at all — so it
+    /// falls back to `NoWatcher`, and checks the rejection actually happens
+    /// end to end.
+    #[tokio::test]
+    async fn serve_rejects_a_subscription_when_no_watcher_is_wired() {
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        // Deliberately no `.with_watcher(...)`: this is what a host that
+        // wires resources but forgets (or has no) cluster watcher looks like.
+        let server = server_with_ping().with_resources(Arc::new(Kinds));
+
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
+            "\n",
+        );
+        let mut out: Vec<u8> = Vec::new();
+        serve(server, BufReader::new(input.as_bytes()), &mut out).await.unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        let v: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(v["error"]["code"], -32602, "got {text}");
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains("no cluster watcher"),
+            "the message must explain no watcher is wired, got {text}"
+        );
     }
 }
