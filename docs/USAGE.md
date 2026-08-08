@@ -468,18 +468,25 @@ Two URIs are fixed:
 - `k8s://catalog` — every tool, prompt and resource template this server
   exposes, so a client can introspect the whole surface in one read.
 
-Everything else addresses a single object, using one of three URI shapes:
+Everything else addresses a single object, using one of these URI shapes:
 
 ```
 k8s://<context>/<namespace>/<kind>/<name>
 k8s://<context>/<namespace>/<kind>/<name>/events
 k8s://<context>/<namespace>/Pod/<name>/logs
+k8s://<context>/<namespace>/Pod/<name>/logs/<container>
 ```
 
 The first reads the object's manifest as YAML; `/events` lists events whose
 involved object is that resource; `/logs` reads a pod's recent log output.
 Cluster-scoped kinds (`Node`, `PersistentVolume`, `ClusterRole`, and so on)
 have no namespace — use `-` in that slot rather than leaving it blank.
+
+`/logs` without a container works only for a single-container pod — that is
+the one case the Kubernetes log API will serve without being told which
+container you mean. For a pod with more than one container (a sidecar, say),
+add the container as a sixth segment; omitting it gets you an error naming
+every container to choose from, not a guess at which one you meant.
 
 **Secrets are not addressable.** A `k8s://.../Secret/...` read is refused
 with an error naming the alternative: fetch secret data with the
@@ -495,7 +502,7 @@ an EKS cluster ARN, say — round-trips safely.
 `resources/list` returns only the two fixed entries above. Enumerating every
 object in a cluster would be unbounded, and would need a cluster round trip
 just to answer a discovery call. Object addressing is discoverable instead
-through `resources/templates/list`, which advertises the three URI shapes
+through `resources/templates/list`, which advertises the four URI shapes
 above as templates for a client to fill in.
 
 A resource read is resolved to the same capability call a tool invocation

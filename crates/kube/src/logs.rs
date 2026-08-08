@@ -144,7 +144,9 @@ pub struct PodLogsIn {
     pub context: String,
     pub namespace: String,
     pub pod: String,
-    /// Container name (optional; defaults to the pod's only/first container).
+    /// Container name. May be omitted only when the pod has exactly one
+    /// container — the Kubernetes log API rejects an omitted container name
+    /// for any pod with more than one (it does not pick one for you).
     #[serde(default)]
     pub container: Option<String>,
     /// Number of trailing lines to return (default 200).

@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resources_templates_list_returns_three_templates() {
+    async fn resources_templates_list_returns_four_templates() {
         let resp = handle_request(
             &server_with_kinds(),
             &json!({"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}),
@@ -1153,7 +1153,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(resp["result"]["resourceTemplates"].as_array().unwrap().len(), 3);
+        assert_eq!(resp["result"]["resourceTemplates"].as_array().unwrap().len(), 4);
     }
 
     #[tokio::test]

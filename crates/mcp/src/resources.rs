@@ -23,18 +23,23 @@ fn decode(s: &str) -> Result<String, String> {
         .map_err(|e| format!("segment is not valid UTF-8 after decoding: {e}"))
 }
 
-/// A subresource hanging off an object URI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A subresource hanging off an object URI. `Logs` carries its optional
+/// container name inside the variant, rather than alongside it on `Object`,
+/// so that an illegal state — a container set on `/events`, which has none —
+/// is unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubResource {
     Events,
-    Logs,
+    /// `None` means "omit the container", which is only valid for a
+    /// single-container pod — see `k8s://.../Pod/<name>/logs[/<container>]`.
+    Logs { container: Option<String> },
 }
 
 impl SubResource {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             SubResource::Events => "events",
-            SubResource::Logs => "logs",
+            SubResource::Logs { .. } => "logs",
         }
     }
 }
@@ -73,10 +78,10 @@ impl ResourceUri {
         }
 
         let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() < 4 || parts.len() > 5 {
+        if parts.len() < 4 || parts.len() > 6 {
             return Err(format!(
                 "`{uri}` has {} segments; expected \
-                 k8s://<context>/<namespace|->/<kind>/<name>[/events|/logs], \
+                 k8s://<context>/<namespace|->/<kind>/<name>[/events|/logs[/<container>]], \
                  or the fixed k8s://contexts or k8s://catalog",
                 parts.len()
             ));
@@ -93,8 +98,22 @@ impl ResourceUri {
         let name = decode(parts[3])?;
         let sub = match parts.get(4) {
             None => None,
-            Some(&"events") => Some(SubResource::Events),
-            Some(&"logs") => Some(SubResource::Logs),
+            Some(&"events") => {
+                if parts.len() > 5 {
+                    return Err(format!(
+                        "`{uri}` has {} segments; `events` takes no further segments",
+                        parts.len()
+                    ));
+                }
+                Some(SubResource::Events)
+            }
+            Some(&"logs") => {
+                let container = match parts.get(5) {
+                    None => None,
+                    Some(c) => Some(decode(c)?),
+                };
+                Some(SubResource::Logs { container })
+            }
             Some(other) => {
                 return Err(format!(
                     "unknown subresource `{other}`; only `events` and `logs` exist"
@@ -181,7 +200,7 @@ pub fn is_subscribable(uri: &ResourceUri) -> Result<(), String> {
                  cannot be subscribed to"
                 .to_string())
         }
-        ResourceUri::Object { sub: Some(SubResource::Logs), .. } => {
+        ResourceUri::Object { sub: Some(SubResource::Logs { .. }), .. } => {
             Err("pod logs are a stream, not a state change; subscribe to the \
                  pod's manifest instead"
                 .to_string())
@@ -296,21 +315,21 @@ pub fn plan_read(uri: &ResourceUri, kinds: &dyn KindResolver) -> Result<Resource
             }),
             mime: "application/json",
         }),
-        Some(SubResource::Logs) => {
+        Some(SubResource::Logs { container }) => {
             if kind != "Pod" {
                 return Err(format!(
                     "logs exist only for Pods; `{kind}` has none"
                 ));
             }
-            Ok(ResourceRead {
-                capability: CAP_LOGS,
-                args: json!({
-                    "context": context,
-                    "namespace": namespace.clone().unwrap_or_default(),
-                    "pod": name,
-                }),
-                mime: "text/plain",
-            })
+            let mut args = json!({
+                "context": context,
+                "namespace": namespace.clone().unwrap_or_default(),
+                "pod": name,
+            });
+            if let Some(c) = container {
+                args["container"] = json!(c);
+            }
+            Ok(ResourceRead { capability: CAP_LOGS, args, mime: "text/plain" })
         }
     }
 }
@@ -331,6 +350,9 @@ impl std::fmt::Display for ResourceUri {
                 )?;
                 if let Some(s) = sub {
                     write!(f, "/{}", s.as_str())?;
+                    if let SubResource::Logs { container: Some(c) } = s {
+                        write!(f, "/{}", encode(c))?;
+                    }
                 }
                 Ok(())
             }
@@ -381,7 +403,16 @@ pub fn templates() -> Vec<serde_json::Value> {
         json!({
             "uriTemplate": "k8s://{context}/{namespace}/Pod/{name}/logs",
             "name": "Pod logs",
-            "description": "Recent log output for a pod's default container.",
+            "description": "Recent log output for a pod's default container. Omitting the \
+                            container is only valid for a single-container pod.",
+            "mimeType": "text/plain"
+        }),
+        json!({
+            "uriTemplate": "k8s://{context}/{namespace}/Pod/{name}/logs/{container}",
+            "name": "Pod container logs",
+            "description": "Recent log output for one named container. Required for a \
+                            multi-container (e.g. sidecar) pod, where Kubernetes rejects \
+                            a log request with no container named.",
             "mimeType": "text/plain"
         }),
     ]
@@ -502,6 +533,30 @@ mod tests {
         assert_eq!(r.args, json!({"context":"c","namespace":"ns","pod":"web-0"}));
     }
 
+    /// The sixth segment names a container, so a multi-container (sidecar)
+    /// pod's logs are reachable at all — without it, `k8s.podLogs` sends no
+    /// container and the Kubernetes API rejects the request outright.
+    #[test]
+    fn a_logs_read_with_a_container_includes_it_in_the_args() {
+        let u = ResourceUri::parse("k8s://c/ns/Pod/web-0/logs/sidecar").unwrap();
+        let r = plan_read(&u, &StubKinds).unwrap();
+        assert_eq!(r.capability, "k8s.podLogs");
+        assert_eq!(
+            r.args,
+            json!({"context":"c","namespace":"ns","pod":"web-0","container":"sidecar"})
+        );
+    }
+
+    /// The five-segment form must still omit the key entirely — not send
+    /// `"container": null` — since that is what makes it valid for a
+    /// single-container pod today.
+    #[test]
+    fn a_logs_read_without_a_container_omits_the_key() {
+        let u = ResourceUri::parse("k8s://c/ns/Pod/web-0/logs").unwrap();
+        let r = plan_read(&u, &StubKinds).unwrap();
+        assert!(r.args.get("container").is_none(), "got: {:?}", r.args);
+    }
+
     #[test]
     fn the_fixed_resources_map_to_their_readers() {
         let c = plan_read(&ResourceUri::Contexts, &StubKinds).unwrap();
@@ -580,10 +635,39 @@ mod tests {
         match (e, l) {
             (
                 ResourceUri::Object { sub: Some(SubResource::Events), .. },
-                ResourceUri::Object { sub: Some(SubResource::Logs), .. },
+                ResourceUri::Object { sub: Some(SubResource::Logs { container: None }), .. },
             ) => {}
             other => panic!("expected events + logs, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_a_sixth_segment_as_the_logs_container() {
+        let u = ResourceUri::parse("k8s://c/ns/Pod/p/logs/sidecar").unwrap();
+        match u {
+            ResourceUri::Object { sub: Some(SubResource::Logs { container }), .. } => {
+                assert_eq!(container, Some("sidecar".into()));
+            }
+            other => panic!("expected logs with a container, got {other:?}"),
+        }
+    }
+
+    /// A sixth segment only means something after `logs`; after `events` it is
+    /// unrepresentable and must be a clear error rather than silently ignored
+    /// or misparsed as part of the object name.
+    #[test]
+    fn a_sixth_segment_after_events_is_rejected() {
+        let e = ResourceUri::parse("k8s://c/ns/Pod/p/events/extra").unwrap_err();
+        assert!(e.contains("events"), "got: {e}");
+        assert!(e.contains("no further segments"), "got: {e}");
+    }
+
+    /// An empty container segment is an error, not `None` — the same rule the
+    /// other segments already follow.
+    #[test]
+    fn an_empty_container_segment_is_rejected() {
+        let e = ResourceUri::parse("k8s://c/ns/Pod/p/logs/").unwrap_err();
+        assert!(e.contains("empty"), "got: {e}");
     }
 
     #[test]
@@ -618,10 +702,30 @@ mod tests {
             "k8s://c/-/Node/n",
             "k8s://c/ns/Pod/p/events",
             "k8s://c/ns/Pod/p/logs",
+            "k8s://c/ns/Pod/p/logs/sidecar",
         ] {
             let parsed = ResourceUri::parse(uri).unwrap();
             assert_eq!(parsed.to_string(), uri, "round trip failed for {uri}");
         }
+    }
+
+    /// A container name containing characters that must be percent-encoded
+    /// (mirroring `round_trips_a_context_name_containing_a_slash_and_colon`
+    /// for the context segment) must still round-trip through `Display` and
+    /// `parse` unharmed.
+    #[test]
+    fn round_trips_a_container_name_needing_percent_encoding() {
+        let original = ResourceUri::Object {
+            context: "c".into(),
+            namespace: Some("ns".into()),
+            kind: "Pod".into(),
+            name: "web-0".into(),
+            sub: Some(SubResource::Logs { container: Some("sidecar/proxy:1".into()) }),
+        };
+        let rendered = original.to_string();
+        assert!(!rendered.contains("proxy:1"), "the colon must be encoded: {rendered}");
+        assert!(!rendered.ends_with("sidecar/proxy:1"), "the slash must be encoded: {rendered}");
+        assert_eq!(ResourceUri::parse(&rendered).unwrap(), original);
     }
 
     #[test]
@@ -629,8 +733,9 @@ mod tests {
         for (uri, expect) in [
             ("http://c/ns/Pod/p", "k8s://"),
             ("k8s://c/ns/Pod", "segments"),
-            ("k8s://c/ns/Pod/p/x/y", "segments"),
+            ("k8s://c/ns/Pod/p/logs/sidecar/extra", "segments"),
             ("k8s://c/ns/Pod/p/status", "events"),
+            ("k8s://c/ns/Pod/p/events/extra", "no further segments"),
             ("k8s://c//Pod/p", "empty"),
             ("k8s://nonsense", "k8s://"),
         ] {
@@ -654,13 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn templates_describe_the_three_parameterised_shapes() {
+    fn templates_describe_the_four_parameterised_shapes() {
         let t = templates();
-        assert_eq!(t.len(), 3);
+        assert_eq!(t.len(), 4);
         let patterns: Vec<&str> = t.iter().map(|x| x["uriTemplate"].as_str().unwrap()).collect();
         assert!(patterns.contains(&"k8s://{context}/{namespace}/{kind}/{name}"));
         assert!(patterns.contains(&"k8s://{context}/{namespace}/{kind}/{name}/events"));
         assert!(patterns.contains(&"k8s://{context}/{namespace}/Pod/{name}/logs"));
+        assert!(patterns.contains(&"k8s://{context}/{namespace}/Pod/{name}/logs/{container}"));
         for x in &t {
             assert!(x["name"].is_string());
             assert!(x["description"].is_string());
@@ -701,16 +807,21 @@ mod tests {
     /// Every capability that plan_read can name must appear in MAPPED_CAPABILITIES,
     /// and nothing in MAPPED_CAPABILITIES must be unreachable. This test uses
     /// compiler-enforced exhaustive matching to ensure the property holds as
-    /// code changes: adding a new ResourceUri or SubResource variant fails the
-    /// build until this test is updated to cover it.
+    /// code changes: adding a new ResourceUri or SubResource *variant* fails the
+    /// build until this test is updated to cover it. Note that this only guards
+    /// variants, not fields — `Logs { .. }` matches every field combination, so
+    /// adding a field to an existing variant (as the `container` field on
+    /// `Logs` was) does not, and should not, break this match; only a brand
+    /// new sibling variant would.
     #[test]
     fn every_plan_read_branch_is_mapped_and_nothing_extra() {
         // Compiler enforcement: if a new SubResource variant is added,
         // this match becomes non-exhaustive and the build fails.
         match SubResource::Events {
-            SubResource::Events | SubResource::Logs => {}
+            SubResource::Events | SubResource::Logs { .. } => {}
         }
-        let sub_variants = [None, Some(SubResource::Events), Some(SubResource::Logs)];
+        let sub_variants =
+            [None, Some(SubResource::Events), Some(SubResource::Logs { container: None })];
 
         // Resolver that allows all kinds we need to exercise every plan_read path:
         // Pod (namespaced, can have logs), and Node (cluster-scoped).
@@ -745,6 +856,10 @@ mod tests {
 
         // ResourceUri::Object with all sub variants
         for sub in sub_variants {
+            // SubResource dropped Copy when Logs grew a `container` field, so
+            // capture this before `sub` is moved into the first uri below.
+            let sub_is_none = sub.is_none();
+
             // Use Pod (namespaced) for most tests
             let kind = "Pod";
             let uri = ResourceUri::Object {
@@ -758,13 +873,13 @@ mod tests {
             capabilities_named.insert(read.capability);
 
             // Also test cluster-scoped (Node) with the object endpoint (no sub)
-            if sub.is_none() {
+            if sub_is_none {
                 let uri = ResourceUri::Object {
                     context: "ctx".into(),
                     namespace: None,
                     kind: "Node".into(),
                     name: "node1".into(),
-                    sub,
+                    sub: None,
                 };
                 let read = plan_read(&uri, &AllowPodAndNode).unwrap();
                 capabilities_named.insert(read.capability);
