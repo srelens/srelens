@@ -8,6 +8,7 @@ pub mod policy;
 pub mod prompts;
 pub mod resources;
 pub mod stdio;
+pub mod subscriptions;
 
 use std::sync::Arc;
 
