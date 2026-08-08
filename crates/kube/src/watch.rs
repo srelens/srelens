@@ -722,6 +722,73 @@ where
     .await
 }
 
+/// Classify a watcher event as an object change (`Apply`/`Delete`) versus
+/// part of the initial list (`Init`/`InitApply`/`InitDone`). Pulled out as a
+/// pure function because `watch_object` itself cannot be unit-tested without
+/// an API server, and getting this classification wrong (e.g. treating the
+/// initial list as a change) would spuriously notify a fresh subscriber.
+fn is_object_change<K>(event: &Event<K>) -> bool {
+    matches!(event, Event::Apply(_) | Event::Delete(_))
+}
+
+/// Watch a single object by name, calling `on_change` on every apply or delete.
+///
+/// One API watch per object via a `metadata.name` field selector, rather than
+/// streaming a whole namespace to observe one member. `on_change` takes no
+/// payload deliberately: the MCP subscription it backs sends only a URI and the
+/// client re-reads, so this needs to detect *that* something changed.
+pub async fn watch_object<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    namespace: Option<String>,
+    gvk: kube::api::GroupVersionKind,
+    name: String,
+    mut on_change: F,
+    mut on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut() + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    use kube::api::{ApiResource, DynamicObject};
+
+    let client = cache.get(&context).await?;
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = match namespace.as_deref().filter(|s| !s.is_empty()) {
+        Some(ns) => Api::namespaced_with(client, ns, &ar),
+        None => Api::all_with(client, &ar),
+    };
+
+    let config = Config::default().fields(&format!("metadata.name={name}"));
+    let mut stream = kube::runtime::watcher(api, config).boxed();
+    let mut reconnecting = false;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => {
+                if reconnecting {
+                    reconnecting = false;
+                    on_status(WatchStatus::Live);
+                }
+                if is_object_change(&event) {
+                    on_change();
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if is_permanent_watch_error(&msg) {
+                    return Err(msg);
+                }
+                if !reconnecting {
+                    reconnecting = true;
+                    on_status(WatchStatus::Reconnecting);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,6 +838,49 @@ mod tests {
         let snap = snapshot(&state);
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].name, "b");
+    }
+
+    /// `watch_object` cannot be exercised without an API server, so this pins
+    /// the part that is pure: a permanent error must stop the loop rather than
+    /// reconnect forever, and everything else must be treated as transient.
+    #[test]
+    fn only_forbidden_is_a_permanent_watch_error_for_object_watches() {
+        assert!(is_permanent_watch_error("Forbidden: User cannot watch pods"));
+        assert!(is_permanent_watch_error("FORBIDDEN"));
+        assert!(!is_permanent_watch_error("connection reset by peer"));
+        assert!(!is_permanent_watch_error("401 Unauthorized"));
+        assert!(!is_permanent_watch_error("too old resource version"));
+    }
+
+    #[tokio::test]
+    async fn watch_object_surfaces_a_client_error_instead_of_panicking() {
+        // No such context, so `cache.get` fails before any watch begins.
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        let gvk = kube::api::GroupVersionKind::gvk("", "v1", "Pod");
+        let err = watch_object(
+            cache,
+            "no-such-context".into(),
+            Some("ns".into()),
+            gvk,
+            "web-0".into(),
+            || {},
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.is_empty(), "the client failure must be surfaced as an error string");
+    }
+
+    /// `Event` is generic; `()` is the cheapest `K` that still lets us
+    /// construct every variant, since `is_object_change` never inspects the
+    /// payload.
+    #[test]
+    fn is_object_change_fires_only_on_apply_and_delete() {
+        assert!(!is_object_change(&Event::<()>::Init));
+        assert!(!is_object_change(&Event::InitApply(())));
+        assert!(!is_object_change(&Event::<()>::InitDone));
+        assert!(is_object_change(&Event::Apply(())));
+        assert!(is_object_change(&Event::Delete(())));
     }
 
     #[test]
