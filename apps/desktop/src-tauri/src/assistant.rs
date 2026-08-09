@@ -277,4 +277,19 @@ mod tests {
         }
         assert!(!path.exists());
     }
+
+    /// The assistant must not stand up its own MCP server or policy — that would
+    /// be a consent bypass. It only borrows the running server's token/url, so a
+    /// gated call still hits the GUI's PromptUser. This guards against a refactor
+    /// that gives the assistant its own server.
+    #[test]
+    fn the_assistant_module_wires_no_confirm_policy_of_its_own() {
+        let src = include_str!("assistant.rs");
+        let needle1 = ["McpServer", "::", "new"].join("");
+        let needle2 = ["Flag", "Gated"].join("");
+        let needle3 = ["Always", "Allow"].join("");
+        assert!(!src.contains(&needle1), "assistant must reuse the running server");
+        assert!(!src.contains(&needle2), "assistant must not introduce a headless policy");
+        assert!(!src.contains(&needle3), "assistant must never bypass consent");
+    }
 }
