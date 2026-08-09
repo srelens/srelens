@@ -41,7 +41,11 @@ fn block_to_event(block: &serde_json::Value) -> Option<AgentEvent> {
         Some("tool_use") => Some(AgentEvent::ToolCallStart {
             id: block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
             tool: block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-            args: block.get("input").cloned().unwrap_or_else(|| serde_json::json!({})),
+            args: block
+                .get("input")
+                .filter(|v| v.is_object())
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
         }),
         _ => None,
     }
@@ -95,6 +99,21 @@ mod tests {
     }
 
     #[test]
+    fn a_non_object_tool_use_input_is_coerced_to_an_empty_object() {
+        let out = parse_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"k8s.scale","input":"oops"}]}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::ToolCallStart {
+                id: "t3".into(),
+                tool: "k8s.scale".into(),
+                args: serde_json::json!({}),
+            }]
+        );
+    }
+
+    #[test]
     fn one_message_with_text_and_tool_use_yields_both_in_order() {
         let out = parse_line(
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"go"},{"type":"tool_use","id":"t2","name":"k8s.listPods","input":{}}]}}"#,
@@ -132,6 +151,16 @@ mod tests {
         );
         assert_eq!(
             events.iter().filter(|e| matches!(e, AgentEvent::ToolCallStart { .. })).count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    AgentEvent::ToolResult { status: ToolStatus::Ok, .. }
+                ))
+                .count(),
             1
         );
         assert!(events.contains(&AgentEvent::TurnDone));
