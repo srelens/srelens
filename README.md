@@ -149,7 +149,7 @@ process-level opt-in — `--mcp-allow-destructive` to change anything, or
 `--mcp-allow-sensitive-reads` to read Secrets. The two are independent, so
 reading a Secret never implies permission to drain a node, and neither flag
 alone authorizes anything without `_confirm`. There's no GUI toggle for stdio.
-See the [user guide](docs/USAGE.md#mcp-server-for-ai-agents) for the full
+See [docs/MCP.md](docs/MCP.md) for the full
 security model, including the Host-header check, audit log, and token storage.
 
 Example stdio configuration:

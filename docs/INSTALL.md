@@ -75,7 +75,7 @@ Settings page. Destructive tools prompt for confirmation in the app — an agent
 can't delete or drain anything without your approval. Headless CLI use needs
 `"_confirm": true` on the call plus a process-level opt-in:
 `--mcp-allow-destructive` to change anything, or `--mcp-allow-sensitive-reads`
-to read Secrets. See the [user guide](USAGE.md#mcp-server-for-ai-agents) for the
+to read Secrets. See [MCP.md](MCP.md) for the
 full security model.
 
 ## Updating
