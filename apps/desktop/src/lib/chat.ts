@@ -16,6 +16,8 @@ export interface AgentInfo {
   path: string | null;
   version: string | null;
   installUrl: string;
+  /** Installed but not yet selectable — sandbox story pending (Codex/Cursor). */
+  gated: boolean;
 }
 
 /** Validate a raw channel payload into a typed event, or null if unknown. */

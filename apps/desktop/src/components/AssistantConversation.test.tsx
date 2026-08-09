@@ -17,7 +17,15 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 beforeEach(() => {
   vi.mocked(chat.listAgents).mockResolvedValue([
-    { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "" },
+    {
+      kind: "claude",
+      label: "Claude Code",
+      available: true,
+      path: "/usr/bin/claude",
+      version: null,
+      installUrl: "",
+      gated: false,
+    },
   ]);
   vi.mocked(chat.startChat).mockResolvedValue("s1");
 });
@@ -47,5 +55,84 @@ describe("AssistantConversation", () => {
   it("shows a context chip when context is provided, scoped like the drawer", async () => {
     render(<AssistantConversation context={{ context: "kind", namespace: "payments" }} />);
     expect(await screen.findByText("kind / payments")).toBeTruthy();
+  });
+
+  it("never auto-selects a gated agent: Claude wins over an installed-but-gated Codex", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      {
+        kind: "codex",
+        label: "Codex",
+        available: true,
+        path: "/usr/bin/codex",
+        version: null,
+        installUrl: "",
+        gated: true,
+      },
+      {
+        kind: "claude",
+        label: "Claude Code",
+        available: true,
+        path: "/usr/bin/claude",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
+    ]);
+    render(<AssistantConversation />);
+    const select = await screen.findByRole("combobox", { name: /agent/i });
+    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("claude"));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("disables Send and shows a coming-soon note when a gated agent is selected", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      {
+        kind: "codex",
+        label: "Codex",
+        available: true,
+        path: "/usr/bin/codex",
+        version: null,
+        installUrl: "",
+        gated: true,
+      },
+      {
+        kind: "claude",
+        label: "Claude Code",
+        available: true,
+        path: "/usr/bin/claude",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
+    ]);
+    render(<AssistantConversation />);
+    const select = await screen.findByRole("combobox", { name: /agent/i });
+    fireEvent.change(select, { target: { value: "codex" } });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      await screen.findByText(/Codex\/Cursor support is coming — use Claude for now\./)
+    ).toBeTruthy();
+  });
+
+  it("a gated-only agent list keeps Send disabled and shows the coming note, not an install link", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      {
+        kind: "codex",
+        label: "Codex",
+        available: true,
+        path: "/usr/bin/codex",
+        version: null,
+        installUrl: "https://developers.openai.com/codex/cli/",
+        gated: true,
+      },
+    ]);
+    render(<AssistantConversation />);
+    await screen.findByRole("combobox", { name: /agent/i });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      await screen.findByText(/Codex\/Cursor support is coming — use Claude for now\./)
+    ).toBeTruthy();
+    expect(screen.queryByText("https://developers.openai.com/codex/cli/")).toBeFalsy();
   });
 });

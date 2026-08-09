@@ -45,6 +45,9 @@ pub struct AgentInfo {
     pub version: Option<String>,
     /// Vendor install page, shown when `available` is false.
     pub install_url: String,
+    /// Installed but not yet selectable — its sandbox story isn't solved yet.
+    /// Distinct from `available: false` ("not installed").
+    pub gated: bool,
 }
 
 /// The `--mcp-config` file content: one HTTP MCP server named `srelens`.

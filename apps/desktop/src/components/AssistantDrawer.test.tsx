@@ -23,7 +23,15 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 beforeEach(() => {
   vi.mocked(chat.listAgents).mockResolvedValue([
-    { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "" },
+    {
+      kind: "claude",
+      label: "Claude Code",
+      available: true,
+      path: "/usr/bin/claude",
+      version: null,
+      installUrl: "",
+      gated: false,
+    },
   ]);
   vi.mocked(chat.startChat).mockResolvedValue("s1");
   respondToConfirm.mockReset();
@@ -118,6 +126,7 @@ describe("AssistantDrawer", () => {
         path: null,
         version: null,
         installUrl: "https://example.com/install-claude",
+        gated: false,
       },
     ]);
     render(<AssistantDrawer open onClose={() => {}} />);
@@ -135,8 +144,17 @@ describe("AssistantDrawer", () => {
         path: null,
         version: null,
         installUrl: "https://example.com/install-codex",
+        gated: false,
       },
-      { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "" },
+      {
+        kind: "claude",
+        label: "Claude Code",
+        available: true,
+        path: "/usr/bin/claude",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
     ]);
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });

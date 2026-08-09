@@ -125,7 +125,9 @@ function ConfirmCard({
  * is entirely optional, so this same component serves both a resource-scoped
  * host (the `AssistantDrawer`) and a global one with no resource in scope
  * (the `AssistantTab`). The agent picker is sourced from `listAgents()`; an
- * unavailable agent shows its install link and disables Send.
+ * unavailable agent shows its install link, a gated one (Codex/Cursor, whose
+ * sandbox isn't solved yet) shows a "coming soon" note instead — either way
+ * Send stays disabled.
  */
 export function AssistantConversation({
   context,
@@ -184,7 +186,7 @@ export function AssistantConversation({
     listAgents()
       .then((list) => {
         setAgents(list);
-        const firstAvailable = list.find((a) => a.available) ?? list[0];
+        const firstAvailable = list.find((a) => a.available && !a.gated) ?? list.find((a) => a.available) ?? list[0];
         setSelectedKind(firstAvailable?.kind ?? "");
       })
       .catch(() => {
@@ -195,7 +197,7 @@ export function AssistantConversation({
 
   const selectedAgent = agents.find((a) => a.kind === selectedKind);
   const agentPath = selectedAgent?.path ?? "";
-  const canSend = !!selectedAgent?.available;
+  const canSend = !!selectedAgent?.available && !selectedAgent?.gated;
 
   function applyEvent(e: AgentEvent) {
     switch (e.type) {
@@ -278,9 +280,9 @@ export function AssistantConversation({
       onChange={(e) => setSelectedKind(e.target.value)}
     >
       {agents.map((a) => (
-        <option key={a.kind} value={a.kind} disabled={!a.available}>
+        <option key={a.kind} value={a.kind} disabled={!a.available || a.gated}>
           {a.label}
-          {a.available ? "" : " (not installed)"}
+          {!a.available ? " (not installed)" : a.gated ? " (not yet available)" : ""}
         </option>
       ))}
     </select>
@@ -323,16 +325,18 @@ export function AssistantConversation({
       {!canSend && (
         <p className="shrink-0 text-xs text-muted-foreground">
           {selectedAgent
-            ? selectedAgent.installUrl
-              ? (
-                <>
-                  {selectedAgent.label} isn&apos;t installed.{" "}
-                  <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
-                    {selectedAgent.installUrl}
-                  </a>
-                </>
-              )
-              : `${selectedAgent.label} isn't installed.`
+            ? selectedAgent.gated
+              ? "Codex/Cursor support is coming — use Claude for now."
+              : selectedAgent.installUrl
+                ? (
+                  <>
+                    {selectedAgent.label} isn&apos;t installed.{" "}
+                    <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
+                      {selectedAgent.installUrl}
+                    </a>
+                  </>
+                )
+                : `${selectedAgent.label} isn't installed.`
             : "No coding agent available. Install one to use the assistant."}
         </p>
       )}

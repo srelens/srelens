@@ -19,6 +19,13 @@ fn install_url(kind: AgentKind) -> &'static str {
     }
 }
 
+/// Codex and Cursor are detected but not yet selectable — their sandbox story
+/// (what a spawned agent can touch on the user's machine) isn't solved yet.
+/// Claude is the only agent shipped end-to-end in v1.
+fn is_gated(kind: AgentKind) -> bool {
+    matches!(kind, AgentKind::Codex | AgentKind::Cursor)
+}
+
 /// Build an `AgentInfo`, resolving availability through the injected `resolve`
 /// (real code passes a PATH lookup; tests pass a stub).
 fn detect(kind: AgentKind, resolve: impl Fn(&str) -> Option<String>) -> AgentInfo {
@@ -30,6 +37,7 @@ fn detect(kind: AgentKind, resolve: impl Fn(&str) -> Option<String>) -> AgentInf
         path,
         version: None,
         install_url: install_url(kind).to_string(),
+        gated: is_gated(kind),
     }
 }
 
@@ -37,12 +45,22 @@ fn detect(kind: AgentKind, resolve: impl Fn(&str) -> Option<String>) -> AgentInf
 #[tauri::command]
 pub async fn agent_list() -> Result<Vec<AgentInfo>, String> {
     let paths = srelens_kube::toolbox::SearchPaths::from_env();
-    let resolve = |bin: &str| which_on_path(bin, &paths.app_path);
+    let resolve = |bin: &str| resolve_agent(bin, &paths);
     Ok(vec![
         detect(AgentKind::Claude, resolve),
         detect(AgentKind::Codex, resolve),
         detect(AgentKind::Cursor, resolve),
     ])
+}
+
+/// Locate an agent binary across both search paths: the app's own PATH first
+/// (post `fix-path-env`, plus srelens's managed dirs), then broader system
+/// locations the app doesn't search. This closes the prod gap where a CLI
+/// installed under `~/.local/bin` — in `system_path` but not `app_path` — was
+/// invisible to a packaged build even though a dev shell's inherited PATH
+/// happened to cover it.
+fn resolve_agent(bin: &str, paths: &srelens_kube::toolbox::SearchPaths) -> Option<String> {
+    which_on_path(bin, &paths.app_path).or_else(|| which_on_path(bin, &paths.system_path))
 }
 
 /// First directory in `path` (a `:`-separated PATH string) that holds an
@@ -308,6 +326,87 @@ mod tests {
         assert!(!info.available);
         assert!(info.path.is_none());
         assert!(info.install_url.contains("codex"));
+    }
+
+    #[test]
+    fn codex_and_cursor_are_gated_but_claude_is_not() {
+        let info = detect(AgentKind::Codex, |_| Some("/usr/bin/codex".into()));
+        assert!(info.available);
+        assert!(info.gated);
+
+        let info = detect(AgentKind::Cursor, |_| Some("/usr/bin/cursor-agent".into()));
+        assert!(info.available);
+        assert!(info.gated);
+
+        let info = detect(AgentKind::Claude, |_| Some("/usr/bin/claude".into()));
+        assert!(info.available);
+        assert!(!info.gated);
+    }
+
+    /// Builds a temp dir under `std::env::temp_dir()` with a single executable
+    /// file `bin`, cleaned up on drop — the fixture `resolve_agent` tests use
+    /// to prove the search actually walks `system_path`, not just `app_path`.
+    struct BinDir {
+        dir: std::path::PathBuf,
+    }
+
+    impl BinDir {
+        fn new(bin: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("srelens-resolve-agent-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join(bin);
+            std::fs::write(&file, b"#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&file).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&file, perms).unwrap();
+            }
+            BinDir { dir }
+        }
+
+        fn path(&self) -> String {
+            self.dir.to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for BinDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn resolve_agent_finds_a_binary_only_present_on_the_system_path() {
+        let bin_dir = BinDir::new("x");
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: "/nope".to_string(),
+            system_path: bin_dir.path(),
+        };
+        let resolved = resolve_agent("x", &paths).expect("should find x via system_path");
+        assert_eq!(resolved, bin_dir.dir.join("x").to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_agent_returns_none_when_absent_from_both_paths() {
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: "/nope".to_string(),
+            system_path: "/also/nope".to_string(),
+        };
+        assert!(resolve_agent("x", &paths).is_none());
+    }
+
+    #[test]
+    fn resolve_agent_prefers_app_path_when_present_in_both() {
+        let app_dir = BinDir::new("x");
+        let system_dir = BinDir::new("x");
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: app_dir.path(),
+            system_path: system_dir.path(),
+        };
+        let resolved = resolve_agent("x", &paths).unwrap();
+        assert_eq!(resolved, app_dir.dir.join("x").to_string_lossy());
     }
 
     struct RecordingSink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
