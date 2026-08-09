@@ -1,0 +1,71 @@
+//! The transport-agnostic event stream every agent adapter normalizes to.
+
+use serde::{Deserialize, Serialize};
+
+/// Outcome of a tool call, as the drawer shows it on a card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolStatus {
+    Ok,
+    Error,
+    Denied,
+}
+
+/// One normalized event from any agent CLI. `#[serde(tag = "type")]` so the
+/// WebView switches on a single discriminant, camelCase to match the frontend.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum AgentEvent {
+    /// A chunk of streamed assistant text.
+    TextDelta { text: String },
+    /// The agent has begun a tool call. `id` correlates with the matching
+    /// `ToolResult`.
+    ToolCallStart { id: String, tool: String, args: serde_json::Value },
+    /// A tool call finished with this status.
+    ToolResult { id: String, status: ToolStatus },
+    /// The agent finished this turn and is waiting for the next user message.
+    TurnDone,
+    /// A fatal error for this turn (parse failure, process died, transport).
+    Error { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_delta_serializes_with_a_tagged_type() {
+        let e = AgentEvent::TextDelta { text: "hi".into() };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "textDelta");
+        assert_eq!(v["text"], "hi");
+    }
+
+    #[test]
+    fn tool_call_start_carries_name_and_args() {
+        let e = AgentEvent::ToolCallStart {
+            id: "t1".into(),
+            tool: "k8s.listPods".into(),
+            args: serde_json::json!({ "namespace": "default" }),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "toolCallStart");
+        assert_eq!(v["tool"], "k8s.listPods");
+        assert_eq!(v["args"]["namespace"], "default");
+    }
+
+    #[test]
+    fn tool_result_reports_a_status() {
+        let e = AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Ok };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "toolResult");
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[test]
+    fn error_and_turn_done_are_distinct_variants() {
+        assert_eq!(serde_json::to_value(AgentEvent::TurnDone).unwrap()["type"], "turnDone");
+        let err = AgentEvent::Error { message: "boom".into() };
+        assert_eq!(serde_json::to_value(&err).unwrap()["type"], "error");
+    }
+}

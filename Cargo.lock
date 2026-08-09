@@ -5654,6 +5654,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-agent"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "srelens-capability"
 version = "0.0.0"
 dependencies = [
