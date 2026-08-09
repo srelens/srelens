@@ -84,6 +84,56 @@ pub fn area(id: &str) -> Area {
     }
 }
 
+/// Safety-class order within an area: safest first, so a reader scanning a
+/// section meets the harmless tools before the dangerous ones.
+const SAFETY_ORDER: [SafetyClass; 4] = [
+    SafetyClass::ReadOnly,
+    SafetyClass::SensitiveRead,
+    SafetyClass::NeedsConfirm,
+    SafetyClass::Destructive,
+];
+
+/// Render every tool as `### <Area> — <safety> (<count>)` sections, each a
+/// table sorted by id. Empty combinations are skipped rather than rendered as
+/// an empty table.
+pub fn render_tools(reg: &srelens_capability::Registry) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("## Tools ({})\n\n", reg.ids().len()));
+    out.push_str(
+        "Argument schemas are not reproduced here — call `tools/list` for those, \
+         which cannot go stale.\n\n",
+    );
+
+    for a in Area::all() {
+        for safety in SAFETY_ORDER {
+            let mut rows: Vec<(&str, &str)> = reg
+                .ids()
+                .into_iter()
+                .filter(|id| area(id) == a)
+                .filter_map(|id| reg.get(id).map(|cap| (id, cap)))
+                .filter(|(_, cap)| classify(&cap.annotations) == safety)
+                .map(|(id, cap)| (id, cap.summary.as_str()))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            rows.sort_unstable_by_key(|(id, _)| *id);
+
+            out.push_str(&format!(
+                "### {} — {} ({})\n\n| Tool | Summary |\n| --- | --- |\n",
+                a.label(),
+                safety.label(),
+                rows.len()
+            ));
+            for (id, summary) in rows {
+                out.push_str(&format!("| `{id}` | {summary} |\n"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +303,60 @@ mod tests {
                 "{probe:?} is missing from Area::all()"
             );
         }
+    }
+
+    #[test]
+    fn tool_tables_are_grouped_by_area_and_safety_with_counts() {
+        let reg = crate::build_registry();
+        let md = render_tools(&reg);
+        assert!(md.contains("### Kubernetes — read-only ("), "got:\n{md}");
+        assert!(md.contains("### Kubernetes — destructive ("), "got:\n{md}");
+        assert!(md.contains("### Helm — "), "got:\n{md}");
+        assert!(md.contains("### Toolbox — "), "got:\n{md}");
+        // A known row, with its summary, proving the table carries real data.
+        assert!(md.contains("| `k8s.listPods` |"), "got:\n{md}");
+    }
+
+    /// Every tool appears exactly once across all sections. Renders the id in
+    /// backticks inside a table cell, so counting that exact pattern counts rows.
+    #[test]
+    fn every_tool_appears_exactly_once() {
+        let reg = crate::build_registry();
+        let md = render_tools(&reg);
+        for id in reg.ids() {
+            let cell = format!("| `{id}` |");
+            assert_eq!(md.matches(&cell).count(), 1, "{id} should appear exactly once");
+        }
+    }
+
+    /// `diffManifest` is sensitive but un-gated, so it must render under
+    /// read-only — never under a confirmation heading.
+    #[test]
+    fn the_sensitive_but_ungated_tool_renders_under_read_only() {
+        let reg = crate::build_registry();
+        let md = render_tools(&reg);
+        let ro = md
+            .split("### ")
+            .find(|s| s.starts_with("Kubernetes — read-only"))
+            .expect("a Kubernetes read-only section exists");
+        assert!(ro.contains("| `k8s.diffManifest` |"), "diffManifest belongs in read-only");
+    }
+
+    #[test]
+    fn rows_within_a_section_are_sorted_by_id() {
+        let reg = crate::build_registry();
+        let md = render_tools(&reg);
+        let section = md
+            .split("### ")
+            .find(|s| s.starts_with("Toolbox"))
+            .expect("a Toolbox section exists");
+        let ids: Vec<&str> = section
+            .lines()
+            .filter_map(|l| l.strip_prefix("| `"))
+            .filter_map(|l| l.split('`').next())
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "Toolbox rows must be sorted by id");
     }
 }
