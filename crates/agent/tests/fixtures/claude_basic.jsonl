@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"s1"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Checking pods. "}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool_1","name":"k8s.listPods","input":{"context":"kind","namespace":"default"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_1","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"3 pods, all Running."}]}}
+{"type":"result","subtype":"success","session_id":"s1"}
