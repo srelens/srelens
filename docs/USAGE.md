@@ -330,8 +330,18 @@ srelens --mcp-http 127.0.0.1:8765
 ```
 
 Reads (listing pods, fetching manifests, tailing logs, and so on) run
-immediately, with no prompt. Anything that changes cluster state, or reads
-back secret material, pauses for your approval in a confirm dialog first.
+immediately, with no prompt. Anything that changes cluster state, or reads back
+secret material, is gated — but *how* depends on where the server is running:
+
+- **In the app**, via the Settings → MCP toggle above: the call pauses and a
+  confirm dialog asks you to approve it, exactly as clicking the same action in
+  the UI would.
+- **Headless**, via either command above: there is no window, so there is no
+  dialog. A gated call is refused outright — unless you started the process
+  with `--mcp-allow-destructive` or `--mcp-allow-sensitive-reads` *and* the
+  call carries `"_confirm": true`, in which case it proceeds with no approval
+  step at all. That combination is for deliberate unattended automation, not a
+  way to reach a human.
 
 Wiring an agent to srelens — transports, the security model, the full tool
 catalog and worked examples — is documented in [MCP.md](MCP.md).
