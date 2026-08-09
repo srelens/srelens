@@ -465,4 +465,94 @@ mod tests {
             "docs/mcp-catalog.md is stale — run `UPDATE_CATALOG=1 cargo test -p srelens-registry`"
         );
     }
+
+    fn doc(name: &str) -> String {
+        let path = format!("{}/../../docs/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// A renamed tool must not leave a plausible-looking dead example behind.
+    /// Scans MCP.md for capability-shaped identifiers and asserts each is real.
+    #[test]
+    fn every_tool_identifier_in_mcp_md_is_registered() {
+        let md = doc("MCP.md");
+        let reg = build_registry();
+        let ids: std::collections::BTreeSet<&str> = reg.ids().into_iter().collect();
+
+        let mut checked = 0usize;
+        // Identifiers appear in backticks, e.g. `k8s.listPods`.
+        for token in md.split('`').skip(1).step_by(2) {
+            if !(token.starts_with("k8s.") || token.starts_with("toolbox.")) {
+                continue;
+            }
+            // Skip URI-ish and prose-ish tokens that merely start with the prefix.
+            if token.contains(' ') || token.contains('/') || token.contains('{') {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                ids.contains(token),
+                "docs/MCP.md names `{token}`, which is not a registered capability"
+            );
+        }
+        assert!(checked >= 5, "expected the examples to name several real tools, saw {checked}");
+    }
+
+    /// Flags the docs mention *in order to say they do not exist*. Keeping this
+    /// list explicit is what lets the guard below stay strict without forcing a
+    /// true statement out of the documentation.
+    ///
+    /// `--mcp-token` is documented as deliberately absent: a token in argv is
+    /// visible to every account on the machine via `ps`, so it comes from
+    /// `SRELENS_MCP_TOKEN` instead. Deleting that sentence to satisfy a test
+    /// would make the docs less accurate, not more.
+    const DOCUMENTED_AS_ABSENT: [&str; 1] = ["--mcp-token"];
+
+    /// A renamed or removed CLI flag must fail here rather than silently
+    /// breaking the documented setup path.
+    #[test]
+    fn every_flag_named_in_the_docs_is_real_or_explicitly_absent() {
+        let main_rs = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src-tauri/src/main.rs"
+        ))
+        .expect("main.rs is readable");
+
+        // Every file that names a flag, not just the new ones — a stale flag is
+        // just as broken in INSTALL.md as in MCP.md.
+        for name in ["MCP.md", "mcp-catalog.md", "USAGE.md", "INSTALL.md", "DEVELOPMENT.md"] {
+            let md = doc(name);
+            for token in md.split('`').skip(1).step_by(2) {
+                if !token.starts_with("--mcp") {
+                    continue;
+                }
+                // `--mcp-http 127.0.0.1:8765` — compare the flag, not its argument.
+                let flag = token.split_whitespace().next().unwrap_or(token);
+                if DOCUMENTED_AS_ABSENT.contains(&flag) {
+                    assert!(
+                        !main_rs.contains(&format!("\"{flag}\"")),
+                        "{flag} is on DOCUMENTED_AS_ABSENT but the CLI now accepts it — \
+                         the docs saying it does not exist are now wrong"
+                    );
+                    continue;
+                }
+                assert!(
+                    main_rs.contains(&format!("\"{flag}\"")),
+                    "docs/{name} names {flag}, which the CLI does not accept"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_json_block_in_the_docs_parses() {
+        for name in ["MCP.md", "mcp-catalog.md"] {
+            let md = doc(name);
+            for block in crate::mcp_docs::tests_support::json_blocks(&md) {
+                serde_json::from_str::<serde_json::Value>(&block).unwrap_or_else(|e| {
+                    panic!("docs/{name} has a json block that does not parse: {e}\n{block}")
+                });
+            }
+        }
+    }
 }

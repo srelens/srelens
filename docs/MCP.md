@@ -111,7 +111,8 @@ Put plainly: **reads flow freely, gated tools do not.** An agent can list
 pods, fetch manifests, tail logs and walk events without ever touching a
 confirm gate; the moment it calls something that mutates the cluster or
 reads secret material, it either raises a dialog in the app or, headless,
-needs the matching `--mcp-allow-*` flag plus `_confirm: true` on that call.
+needs the matching `--mcp-allow-destructive` or `--mcp-allow-sensitive-reads`
+flag plus `_confirm: true` on that call.
 
 Review tool calls and use appropriate Kubernetes RBAC, especially with
 critical clusters.
@@ -186,7 +187,8 @@ The property this sequence demonstrates: **no confirm dialog appears at any
 point.** All four tools are classed read-only — none of them changes
 cluster state or returns secret material — so they run straight through on
 either transport, headless or not, with no `_confirm` field, no
-`--mcp-allow-*` flag, and nothing for a human to click through. An agent can
+`--mcp-allow-destructive` or `--mcp-allow-sensitive-reads` flag, and nothing
+for a human to click through. An agent can
 run this entire investigation unattended.
 
 ## Worked example 2: a consented write
