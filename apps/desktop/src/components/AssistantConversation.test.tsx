@@ -189,14 +189,19 @@ describe("AssistantConversation session persistence", () => {
     expect(vi.mocked(chatHistory.saveSession).mock.calls[0][0].contexts).toEqual(["prod-cluster"]);
   });
 
-  it("auto-saves on a stream error turn too, once, with the error appended", async () => {
+  it("saves exactly once when a turn streams an error followed by turnDone (the real backend's shape)", async () => {
+    // The backend always emits a terminal `turnDone` after any `error` on a
+    // live channel (crash-recovery in `finish_turn`, and the bad-image-
+    // attachment path both do this) — saving on `error` too would double-save.
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "error", message: "boom" });
+      onEvent({ type: "turnDone" });
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
+    await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
     await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
     const saved = vi.mocked(chatHistory.saveSession).mock.calls[0][0];
     expect(saved.messages).toHaveLength(3);
@@ -226,6 +231,60 @@ describe("AssistantConversation session persistence", () => {
 
     const ids = vi.mocked(chatHistory.saveSession).mock.calls.map((c) => c[0].id);
     expect(ids).toEqual(["s1", "s2"]);
+  });
+
+  it("preserves createdAt across a second save of the same session, while updatedAt advances", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "reply" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "first turn" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
+    const firstSaved = vi.mocked(chatHistory.saveSession).mock.calls[0][0];
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "second turn" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(2));
+    const secondSaved = vi.mocked(chatHistory.saveSession).mock.calls[1][0];
+
+    expect(secondSaved.id).toBe(firstSaved.id);
+    expect(secondSaved.createdAt).toBe(firstSaved.createdAt);
+    expect(secondSaved.updatedAt).toBeGreaterThanOrEqual(firstSaved.updatedAt);
+  });
+
+  it("sends further turns of a reopened session back to the same disk id", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "old-1",
+      title: "Old chat",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: [],
+      skills: [],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text: "what pods are crashing?" }],
+    });
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "still looking" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.click(await screen.findByText("Old chat"));
+    await screen.findByText("what pods are crashing?");
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "any update?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(chatHistory.saveSession).mock.calls[0][0].id).toBe("old-1");
+    // Reopening never re-mints a channel session — `startChat` (which only
+    // fires when `sessionRef.current` is empty) must not have been called.
+    expect(chat.startChat).not.toHaveBeenCalled();
   });
 
   it("selecting a session loads it and replays its messages read-only into state", async () => {

@@ -344,6 +344,9 @@ export function AssistantConversation({
       nextId.current = msgs.reduce((max, m) => Math.max(max, m.id + 1), 0);
       sessionRef.current = session.id;
       createdAtRef.current = session.createdAt;
+      // `session.contexts` is deliberately not restored into
+      // `attachedContext` yet — Task 17 owns the real multi-context
+      // select this would need to round-trip through.
     } catch {
       // Leave the current conversation untouched on a bad load.
     }
@@ -397,8 +400,11 @@ export function AssistantConversation({
         break;
       }
       case "error":
+        // Don't persist here: the backend always follows a stream `error`
+        // with a terminal `turnDone` on the same channel once it's live
+        // (crash-recovery in `finish_turn`, and the bad-image-attachment
+        // path both do this) — saving on both would double-save the turn.
         setMessagesTracked((msgs) => [...msgs, { id: nextId.current++, role: "error", text: e.message }]);
-        void persistSession(messagesRef.current, toolCallsRef.current);
         break;
       case "turnDone":
         void persistSession(messagesRef.current, toolCallsRef.current);
