@@ -1,7 +1,25 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Drawer } from "../ui/Drawer";
 import { Badge, Button, Spinner, TextInput } from "../ui";
-import { listAgents, startChat, sendChat, type AgentEvent, type ToolStatus } from "../lib/chat";
+import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
+
+export type AssistantContext = { context: string; namespace?: string; kind?: string; name?: string };
+
+/** Chip text: `cluster[ / namespace][ / Kind name]`. */
+function formatContext(c: AssistantContext): string {
+  let text = c.context;
+  if (c.namespace) text += ` / ${c.namespace}`;
+  if (c.kind && c.name) text += ` / ${c.kind} ${c.name}`;
+  return text;
+}
+
+/** One-line preface prepended to the prompt so the agent knows the target. */
+function contextPreface(c: AssistantContext): string {
+  let text = `Current context: cluster ${c.context}`;
+  if (c.namespace) text += `, namespace ${c.namespace}`;
+  if (c.kind && c.name) text += `, ${c.kind} ${c.name}`;
+  return `${text}.`;
+}
 
 interface ToolCallState {
   tool: string;
@@ -53,9 +71,10 @@ function ToolCallCard({ tool, args, status }: ToolCallState) {
 /**
  * Right-hand chat drawer: a streamed conversation with the configured coding
  * agent, plus collapsible tool-call cards for anything it invokes. `context`
- * (the resource/namespace the user had open) is accepted here so Task 10 can
- * render it as a chip and thread it into the prompt — this task doesn't act
- * on it yet.
+ * (the resource/namespace the user had open) is rendered as a removable chip
+ * and, while attached, prefaced onto the prompt sent to the agent. The header
+ * carries an agent picker sourced from `listAgents()`; an unavailable agent
+ * shows its install link and disables Send.
  */
 export function AssistantDrawer({
   open,
@@ -64,25 +83,42 @@ export function AssistantDrawer({
 }: {
   open: boolean;
   onClose: () => void;
-  context?: { context: string; namespace?: string; kind?: string; name?: string };
+  context?: AssistantContext;
 }) {
-  void context;
-
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({});
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [agentPath, setAgentPath] = useState("");
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [selectedKind, setSelectedKind] = useState("");
+  const [attachedContext, setAttachedContext] = useState<AssistantContext | undefined>(context);
 
   const sessionRef = useRef<string | null>(null);
   const nextId = useRef(0);
 
+  // Re-sync the locally-editable context (and the agent list) each time the
+  // drawer is (re)opened, so a fresh open picks up the caller's latest target.
+  useEffect(() => {
+    if (!open) return;
+    setAttachedContext(context);
+  }, [open, context]);
+
   useEffect(() => {
     if (!open) return;
     listAgents()
-      .then((agents) => setAgentPath(agents.find((a) => a.available)?.path ?? ""))
-      .catch(() => setAgentPath(""));
+      .then((list) => {
+        setAgents(list);
+        setSelectedKind(list[0]?.kind ?? "");
+      })
+      .catch(() => {
+        setAgents([]);
+        setSelectedKind("");
+      });
   }, [open]);
+
+  const selectedAgent = agents.find((a) => a.kind === selectedKind);
+  const agentPath = selectedAgent?.path ?? "";
+  const canSend = !!selectedAgent?.available;
 
   function applyEvent(e: AgentEvent) {
     switch (e.type) {
@@ -119,7 +155,8 @@ export function AssistantDrawer({
 
   async function handleSend() {
     const prompt = input.trim();
-    if (!prompt || sending) return;
+    if (!prompt || sending || !canSend) return;
+    const outgoing = attachedContext ? `${contextPreface(attachedContext)}\n\n${prompt}` : prompt;
     setInput("");
     setMessages((msgs) => [
       ...msgs,
@@ -133,14 +170,30 @@ export function AssistantDrawer({
         session = await startChat();
         sessionRef.current = session;
       }
-      await sendChat(session, prompt, agentPath, applyEvent);
+      await sendChat(session, outgoing, agentPath, applyEvent);
     } finally {
       setSending(false);
     }
   }
 
+  const agentPicker = agents.length > 0 && (
+    <select
+      aria-label="Agent"
+      className="fl-select text-xs"
+      value={selectedKind}
+      onChange={(e) => setSelectedKind(e.target.value)}
+    >
+      {agents.map((a) => (
+        <option key={a.kind} value={a.kind} disabled={!a.available}>
+          {a.label}
+          {a.available ? "" : " (not installed)"}
+        </option>
+      ))}
+    </select>
+  );
+
   return (
-    <Drawer open={open} onClose={onClose} title="Assistant" defaultWidth={420}>
+    <Drawer open={open} onClose={onClose} title="Assistant" headerActions={agentPicker || undefined} defaultWidth={420}>
       <div className="flex h-full flex-col gap-3">
         <div className="flex-1 space-y-3 overflow-y-auto">
           {messages.length === 0 && (
@@ -164,6 +217,35 @@ export function AssistantDrawer({
             </div>
           ))}
         </div>
+        {!canSend && (
+          <p className="shrink-0 text-xs text-muted-foreground">
+            {selectedAgent
+              ? selectedAgent.installUrl
+                ? (
+                  <>
+                    {selectedAgent.label} isn&apos;t installed.{" "}
+                    <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
+                      {selectedAgent.installUrl}
+                    </a>
+                  </>
+                )
+                : `${selectedAgent.label} isn't installed.`
+              : "No coding agent available. Install one to use the assistant."}
+          </p>
+        )}
+        {attachedContext && (
+          <div className="flex shrink-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs">
+            <span className="min-w-0 flex-1 truncate">{formatContext(attachedContext)}</span>
+            <button
+              type="button"
+              aria-label="Remove context"
+              onClick={() => setAttachedContext(undefined)}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         <div className="flex shrink-0 items-end gap-2 border-t border-border pt-3">
           <TextInput
             value={input}
@@ -173,7 +255,7 @@ export function AssistantDrawer({
             disabled={sending}
             className="flex-1"
           />
-          <Button onClick={handleSend} disabled={sending || !input.trim()}>
+          <Button onClick={handleSend} disabled={sending || !input.trim() || !canSend}>
             Send
           </Button>
         </div>

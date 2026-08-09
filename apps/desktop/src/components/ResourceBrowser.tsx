@@ -58,6 +58,7 @@ import { PodActions, ResourceActions, ServiceForwardAction } from "./DetailActio
 import { BulkActionBar } from "./BulkActionBar";
 import { NodeCordonAction } from "./NodeCordonAction";
 import { ResourceDetail } from "./ResourceDetail";
+import { AssistantDrawer, type AssistantContext } from "./AssistantDrawer";
 import type { OpenResource } from "../lib/resourceNavigation";
 import { describeError } from "../lib/errors";
 import {
@@ -637,6 +638,9 @@ export function ResourceBrowser({
   const [watchStatus, setWatchStatus] = useState<WatchStatus>("live");
   const [selectedPod, setSelectedPod] = useState<PodSummary | null>(null);
   const [otherDetail, setOtherDetail] = useState<OtherDetail | null>(null);
+  // Set when the user clicks "Ask assistant" on a resource's detail header;
+  // opens AssistantDrawer with that resource attached as context.
+  const [assistantContext, setAssistantContext] = useState<AssistantContext | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   // Bulk-selection: keys are namespace-qualified so all-namespace views can't
   // confuse two same-named resources.
@@ -919,6 +923,7 @@ export function ResourceBrowser({
       onOpenTerminal={onOpenTerminal}
       onOpenLogs={onOpenLogs}
       onEdit={onOpenEdit ? () => onOpenEdit("Pod", selectedPod.namespace, selectedPod.name) : undefined}
+      onAskAssistant={setAssistantContext}
     />
   ) : otherDetail ? (
     <>
@@ -948,6 +953,7 @@ export function ResourceBrowser({
         onEdit={
           onOpenEdit ? () => onOpenEdit(otherDetail.kind, otherDetail.namespace, otherDetail.name) : undefined
         }
+        onAskAssistant={setAssistantContext}
       />
     </>
   ) : null;
@@ -1114,6 +1120,12 @@ export function ResourceBrowser({
           />
         )}
       </Drawer>
+
+      <AssistantDrawer
+        open={!!assistantContext}
+        onClose={() => setAssistantContext(null)}
+        context={assistantContext ?? undefined}
+      />
     </div>
   );
 }
