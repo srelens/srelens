@@ -53,13 +53,14 @@ export async function sendChat(
   prompt: string,
   agentPath: string,
   onEvent: (e: AgentEvent) => void,
+  images?: string[],
 ): Promise<void> {
   const unsub = await subscribe(`chat://${session}`, (payload: unknown) => {
     const e = parseAgentEvent(payload);
     if (e) onEvent(e);
   });
   try {
-    await invokeCommand("chat_send", { session, prompt, agentPath });
+    await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath });
   } finally {
     unsub();
   }

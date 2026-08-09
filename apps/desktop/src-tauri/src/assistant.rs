@@ -132,6 +132,37 @@ fn finish_turn(sink: &dyn EventSink, channel: &str, saw_done: bool, crashed: boo
     );
 }
 
+/// Prepend one `Attached image: <path>` line per path, then a blank line,
+/// then the original prompt — so the agent sees where each decoded image
+/// landed on disk before reading the user's actual question. `image_paths`
+/// empty (the common case: no attachments) returns `prompt` unchanged,
+/// byte-identical, so a turn without images pays no cost here.
+fn prompt_with_images(prompt: &str, image_paths: &[String]) -> String {
+    if image_paths.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::new();
+    for path in image_paths {
+        out.push_str("Attached image: ");
+        out.push_str(path);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(prompt);
+    out
+}
+
+/// Decode one attached image's base64 body (no `data:image/...;base64,`
+/// prefix — the WebView strips that before sending) into raw bytes. A thin
+/// wrapper so `chat_send` can decode without a fallible call inline, and so
+/// both directions (valid → bytes, invalid → error) are unit-tested without
+/// touching the filesystem.
+fn decode_base64_image(data: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.decode(data)
+}
+
 /// Tauri-managed state owning the running chat turns, keyed by session id, so
 /// `chat_cancel` can find and kill the right child process.
 #[derive(Default)]
@@ -178,6 +209,7 @@ impl Drop for TempDir {
 pub async fn chat_send(
     session: String,
     prompt: String,
+    images: Vec<String>,
     agent_path: String,
     app: tauri::AppHandle,
     mcp: tauri::State<'_, crate::mcp::McpHttpManager>,
@@ -211,9 +243,47 @@ pub async fn chat_send(
     std::fs::create_dir_all(&cwd_path).map_err(|e| e.to_string())?;
     let _cwd_guard = TempDir(cwd_path.clone());
 
+    // Decode each attached image to its own temp file under the same dir,
+    // guarded by a `TempFile` per image so every one is cleaned up on any
+    // exit from this function, same lifecycle as `_cfg_guard` above. A
+    // decode or write failure is reported as an `Error` event and that image
+    // is skipped rather than aborting the whole turn.
+    let mut image_guards: Vec<TempFile> = Vec::new();
+    let mut image_paths: Vec<String> = Vec::new();
+    for (i, data) in images.iter().enumerate() {
+        let bytes = match decode_base64_image(data) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                sink.emit(
+                    &channel,
+                    serde_json::to_value(srelens_agent::event::AgentEvent::Error {
+                        message: format!("could not decode attached image {i}: {e}"),
+                    })
+                    .unwrap(),
+                );
+                continue;
+            }
+        };
+        let image_path = dir.join(format!("srelens-img-{session}-{i}.png"));
+        if let Err(e) = std::fs::write(&image_path, &bytes) {
+            sink.emit(
+                &channel,
+                serde_json::to_value(srelens_agent::event::AgentEvent::Error {
+                    message: format!("could not save attached image {i}: {e}"),
+                })
+                .unwrap(),
+            );
+            continue;
+        }
+        image_guards.push(TempFile(image_path.clone()));
+        image_paths.push(image_path.to_string_lossy().into_owned());
+    }
+
+    let effective_prompt = prompt_with_images(&prompt, &image_paths);
+
     let cmd = srelens_agent::adapter::claude_command(
         &agent_path,
-        &prompt,
+        &effective_prompt,
         &cfg_path.to_string_lossy(),
         None,
     );
@@ -503,6 +573,43 @@ mod tests {
             assert!(path.exists());
         }
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn prompt_with_images_lists_each_path_then_a_blank_line_then_the_prompt() {
+        let images = vec!["/tmp/a.png".to_string(), "/tmp/b.png".to_string()];
+        let got = prompt_with_images("why?", &images);
+        assert_eq!(got, "Attached image: /tmp/a.png\nAttached image: /tmp/b.png\n\nwhy?");
+    }
+
+    #[test]
+    fn prompt_with_images_returns_the_prompt_unchanged_when_there_are_no_images() {
+        let got = prompt_with_images("why?", &[]);
+        assert_eq!(got, "why?");
+    }
+
+    #[test]
+    fn decode_base64_image_recovers_the_original_bytes() {
+        // "hello" base64-encoded, hand-written rather than produced by encoding
+        // "hello" ourselves in the test.
+        let bytes = decode_base64_image("aGVsbG8=").expect("valid base64");
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn decode_base64_image_rejects_invalid_base64() {
+        assert!(decode_base64_image("not-valid-base64!!!").is_err());
+    }
+
+    #[test]
+    fn a_decoded_image_written_to_a_temp_file_reads_back_byte_identical() {
+        let bytes = decode_base64_image("aGVsbG8=").expect("valid base64");
+        let path = std::env::temp_dir().join(format!("srelens-assistant-image-test-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &bytes).unwrap();
+        let read_back = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_back, bytes);
+        assert_eq!(read_back, b"hello");
     }
 
     /// The assistant must not stand up its own MCP server or policy — that would

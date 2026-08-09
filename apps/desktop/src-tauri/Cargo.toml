@@ -61,6 +61,9 @@ async-trait = "0.1"
 # provider. default-tls here pulls rustls-platform-verifier -> aws-lc-rs,
 # giving two providers and a runtime "could not determine CryptoProvider" panic.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+# Decodes base64 image attachments a chat turn carries (`chat_send`); also
+# used by `tests/e2e.rs` to decode a secret's value for assertions.
+base64 = "0.22"
 
 # Auto-update is desktop-only (mobile stores handle their own updates).
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
@@ -74,4 +77,3 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "process"] }
 futures = "0.3"
-base64 = "0.22"
