@@ -191,7 +191,7 @@ pub mod tests_support {
         for (line_num, line) in md.lines().enumerate() {
             let trimmed = line.trim_start();
             match (&mut current, trimmed) {
-                (None, l) if l == "```json" => {
+                (None, "```json") => {
                     current = Some(String::new());
                     fence_start_line = line_num;
                 }
@@ -565,7 +565,7 @@ mod tests {
     /// opens a code span that never closes and corrupts rendering. Pipes and newlines
     /// break the table row structure itself.
     fn has_unmatched_backticks(s: &str) -> bool {
-        s.matches('`').count() % 2 != 0
+        !s.matches('`').count().is_multiple_of(2)
     }
 
     /// Tool summaries are interpolated into Markdown table cells. A summary
