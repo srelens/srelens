@@ -520,6 +520,36 @@ mod tests {
     /// `SRELENS_MCP_BEARER` for a variable main.rs never reads would fail
     /// here too, not just the `TOKEN_ENV` constant the generated catalog
     /// cross-checks.
+    /// Every `.rs` file under `crates/` and the desktop app, concatenated.
+    ///
+    /// Environment variables are read wherever they are needed — the desktop
+    /// binary, `crates/server`, capability crates — so a documented variable
+    /// has to be looked for across the workspace rather than in one file.
+    fn workspace_rust_sources() -> String {
+        fn walk(dir: &std::path::Path, out: &mut String) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        out.push_str(&text);
+                    }
+                }
+            }
+        }
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let mut out = String::new();
+        walk(&root.join("crates"), &mut out);
+        walk(&root.join("apps/desktop/src-tauri/src"), &mut out);
+        assert!(!out.is_empty(), "found no Rust sources to scan");
+        out
+    }
+
     #[test]
     fn every_flag_named_in_the_docs_is_real_or_explicitly_absent() {
         let main_rs = std::fs::read_to_string(concat!(
@@ -563,9 +593,16 @@ mod tests {
                         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                         .next()
                         .unwrap_or(token);
+                    // Searched across the whole workspace, NOT just the desktop
+                    // `main.rs` the flag check uses. CLI flags are all parsed in
+                    // one place, but environment variables are not: web-mode
+                    // documents `SRELENS_MASTER_KEY` and `SRELENS_DEV_LOGIN`,
+                    // which `crates/server` reads and `main.rs` never mentions.
+                    // Scoping this to `main.rs` made the test fail on accurate
+                    // prose — which is the test being wrong, not the docs.
                     assert!(
-                        main_rs.contains(&format!("\"{var}\"")),
-                        "docs/{name} names environment variable {var}, which main.rs does not reference"
+                        workspace_rust_sources().contains(&format!("\"{var}\"")),
+                        "docs/{name} names environment variable {var}, which no Rust source reads"
                     );
                 }
             }
