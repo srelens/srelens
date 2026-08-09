@@ -305,6 +305,23 @@ pub fn render_tools(reg: &srelens_capability::Registry) -> String {
     out
 }
 
+/// The whole generated page.
+pub fn render_catalog() -> String {
+    let mut out = String::from(
+        "<!-- GENERATED FILE — do not edit by hand.\n     \
+         Regenerate with: UPDATE_CATALOG=1 cargo test -p srelens-registry -->\n\n\
+         # srelens MCP catalog\n\n\
+         Everything this server exposes over MCP, generated from the live \
+         registry so it cannot drift. Written for someone wiring an agent to \
+         srelens; the narrative reference is [MCP.md](MCP.md).\n\n",
+    );
+    out.push_str(&render_tools(&crate::build_registry()));
+    out.push_str(&render_prompts());
+    out.push_str(&render_resources());
+    out.push_str(&render_client_configs());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +872,17 @@ mod tests {
         let blocks = crate::mcp_docs::tests_support::json_blocks(md);
         assert_eq!(blocks.len(), 1, "should only match ```json, not json5 or jsonc");
         assert!(blocks[0].contains("\"a\""), "should contain the json block content");
+    }
+
+    #[test]
+    fn the_page_opens_with_a_do_not_edit_header_and_carries_every_section() {
+        let md = render_catalog();
+        assert!(md.starts_with("<!-- GENERATED FILE"), "got:\n{}", &md[..200.min(md.len())]);
+        assert!(md.contains("UPDATE_CATALOG=1"), "the header must name the fix command");
+        assert!(md.contains("## Tools ("));
+        assert!(md.contains("## Prompts ("));
+        assert!(md.contains("## Resources ("));
+        assert!(md.contains("## Client configuration"));
+        assert!(md.ends_with('\n'), "must end with a newline");
     }
 }

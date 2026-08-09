@@ -447,4 +447,22 @@ mod tests {
         let got = std::fs::read_to_string(path).unwrap_or_default();
         assert_eq!(got, want, "capability-catalog.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry");
     }
+
+    /// The published catalog MUST equal what the live registry, prompt library
+    /// and resource templates render. Same convention as
+    /// `capability_catalog_json_is_in_sync` above — one regeneration knob.
+    #[test]
+    fn mcp_catalog_md_is_in_sync() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp-catalog.md");
+        let want = crate::mcp_docs::render_catalog();
+        if std::env::var("UPDATE_CATALOG").is_ok() {
+            std::fs::write(path, &want).unwrap();
+            return;
+        }
+        let got = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            got, want,
+            "docs/mcp-catalog.md is stale — run `UPDATE_CATALOG=1 cargo test -p srelens-registry`"
+        );
+    }
 }
