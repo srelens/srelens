@@ -65,6 +65,37 @@ describe("AssistantDrawer", () => {
     expect(screen.queryByText("A.B.")).toBeFalsy();
   });
 
+  it("does not add an extra paragraph break when the delta itself already starts with whitespace", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "A." });
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      // Leading "\n" already separates this from "A." — inserting another
+      // "\n\n" on top would produce a blank line and split this into two
+      // paragraphs instead of one continued line.
+      onEvent({ type: "textDelta", text: "\nB." });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantDrawer open onClose={() => {}} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    const merged = await screen.findByText("A. B.");
+    expect(merged.closest("p")).toBeTruthy();
+  });
+
+  it("keeps consecutive textDeltas with no tool event between them in one paragraph", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "Hello " });
+      onEvent({ type: "textDelta", text: "world" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantDrawer open onClose={() => {}} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    const merged = await screen.findByText("Hello world");
+    expect(merged.closest("p")).toBeTruthy();
+  });
+
   it("shows a context chip and removes it on click", async () => {
     render(
       <AssistantDrawer

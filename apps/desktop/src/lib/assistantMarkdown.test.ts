@@ -52,6 +52,11 @@ describe("parseAssistantMarkdown", () => {
     expect(blocks).toEqual([{ kind: "code", text: "- not a list" }]);
   });
 
+  it("keeps **bold**-looking text inside a fence literal, not a strong span", () => {
+    const blocks = parseAssistantMarkdown("```\n**not bold**\n```");
+    expect(blocks).toEqual([{ kind: "code", text: "**not bold**" }]);
+  });
+
   it("surfaces inline strong and code spans in a paragraph via parseSpans", () => {
     const blocks = parseAssistantMarkdown("this is **bold** and `code`");
     expect(blocks).toEqual([

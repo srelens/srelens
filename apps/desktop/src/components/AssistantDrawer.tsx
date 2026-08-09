@@ -228,7 +228,8 @@ export function AssistantDrawer({
         setMessages((msgs) => {
           const last = msgs[msgs.length - 1];
           if (!last || last.role !== "assistant") return msgs;
-          const needsBreak = toolEventPending && last.text.length > 0 && !/\s$/.test(last.text);
+          const needsBreak =
+            toolEventPending && last.text.length > 0 && !/\s$/.test(last.text) && !/^\s/.test(e.text);
           const separator = needsBreak ? "\n\n" : "";
           return [...msgs.slice(0, -1), { ...last, text: last.text + separator + e.text }];
         });
