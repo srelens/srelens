@@ -17,6 +17,10 @@ struct Running {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
+    // Read via `McpHttpManager::session_token`, which has no caller yet — the
+    // in-app assistant wires this up in a later task.
+    #[allow(dead_code)]
+    token: srelens_mcp::auth::Token,
 }
 
 /// Tauri-managed state owning the running MCP HTTP server (if any).
@@ -47,6 +51,18 @@ impl McpHttpManager {
     /// as a witness, so neither can be called without it being held.
     async fn lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.lifecycle.lock().await
+    }
+
+    /// The bearer token the running loopback MCP server accepts, as hex, or
+    /// `None` if no server is running. The assistant uses this to authenticate;
+    /// it grants only the loopback MCP surface, never cluster credentials.
+    ///
+    /// No caller yet outside tests — the in-app assistant wires this up in a
+    /// later task.
+    #[allow(dead_code)]
+    pub fn session_token(&self) -> Option<String> {
+        let running = self.running.lock().unwrap();
+        running.as_ref().map(|r| r.token.as_str().to_string())
     }
 }
 
@@ -131,6 +147,7 @@ async fn start_server(
         .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(
             manager.cache.clone(),
         )));
+    let running_token = token.clone();
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
         let _ = srelens_mcp::http::serve_http_with_shutdown(
@@ -148,6 +165,7 @@ async fn start_server(
         addr,
         shutdown: Some(tx),
         handle,
+        token: running_token,
     });
     Ok(url_for(addr))
 }
@@ -464,6 +482,7 @@ mod tests {
             addr,
             shutdown: Some(tx),
             handle,
+            token: srelens_mcp::auth::Token::generate(),
         });
         Ok(())
     }
@@ -506,6 +525,7 @@ mod tests {
                 addr,
                 shutdown: Some(tx),
                 handle,
+                token: srelens_mcp::auth::Token::generate(),
             });
             addr
         };
@@ -545,6 +565,7 @@ mod tests {
                 addr: bound_addr,
                 shutdown: Some(tx),
                 handle,
+                token: srelens_mcp::auth::Token::generate(),
             });
 
             {
@@ -556,5 +577,36 @@ mod tests {
                 panic!("rebind attempt {i} on {bound_addr} failed: {e}")
             });
         }
+    }
+
+    #[tokio::test]
+    async fn session_token_is_none_when_the_server_is_stopped() {
+        let cache = srelens_kube::client_cache::ClientCache::new(std::path::PathBuf::from("/dev/null"));
+        let mgr = McpHttpManager::new(cache);
+        assert!(mgr.session_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn session_token_is_the_running_servers_token() {
+        let cache = srelens_kube::client_cache::ClientCache::new(std::path::PathBuf::from("/dev/null"));
+        let mgr = McpHttpManager::new(cache);
+
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0)); // OS-assigned port
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = rx.await;
+            drop(listener);
+        });
+        let t = srelens_mcp::auth::Token::generate();
+        *mgr.running.lock().unwrap() = Some(Running {
+            addr: bound_addr,
+            shutdown: Some(tx),
+            handle,
+            token: t.clone(),
+        });
+
+        assert_eq!(mgr.session_token(), Some(t.as_str().to_string()));
     }
 }
