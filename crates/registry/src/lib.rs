@@ -526,6 +526,13 @@ mod tests {
                 if !token.starts_with("--mcp") {
                     continue;
                 }
+                // `--mcp-allow-*` is prose shorthand for "whichever of the
+                // family applies", not a claim that a flag literally named
+                // with a `*` exists — a glob is self-evidently not a literal
+                // flag name, so it doesn't constrain how the docs are written.
+                if token.contains('*') {
+                    continue;
+                }
                 // `--mcp-http 127.0.0.1:8765` — compare the flag, not its argument.
                 let flag = token.split_whitespace().next().unwrap_or(token);
                 if DOCUMENTED_AS_ABSENT.contains(&flag) {

@@ -187,8 +187,7 @@ The property this sequence demonstrates: **no confirm dialog appears at any
 point.** All four tools are classed read-only — none of them changes
 cluster state or returns secret material — so they run straight through on
 either transport, headless or not, with no `_confirm` field, no
-`--mcp-allow-destructive` or `--mcp-allow-sensitive-reads` flag, and nothing
-for a human to click through. An agent can
+`--mcp-allow-*` flag, and nothing for a human to click through. An agent can
 run this entire investigation unattended.
 
 ## Worked example 2: a consented write
