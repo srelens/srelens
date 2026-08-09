@@ -338,7 +338,8 @@ pub async fn handle_request(
 fn handle_subscription(
     server: &std::sync::Arc<McpServer>,
     subs: &std::sync::Arc<crate::subscriptions::SubscriptionRegistry>,
-    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    dirty: &std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    wake: &tokio::sync::mpsc::Sender<()>,
     req: &Value,
     method: &str,
 ) -> Option<Value> {
@@ -376,13 +377,24 @@ fn handle_subscription(
         return Some(err(id, -32602, &message));
     }
 
-    // The callback is sync and owns only a channel sender, so it needs no
-    // writer, no mutex and no spawn. A send failure means the loop is gone,
-    // which the watch's own abort will follow.
-    let tx = tx.clone();
+    // The callback is sync and owns only the dirty set and a wakeup sender,
+    // so it needs no writer and no spawn. It never awaits, so the dirty
+    // set's lock is only ever held for the insert itself — matching the
+    // discipline in `subscriptions.rs`.
+    let dirty = dirty.clone();
+    let wake = wake.clone();
     let notify_uri = canonical.clone();
     let on_change = Box::new(move || {
-        let _ = tx.send(notify_uri.clone());
+        dirty
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(notify_uri.clone());
+        // `try_send` never blocks, keeping this callback synchronous. If the
+        // capacity-1 channel is already full, a wakeup is already pending —
+        // dropping this one is correct, not a lost notification, because
+        // that pending wakeup already guarantees `serve_loop` will come back
+        // and drain the whole dirty set, which by then includes this URI too.
+        let _ = wake.try_send(());
     });
 
     let handle = match server.watcher().watch(&uri, on_change) {
@@ -399,11 +411,18 @@ fn handle_subscription(
 /// no watch outlives this session — stdio's client spawned the process, so loop
 /// exit *is* disconnect.
 ///
-/// Watch callbacks are sync and cannot write asynchronously, so they send the
-/// changed URI over a channel; this loop selects on it alongside incoming
-/// requests. Responses and notifications are therefore written by one task and
-/// serialised by construction — no mutex, no spawn, and the writer bound stays
-/// `AsyncWrite + Unpin`.
+/// Watch callbacks are sync and cannot write asynchronously, so they cannot
+/// hand the loop content directly. Instead they insert the changed URI into a
+/// shared dirty set and signal a capacity-1 wakeup channel; this loop selects
+/// on the wakeup alongside incoming requests and, once woken, drains the
+/// whole dirty set. Because a notification carries only the URI (the client
+/// re-reads for content), N queued changes to the same URI are indistinguishable
+/// from one, so coalescing them is a strict improvement, not a tradeoff — it
+/// also bounds pending memory at the number of distinct subscribed URIs
+/// (at most `MAX_SUBSCRIPTIONS`) rather than growing without limit if the
+/// client stops reading. Responses and notifications are still written by one
+/// task and serialised by construction — no mutex around the writer, no
+/// spawn, and the writer bound stays `AsyncWrite + Unpin`.
 pub async fn serve<R, W>(server: McpServer, reader: R, mut writer: W) -> std::io::Result<()>
 where
     R: AsyncBufReadExt + Unpin,
@@ -411,9 +430,12 @@ where
 {
     let server = std::sync::Arc::new(server);
     let subs = std::sync::Arc::new(crate::subscriptions::SubscriptionRegistry::new());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let dirty: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-    let result = serve_loop(&server, &subs, &tx, &mut rx, reader, &mut writer).await;
+    let result =
+        serve_loop(&server, &subs, &dirty, &wake_tx, &mut wake_rx, reader, &mut writer).await;
     // Release every watch however the loop ended — EOF or a write error. Doing
     // this here rather than inside the loop means the `?` error path cannot skip
     // it.
@@ -424,8 +446,9 @@ where
 async fn serve_loop<R, W>(
     server: &std::sync::Arc<McpServer>,
     subs: &std::sync::Arc<crate::subscriptions::SubscriptionRegistry>,
-    tx: &tokio::sync::mpsc::UnboundedSender<String>,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    dirty: &std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    wake_tx: &tokio::sync::mpsc::Sender<()>,
+    wake_rx: &mut tokio::sync::mpsc::Receiver<()>,
     reader: R,
     writer: &mut W,
 ) -> std::io::Result<()>
@@ -454,8 +477,9 @@ where
             line = lines.next_line() => {
                 let Some(line) = line? else {
                     // EOF. Same starvation as above, one last time: drain
-                    // whatever is already pending before leaving.
-                    drain_notifications(writer, rx).await?;
+                    // whatever is already pending before leaving. No wakeup
+                    // token is needed here — the dirty set is read directly.
+                    drain_notifications(writer, dirty).await?;
                     return Ok(());
                 };
                 let trimmed = line.trim();
@@ -470,42 +494,57 @@ where
                 // HTTP transport, which has no channel to push notifications and
                 // must keep answering -32601.
                 let resp = if method == "resources/subscribe" || method == "resources/unsubscribe" {
-                    handle_subscription(server, subs, tx, &req, method)
+                    handle_subscription(server, subs, dirty, wake_tx, &req, method)
                 } else {
                     handle_request(server, &req, crate::Transport::Stdio).await
                 };
                 if let Some(resp) = resp {
                     write_line(writer, &resp).await?;
                 }
-                // `biased` means `rx.recv()` below is never polled while a
-                // line is ready — a pipelined client (several requests in one
-                // read, or a `try_recv` producer racing ahead) would starve
-                // every pending notification until EOF's drain otherwise.
-                // Draining here after every line bounds delivery to at most
-                // one request and keeps ordering deterministic: a request's
-                // own response is written before any notification a
-                // concurrent watch queued during its handling.
-                drain_notifications(writer, rx).await?;
+                // `biased` means `wake_rx.recv()` below is never polled while
+                // a line is ready — a pipelined client (several requests in
+                // one read, or a watch racing ahead) would starve every
+                // pending notification until EOF's drain otherwise. Draining
+                // here after every line bounds delivery to at most one
+                // request and keeps ordering deterministic: a request's own
+                // response is written before any notification a concurrent
+                // watch queued during its handling.
+                drain_notifications(writer, dirty).await?;
             }
 
-            Some(uri) = rx.recv() => {
-                write_line(writer, &subscription_notification(&uri)).await?;
+            Some(()) = wake_rx.recv() => {
+                // The wakeup itself carries no payload — it only means "the
+                // dirty set changed" — so draining reads the set directly
+                // rather than the channel.
+                drain_notifications(writer, dirty).await?;
             }
         }
     }
 }
 
-/// Write every notification already queued on `rx`, without waiting for more.
-/// Shared by the per-line and EOF paths so `biased` select's starvation gap
-/// (see `serve_loop`) is closed the same way in both places.
+/// Write one notification per URI currently in the dirty set, then clear it,
+/// without waiting for more to arrive. Shared by the per-line and EOF paths
+/// so `biased` select's starvation gap (see `serve_loop`) is closed the same
+/// way in both places.
+///
+/// Takes the whole set under the lock via `mem::take` and releases the lock
+/// before writing anything — the lock is never held across an await, matching
+/// the discipline in `subscriptions.rs`. `BTreeSet` yields URIs in sorted
+/// order rather than arrival order; that's fine, and deliberate: each
+/// notification is independent and carries no ordering meaning, it only
+/// tells the client to re-read that one URI.
 async fn drain_notifications<W>(
     writer: &mut W,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    dirty: &std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
 ) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    while let Ok(uri) = rx.try_recv() {
+    let uris = {
+        let mut guard = dirty.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for uri in uris {
         write_line(writer, &subscription_notification(&uri)).await?;
     }
     Ok(())
@@ -1538,6 +1577,164 @@ mod tests {
             "the notification must not be pushed only by the EOF drain, \
              i.e. it must appear before the final response: {text}"
         );
+    }
+
+    /// A watcher whose spawned task calls `on_change` several times in a
+    /// tight loop with no `.await` between calls, so all the calls complete
+    /// within a single poll of the task — there is no scheduling point at
+    /// which the loop could interleave a drain between them. That makes the
+    /// dirty-set coalescing this proves deterministic rather than a race:
+    /// however the loop happens to be scheduled, all `times` inserts land in
+    /// the dirty set before it can ever be drained, so exactly one entry for
+    /// this URI survives regardless.
+    struct RepeatFiringWatcher {
+        times: usize,
+        fired: std::sync::Arc<tokio::sync::Notify>,
+    }
+    impl crate::resources::ObjectWatcher for RepeatFiringWatcher {
+        fn watch(
+            &self,
+            _uri: &crate::resources::ResourceUri,
+            mut on_change: Box<dyn FnMut() + Send>,
+        ) -> Result<tokio::task::AbortHandle, String> {
+            let fired = self.fired.clone();
+            let times = self.times;
+            Ok(tokio::spawn(async move {
+                for _ in 0..times {
+                    on_change();
+                }
+                fired.notify_one();
+                std::future::pending::<()>().await
+            })
+            .abort_handle())
+        }
+    }
+
+    /// The coalescing this closes: without it, 5 `on_change` calls to one
+    /// subscribed URI would queue 5 identical notifications, making the
+    /// client re-read the same URI 5 times to learn the same thing once.
+    /// Bounding pending memory at "distinct subscribed URIs" rather than
+    /// "watch events ever fired" depends on this actually deduplicating.
+    #[tokio::test]
+    async fn repeated_changes_to_one_uri_coalesce_to_fewer_notifications() {
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+
+        let fired = std::sync::Arc::new(tokio::sync::Notify::new());
+        let server = server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(Arc::new(
+            RepeatFiringWatcher { times: 5, fired: fired.clone() },
+        ));
+
+        let (mut client_in, mut out_lines, serve_task) = spawn_serve_over_duplex(server);
+
+        client_in
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}
+"#,
+            )
+            .await
+            .unwrap();
+
+        // Deterministic: wait for all 5 `on_change` calls to have actually
+        // run and been inserted into the dirty set, rather than racing them
+        // against this test ending the session.
+        fired.notified().await;
+
+        drop(client_in); // EOF: nothing more is coming.
+        serve_task.await.unwrap().unwrap();
+
+        let mut text = String::new();
+        while let Some(line) = out_lines.next_line().await.unwrap() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        let count = text.matches("notifications/resources/updated").count();
+        assert_eq!(
+            count, 1,
+            "5 on_change calls to the same URI must coalesce to exactly one notification: {text}"
+        );
+    }
+
+    /// Sibling of the coalescing test above, pinning the other half: distinct
+    /// URIs must never collapse into each other just because they share a
+    /// drain pass. A dirty set keyed on the whole URI is what this depends
+    /// on; a regression that, say, coalesced by kind or by drain pass alone
+    /// would break this while leaving the single-URI test above green.
+    #[tokio::test]
+    async fn two_different_subscribed_uris_each_still_get_a_notification() {
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+
+        struct TwoUriWatcher {
+            fired_a: std::sync::Arc<tokio::sync::Notify>,
+            fired_b: std::sync::Arc<tokio::sync::Notify>,
+        }
+        impl crate::resources::ObjectWatcher for TwoUriWatcher {
+            fn watch(
+                &self,
+                uri: &crate::resources::ResourceUri,
+                mut on_change: Box<dyn FnMut() + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                let fired = if uri.to_string().contains("web-0") {
+                    self.fired_a.clone()
+                } else {
+                    self.fired_b.clone()
+                };
+                Ok(tokio::spawn(async move {
+                    on_change();
+                    fired.notify_one();
+                    std::future::pending::<()>().await
+                })
+                .abort_handle())
+            }
+        }
+
+        let fired_a = std::sync::Arc::new(tokio::sync::Notify::new());
+        let fired_b = std::sync::Arc::new(tokio::sync::Notify::new());
+        let server = server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(Arc::new(
+            TwoUriWatcher { fired_a: fired_a.clone(), fired_b: fired_b.clone() },
+        ));
+
+        let (mut client_in, mut out_lines, serve_task) = spawn_serve_over_duplex(server);
+
+        client_in
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}
+"#,
+            )
+            .await
+            .unwrap();
+        client_in
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-1"}}
+"#,
+            )
+            .await
+            .unwrap();
+
+        fired_a.notified().await;
+        fired_b.notified().await;
+
+        drop(client_in); // EOF: nothing more is coming.
+        serve_task.await.unwrap().unwrap();
+
+        let mut text = String::new();
+        while let Some(line) = out_lines.next_line().await.unwrap() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        let count = text.matches("notifications/resources/updated").count();
+        assert_eq!(count, 2, "two distinct URIs must not coalesce into one: {text}");
+        assert!(text.contains("web-0"), "got {text}");
+        assert!(text.contains("web-1"), "got {text}");
     }
 
     /// stdio's client spawned the process, so loop exit IS disconnect — nothing
