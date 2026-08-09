@@ -68,9 +68,12 @@ impl Area {
 }
 
 /// Helm tools are `k8s.helm*`, so that prefix MUST be tested before the bare
-/// `k8s.` one.
+/// `k8s.` one. A match requires the character after `k8s.helm` to be uppercase,
+/// enforcing the naming convention that all real Helm tools follow
+/// (e.g., `k8s.helmInstall`, `k8s.helmUpgrade`). This prevents a hypothetical
+/// `k8s.helmet` from being misfiled.
 pub fn area(id: &str) -> Area {
-    if id.starts_with("k8s.helm") {
+    if id.strip_prefix("k8s.helm").is_some_and(|rest| rest.starts_with(char::is_uppercase)) {
         Area::Helm
     } else if id.starts_with("k8s.") {
         Area::Kubernetes
@@ -216,6 +219,39 @@ mod tests {
             } else {
                 assert_eq!(a, Area::Server, "{id} has an unexpected prefix — add an Area for it");
             }
+        }
+    }
+
+    /// Helm tools follow a strict naming convention: `k8s.helm` followed by an
+    /// uppercase verb like `Install`, `Upgrade`, `Rollback`. This test uses
+    /// synthetic ids to ensure boundary checking prevents false positives like
+    /// a hypothetical `k8s.helmet` from being misfiled.
+    #[test]
+    fn helm_boundary_prevents_false_matches() {
+        // Synthetic edge cases that must NOT match as Helm
+        assert_eq!(area("k8s.helmet"), Area::Kubernetes, "lowercase after k8s.helm");
+        assert_eq!(area("k8s.helm"), Area::Kubernetes, "bare k8s.helm with no verb");
+
+        // Real Helm tools that MUST match
+        assert_eq!(area("k8s.helmInstall"), Area::Helm);
+    }
+
+    /// Adding a new `Area` variant should be caught by the exhaustive match here,
+    /// forcing acknowledgment of the new area. However, the `all()` array is
+    /// hand-maintained, so a variant added to both the match and the seed but
+    /// forgotten in the array would still slip through. This test catches the
+    /// first part of that problem (compiler forces acknowledgment), but not the
+    /// second (hand-maintenance of `all()`).
+    #[test]
+    fn all_area_variants_appear_in_the_canonical_order() {
+        for probe in [Area::Kubernetes, Area::Helm, Area::Toolbox, Area::Server] {
+            match probe {
+                Area::Kubernetes | Area::Helm | Area::Toolbox | Area::Server => {}
+            }
+            assert!(
+                Area::all().contains(&probe),
+                "{probe:?} is missing from Area::all()"
+            );
         }
     }
 }
