@@ -165,6 +165,83 @@ pub fn render_resources() -> String {
     out
 }
 
+/// srelens's own half of every client config. Generated from these constants so
+/// a renamed flag is caught by `every_flag_the_configs_name_exists_in_the_cli`
+/// rather than silently breaking the documented setup path.
+pub const FLAG_STDIO: &str = "--mcp-stdio";
+pub const FLAG_HTTP: &str = "--mcp-http";
+pub const FLAG_ALLOW_DESTRUCTIVE: &str = "--mcp-allow-destructive";
+pub const FLAG_ALLOW_SENSITIVE_READS: &str = "--mcp-allow-sensitive-reads";
+/// The token never goes in argv — that would leak it into `ps`.
+pub const TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
+
+/// Shared helpers the tests need. Not `#[cfg(test)]` on the module itself
+/// because Task 8's doc-scan tests in `lib.rs` use `json_blocks` too.
+pub mod tests_support {
+    /// Extract the body of every ```json fenced block.
+    pub fn json_blocks(md: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current: Option<String> = None;
+        for line in md.lines() {
+            match (&mut current, line.trim_start()) {
+                (None, l) if l.starts_with("```json") => current = Some(String::new()),
+                (Some(buf), l) if l.starts_with("```") => {
+                    out.push(std::mem::take(buf));
+                    current = None;
+                }
+                (Some(buf), _) => {
+                    buf.push_str(line);
+                    buf.push('\n');
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Paste-ready client configs.
+///
+/// srelens's side is generated from the constants above. The surrounding
+/// envelope (`mcpServers`, and each client's key names) is a per-client
+/// template, because that shape belongs to the client and changes outside this
+/// repo — generating it cannot make it correct, only consistent.
+pub fn render_client_configs() -> String {
+    let mut out = String::from("## Client configuration\n\n");
+
+    out.push_str(
+        "### Claude Desktop\n\nAdd to `claude_desktop_config.json`:\n\n```json\n{\n  \
+         \"mcpServers\": {\n    \"srelens\": {\n      \"command\": \"srelens\",\n      \
+         \"args\": [\"",
+    );
+    out.push_str(FLAG_STDIO);
+    out.push_str("\"]\n    }\n  }\n}\n```\n\n");
+
+    out.push_str("### Claude Code\n\n```bash\nclaude mcp add srelens -- srelens ");
+    out.push_str(FLAG_STDIO);
+    out.push_str("\n```\n\n");
+
+    out.push_str(
+        "### Generic stdio client\n\nSpawn the binary and speak newline-delimited \
+         JSON-RPC on stdin/stdout:\n\n```json\n{\n  \"command\": \"srelens\",\n  \
+         \"args\": [\"",
+    );
+    out.push_str(FLAG_STDIO);
+    out.push_str("\"]\n}\n```\n\n");
+
+    out.push_str(&format!(
+        "### Headless consent\n\nBoth transports refuse gated tools by default. To \
+         pre-authorise them for an unattended session, add `{FLAG_ALLOW_DESTRUCTIVE}` \
+         (mutations) or `{FLAG_ALLOW_SENSITIVE_READS}` (secret reads).\n\n\
+         ### HTTP transport\n\nTo talk to a running srelens GUI instead of spawning \
+         one, start it with `{FLAG_HTTP} 127.0.0.1:8765` and send the token from \
+         `{TOKEN_ENV}` as `Authorization: Bearer <token>`. The token is read from the \
+         environment, never argv.\n\n"
+    ));
+
+    out
+}
+
 /// Render every tool as `### <Area> — <safety> (<count>)` sections, each a
 /// table sorted by id. Empty combinations are skipped rather than rendered as
 /// an empty table.
@@ -691,5 +768,49 @@ mod tests {
                 description
             );
         }
+    }
+
+    #[test]
+    fn client_configs_name_the_real_flags_and_token_env_var() {
+        let md = render_client_configs();
+        assert!(md.contains(FLAG_STDIO), "got:\n{md}");
+        assert!(md.contains(TOKEN_ENV), "got:\n{md}");
+        assert!(md.contains("Claude Desktop"), "got:\n{md}");
+        assert!(md.contains("Claude Code"), "got:\n{md}");
+    }
+
+    /// Every fenced json block in the generated configs must parse — a
+    /// paste-ready config that is not valid JSON is worse than none.
+    #[test]
+    fn every_generated_json_block_parses() {
+        let md = render_client_configs();
+        let blocks = crate::mcp_docs::tests_support::json_blocks(&md);
+        assert!(!blocks.is_empty(), "expected at least one json block:\n{md}");
+        for b in blocks {
+            serde_json::from_str::<serde_json::Value>(&b)
+                .unwrap_or_else(|e| panic!("generated config is not valid JSON: {e}\n{b}"));
+        }
+    }
+
+    /// srelens's own half of every config must be flags the binary actually
+    /// accepts. `main.rs` matches flags as string literals, so the literal
+    /// appearing there is the check available without invoking the binary.
+    #[test]
+    fn every_flag_the_configs_name_exists_in_the_cli() {
+        let main_rs = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src-tauri/src/main.rs"
+        ))
+        .expect("main.rs is readable");
+        for flag in [FLAG_STDIO, FLAG_HTTP, FLAG_ALLOW_DESTRUCTIVE, FLAG_ALLOW_SENSITIVE_READS] {
+            assert!(
+                main_rs.contains(&format!("\"{flag}\"")),
+                "{flag} is documented but the CLI does not accept it"
+            );
+        }
+        assert!(
+            main_rs.contains(&format!("\"{TOKEN_ENV}\"")),
+            "{TOKEN_ENV} is documented but main.rs does not read it"
+        );
     }
 }
