@@ -208,5 +208,16 @@ Both transports refuse gated tools by default. To pre-authorise them for an unat
 
 ### HTTP transport
 
-To talk to a running srelens GUI instead of spawning one, start it with `--mcp-http 127.0.0.1:8765` and send the token from `SRELENS_MCP_TOKEN` as `Authorization: Bearer <token>`. The token is read from the environment, never argv.
+`--mcp-http <addr>` starts a **separate, headless** MCP server process — it does not attach to an already-running GUI, and will fail to bind if the GUI's own Settings → MCP toggle already holds the port. (To share the GUI's process and its in-app confirm dialog instead, use Settings → MCP → Run the MCP server in the running desktop app.) Either way, point an HTTP-capable client at the address with the bearer token as `Authorization: Bearer <token>` — read from `SRELENS_MCP_TOKEN` for the headless process, or from Settings → MCP for the in-app one; never from argv:
+
+```json
+{
+  "mcpServers": {
+    "srelens": {
+      "url": "http://127.0.0.1:8765/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
 

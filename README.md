@@ -148,9 +148,9 @@ dialog to show, so they need `"_confirm": true` on the call *and* a
 process-level opt-in — `--mcp-allow-destructive` to change anything, or
 `--mcp-allow-sensitive-reads` to read Secrets. The two are independent, so
 reading a Secret never implies permission to drain a node, and neither flag
-alone authorizes anything without `_confirm`. There's no GUI toggle for stdio.
-See [docs/MCP.md](docs/MCP.md) for the full
-security model, including the Host-header check, audit log, and token storage.
+alone authorizes anything without `_confirm`. There's no GUI toggle for
+stdio. See [docs/MCP.md](docs/MCP.md) for the full security model, including
+the Host-header check, audit log, and token storage.
 
 Example stdio configuration:
 
@@ -258,6 +258,7 @@ Contributions are welcome. Start with:
 
 - [Contribution guide](CONTRIBUTING.md)
 - [Developer guide](docs/DEVELOPMENT.md)
+- [MCP agent integration guide](docs/MCP.md)
 - [Open issues](https://github.com/srelens/srelens/issues)
 
 Please review the [Code of Conduct](.github/CODE_OF_CONDUCT.md) before

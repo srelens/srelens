@@ -175,15 +175,17 @@ pub const FLAG_ALLOW_SENSITIVE_READS: &str = "--mcp-allow-sensitive-reads";
 /// The token never goes in argv — that would leak it into `ps`.
 pub const TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 
-/// Shared helpers the tests need. Not `#[cfg(test)]` on the module itself
-/// because Task 8's doc-scan tests in `lib.rs` use `json_blocks` too.
+/// Shared helpers the tests need. No `#[cfg(test)]` of its own: the whole
+/// `mcp_docs` module is already gated on it in `lib.rs`, since `lib.rs`'s
+/// doc-scan tests use `json_blocks` too and every caller of this module is a
+/// test.
 pub mod tests_support {
     /// Extract the body of every ```json fenced block.
     ///
     /// Panics if a ```json fence is opened but never closed, because an
     /// unterminated block in hand-written prose is an error that should be
-    /// caught during testing, not silently skipped. This is particularly
-    /// important for Task 8's doc-scan validation over `docs/MCP.md`.
+    /// caught during testing, not silently skipped. This matters in
+    /// particular for the doc-scan validation over `docs/MCP.md`.
     pub fn json_blocks(md: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut current: Option<String> = None;
@@ -250,12 +252,24 @@ pub fn render_client_configs() -> String {
     out.push_str(&format!(
         "### Headless consent\n\nBoth transports refuse gated tools by default. To \
          pre-authorise them for an unattended session, add `{FLAG_ALLOW_DESTRUCTIVE}` \
-         (mutations) or `{FLAG_ALLOW_SENSITIVE_READS}` (secret reads).\n\n\
-         ### HTTP transport\n\nTo talk to a running srelens GUI instead of spawning \
-         one, start it with `{FLAG_HTTP} 127.0.0.1:8765` and send the token from \
-         `{TOKEN_ENV}` as `Authorization: Bearer <token>`. The token is read from the \
-         environment, never argv.\n\n"
+         (mutations) or `{FLAG_ALLOW_SENSITIVE_READS}` (secret reads).\n\n"
     ));
+
+    out.push_str(&format!(
+        "### HTTP transport\n\n`{FLAG_HTTP} <addr>` starts a **separate, headless** MCP \
+         server process — it does not attach to an already-running GUI, and will fail to \
+         bind if the GUI's own Settings → MCP toggle already holds the port. (To share the \
+         GUI's process and its in-app confirm dialog instead, use Settings → MCP → Run the \
+         MCP server in the running desktop app.) Either way, point an HTTP-capable client \
+         at the address with the bearer token as `Authorization: Bearer <token>` — read \
+         from `{TOKEN_ENV}` for the headless process, or from Settings → MCP for the \
+         in-app one; never from argv:\n\n"
+    ));
+    out.push_str(
+        "```json\n{\n  \"mcpServers\": {\n    \"srelens\": {\n      \
+         \"url\": \"http://127.0.0.1:8765/mcp\",\n      \
+         \"headers\": { \"Authorization\": \"Bearer <token>\" }\n    }\n  }\n}\n```\n\n",
+    );
 
     out
 }
@@ -872,6 +886,44 @@ mod tests {
         let blocks = crate::mcp_docs::tests_support::json_blocks(md);
         assert_eq!(blocks.len(), 1, "should only match ```json, not json5 or jsonc");
         assert!(blocks[0].contains("\"a\""), "should contain the json block content");
+    }
+
+    /// `classify` and `McpServer::consent_kind` (`crates/mcp/src/lib.rs`) both
+    /// decide safety from the same `Annotations`, but check the flags in
+    /// different orders: `classify` tests `destructive` first, `consent_kind`
+    /// tests `read_only` first. If a capability were ever annotated with both
+    /// `read_only` and `destructive` set, the two would disagree — the
+    /// published catalog would tell an agent to pass `--mcp-allow-destructive`
+    /// while the runtime gate actually demanded `--mcp-allow-sensitive-reads`
+    /// (or vice versa). No such capability exists today, but nothing else
+    /// guards against one being added — `every_bucket_holds_only_capabilities_
+    /// matching_its_definition` only asserts `ann.destructive` for the
+    /// `Destructive` arm, so it would not catch this. This test makes the
+    /// safety table in MCP.md mechanically true rather than merely true today.
+    #[test]
+    fn classify_and_consent_kind_agree_on_the_flag_a_capability_needs() {
+        let reg = crate::build_registry();
+        let server = srelens_mcp::McpServer::new(std::sync::Arc::new(crate::build_registry()));
+        for id in reg.ids() {
+            let cap = reg.get(id).expect("capability exists");
+            let published_flag = match classify(&cap.annotations) {
+                SafetyClass::ReadOnly => None,
+                SafetyClass::SensitiveRead => {
+                    Some(srelens_mcp::policy::ConsentKind::SensitiveRead.flag())
+                }
+                SafetyClass::NeedsConfirm | SafetyClass::Destructive => {
+                    Some(srelens_mcp::policy::ConsentKind::Destructive.flag())
+                }
+            };
+            let runtime_flag = server.consent_kind(id).map(|k| k.flag());
+            assert_eq!(
+                published_flag, runtime_flag,
+                "{id}: classify() implies flag {published_flag:?} but \
+                 McpServer::consent_kind implies {runtime_flag:?} — the published \
+                 safety class and the runtime gate disagree about which flag \
+                 this capability needs"
+            );
+        }
     }
 
     #[test]

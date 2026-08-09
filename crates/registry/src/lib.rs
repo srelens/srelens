@@ -14,7 +14,13 @@ use srelens_kube::client_cache::ClientCache;
 mod catalog;
 pub use catalog::{catalog_of, CatalogEntry};
 
-pub mod mcp_docs;
+// Test-only: every consumer of this module — `render_catalog` (regenerated via
+// `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
+// own unit tests — runs under `#[cfg(test)]`. Nothing in a normal build calls
+// it, so `pub` would be the only thing keeping it from looking dead; gating
+// the whole module here is more honest than papering over that with `pub`.
+#[cfg(test)]
+pub(crate) mod mcp_docs;
 
 /// Sorted id + annotation-flag projection of the live registry, emitted to a
 /// committed JSON so the frontend palette audit can cross-check it without
@@ -509,7 +515,11 @@ mod tests {
     const DOCUMENTED_AS_ABSENT: [&str; 1] = ["--mcp-token"];
 
     /// A renamed or removed CLI flag must fail here rather than silently
-    /// breaking the documented setup path.
+    /// breaking the documented setup path. Also scans for backticked
+    /// `SRELENS_*` environment variable names, so a doc naming e.g.
+    /// `SRELENS_MCP_BEARER` for a variable main.rs never reads would fail
+    /// here too, not just the `TOKEN_ENV` constant the generated catalog
+    /// cross-checks.
     #[test]
     fn every_flag_named_in_the_docs_is_real_or_explicitly_absent() {
         let main_rs = std::fs::read_to_string(concat!(
@@ -523,30 +533,41 @@ mod tests {
         for name in ["MCP.md", "mcp-catalog.md", "USAGE.md", "INSTALL.md", "DEVELOPMENT.md"] {
             let md = doc(name);
             for token in md.split('`').skip(1).step_by(2) {
-                if !token.starts_with("--mcp") {
-                    continue;
-                }
-                // `--mcp-allow-*` is prose shorthand for "whichever of the
-                // family applies", not a claim that a flag literally named
-                // with a `*` exists — a glob is self-evidently not a literal
-                // flag name, so it doesn't constrain how the docs are written.
-                if token.contains('*') {
-                    continue;
-                }
-                // `--mcp-http 127.0.0.1:8765` — compare the flag, not its argument.
-                let flag = token.split_whitespace().next().unwrap_or(token);
-                if DOCUMENTED_AS_ABSENT.contains(&flag) {
+                if token.starts_with("--mcp") {
+                    // `--mcp-allow-*` is prose shorthand for "whichever of the
+                    // family applies", not a claim that a flag literally named
+                    // with a `*` exists — a glob is self-evidently not a literal
+                    // flag name, so it doesn't constrain how the docs are written.
+                    if token.contains('*') {
+                        continue;
+                    }
+                    // `--mcp-http 127.0.0.1:8765` — compare the flag, not its argument.
+                    let flag = token.split_whitespace().next().unwrap_or(token);
+                    if DOCUMENTED_AS_ABSENT.contains(&flag) {
+                        assert!(
+                            !main_rs.contains(&format!("\"{flag}\"")),
+                            "{flag} is on DOCUMENTED_AS_ABSENT but the CLI now accepts it — \
+                             the docs saying it does not exist are now wrong"
+                        );
+                        continue;
+                    }
                     assert!(
-                        !main_rs.contains(&format!("\"{flag}\"")),
-                        "{flag} is on DOCUMENTED_AS_ABSENT but the CLI now accepts it — \
-                         the docs saying it does not exist are now wrong"
+                        main_rs.contains(&format!("\"{flag}\"")),
+                        "docs/{name} names {flag}, which the CLI does not accept"
                     );
-                    continue;
+                } else if token.starts_with("SRELENS_") {
+                    // A bare env var name (`SRELENS_MCP_TOKEN`) or one shown with
+                    // a shell assignment (`SRELENS_MCP_TOKEN=...`) — compare just
+                    // the name.
+                    let var = token
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or(token);
+                    assert!(
+                        main_rs.contains(&format!("\"{var}\"")),
+                        "docs/{name} names environment variable {var}, which main.rs does not reference"
+                    );
                 }
-                assert!(
-                    main_rs.contains(&format!("\"{flag}\"")),
-                    "docs/{name} names {flag}, which the CLI does not accept"
-                );
             }
         }
     }

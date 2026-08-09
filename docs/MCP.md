@@ -23,19 +23,33 @@ srelens speaks MCP over two transports:
   your privileges by virtue of having started the process, so there is no
   token to configure. This is the simplest setup and what Claude Desktop,
   Claude Code, and most local agent tooling expect.
-- **Loopback HTTP** — `srelens --mcp-http 127.0.0.1:8765` (or the equivalent
-  toggle in **Settings → MCP** of an already-running desktop app) exposes the
-  same server on a local port, authenticated with a bearer token. Tool calls
-  made this way run inside the same process as the GUI, sharing its
-  authenticated cluster connections — and, crucially, its confirm dialog: a
-  gated tool call over HTTP pops the same in-app approval prompt a click in
-  the UI would, in whichever srelens window is open.
+- **Loopback HTTP** exposes the server on a local port over a bearer token —
+  but as two distinct modes, because they run in different processes with
+  different consequences for who approves a gated call:
+  - **Settings → MCP → Run the MCP server**, in an already-running desktop
+    app, runs the HTTP server *inside* the GUI's own process, sharing its
+    authenticated cluster connections and, crucially, its confirm dialog: a
+    gated tool call over this connection pops the same in-app approval
+    prompt a click in the UI would, in whichever srelens window is open.
+    This is the mode with a human in the loop.
+  - **`srelens --mcp-http <addr>`** spawns a **separate, headless** process.
+    It does not attach to a running GUI — if the GUI's own toggle already
+    holds the port, this second process fails to bind rather than sharing
+    it. There is no window and therefore no dialog: a gated call is refused
+    unless the process was started with `--mcp-allow-destructive` /
+    `--mcp-allow-sensitive-reads` and the individual call carries
+    `"_confirm": true`. Once a call is pre-authorised that way, it proceeds
+    with **no human approval at any point** — this flag combination is for
+    deliberate unattended automation, not a way to reach a human reviewer.
 
-Pick stdio unless you specifically need calls to land in an already-running
-GUI session — for example, so a human watching the desktop app can see and
-approve an agent's confirm dialogs as they happen, or so the agent shares
-cluster contexts the GUI already has open. Everything else — including both
-worked examples below — works identically over either transport.
+Pick stdio for a client that spawns srelens itself — the common case. Reach
+for the Settings → MCP toggle only if you need calls to land in an
+already-running GUI session, so a human watching the app can see and approve
+confirm dialogs as they happen, or so the agent shares cluster contexts the
+GUI already has open. Reach for `srelens --mcp-http` only for unattended
+automation where you deliberately pre-authorise gated calls with the flags
+above; it is not a way to reach a human reviewer, since headless means
+exactly that.
 
 ## Security model
 
@@ -119,9 +133,9 @@ critical clusters.
 
 ## The catalog and its safety classes
 
-[mcp-catalog.md](mcp-catalog.md) enumerates all 82 tools, the 4 built-in
-prompts, and every resource URI, grouped by area (Kubernetes, Helm, Toolbox,
-Server) and by **safety class**. There are exactly four:
+[mcp-catalog.md](mcp-catalog.md) enumerates every tool, the built-in prompts,
+and every resource URI, grouped by area (Kubernetes, Helm, Toolbox, Server)
+and, for tools, by **safety class**. There are exactly four:
 
 | Class | Confirm gate? | Headless flag needed |
 | --- | --- | --- |
@@ -159,12 +173,24 @@ look up its actual safety class.
 
 ## Client configuration
 
+**Prerequisite: `srelens` must resolve on `PATH`.** Every generated config
+below runs `"command": "srelens"` as a bare name, but a normal install does
+not put it there. From the desktop app, use **Settings → MCP → Install the
+srelens CLI**, which symlinks the running binary to `~/.local/bin/srelens`.
+Then confirm it actually resolves — `srelens --version` or `which srelens` —
+before pasting a config that assumes it does. If it doesn't, either add
+`~/.local/bin` to your shell's `PATH` or replace `"srelens"` with the
+absolute path Settings → MCP reports. **This install step is Unix-only**
+(macOS/Linux); on Windows, skip it and put the absolute path to the
+installed `srelens.exe` directly in `"command"` instead.
+
 Ready-to-paste snippets for Claude Desktop, Claude Code, a generic stdio
-client, the headless consent flags, and connecting to a running GUI over
-HTTP are all in
+client, the headless consent flags, and the HTTP transport are all in
 [mcp-catalog.md § Client configuration](mcp-catalog.md#client-configuration).
-Copy the one that matches your client rather than hand-rolling it — Task 8's
-test in this repository parses those exact blocks, so they stay accurate.
+Copy the one that matches your client rather than hand-rolling it — a test
+in this repository parses every one of those fenced blocks as JSON, so a
+config that isn't valid JSON fails the build; it does not, by itself, prove
+the envelope matches what your specific client expects.
 
 ## Worked example 1: read-only triage
 
@@ -197,18 +223,19 @@ Prompt: *"Scale `web` to 3, then restart it."*
 Unlike triage, this intends to change the cluster, so it walks through the
 confirm gate twice — once per mutating call.
 
-1. The agent calls `k8s.scale` with `{ "name": "web", "namespace": "...",
-   "replicas": 3 }`. `k8s.scale` is classed **needs confirmation**, so the
-   call blocks: in the GUI, a dialog appears asking you to approve scaling
-   `web` to 3 replicas; headless, it would instead require
-   `--mcp-allow-destructive` on the process plus `"_confirm": true` on this
-   call.
+1. The agent calls `k8s.scale` with `{ "context": "...", "kind": "Deployment",
+   "namespace": "...", "name": "web", "replicas": 3 }`. `k8s.scale` is classed
+   **needs confirmation**, so the call blocks: in the GUI, a dialog appears
+   asking you to approve scaling `web` to 3 replicas; headless, it would
+   instead require `--mcp-allow-destructive` on the process plus
+   `"_confirm": true` on this call.
    - **Approve** it, and the call proceeds — `k8s.scale` sets the replica
      count on the cluster and returns `{ "name": "web", "ok": true }`; it
      does not echo back the updated spec or replica count, so an agent that
      wants to confirm the new count needs a follow-up read (`k8s.getObject`
      or `k8s.listDeployments`).
-2. The agent then calls `k8s.rolloutRestart` for `web`. This is a distinct
+2. The agent then calls `k8s.rolloutRestart` with `{ "context": "...", "kind":
+   "Deployment", "namespace": "...", "name": "web" }`. This is a distinct
    confirm-gated call, not covered by the first approval — it pauses on its
    own dialog. **Approve** that too, and the rollout restart is triggered
    and returns success.
@@ -227,11 +254,12 @@ the denial as an exception that aborts the whole interaction.
 
 ## Prompts
 
-srelens ships a handful of MCP **prompts** — ready-made diagnostic flows for
-an agent to run instead of improvising one. Four built-ins cover common
-failure modes: `pod-crashloop`, `pod-pending`, `node-pressure`, and
-`service-no-endpoints`. An MCP client that supports prompts shows them in
-its prompt picker.
+srelens ships a set of built-in MCP **prompts** — ready-made diagnostic flows
+for an agent to run instead of improvising one, covering common failure
+modes such as a crash-looping pod or a service with no endpoints. The full
+list, with each one's description and arguments, is in
+[mcp-catalog.md § Prompts](mcp-catalog.md#prompts). An MCP client that
+supports prompts shows them in its prompt picker.
 
 Every prompt takes one required argument, `context`; everything else is
 optional. Naming the object it's about — `pod`, `node`, or `service` —
@@ -292,33 +320,31 @@ audited exactly like any other MCP call.
 
 Alongside tools and prompts, srelens exposes cluster state as MCP
 **resources** — addressable under `k8s://` URIs that a client can list,
-read, and (over stdio) subscribe to for change notifications.
+read, and (over stdio) subscribe to for change notifications. The exact
+fixed URIs and parameterised URI shapes are listed in
+[mcp-catalog.md § Resources](mcp-catalog.md#resources); what matters here is
+what they mean and how to use them.
 
-Two URIs are fixed:
+A fixed URI addresses something that isn't a single cluster object — the
+list of contexts srelens can connect to, or a dump of the whole tool/prompt/
+resource catalog for a client that wants to introspect the server in one
+read. Everything else addresses a single object by context, namespace, kind
+and name, with an optional trailing segment for that object's events or
+(Pod only) its logs. What each shape resolves to:
 
-- `k8s://contexts` — the same contexts `k8s.listContexts` returns.
-- `k8s://catalog` — every tool, prompt and resource template this server
-  exposes, so a client can introspect the whole surface in one read.
+- the bare object URI reads its manifest as YAML;
+- appending `/events` lists events whose involved object is that resource;
+- appending `/logs` (Pod only) reads its recent log output, with the
+  container name as an optional final segment.
 
-Everything else addresses a single object, using one of these URI shapes:
-
-```
-k8s://<context>/<namespace>/<kind>/<name>
-k8s://<context>/<namespace>/<kind>/<name>/events
-k8s://<context>/<namespace>/Pod/<name>/logs
-k8s://<context>/<namespace>/Pod/<name>/logs/<container>
-```
-
-The first reads the object's manifest as YAML; `/events` lists events whose
-involved object is that resource; `/logs` reads a pod's recent log output.
 Cluster-scoped kinds (`Node`, `PersistentVolume`, `ClusterRole`, and so on)
 have no namespace — use `-` in that slot rather than leaving it blank.
 
 `/logs` without a container works only for a single-container pod — that is
 the one case the Kubernetes log API will serve without being told which
 container you mean. For a pod with more than one container (a sidecar, say),
-add the container as a sixth segment; omitting it gets you an error naming
-every container to choose from, not a guess at which one you meant.
+name the container explicitly; omitting it gets you an error naming every
+container to choose from, not a guess at which one you meant.
 
 **Secrets are not addressable.** A `k8s://.../Secret/...` read is refused
 with an error naming the alternative: fetch secret data with the
@@ -331,11 +357,11 @@ material.
 Every segment is percent-encoded, so a context name containing `/` or `:` —
 an EKS cluster ARN, say — round-trips safely.
 
-`resources/list` returns only the two fixed entries above. Enumerating
-every object in a cluster would be unbounded, and would need a cluster
-round trip just to answer a discovery call. Object addressing is
-discoverable instead through `resources/templates/list`, which advertises
-the four URI shapes above as templates for a client to fill in.
+`resources/list` returns only the fixed entries. Enumerating every object in
+a cluster would be unbounded, and would need a cluster round trip just to
+answer a discovery call. Object addressing is discoverable instead through
+`resources/templates/list`, which advertises the parameterised shapes above
+as templates for a client to fill in.
 
 A resource read is resolved to the same capability call a tool invocation
 would make — `k8s.getManifest`, `k8s.listEvents`, `k8s.podLogs`, or
