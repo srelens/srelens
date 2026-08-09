@@ -536,8 +536,30 @@ mod tests {
                     }
                     walk(&path, out);
                 } else if path.extension().is_some_and(|e| e == "rs") {
+                    // Skip the catalog renderer. It defines the documented
+                    // names (`TOKEN_ENV = "SRELENS_MCP_TOKEN"`) in order to
+                    // *print* them, so finding a literal there is not evidence
+                    // that anything reads the variable — it would let this
+                    // guard pass even after the variable was renamed out of
+                    // production. The guard has to look at code that uses the
+                    // name, not code that documents it.
+                    if path.file_name().is_some_and(|n| n == "mcp_docs.rs") {
+                        continue;
+                    }
                     if let Ok(text) = std::fs::read_to_string(&path) {
-                        out.push_str(&text);
+                        // Comment lines are dropped. A name mentioned in prose
+                        // — including the comment just above, and this test's
+                        // own doc comment — is not evidence that any code reads
+                        // it. Leaving them in let this guard be satisfied by its
+                        // own explanation of itself.
+                        for line in text.lines() {
+                            let trimmed = line.trim_start();
+                            if trimmed.starts_with("//") {
+                                continue;
+                            }
+                            out.push_str(line);
+                            out.push('\n');
+                        }
                     }
                 }
             }
