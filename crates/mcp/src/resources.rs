@@ -389,7 +389,7 @@ pub fn templates() -> Vec<serde_json::Value> {
         json!({
             "uriTemplate": "k8s://{context}/{namespace}/{kind}/{name}",
             "name": "Object manifest",
-            "description": "A resource's manifest as YAML. Use `-` as the namespace for \
+            "description": "A resource's manifest as YAML. Use - as the namespace for \
                             cluster-scoped kinds. Secrets are not addressable — read them \
                             with the k8s.getSecret tool.",
             "mimeType": "application/yaml"

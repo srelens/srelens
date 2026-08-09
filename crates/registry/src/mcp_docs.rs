@@ -123,6 +123,7 @@ pub fn render_prompts() -> String {
     out
 }
 
+
 /// The addressable resource surface: the fixed entries a client gets from
 /// `resources/list`, then the URI templates from `resources/templates/list`.
 pub fn render_resources() -> String {
@@ -136,11 +137,14 @@ pub fn render_resources() -> String {
 
     out.push_str("`resources/list` returns only these two:\n\n| URI | Description |\n| --- | --- |\n");
     for r in &fixed {
-        out.push_str(&format!(
-            "| `{}` | {} |\n",
-            r["uri"].as_str().unwrap_or_default(),
-            r["description"].as_str().unwrap_or_default()
-        ));
+        // These are internally-produced values, so a missing key is a bug in this repo.
+        let uri = r["uri"]
+            .as_str()
+            .expect("fixed resource missing 'uri' key");
+        let description = r["description"]
+            .as_str()
+            .expect("fixed resource missing 'description' key");
+        out.push_str(&format!("| `{}` | {} |\n", uri, description));
     }
 
     out.push_str(
@@ -148,11 +152,14 @@ pub fn render_resources() -> String {
          | URI template | Description |\n| --- | --- |\n",
     );
     for t in &templates {
-        out.push_str(&format!(
-            "| `{}` | {} |\n",
-            t["uriTemplate"].as_str().unwrap_or_default(),
-            t["description"].as_str().unwrap_or_default()
-        ));
+        // These are internally-produced values, so a missing key is a bug in this repo.
+        let uri_template = t["uriTemplate"]
+            .as_str()
+            .expect("template missing 'uriTemplate' key");
+        let description = t["description"]
+            .as_str()
+            .expect("template missing 'description' key");
+        out.push_str(&format!("| `{}` | {} |\n", uri_template, description));
     }
     out.push('\n');
     out
@@ -469,26 +476,213 @@ mod tests {
 
     #[test]
     fn prompts_render_with_required_arguments_marked() {
+        let lib = srelens_mcp::prompts::PromptLibrary::new(None);
+        let specs = lib.list();
         let md = render_prompts();
-        // Built-ins only: a user's own prompt directory is not a property of
-        // the release, so `PromptLibrary::new(None)` is correct here.
-        assert!(md.contains("`pod-crashloop`"), "got:\n{md}");
-        assert!(md.contains("`node-pressure`"), "got:\n{md}");
-        // `context` is required on every built-in; the marker must show it.
+        // Every built-in prompt must appear with its full row format.
+        for spec in &specs {
+            let args_str: Vec<String> = spec
+                .arguments
+                .iter()
+                .map(|a| {
+                    if a.required {
+                        format!("{} (required)", a.name)
+                    } else {
+                        a.name.clone()
+                    }
+                })
+                .collect();
+            let expected_row = format!(
+                "| `{}` | {} | {} |",
+                spec.name,
+                spec.description,
+                args_str.join(", ")
+            );
+            assert!(
+                md.contains(&expected_row),
+                "prompt {} missing expected row format from:\n{md}",
+                spec.name
+            );
+        }
+        // Specifically verify context is marked as required on all prompts.
         assert!(md.contains("context (required)"), "got:\n{md}");
     }
 
     #[test]
     fn resources_render_both_fixed_entries_and_every_template() {
+        let fixed = srelens_mcp::resources::fixed_resources();
+        let templates = srelens_mcp::resources::templates();
         let md = render_resources();
-        assert!(md.contains("k8s://contexts"), "got:\n{md}");
-        assert!(md.contains("k8s://catalog"), "got:\n{md}");
-        assert!(md.contains("k8s://{context}/{namespace}/{kind}/{name}"), "got:\n{md}");
-        assert!(md.contains("/logs/{container}"), "the container-addressed logs template is missing:\n{md}");
-        // Every template the server advertises must appear.
+
+        // Every fixed resource must appear with its full row format.
+        for r in &fixed {
+            let uri = r["uri"].as_str().expect("fixed resource has 'uri' key");
+            let description = r["description"]
+                .as_str()
+                .expect("fixed resource has 'description' key");
+            let expected_row = format!("| `{}` | {} |", uri, description);
+            assert!(
+                md.contains(&expected_row),
+                "fixed resource {} missing expected row format from:\n{md}",
+                uri
+            );
+        }
+
+        // Every template must appear with its full row format.
+        for t in &templates {
+            let uri_template = t["uriTemplate"]
+                .as_str()
+                .expect("template has 'uriTemplate' key");
+            let description = t["description"]
+                .as_str()
+                .expect("template has 'description' key");
+            let expected_row = format!("| `{}` | {} |", uri_template, description);
+            assert!(
+                md.contains(&expected_row),
+                "template {} missing expected row format from:\n{md}",
+                uri_template
+            );
+        }
+    }
+
+    /// Prompt descriptions and argument names are interpolated into Markdown
+    /// table cells. A description containing `|`, backtick, or newline would
+    /// corrupt the row or break the rendering that `prompts_render_with_required_arguments_marked`
+    /// validates. Resource names and descriptions face the same risk. This test
+    /// fails at the source (in the MCP definitions) rather than producing silently
+    /// broken markdown.
+    #[test]
+    fn no_prompt_or_resource_text_contains_table_or_markdown_delimiters() {
+        // Check prompt descriptions and argument names.
+        let lib = srelens_mcp::prompts::PromptLibrary::new(None);
+        for spec in lib.list() {
+            assert!(
+                !spec.description.contains('|'),
+                "prompt {}: description contains pipe: {:?}",
+                spec.name,
+                spec.description
+            );
+            assert!(
+                !spec.description.contains('`'),
+                "prompt {}: description contains backtick: {:?}",
+                spec.name,
+                spec.description
+            );
+            assert!(
+                !spec.description.contains('\n'),
+                "prompt {}: description contains newline: {:?}",
+                spec.name,
+                spec.description
+            );
+            for arg in &spec.arguments {
+                assert!(
+                    !arg.name.contains('|'),
+                    "prompt {} argument {}: name contains pipe: {:?}",
+                    spec.name,
+                    arg.name,
+                    arg.name
+                );
+                assert!(
+                    !arg.name.contains('`'),
+                    "prompt {} argument {}: name contains backtick: {:?}",
+                    spec.name,
+                    arg.name,
+                    arg.name
+                );
+                assert!(
+                    !arg.name.contains('\n'),
+                    "prompt {} argument {}: name contains newline: {:?}",
+                    spec.name,
+                    arg.name,
+                    arg.name
+                );
+            }
+        }
+
+        // Check fixed resource names and descriptions.
+        for r in srelens_mcp::resources::fixed_resources() {
+            let uri = r["uri"].as_str().expect("has 'uri' key");
+            let name = r["name"].as_str().expect("has 'name' key");
+            let description = r["description"].as_str().expect("has 'description' key");
+            assert!(
+                !name.contains('|'),
+                "fixed resource {}: name contains pipe: {:?}",
+                uri,
+                name
+            );
+            assert!(
+                !name.contains('`'),
+                "fixed resource {}: name contains backtick: {:?}",
+                uri,
+                name
+            );
+            assert!(
+                !name.contains('\n'),
+                "fixed resource {}: name contains newline: {:?}",
+                uri,
+                name
+            );
+            assert!(
+                !description.contains('|'),
+                "fixed resource {}: description contains pipe: {:?}",
+                uri,
+                description
+            );
+            assert!(
+                !description.contains('`'),
+                "fixed resource {}: description contains backtick: {:?}",
+                uri,
+                description
+            );
+            assert!(
+                !description.contains('\n'),
+                "fixed resource {}: description contains newline: {:?}",
+                uri,
+                description
+            );
+        }
+
+        // Check template names and descriptions.
         for t in srelens_mcp::resources::templates() {
-            let pattern = t["uriTemplate"].as_str().unwrap().to_string();
-            assert!(md.contains(&pattern), "template {pattern} missing from:\n{md}");
+            let uri_template = t["uriTemplate"].as_str().expect("has 'uriTemplate' key");
+            let name = t["name"].as_str().expect("has 'name' key");
+            let description = t["description"].as_str().expect("has 'description' key");
+            assert!(
+                !name.contains('|'),
+                "template {}: name contains pipe: {:?}",
+                uri_template,
+                name
+            );
+            assert!(
+                !name.contains('`'),
+                "template {}: name contains backtick: {:?}",
+                uri_template,
+                name
+            );
+            assert!(
+                !name.contains('\n'),
+                "template {}: name contains newline: {:?}",
+                uri_template,
+                name
+            );
+            assert!(
+                !description.contains('|'),
+                "template {}: description contains pipe: {:?}",
+                uri_template,
+                description
+            );
+            assert!(
+                !description.contains('`'),
+                "template {}: description contains backtick: {:?}",
+                uri_template,
+                description
+            );
+            assert!(
+                !description.contains('\n'),
+                "template {}: description contains newline: {:?}",
+                uri_template,
+                description
+            );
         }
     }
 }
