@@ -1,6 +1,7 @@
 mod app_log;
 mod appimage;
 mod assistant;
+mod assistant_history;
 mod bridge;
 pub mod capabilities;
 mod cluster_oidc;
@@ -379,6 +380,10 @@ pub fn run() {
             assistant::chat_start,
             assistant::chat_send,
             assistant::chat_cancel,
+            assistant_history::chat_history_list,
+            assistant_history::chat_history_load,
+            assistant_history::chat_history_save,
+            assistant_history::chat_history_delete,
             invoke_capability,
             start_resource_watch,
             stop_watch,
