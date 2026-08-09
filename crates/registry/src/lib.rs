@@ -14,6 +14,8 @@ use srelens_kube::client_cache::ClientCache;
 mod catalog;
 pub use catalog::{catalog_of, CatalogEntry};
 
+pub mod mcp_docs;
+
 /// Sorted id + annotation-flag projection of the live registry, emitted to a
 /// committed JSON so the frontend palette audit can cross-check it without
 /// linking Rust. See `capability_catalog_json_is_in_sync`.
