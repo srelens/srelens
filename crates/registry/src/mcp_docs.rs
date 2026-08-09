@@ -93,6 +93,71 @@ const SAFETY_ORDER: [SafetyClass; 4] = [
     SafetyClass::Destructive,
 ];
 
+/// Built-in prompts only. A user's own prompt directory is machine-local, so
+/// including it would make the published catalog depend on who generated it.
+pub fn render_prompts() -> String {
+    let lib = srelens_mcp::prompts::PromptLibrary::new(None);
+    let specs = lib.list();
+    let mut out = format!("## Prompts ({})\n\n", specs.len());
+    out.push_str("| Prompt | Description | Arguments |\n| --- | --- | --- |\n");
+    for spec in specs {
+        let args: Vec<String> = spec
+            .arguments
+            .iter()
+            .map(|a| {
+                if a.required {
+                    format!("{} (required)", a.name)
+                } else {
+                    a.name.clone()
+                }
+            })
+            .collect();
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            spec.name,
+            spec.description,
+            args.join(", ")
+        ));
+    }
+    out.push('\n');
+    out
+}
+
+/// The addressable resource surface: the fixed entries a client gets from
+/// `resources/list`, then the URI templates from `resources/templates/list`.
+pub fn render_resources() -> String {
+    let fixed = srelens_mcp::resources::fixed_resources();
+    let templates = srelens_mcp::resources::templates();
+    let mut out = format!(
+        "## Resources ({} fixed, {} templates)\n\n",
+        fixed.len(),
+        templates.len()
+    );
+
+    out.push_str("`resources/list` returns only these two:\n\n| URI | Description |\n| --- | --- |\n");
+    for r in &fixed {
+        out.push_str(&format!(
+            "| `{}` | {} |\n",
+            r["uri"].as_str().unwrap_or_default(),
+            r["description"].as_str().unwrap_or_default()
+        ));
+    }
+
+    out.push_str(
+        "\nObject addressing is discovered through `resources/templates/list`:\n\n\
+         | URI template | Description |\n| --- | --- |\n",
+    );
+    for t in &templates {
+        out.push_str(&format!(
+            "| `{}` | {} |\n",
+            t["uriTemplate"].as_str().unwrap_or_default(),
+            t["description"].as_str().unwrap_or_default()
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 /// Render every tool as `### <Area> — <safety> (<count>)` sections, each a
 /// table sorted by id. Empty combinations are skipped rather than rendered as
 /// an empty table.
@@ -399,6 +464,31 @@ mod tests {
                 !summary.contains('\n'),
                 "{id}: summary contains newline: {summary:?}"
             );
+        }
+    }
+
+    #[test]
+    fn prompts_render_with_required_arguments_marked() {
+        let md = render_prompts();
+        // Built-ins only: a user's own prompt directory is not a property of
+        // the release, so `PromptLibrary::new(None)` is correct here.
+        assert!(md.contains("`pod-crashloop`"), "got:\n{md}");
+        assert!(md.contains("`node-pressure`"), "got:\n{md}");
+        // `context` is required on every built-in; the marker must show it.
+        assert!(md.contains("context (required)"), "got:\n{md}");
+    }
+
+    #[test]
+    fn resources_render_both_fixed_entries_and_every_template() {
+        let md = render_resources();
+        assert!(md.contains("k8s://contexts"), "got:\n{md}");
+        assert!(md.contains("k8s://catalog"), "got:\n{md}");
+        assert!(md.contains("k8s://{context}/{namespace}/{kind}/{name}"), "got:\n{md}");
+        assert!(md.contains("/logs/{container}"), "the container-addressed logs template is missing:\n{md}");
+        // Every template the server advertises must appear.
+        for t in srelens_mcp::resources::templates() {
+            let pattern = t["uriTemplate"].as_str().unwrap().to_string();
+            assert!(md.contains(&pattern), "template {pattern} missing from:\n{md}");
         }
     }
 }
