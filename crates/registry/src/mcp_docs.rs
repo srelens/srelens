@@ -449,10 +449,17 @@ mod tests {
         }
     }
 
+    /// Backticks are allowed if balanced (even count); a single unmatched backtick
+    /// opens a code span that never closes and corrupts rendering. Pipes and newlines
+    /// break the table row structure itself.
+    fn has_unmatched_backticks(s: &str) -> bool {
+        s.matches('`').count() % 2 != 0
+    }
+
     /// Tool summaries are interpolated into Markdown table cells. A summary
-    /// containing `|`, backtick, or newline would corrupt the row or break the pattern
-    /// that `every_tool_appears_exactly_once` counts on. This test fails at the source
-    /// (in the registry) rather than producing silently broken markdown.
+    /// containing `|`, newline, or unmatched backticks would corrupt the row or break
+    /// the pattern that `every_tool_appears_exactly_once` counts on. This test fails
+    /// at the source (in the registry) rather than producing silently broken markdown.
     #[test]
     fn no_summary_contains_table_or_markdown_delimiters() {
         let reg = crate::build_registry();
@@ -464,8 +471,8 @@ mod tests {
                 "{id}: summary contains pipe: {summary:?}"
             );
             assert!(
-                !summary.contains('`'),
-                "{id}: summary contains backtick: {summary:?}"
+                !has_unmatched_backticks(summary),
+                "{id}: summary contains unmatched backtick: {summary:?}"
             );
             assert!(
                 !summary.contains('\n'),
@@ -546,11 +553,11 @@ mod tests {
     }
 
     /// Prompt descriptions and argument names are interpolated into Markdown
-    /// table cells. A description containing `|`, backtick, or newline would
-    /// corrupt the row or break the rendering that `prompts_render_with_required_arguments_marked`
-    /// validates. Resource names and descriptions face the same risk. This test
-    /// fails at the source (in the MCP definitions) rather than producing silently
-    /// broken markdown.
+    /// table cells. A description containing `|`, unmatched backticks, or newline
+    /// would corrupt the row or break the rendering. Resource names and descriptions
+    /// face the same risk. Balanced backticks (`` `-` ``) are allowed; a single
+    /// unmatched backtick opens a code span that never closes. This test fails at
+    /// the source (in the MCP definitions) rather than producing silently broken markdown.
     #[test]
     fn no_prompt_or_resource_text_contains_table_or_markdown_delimiters() {
         // Check prompt descriptions and argument names.
@@ -563,8 +570,8 @@ mod tests {
                 spec.description
             );
             assert!(
-                !spec.description.contains('`'),
-                "prompt {}: description contains backtick: {:?}",
+                !has_unmatched_backticks(&spec.description),
+                "prompt {}: description contains unmatched backtick: {:?}",
                 spec.name,
                 spec.description
             );
@@ -583,8 +590,8 @@ mod tests {
                     arg.name
                 );
                 assert!(
-                    !arg.name.contains('`'),
-                    "prompt {} argument {}: name contains backtick: {:?}",
+                    !has_unmatched_backticks(&arg.name),
+                    "prompt {} argument {}: name contains unmatched backtick: {:?}",
                     spec.name,
                     arg.name,
                     arg.name
@@ -611,8 +618,8 @@ mod tests {
                 name
             );
             assert!(
-                !name.contains('`'),
-                "fixed resource {}: name contains backtick: {:?}",
+                !has_unmatched_backticks(name),
+                "fixed resource {}: name contains unmatched backtick: {:?}",
                 uri,
                 name
             );
@@ -629,8 +636,8 @@ mod tests {
                 description
             );
             assert!(
-                !description.contains('`'),
-                "fixed resource {}: description contains backtick: {:?}",
+                !has_unmatched_backticks(description),
+                "fixed resource {}: description contains unmatched backtick: {:?}",
                 uri,
                 description
             );
@@ -654,8 +661,8 @@ mod tests {
                 name
             );
             assert!(
-                !name.contains('`'),
-                "template {}: name contains backtick: {:?}",
+                !has_unmatched_backticks(name),
+                "template {}: name contains unmatched backtick: {:?}",
                 uri_template,
                 name
             );
@@ -672,8 +679,8 @@ mod tests {
                 description
             );
             assert!(
-                !description.contains('`'),
-                "template {}: description contains backtick: {:?}",
+                !has_unmatched_backticks(description),
+                "template {}: description contains unmatched backtick: {:?}",
                 uri_template,
                 description
             );
