@@ -87,6 +87,19 @@ pub async fn chat_start() -> Result<String, String> {
     Ok(uuid::Uuid::new_v4().to_string())
 }
 
+/// Removes the wrapped path when dropped. The MCP config file `chat_send`
+/// writes for a turn carries the bearer token in cleartext, so it must be
+/// removed on every exit — including an early `?` after a failed spawn — not
+/// just the happy path a bare `remove_file` at the end of the function would
+/// cover.
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Send one user turn. Spawns the agent against our running MCP server and
 /// streams `AgentEvent`s on `chat://<session>`.
 #[tauri::command]
@@ -99,18 +112,24 @@ pub async fn chat_send(
     chats: tauri::State<'_, ChatManager>,
 ) -> Result<(), String> {
     use tauri::Manager;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     let token = mcp
         .session_token()
         .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
     let url = mcp.status_url().ok_or("MCP server URL unavailable")?;
 
-    // Write the MCP config to a temp file the child reads.
+    let channel = format!("chat://{session}");
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
+
+    // Write the MCP config to a temp file the child reads by path (never on
+    // argv). `_cfg_guard`'s Drop removes it on every subsequent exit from
+    // this function, success or error.
     let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
     let dir = app.path().temp_dir().map_err(|e| e.to_string())?;
     let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
     std::fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
+    let _cfg_guard = TempFile(cfg_path.clone());
 
     let cmd = srelens_agent::adapter::claude_command(
         &agent_path,
@@ -125,9 +144,52 @@ pub async fn chat_send(
         .spawn()
         .map_err(|e| format!("could not start the agent: {e}"))?;
 
-    let stdout = child.stdout.take().ok_or("no stdout from agent")?;
-    let channel = format!("chat://{session}");
-    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
+    // `Stdio::piped()` above guarantees this is `Some`; still handled rather
+    // than unwrapped so a future refactor that drops the `piped()` call
+    // degrades to a clean turn-ending error instead of a silently hung UI —
+    // every post-spawn exit re-enables input via a `TurnDone`.
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.start_kill();
+        let message = "the agent process had no stdout".to_string();
+        sink.emit(
+            &channel,
+            serde_json::to_value(srelens_agent::event::AgentEvent::Error { message: message.clone() })
+                .unwrap(),
+        );
+        sink.emit(
+            &channel,
+            serde_json::to_value(srelens_agent::event::AgentEvent::TurnDone).unwrap(),
+        );
+        return Err(message);
+    };
+
+    // Drain stderr concurrently with the stdout loop below: it's piped but
+    // otherwise unread, so once the agent writes past the OS pipe buffer it
+    // would block on write() and wedge stdout along with it. Keep only a
+    // bounded tail; Task 11 wires this into an `error` event on a non-zero
+    // exit, so it's returned via the JoinHandle rather than discarded, but
+    // for this task draining it (so it can never block) is what matters.
+    let stderr_task = child.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            const TAIL_CAP: usize = 8 * 1024;
+            let mut tail: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&buf[..n]);
+                        if tail.len() > TAIL_CAP {
+                            let excess = tail.len() - TAIL_CAP;
+                            tail.drain(0..excess);
+                        }
+                    }
+                }
+            }
+            tail
+        })
+    });
+
     chats.children.lock().unwrap().insert(session.clone(), child);
 
     let mut lines = BufReader::new(stdout).lines();
@@ -142,7 +204,15 @@ pub async fn chat_send(
         );
     }
     chats.children.lock().unwrap().remove(&session);
-    let _ = std::fs::remove_file(&cfg_path);
+
+    // Captured for Task 11 to surface as an `error` event on a non-zero exit;
+    // draining it above is what actually prevents the deadlock.
+    let stderr_tail = match stderr_task {
+        Some(task) => task.await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let _ = stderr_tail;
+
     Ok(())
 }
 
@@ -194,5 +264,17 @@ mod tests {
         assert_eq!(got[0].0, "chat://s1");
         assert_eq!(got[0].1["type"], "textDelta");
         assert_eq!(got[1].1["type"], "turnDone");
+    }
+
+    #[test]
+    fn temp_file_guard_removes_the_file_on_drop() {
+        let path = std::env::temp_dir()
+            .join(format!("srelens-assistant-tempfile-test-{}", std::process::id()));
+        std::fs::write(&path, b"secret").unwrap();
+        {
+            let _guard = TempFile(path.clone());
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
     }
 }
