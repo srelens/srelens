@@ -203,7 +203,10 @@ confirm gate twice — once per mutating call.
    `--mcp-allow-destructive` on the process plus `"_confirm": true` on this
    call.
    - **Approve** it, and the call proceeds — `k8s.scale` sets the replica
-     count and returns success with the new spec.
+     count on the cluster and returns `{ "name": "web", "ok": true }`; it
+     does not echo back the updated spec or replica count, so an agent that
+     wants to confirm the new count needs a follow-up read (`k8s.getObject`
+     or `k8s.listDeployments`).
 2. The agent then calls `k8s.rolloutRestart` for `web`. This is a distinct
    confirm-gated call, not covered by the first approval — it pauses on its
    own dialog. **Approve** that too, and the rollout restart is triggered
