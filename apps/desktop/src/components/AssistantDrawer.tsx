@@ -108,7 +108,8 @@ export function AssistantDrawer({
     listAgents()
       .then((list) => {
         setAgents(list);
-        setSelectedKind(list[0]?.kind ?? "");
+        const firstAvailable = list.find((a) => a.available) ?? list[0];
+        setSelectedKind(firstAvailable?.kind ?? "");
       })
       .catch(() => {
         setAgents([]);

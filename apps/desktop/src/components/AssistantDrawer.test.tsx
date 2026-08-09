@@ -43,7 +43,24 @@ describe("AssistantDrawer", () => {
     expect(screen.queryByText("kind / payments / Deployment api")).toBeFalsy();
   });
 
-  it("disables Send for an unavailable agent until an available one is picked", async () => {
+  it("disables Send and shows the install link when no agent is available", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      {
+        kind: "claude",
+        label: "Claude Code",
+        available: false,
+        path: null,
+        version: null,
+        installUrl: "https://example.com/install-claude",
+      },
+    ]);
+    render(<AssistantDrawer open onClose={() => {}} />);
+    await screen.findByText(/example\.com\/install-claude/);
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("defaults to the first available agent, and disables Send when the user switches to an unavailable one", async () => {
     vi.mocked(chat.listAgents).mockResolvedValue([
       {
         kind: "codex",
@@ -56,13 +73,18 @@ describe("AssistantDrawer", () => {
       { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "" },
     ]);
     render(<AssistantDrawer open onClose={() => {}} />);
-    await screen.findByText(/example\.com\/install-codex/);
-    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "why?" } });
-    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
-
-    fireEvent.change(screen.getByRole("combobox", { name: /agent/i }), { target: { value: "claude" } });
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    // The mock lists the unavailable agent first — the default selection must
+    // still land on the available one, proving "first available" wins over
+    // list order.
     await waitFor(() =>
       expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false),
     );
+
+    fireEvent.change(screen.getByRole("combobox", { name: /agent/i }), { target: { value: "codex" } });
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true),
+    );
+    expect(screen.getByText(/example\.com\/install-codex/)).toBeTruthy();
   });
 });

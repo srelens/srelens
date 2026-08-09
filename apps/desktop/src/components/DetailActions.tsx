@@ -29,10 +29,11 @@ import { ForwardDialog } from "./ForwardDialog";
 import { CopyAsKubectlButton } from "./CopyAsKubectlButton";
 import { toKubectl } from "../lib/kubectlMapper";
 import { copyKubectlCommand } from "../lib/copyKubectl";
+import type { AssistantContext } from "./AssistantDrawer";
 
 type Opener = (s: { context: string; namespace: string; pod: string; container?: string }) => void;
 /** Opens the assistant drawer with the current resource attached as context. */
-export type AskAssistant = (s: { context: string; namespace?: string; kind?: string; name?: string }) => void;
+export type AskAssistant = (s: AssistantContext) => void;
 
 const SCALABLE = ["Deployment", "StatefulSet", "ReplicaSet"];
 const RESTARTABLE = ["Deployment", "StatefulSet", "DaemonSet"];
