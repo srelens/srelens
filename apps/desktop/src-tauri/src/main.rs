@@ -206,7 +206,7 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))
-            .with_resources(srelens_registry::kind_resolver())
+            .with_kind_resolver(srelens_registry::kind_resolver())
             .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
                 cache,
             )));
@@ -270,7 +270,7 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))
-            .with_resources(srelens_registry::kind_resolver())
+            .with_kind_resolver(srelens_registry::kind_resolver())
             .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
                 cache,
             )));

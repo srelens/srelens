@@ -1905,7 +1905,7 @@ async fn delete_context_on_a_copy(h: &mut Harness, ctx: &str) {
 async fn mcp_resource_reads(ctx: &str, pod: &str) {
     println!("=== mcp resources: reads ===");
     let server = srelens_mcp::McpServer::new(Arc::new(build_registry_with(cache())))
-        .with_resources(srelens_registry::kind_resolver());
+        .with_kind_resolver(srelens_registry::kind_resolver());
 
     for (uri, expect) in [
         (format!("k8s://{ctx}/{NS}/Pod/{pod}"), "kind: Pod"),
@@ -1968,7 +1968,7 @@ async fn mcp_resource_reads(ctx: &str, pod: &str) {
 async fn mcp_resource_subscription(ctx: &str, pod: &str) {
     println!("=== mcp resources: subscription ===");
     let server = srelens_mcp::McpServer::new(Arc::new(build_registry_with(cache())))
-        .with_resources(srelens_registry::kind_resolver())
+        .with_kind_resolver(srelens_registry::kind_resolver())
         .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
             cache(),
         )));

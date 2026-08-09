@@ -44,7 +44,7 @@ pub struct McpServer {
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
     audit: Arc<dyn crate::audit::AuditSink>,
     prompts: crate::prompts::PromptLibrary,
-    resources: std::sync::Arc<dyn crate::resources::KindResolver>,
+    kind_resolver: std::sync::Arc<dyn crate::resources::KindResolver>,
     watcher: std::sync::Arc<dyn crate::resources::ObjectWatcher>,
 }
 
@@ -59,7 +59,7 @@ impl McpServer {
             prompts: crate::prompts::PromptLibrary::new(None),
             // Fail closed: no resolver means no object resources, only the two
             // fixed ones.
-            resources: std::sync::Arc::new(crate::resources::NoKinds),
+            kind_resolver: std::sync::Arc::new(crate::resources::NoKinds),
             // Fail closed: refuse subscriptions rather than accept ones that
             // will never fire.
             watcher: std::sync::Arc::new(crate::resources::NoWatcher),
@@ -93,16 +93,16 @@ impl McpServer {
         &self.prompts
     }
 
-    pub fn with_resources(
+    pub fn with_kind_resolver(
         mut self,
-        kinds: std::sync::Arc<dyn crate::resources::KindResolver>,
+        kind_resolver: std::sync::Arc<dyn crate::resources::KindResolver>,
     ) -> Self {
-        self.resources = kinds;
+        self.kind_resolver = kind_resolver;
         self
     }
 
-    pub fn resources(&self) -> &std::sync::Arc<dyn crate::resources::KindResolver> {
-        &self.resources
+    pub fn kind_resolver(&self) -> &std::sync::Arc<dyn crate::resources::KindResolver> {
+        &self.kind_resolver
     }
 
     pub fn with_watcher(
@@ -185,6 +185,25 @@ mod tests {
             Ok(json!({ "echo": v }))
         }));
         Arc::new(reg)
+    }
+
+    #[test]
+    fn kind_resolver_builder_and_getter_expose_injected_resolver() {
+        struct PodKinds;
+
+        impl crate::resources::KindResolver for PodKinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+
+        let server =
+            McpServer::new(registry_with_ping()).with_kind_resolver(Arc::new(PodKinds));
+
+        assert_eq!(
+            server.kind_resolver().scope("Pod"),
+            Some(crate::resources::KindScope::Namespaced)
+        );
     }
 
     #[test]
