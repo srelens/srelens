@@ -76,10 +76,25 @@ pub struct AgentCommand {
 }
 
 /// The only tools the agent may call: srelens's own MCP tools, exposed under
-/// the `srelens` server name configured in `McpConfig::http`. No `Read`,
-/// `Bash`, `Glob`, `WebFetch`, or other Claude Code built-in is allowed —
-/// the agent must operate exclusively through cluster tool calls.
+/// the `srelens` server name configured in `McpConfig::http`. Kept for
+/// documentation of intent — see `DISALLOWED_TOOLS` for the flag that
+/// actually enforces this under `--dangerously-skip-permissions`.
 const ALLOWED_TOOLS: &str = "mcp__srelens__*";
+
+/// Built-in Claude Code tools that must never run — the agent operates the
+/// cluster only through srelens's MCP tools. This, not `ALLOWED_TOOLS`, is
+/// the real box: allow rules (`--allowedTools`) have no effect under
+/// `--dangerously-skip-permissions` because bypass mode already approves
+/// everything, but deny rules (`--disallowedTools`) remain effective even in
+/// bypass mode. Covers shell (`Bash`), file read/write
+/// (`Read`/`Edit`/`Write`/`NotebookEdit`), file enumeration
+/// (`Glob`/`Grep`), network (`WebFetch`/`WebSearch`), and subagent spawning
+/// (`Task`, which could itself invoke any of the above).
+///
+/// Residual risk: this is a deny-list, not deny-by-default — a new built-in
+/// tool added in a future Claude Code version would not be covered until
+/// this list is updated. Tracked as a known gap, not solved here.
+const DISALLOWED_TOOLS: &str = "Bash Read Edit Write NotebookEdit Glob Grep WebFetch WebSearch Task";
 
 /// Establishes the assistant's identity and scope. Deliberately names no
 /// local path and makes no mention of srelens's own source, repo, or
@@ -111,6 +126,8 @@ pub fn claude_command(
         "--dangerously-skip-permissions".to_string(),
         "--allowedTools".to_string(),
         ALLOWED_TOOLS.to_string(),
+        "--disallowedTools".to_string(),
+        DISALLOWED_TOOLS.to_string(),
         "--append-system-prompt".to_string(),
         BASE_SYSTEM_PROMPT.to_string(),
     ];
@@ -144,6 +161,18 @@ mod tests {
     fn a_resume_id_adds_the_resume_flag() {
         let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", Some("sess-123"));
         assert!(cmd.args.windows(2).any(|w| w == ["--resume", "sess-123"]));
+    }
+
+    #[test]
+    fn builtin_tools_are_denied_since_allow_rules_are_inert_under_bypass() {
+        let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", None);
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--disallowedTools" && w[1] == DISALLOWED_TOOLS));
+        assert!(DISALLOWED_TOOLS.contains("Bash"));
+        assert!(DISALLOWED_TOOLS.contains("Read"));
+        assert!(DISALLOWED_TOOLS.contains("WebFetch"));
     }
 
     #[test]
