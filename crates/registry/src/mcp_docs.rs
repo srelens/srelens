@@ -42,6 +42,45 @@ pub fn classify(a: &Annotations) -> SafetyClass {
     }
 }
 
+/// Which section of the catalog a tool belongs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Area {
+    Kubernetes,
+    Helm,
+    Toolbox,
+    Server,
+}
+
+impl Area {
+    pub fn label(self) -> &'static str {
+        match self {
+            Area::Kubernetes => "Kubernetes",
+            Area::Helm => "Helm",
+            Area::Toolbox => "Toolbox",
+            Area::Server => "Server",
+        }
+    }
+
+    /// Section order in the rendered page.
+    pub fn all() -> [Area; 4] {
+        [Area::Kubernetes, Area::Helm, Area::Toolbox, Area::Server]
+    }
+}
+
+/// Helm tools are `k8s.helm*`, so that prefix MUST be tested before the bare
+/// `k8s.` one.
+pub fn area(id: &str) -> Area {
+    if id.starts_with("k8s.helm") {
+        Area::Helm
+    } else if id.starts_with("k8s.") {
+        Area::Kubernetes
+    } else if id.starts_with("toolbox.") {
+        Area::Toolbox
+    } else {
+        Area::Server
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +184,37 @@ mod tests {
                         ann.destructive
                     );
                 }
+            }
+        }
+    }
+
+    /// `k8s.helm*` must be tested BEFORE the `k8s.` prefix, or every Helm tool
+    /// is filed under Kubernetes.
+    #[test]
+    fn helm_is_recognised_before_the_kubernetes_prefix() {
+        assert_eq!(area("k8s.helmInstall"), Area::Helm);
+        assert_eq!(area("k8s.helmListReleases"), Area::Helm);
+        assert_eq!(area("k8s.listPods"), Area::Kubernetes);
+        assert_eq!(area("k8s.scale"), Area::Kubernetes);
+        assert_eq!(area("toolbox.status"), Area::Toolbox);
+        assert_eq!(area("ping"), Area::Server);
+    }
+
+    /// Every registered capability must land in a real area. A new prefix
+    /// falling through to `Server` would bury it under a heading nobody reads.
+    #[test]
+    fn every_registered_capability_maps_to_a_plausible_area() {
+        let reg = crate::build_registry();
+        for id in reg.ids() {
+            let a = area(id);
+            if id.starts_with("k8s.helm") {
+                assert_eq!(a, Area::Helm, "{id}");
+            } else if id.starts_with("k8s.") {
+                assert_eq!(a, Area::Kubernetes, "{id}");
+            } else if id.starts_with("toolbox.") {
+                assert_eq!(a, Area::Toolbox, "{id}");
+            } else {
+                assert_eq!(a, Area::Server, "{id} has an unexpected prefix — add an Area for it");
             }
         }
     }
