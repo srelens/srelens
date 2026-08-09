@@ -1,0 +1,77 @@
+// Typed wrappers for the four chat-history commands (backend: `assistant_history.rs`,
+// Task 14) — disk persistence for the in-app AI assistant's chat sessions.
+// Field names are camelCase to mirror the Rust `Session`/`SessionMeta`
+// structs exactly (`#[serde(rename_all = "camelCase")]`) — no translation
+// happens at this boundary.
+import { invokeCommand } from "../transport/transport";
+import type { ToolStatus } from "./chat";
+
+/** Picker metadata only — no `messages`, so listing sessions stays cheap
+ * even once a session's transcript grows large. */
+export interface SessionMeta {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * A full chat session, including its message transcript. `messages` is
+ * opaque JSON to the backend — the frontend owns its shape; see
+ * `StoredMessage` below for what `AssistantConversation` actually stores.
+ */
+export interface Session extends SessionMeta {
+  contexts: string[];
+  /** Active skill names (Task 23) — always empty for now. */
+  skills: string[];
+  /**
+   * The agent CLI's own session id (for `--resume`). The current
+   * `AgentEvent` stream doesn't carry it — wiring it through needs a
+   * backend change — so this is always `null` for now. Continuing a
+   * reopened session is therefore best-effort ("continue with memory of the
+   * transcript" rather than a true CLI `--resume`), which the spec (§2)
+   * allows.
+   */
+  cliSessionId: string | null;
+  messages: unknown[];
+}
+
+/** A frozen copy of a `ToolCallState` (see `AssistantConversation`),
+ * embedded directly on the stored message it belongs to rather than
+ * referenced by id into a separate live record — that record doesn't
+ * survive a reload. */
+export interface StoredToolCall {
+  id: string;
+  tool: string;
+  args: unknown;
+  status: ToolStatus | null;
+}
+
+/** Mirrors `AssistantConversation`'s `ChatMessage`, with its tool calls
+ * embedded (see `StoredToolCall`) instead of referenced by id. */
+export interface StoredMessage {
+  id: number;
+  role: "user" | "assistant" | "error";
+  text: string;
+  toolCalls?: StoredToolCall[];
+}
+
+/** Saved sessions, newest first. */
+export function listSessions(): Promise<SessionMeta[]> {
+  return invokeCommand("chat_history_list");
+}
+
+/** Load one full session (including its message transcript) by id. */
+export function loadSession(id: string): Promise<Session> {
+  return invokeCommand("chat_history_load", { id });
+}
+
+/** Persist a session, creating or updating both its file and index entry. */
+export function saveSession(session: Session): Promise<void> {
+  return invokeCommand("chat_history_save", { session });
+}
+
+/** Delete a session's file and its index entry. */
+export function deleteSession(id: string): Promise<void> {
+  return invokeCommand("chat_history_delete", { id });
+}
