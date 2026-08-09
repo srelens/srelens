@@ -370,11 +370,15 @@ pub fn run() {
         .manage(ExecManager::new(cache.clone()))
         .manage(ForwardManager::new(cache.clone()))
         .manage(McpHttpManager::new(cache.clone()))
+        .manage(assistant::ChatManager::default())
         .manage(LogStreamManager::new(cache))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
         .invoke_handler(tauri::generate_handler![
             assistant::agent_list,
+            assistant::chat_start,
+            assistant::chat_send,
+            assistant::chat_cancel,
             invoke_capability,
             start_resource_watch,
             stop_watch,

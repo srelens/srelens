@@ -51,7 +51,7 @@ srelens-registry = { path = "../../../crates/registry" }
 # Each backend's transitive deps are already gated to their own target by the
 # keyring crate itself, so enabling all four is safe cross-platform.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
-tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 # Blocking HTTP for Toolbox tool downloads (run inside spawn_blocking).

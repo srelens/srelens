@@ -17,9 +17,8 @@ struct Running {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
-    // Read via `McpHttpManager::session_token`, which has no caller yet — the
-    // in-app assistant wires this up in a later task.
-    #[allow(dead_code)]
+    // Read via `McpHttpManager::session_token`, which the assistant's
+    // `chat_send` uses to authenticate the agent CLI against this server.
     token: srelens_mcp::auth::Token,
 }
 
@@ -56,13 +55,17 @@ impl McpHttpManager {
     /// The bearer token the running loopback MCP server accepts, as hex, or
     /// `None` if no server is running. The assistant uses this to authenticate;
     /// it grants only the loopback MCP surface, never cluster credentials.
-    ///
-    /// No caller yet outside tests — the in-app assistant wires this up in a
-    /// later task.
-    #[allow(dead_code)]
     pub fn session_token(&self) -> Option<String> {
         let running = self.running.lock().unwrap();
         running.as_ref().map(|r| r.token.as_str().to_string())
+    }
+
+    /// The running loopback MCP server's URL (already including the `/mcp`
+    /// path, per `url_for`), or `None` if it isn't running. The assistant's
+    /// `chat_send` passes this straight into the agent's MCP config.
+    pub fn status_url(&self) -> Option<String> {
+        let running = self.running.lock().unwrap();
+        running.as_ref().map(|r| url_for(r.addr))
     }
 }
 
