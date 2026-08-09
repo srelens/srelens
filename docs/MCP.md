@@ -146,8 +146,11 @@ and, for tools, by **safety class**. There are exactly four:
 
 A tool's safety class is what the security model above actually keys off:
 read-only tools never raise a confirm dialog and need no flag headlessly;
-the other three all gate on `_confirm: true` plus the app dialog (or, off
-the GUI, the matching flag), differing only in which flag authorizes them
+the other three are all gated, and *how* depends on where the server runs —
+in the app the call pauses on the confirm dialog and nothing else is needed,
+while headless it needs the matching flag plus `"_confirm": true` on the
+call. `_confirm` is a headless-only mechanism: the in-app policy never reads
+it. The three classes differ only in which flag authorizes them headlessly
 and in how much damage they can do.
 
 **`sensitive` is a separate, orthogonal property — not a fifth safety class
@@ -177,8 +180,10 @@ look up its actual safety class.
 below runs `"command": "srelens"` as a bare name, but a normal install does
 not put it there. From the desktop app, use **Settings → MCP → Install the
 srelens CLI**, which symlinks the running binary to `~/.local/bin/srelens`.
-Then confirm it actually resolves — `srelens --version` or `which srelens` —
-before pasting a config that assumes it does. If it doesn't, either add
+Then confirm it actually resolves — `command -v srelens` — before pasting a
+config that assumes it does. (Don't reach for `srelens --version`: there is no
+version flag, and an unrecognised argument launches the GUI instead of
+printing anything.) If it doesn't, either add
 `~/.local/bin` to your shell's `PATH` or replace `"srelens"` with the
 absolute path Settings → MCP reports. **This install step is Unix-only**
 (macOS/Linux); on Windows, skip it and put the absolute path to the

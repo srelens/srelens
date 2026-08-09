@@ -512,7 +512,7 @@ mod tests {
     /// visible to every account on the machine via `ps`, so it comes from
     /// `SRELENS_MCP_TOKEN` instead. Deleting that sentence to satisfy a test
     /// would make the docs less accurate, not more.
-    const DOCUMENTED_AS_ABSENT: [&str; 1] = ["--mcp-token"];
+    const DOCUMENTED_AS_ABSENT: [&str; 2] = ["--mcp-token", "--version"];
 
     /// A renamed or removed CLI flag must fail here rather than silently
     /// breaking the documented setup path. Also scans for backticked
@@ -584,6 +584,32 @@ mod tests {
         // just as broken in INSTALL.md as in MCP.md.
         for name in ["MCP.md", "mcp-catalog.md", "USAGE.md", "INSTALL.md", "DEVELOPMENT.md"] {
             let md = doc(name);
+
+            // Any flag the docs show being passed to the binary — `srelens
+            // --foo` — not just `--mcp*` ones. A `srelens --version` suggestion
+            // slipped in here once: there is no version flag, and an
+            // unrecognised argument falls through and launches the GUI, so the
+            // suggested verification command would hang a terminal. Scoped to
+            // the `srelens ` prefix so cargo/kubectl flags in the same docs are
+            // not swept in.
+            for occurrence in md.split("srelens --").skip(1) {
+                let flag: String = std::iter::once('-')
+                    .chain(std::iter::once('-'))
+                    .chain(occurrence.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-'))
+                    .collect();
+                if DOCUMENTED_AS_ABSENT.contains(&flag.as_str()) {
+                    assert!(
+                        !main_rs.contains(&format!("\"{flag}\"")),
+                        "{flag} is on DOCUMENTED_AS_ABSENT but the CLI now accepts it — \
+                         the docs saying it does not exist are now wrong"
+                    );
+                    continue;
+                }
+                assert!(
+                    main_rs.contains(&format!("\"{flag}\"")),
+                    "docs/{name} shows `srelens {flag}`, which the CLI does not accept"
+                );
+            }
             for token in md.split('`').skip(1).step_by(2) {
                 if token.starts_with("--mcp") {
                     // `--mcp-allow-*` is prose shorthand for "whichever of the
