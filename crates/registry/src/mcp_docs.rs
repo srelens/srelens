@@ -117,6 +117,10 @@ pub fn render_tools(reg: &srelens_capability::Registry) -> String {
             if rows.is_empty() {
                 continue;
             }
+            // `Registry::ids()` yields sorted order today (BTreeMap), but this sort is
+            // defensive: if the type ever changes to HashMap or if filtering scrambles order,
+            // the sort becomes load-bearing. Without it, the published catalog would be
+            // silently out of order.
             rows.sort_unstable_by_key(|(id, _)| *id);
 
             out.push_str(&format!(
@@ -342,21 +346,59 @@ mod tests {
         assert!(ro.contains("| `k8s.diffManifest` |"), "diffManifest belongs in read-only");
     }
 
+    /// Proves the renderer **preserves** the input's sorted order across filtering and
+    /// grouping — a future change that scrambles rows (HashMap intermediate, broken
+    /// sort, reordering filter) would fail this. Does not prove the sort call itself
+    /// is reachable: input arrives pre-sorted from `Registry::ids()` (BTreeMap), so
+    /// the sort is defensive rather than essential today.
     #[test]
     fn rows_within_a_section_are_sorted_by_id() {
         let reg = crate::build_registry();
         let md = render_tools(&reg);
-        let section = md
-            .split("### ")
-            .find(|s| s.starts_with("Toolbox"))
-            .expect("a Toolbox section exists");
-        let ids: Vec<&str> = section
-            .lines()
-            .filter_map(|l| l.strip_prefix("| `"))
-            .filter_map(|l| l.split('`').next())
-            .collect();
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        assert_eq!(ids, sorted, "Toolbox rows must be sorted by id");
+        for section_text in md.split("### ").skip(1) {
+            // Skip the header line; remaining lines are either table separator or rows.
+            let ids: Vec<&str> = section_text
+                .lines()
+                .skip(2) // Skip heading and separator
+                .filter_map(|l| l.strip_prefix("| `"))
+                .filter_map(|l| l.split('`').next())
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            let section_name = section_text.lines().next().unwrap_or("(unknown)");
+            assert_eq!(
+                ids, sorted,
+                "Section '### {}' rows must be sorted by id, got: {:?}",
+                section_name, ids
+            );
+        }
+    }
+
+    /// Tool summaries are interpolated into Markdown table cells. A summary
+    /// containing `|`, backtick, or newline would corrupt the row or break the pattern
+    /// that `every_tool_appears_exactly_once` counts on. This test fails at the source
+    /// (in the registry) rather than producing silently broken markdown.
+    #[test]
+    fn no_summary_contains_table_or_markdown_delimiters() {
+        let reg = crate::build_registry();
+        for id in reg.ids() {
+            let cap = reg.get(id).expect("capability exists");
+            let summary = &cap.summary;
+            assert!(
+                !summary.contains('|'),
+                "{id}: summary contains pipe: {summary:?}"
+            );
+            assert!(
+                !summary.contains('`'),
+                "{id}: summary contains backtick: {summary:?}"
+            );
+            assert!(
+                !summary.contains('\n'),
+                "{id}: summary contains newline: {summary:?}"
+            );
+        }
     }
 }
