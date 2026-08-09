@@ -1,5 +1,6 @@
 mod app_log;
 mod appimage;
+mod assistant;
 mod bridge;
 pub mod capabilities;
 mod cluster_oidc;
@@ -373,6 +374,7 @@ pub fn run() {
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
         .invoke_handler(tauri::generate_handler![
+            assistant::agent_list,
             invoke_capability,
             start_resource_watch,
             stop_watch,
