@@ -18,6 +18,7 @@ import { NewResourceEditor } from "./components/NewResourceEditor";
 import { EditResourceTab } from "./components/EditResourceTab";
 import { SettingsView } from "./components/SettingsView";
 import { ToolboxView } from "./components/ToolboxView";
+import { AssistantTab } from "./components/AssistantTab";
 import { CommandPalette } from "./components/CommandPalette";
 import { McpConfirmDialog } from "./components/McpConfirmDialog";
 import { Toaster } from "./components/ui/sonner";
@@ -302,6 +303,10 @@ export function App() {
       openToolbox();
       return;
     }
+    if (kind === "assistant") {
+      openAssistant();
+      return;
+    }
     const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
     if (existing) {
       setActiveTabId(existing.id);
@@ -344,6 +349,21 @@ export function App() {
     }
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster: null, kind: "toolbox" }]);
+    setActiveTabId(id);
+    setQuery("");
+  }
+
+  /** Open (or focus) the single workspace-level Assistant tab: a full-tab,
+   *  global chat with the configured coding agent, not scoped to any
+   *  particular resource. */
+  function openAssistant() {
+    const existing = tabs.find((t) => t.kind === "assistant" && !t.cluster);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabIdRef.current++;
+    setTabs((ts) => [...ts, { id, cluster: null, kind: "assistant", namespace: "" }]);
     setActiveTabId(id);
     setQuery("");
   }
@@ -546,6 +566,7 @@ export function App() {
         onToggleTheme={toggleThemeMode}
         onOpenSettings={openSettings}
         onOpenToolbox={openToolbox}
+        onOpenAssistant={openAssistant}
         contextProfiles={contextProfiles}
         kubeconfigFiles={kubeconfigFiles}
         contextOrder={contextOrder}
@@ -602,6 +623,10 @@ export function App() {
                     />
                   ) : activeKind === "toolbox" ? (
                     <ToolboxView key={activeTab.id} initialContext={toolboxContext} />
+                  ) : activeKind === "assistant" ? (
+                    <div className="min-h-0 flex-1 overflow-hidden p-3">
+                      <AssistantTab cluster={activeCluster} namespace={activeTab.namespace} />
+                    </div>
                   ) : activeTab.crd && activeCluster ? (
                     <CustomResourceBrowser
                       key={activeTab.id}
@@ -749,7 +774,9 @@ export function App() {
             ? openSettings()
             : kind === "toolbox"
               ? openToolbox()
-              : activeCluster && openView(activeCluster, kind)
+              : kind === "assistant"
+                ? openAssistant()
+                : activeCluster && openView(activeCluster, kind)
         }
         onOpenResource={openResource}
         onOpenCrd={(crd) => activeCluster && openCrdView(activeCluster, crd)}

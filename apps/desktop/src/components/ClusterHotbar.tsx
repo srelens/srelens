@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Moon, Settings, Sun, Wrench } from "lucide-react";
+import { Bot, Moon, Settings, Sun, Wrench } from "lucide-react";
 import { listContexts, type ClusterContext } from "../lib/clusters";
 import {
   type Theme,
@@ -20,6 +20,7 @@ export function ClusterHotbar({
   onToggleTheme,
   onOpenSettings,
   onOpenToolbox,
+  onOpenAssistant,
   contextProfiles = {},
   kubeconfigFiles = EMPTY_LIST,
   contextOrder = EMPTY_LIST,
@@ -31,6 +32,7 @@ export function ClusterHotbar({
   onToggleTheme: () => void;
   onOpenSettings: () => void;
   onOpenToolbox?: () => void;
+  onOpenAssistant?: () => void;
   contextProfiles?: ContextProfiles;
   kubeconfigFiles?: string[];
   contextOrder?: string[];
@@ -98,6 +100,16 @@ export function ClusterHotbar({
           onClick={onOpenToolbox}
         >
           <Wrench aria-hidden="true" />
+        </button>
+      )}
+      {onOpenAssistant && (
+        <button
+          className="fl-hotbar__theme"
+          aria-label="Open assistant"
+          title="Open assistant"
+          onClick={onOpenAssistant}
+        >
+          <Bot aria-hidden="true" />
         </button>
       )}
       <button

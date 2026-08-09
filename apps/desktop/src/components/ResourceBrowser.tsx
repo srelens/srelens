@@ -120,6 +120,7 @@ export type ResourceKind =
   | "helmreleases"
   | "settings"
   | "toolbox"
+  | "assistant"
   | "newresource"
   | "editresource";
 
@@ -164,6 +165,7 @@ export const RESOURCE_LABELS: Record<ResourceKind, string> = {
   helmreleases: "Helm Releases",
   settings: "Settings",
   toolbox: "Toolbox",
+  assistant: "Assistant",
   newresource: "New Resource",
   editresource: "Edit Resource",
 };
@@ -209,6 +211,7 @@ export const K8S_KIND: Record<ResourceKind, string> = {
   helmreleases: "",
   settings: "",
   toolbox: "",
+  assistant: "",
   newresource: "",
   editresource: "",
 };
