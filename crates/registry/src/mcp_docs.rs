@@ -67,13 +67,25 @@ impl Area {
     }
 }
 
-/// Helm tools are `k8s.helm*`, so that prefix MUST be tested before the bare
-/// `k8s.` one. A match requires the character after `k8s.helm` to be uppercase,
-/// enforcing the naming convention that all real Helm tools follow
-/// (e.g., `k8s.helmInstall`, `k8s.helmUpgrade`). This prevents a hypothetical
-/// `k8s.helmet` from being misfiled.
+/// Which catalog section a capability id belongs under.
+///
+/// The Helm test runs first and is deliberately two-pronged, because the
+/// registry names Helm capabilities two ways: helm as the verb prefix
+/// (`k8s.helmInstall`) and helm as a camelCase word inside the name
+/// (`k8s.getHelmRelease`, `k8s.listHelmReleases`). Matching only the prefix
+/// published those two release readers under Kubernetes.
+///
+/// Two exclusions keep the broader match honest:
+/// - Both prongs require an uppercase letter after `helm`, so a hypothetical
+///   `k8s.helmet` stays under Kubernetes.
+/// - Both are scoped to `k8s.` ids, so `toolbox.installHelm` stays under
+///   Toolbox — it installs the helm *binary*, which is Toolbox work, not a
+///   Helm release operation.
 pub fn area(id: &str) -> Area {
-    if id.strip_prefix("k8s.helm").is_some_and(|rest| rest.starts_with(char::is_uppercase)) {
+    let helm_prefixed =
+        id.strip_prefix("k8s.helm").is_some_and(|rest| rest.starts_with(char::is_uppercase));
+    let helm_word = id.starts_with("k8s.") && id.contains("Helm");
+    if helm_prefixed || helm_word {
         Area::Helm
     } else if id.starts_with("k8s.") {
         Area::Kubernetes
@@ -462,8 +474,20 @@ mod tests {
         let reg = crate::build_registry();
         for id in reg.ids() {
             let a = area(id);
-            if id.starts_with("k8s.helm") {
-                assert_eq!(a, Area::Helm, "{id}");
+            // Toolbox is checked first: `toolbox.installHelm` installs the helm
+            // binary, which is Toolbox work, not a Helm release operation.
+            //
+            // The helm arm is deliberately case-insensitive rather than
+            // mirroring `area`'s own prefix logic. An earlier version asserted
+            // that anything `k8s.`-prefixed but not `k8s.helm`-prefixed was
+            // Kubernetes — which ratified the bug that filed
+            // `k8s.getHelmRelease` and `k8s.listHelmReleases` under Kubernetes
+            // instead of catching it. Expectations here come from what the name
+            // means, not from how `area` happens to parse it.
+            if id.starts_with("toolbox.") {
+                assert_eq!(a, Area::Toolbox, "{id}");
+            } else if id.to_ascii_lowercase().contains("helm") {
+                assert_eq!(a, Area::Helm, "{id} names helm, so it belongs under Helm");
             } else if id.starts_with("k8s.") {
                 assert_eq!(a, Area::Kubernetes, "{id}");
             } else if id.starts_with("toolbox.") {
@@ -484,8 +508,15 @@ mod tests {
         assert_eq!(area("k8s.helmet"), Area::Kubernetes, "lowercase after k8s.helm");
         assert_eq!(area("k8s.helm"), Area::Kubernetes, "bare k8s.helm with no verb");
 
-        // Real Helm tools that MUST match
+        // Real Helm tools that MUST match, in both naming styles the registry
+        // actually uses: helm as the verb prefix, and helm as a camelCase word.
         assert_eq!(area("k8s.helmInstall"), Area::Helm);
+        assert_eq!(area("k8s.getHelmRelease"), Area::Helm, "helm as a camelCase word");
+        assert_eq!(area("k8s.listHelmReleases"), Area::Helm, "helm as a camelCase word");
+
+        // And the camelCase match must not reach outside `k8s.`: installing the
+        // helm binary is Toolbox work.
+        assert_eq!(area("toolbox.installHelm"), Area::Toolbox, "toolbox owns binary installs");
     }
 
     /// Adding a new `Area` variant should be caught by the exhaustive match here,

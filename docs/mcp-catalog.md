@@ -9,7 +9,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (48)
+### Kubernetes — read-only (46)
 
 | Tool | Summary |
 | --- | --- |
@@ -17,7 +17,6 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.canI` | check whether the current user can perform actions (SelfSubjectAccessReview, batched) |
 | `k8s.clusterInfo` | connect to a kube context and report server version and reachability |
 | `k8s.diffManifest` | diff a manifest against the cluster via server dry-run apply (per document) |
-| `k8s.getHelmRelease` | fetch a Helm release's values, manifest, and revision history |
 | `k8s.getManifest` | fetch a resource's manifest as YAML (any supported kind) |
 | `k8s.getObject` | fetch a resource as a structured JSON object (any supported kind) |
 | `k8s.listCRDs` | list installed CustomResourceDefinitions (group, kind, plural, scope) |
@@ -31,7 +30,6 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.listDeployments` | list deployments in a namespace of a connected kube context |
 | `k8s.listEndpointSlices` | list EndpointSlices in a namespace of a connected kube context |
 | `k8s.listEvents` | list events in a connected kube context |
-| `k8s.listHelmReleases` | list installed Helm releases (latest revision of each) |
 | `k8s.listIngresses` | list Ingresses in a namespace of a connected kube context |
 | `k8s.listJobs` | list Jobs in a namespace of a connected kube context |
 | `k8s.listLimitRanges` | list LimitRanges in a namespace of a connected kube context |
@@ -92,13 +90,15 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.drainNode` | cordon a node and evict its evictable pods (destructive) |
 | `k8s.evictPod` | evict a pod via the eviction API (respects PodDisruptionBudgets) |
 
-### Helm — read-only (3)
+### Helm — read-only (5)
 
 | Tool | Summary |
 | --- | --- |
+| `k8s.getHelmRelease` | fetch a Helm release's values, manifest, and revision history |
 | `k8s.helmSearchRepo` | search configured Helm repos for a chart by name, resolving its full ref and available versions |
 | `k8s.helmTemplate` | render a chart's manifests locally (helm template) for preview |
 | `k8s.helmVersion` | report the installed Helm client version (detects whether helm is available) |
+| `k8s.listHelmReleases` | list installed Helm releases (latest revision of each) |
 
 ### Helm — needs confirmation (5)
 
