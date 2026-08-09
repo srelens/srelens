@@ -28,6 +28,7 @@ actions are identified and ask for confirmation before they run.
 - [Command palette](#command-palette)
 - [Application logs](#application-logs)
 - [MCP server for AI agents](#mcp-server-for-ai-agents)
+- [AI assistant](#ai-assistant)
 - [Settings reference](#settings-reference)
 - [Updating](#updating)
 
@@ -345,6 +346,23 @@ secret material, is gated — but *how* depends on where the server is running:
 
 Wiring an agent to srelens — transports, the security model, the full tool
 catalog and worked examples — is documented in [MCP.md](MCP.md).
+
+## AI assistant
+
+Beyond the standalone MCP server above, srelens also has an in-app assistant:
+a chat drawer, opened from a resource's **Ask assistant** action, that drives
+srelens's own capabilities through your own installed coding-agent CLI —
+Claude Code today, with other agents following later. It needs two things to
+be usable: that CLI installed and on your PATH, and the MCP server running
+(**Settings → MCP**, [above](#mcp-server-for-ai-agents)) — until both are
+true the drawer shows what's missing and disables sending.
+
+Functionally the assistant is just another MCP client, so the same rules from
+the section above apply: reads run immediately, and anything that changes
+cluster state or reads back secret material raises the same confirm dialog,
+shown inline in the drawer's own transcript as well as the usual modal. The
+agent process itself never receives your kube credentials — only a scoped
+bearer token good for this loopback MCP server and nothing else.
 
 ## Settings reference
 

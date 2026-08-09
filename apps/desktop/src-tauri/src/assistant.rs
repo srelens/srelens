@@ -73,6 +73,47 @@ fn emit_events(
     saw_done
 }
 
+/// Last non-empty line of a byte buffer, trimmed — used to turn a raw stderr
+/// tail into a one-line error message instead of dumping a whole traceback
+/// into the transcript.
+fn last_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Close out a turn whose stdout stream ended without a `TurnDone`: if the
+/// child also exited non-zero, that's a crash, not a clean finish, so an
+/// `Error` (carrying the stderr tail) is emitted before the synthetic
+/// `TurnDone` that always re-enables the drawer's input. A stream that DID
+/// see `TurnDone` needs nothing further — the agent already closed its own
+/// turn. Pure over the sink, so the crash-reporting decision is unit-tested
+/// without spawning a process.
+fn finish_turn(sink: &dyn EventSink, channel: &str, saw_done: bool, crashed: bool, stderr_tail: &[u8]) {
+    if saw_done {
+        return;
+    }
+    if crashed {
+        let tail = last_line(stderr_tail);
+        let message = if tail.is_empty() {
+            "the agent process exited unexpectedly".to_string()
+        } else {
+            tail
+        };
+        sink.emit(
+            channel,
+            serde_json::to_value(srelens_agent::event::AgentEvent::Error { message }).unwrap(),
+        );
+    }
+    sink.emit(
+        channel,
+        serde_json::to_value(srelens_agent::event::AgentEvent::TurnDone).unwrap(),
+    );
+}
+
 /// Tauri-managed state owning the running chat turns, keyed by session id, so
 /// `chat_cancel` can find and kill the right child process.
 #[derive(Default)]
@@ -166,9 +207,8 @@ pub async fn chat_send(
     // Drain stderr concurrently with the stdout loop below: it's piped but
     // otherwise unread, so once the agent writes past the OS pipe buffer it
     // would block on write() and wedge stdout along with it. Keep only a
-    // bounded tail; Task 11 wires this into an `error` event on a non-zero
-    // exit, so it's returned via the JoinHandle rather than discarded, but
-    // for this task draining it (so it can never block) is what matters.
+    // bounded tail, surfaced as an `error` event below if the child exits
+    // non-zero.
     let stderr_task = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
             const TAIL_CAP: usize = 8 * 1024;
@@ -197,21 +237,25 @@ pub async fn chat_send(
     while let Ok(Some(line)) = lines.next_line().await {
         saw_done |= emit_events(sink.clone(), &channel, std::iter::once(line));
     }
-    if !saw_done {
-        sink.emit(
-            &channel,
-            serde_json::to_value(srelens_agent::event::AgentEvent::TurnDone).unwrap(),
-        );
-    }
-    chats.children.lock().unwrap().remove(&session);
 
-    // Captured for Task 11 to surface as an `error` event on a non-zero exit;
-    // draining it above is what actually prevents the deadlock.
+    // Taken out of the map either here, or already by `chat_cancel` (a
+    // user-initiated kill, which is not a crash worth reporting below).
+    let removed_child = chats.children.lock().unwrap().remove(&session);
+
     let stderr_tail = match stderr_task {
         Some(task) => task.await.unwrap_or_default(),
         None => Vec::new(),
     };
-    let _ = stderr_tail;
+
+    // Wait for the actual exit and reap the process — a well-behaved agent
+    // that closes stdout just before exiting would otherwise leave a zombie —
+    // and use the status to tell a crash from a clean finish.
+    let crashed = match removed_child {
+        Some(mut child) => !child.wait().await.map(|s| s.success()).unwrap_or(false),
+        None => false,
+    };
+
+    finish_turn(sink.as_ref(), &channel, saw_done, crashed, &stderr_tail);
 
     Ok(())
 }
@@ -264,6 +308,55 @@ mod tests {
         assert_eq!(got[0].0, "chat://s1");
         assert_eq!(got[0].1["type"], "textDelta");
         assert_eq!(got[1].1["type"], "turnDone");
+    }
+
+    #[test]
+    fn a_clean_turn_that_already_saw_turn_done_emits_nothing_further() {
+        let sink = std::sync::Arc::new(RecordingSink(Default::default()));
+        finish_turn(sink.as_ref(), "chat://s1", true, true, b"ignored, moot: saw_done wins");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stream_that_ends_cleanly_without_turn_done_gets_only_a_synthetic_one() {
+        let sink = std::sync::Arc::new(RecordingSink(Default::default()));
+        finish_turn(sink.as_ref(), "chat://s1", false, false, b"");
+        let got = sink.0.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1["type"], "turnDone");
+    }
+
+    #[test]
+    fn a_crash_emits_an_error_with_the_stderr_tail_before_the_synthetic_turn_done() {
+        let sink = std::sync::Arc::new(RecordingSink(Default::default()));
+        finish_turn(
+            sink.as_ref(),
+            "chat://s1",
+            false,
+            true,
+            b"Traceback (most recent call last)\nRuntimeError: boom\n",
+        );
+        let got = sink.0.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].1["type"], "error");
+        assert_eq!(got[0].1["message"], "RuntimeError: boom");
+        assert_eq!(got[1].1["type"], "turnDone");
+    }
+
+    #[test]
+    fn a_crash_with_no_stderr_still_gets_a_generic_error_message() {
+        let sink = std::sync::Arc::new(RecordingSink(Default::default()));
+        finish_turn(sink.as_ref(), "chat://s1", false, true, b"");
+        let got = sink.0.lock().unwrap();
+        assert_eq!(got[0].1["type"], "error");
+        assert_eq!(got[0].1["message"], "the agent process exited unexpectedly");
+    }
+
+    #[test]
+    fn last_line_trims_and_skips_trailing_blank_lines() {
+        assert_eq!(last_line(b"first\nsecond\n\n"), "second");
+        assert_eq!(last_line(b"  only  \n"), "only");
+        assert_eq!(last_line(b""), "");
     }
 
     #[test]

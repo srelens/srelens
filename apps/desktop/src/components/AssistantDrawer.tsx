@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Drawer } from "../ui/Drawer";
 import { Badge, Button, Spinner, TextInput } from "../ui";
 import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
+import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
 
 export type AssistantContext = { context: string; namespace?: string; kind?: string; name?: string };
 
@@ -30,7 +32,9 @@ interface ToolCallState {
 
 interface ChatMessage {
   id: number;
-  role: "user" | "assistant";
+  /** `error` renders as its own red bubble — a transport failure or a stream
+   * `error` event, neither of which belongs to either side of the exchange. */
+  role: "user" | "assistant" | "error";
   text: string;
   /** Tool calls started during this (assistant) turn, in order. */
   toolCallIds?: string[];
@@ -48,12 +52,22 @@ function summarizeArgs(args: unknown): string {
   }
 }
 
-/** A single tool invocation: name, a short args summary, and a status badge (spinner while running). */
+/**
+ * A single tool invocation: name and a status badge (spinner while running)
+ * are always visible; the args summary is behind a disclosure toggle,
+ * collapsed by default so a busy turn doesn't flood the transcript.
+ */
 function ToolCallCard({ tool, args, status }: ToolCallState) {
+  const [expanded, setExpanded] = useState(false);
   const summary = summarizeArgs(args);
   return (
     <div className="mt-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
-      <div className="flex items-center justify-between gap-2">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 text-left"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((e) => !e)}
+      >
         <span className="font-mono font-medium">{tool}</span>
         {status ? (
           <Badge variant={status === "ok" ? "success" : status === "denied" ? "warning" : "danger"}>
@@ -62,8 +76,43 @@ function ToolCallCard({ tool, args, status }: ToolCallState) {
         ) : (
           <Spinner className="size-3" label="Running" />
         )}
+      </button>
+      {expanded && summary && <div className="mt-1 truncate font-mono text-muted-foreground">{summary}</div>}
+    </div>
+  );
+}
+
+/**
+ * The same `mcp://confirm-request` the modal (`McpConfirmDialog`) answers,
+ * rendered inline in the transcript so the approval is visible next to the
+ * turn that triggered it. Both views call `respondToConfirm` with the same
+ * `id` — the backend resolves whichever answers first and errors harmlessly
+ * on the second, which this view swallows since the modal already surfaces
+ * that failure.
+ */
+function ConfirmCard({
+  request,
+  onAnswer,
+}: {
+  request: ConfirmRequest;
+  onAnswer: (id: string, approved: boolean) => void;
+}) {
+  const summary = summarizeArgs(request.args);
+  return (
+    <div className="mt-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono font-medium">{request.tool}</span>
+        <span className="text-muted-foreground">wants to run</span>
       </div>
       {summary && <div className="mt-1 truncate font-mono text-muted-foreground">{summary}</div>}
+      <div className="mt-2 flex justify-end gap-2">
+        <Button variant="secondary" size="xs" onClick={() => onAnswer(request.id, false)}>
+          Deny
+        </Button>
+        <Button size="xs" onClick={() => onAnswer(request.id, true)}>
+          Approve
+        </Button>
+      </div>
     </div>
   );
 }
@@ -92,9 +141,33 @@ export function AssistantDrawer({
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedKind, setSelectedKind] = useState("");
   const [attachedContext, setAttachedContext] = useState<AssistantContext | undefined>(context);
+  const [pendingConfirms, setPendingConfirms] = useState<ConfirmRequest[]>([]);
 
   const sessionRef = useRef<string | null>(null);
   const nextId = useRef(0);
+
+  // Only while open: the modal (`McpConfirmDialog`, mounted app-wide) already
+  // answers a request that arrives while this drawer is closed, so there's
+  // nothing this second view needs to catch before the user can see it.
+  useEffect(() => {
+    if (!open) return;
+    const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
+      setPendingConfirms((q) => [...q, event.payload]);
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, [open]);
+
+  async function answerConfirm(id: string, approved: boolean) {
+    setPendingConfirms((q) => q.filter((r) => r.id !== id));
+    try {
+      await respondToConfirm(id, approved);
+    } catch {
+      // Already answered elsewhere (the modal, or a server-side timeout) —
+      // that failure is surfaced there; nothing left here to retry.
+    }
+  }
 
   // Re-sync the locally-editable context (and the agent list) each time the
   // drawer is (re)opened, so a fresh open picks up the caller's latest target.
@@ -142,12 +215,7 @@ export function AssistantDrawer({
         });
         break;
       case "error":
-        setMessages((msgs) => {
-          const last = msgs[msgs.length - 1];
-          if (!last || last.role !== "assistant") return msgs;
-          const prefix = last.text ? `${last.text}\n` : "";
-          return [...msgs.slice(0, -1), { ...last, text: `${prefix}Error: ${e.message}` }];
-        });
+        setMessages((msgs) => [...msgs, { id: nextId.current++, role: "error", text: e.message }]);
         break;
       case "turnDone":
         break;
@@ -172,6 +240,13 @@ export function AssistantDrawer({
         sessionRef.current = session;
       }
       await sendChat(session, outgoing, agentPath, applyEvent);
+    } catch (e) {
+      // A rejection here means the transport itself failed before any
+      // `error` event could stream (e.g. `chat_send` rejects outright when
+      // the MCP server isn't running) — without this it would be a silent
+      // unhandled rejection and the user would just see the turn hang.
+      const text = e instanceof Error ? e.message : String(e);
+      setMessages((msgs) => [...msgs, { id: nextId.current++, role: "error", text }]);
     } finally {
       setSending(false);
     }
@@ -206,7 +281,9 @@ export function AssistantDrawer({
                 className={
                   m.role === "user"
                     ? "inline-block whitespace-pre-wrap rounded-md bg-primary/10 px-3 py-2 text-left text-sm"
-                    : "inline-block whitespace-pre-wrap rounded-md bg-muted px-3 py-2 text-left text-sm"
+                    : m.role === "error"
+                      ? "inline-block whitespace-pre-wrap rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-sm text-destructive"
+                      : "inline-block whitespace-pre-wrap rounded-md bg-muted px-3 py-2 text-left text-sm"
                 }
               >
                 {m.text || (m.role === "assistant" && sending ? "…" : "")}
@@ -216,6 +293,9 @@ export function AssistantDrawer({
                 return tc ? <ToolCallCard key={id} tool={tc.tool} args={tc.args} status={tc.status} /> : null;
               })}
             </div>
+          ))}
+          {pendingConfirms.map((req) => (
+            <ConfirmCard key={req.id} request={req} onAnswer={answerConfirm} />
           ))}
         </div>
         {!canSend && (

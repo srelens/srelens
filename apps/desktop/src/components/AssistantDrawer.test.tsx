@@ -1,9 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { AssistantDrawer } from "./AssistantDrawer";
 import * as chat from "../lib/chat";
 
+const respondToConfirm = vi.fn();
+let emitConfirm: (payload: unknown) => void = () => {};
+
 vi.mock("../lib/chat");
+vi.mock("../lib/mcpSecurity", () => ({
+  respondToConfirm: (...a: unknown[]) => respondToConfirm(...a),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (_name: string, cb: (e: { payload: unknown }) => void) => {
+    emitConfirm = (payload) => cb({ payload });
+    return Promise.resolve(() => {});
+  },
+}));
 
 // This repo doesn't pull in @testing-library/jest-dom, so assert directly on
 // DOM presence (`getByText` throws if not found) instead of `toBeInTheDocument`.
@@ -13,6 +26,7 @@ beforeEach(() => {
     { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "" },
   ]);
   vi.mocked(chat.startChat).mockResolvedValue("s1");
+  respondToConfirm.mockReset();
 });
 
 describe("AssistantDrawer", () => {
@@ -86,5 +100,63 @@ describe("AssistantDrawer", () => {
       expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true),
     );
     expect(screen.getByText(/example\.com\/install-codex/)).toBeTruthy();
+  });
+
+  it("keeps a tool call's args collapsed until the disclosure toggle is clicked", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.getSecret", args: { name: "db-creds", namespace: "prod" } });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantDrawer open onClose={() => {}} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await screen.findByText("k8s.getSecret");
+    expect(screen.queryByText(/db-creds/)).toBeFalsy();
+
+    fireEvent.click(screen.getByRole("button", { name: /k8s\.getSecret/i }));
+    expect(screen.getByText(/db-creds/)).toBeTruthy();
+  });
+
+  it("renders an error AgentEvent as a distinct error bubble", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "error", message: "the agent crashed" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantDrawer open onClose={() => {}} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    const bubble = await screen.findByText("the agent crashed");
+    expect(bubble.className).toContain("text-destructive");
+  });
+
+  it("catches a rejected sendChat (transport failure) as an error message and re-enables Send", async () => {
+    vi.mocked(chat.sendChat).mockRejectedValue(
+      new Error("Start the MCP server in Settings → MCP before using the assistant."),
+    );
+    render(<AssistantDrawer open onClose={() => {}} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    const bubble = await screen.findByText(/start the mcp server/i);
+    expect(bubble.className).toContain("text-destructive");
+
+    // `sending` must have been cleared even though the promise rejected —
+    // re-type into the box and confirm Send isn't stuck disabled.
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "again" } });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("renders the inline confirm card for a gated call and approves it", async () => {
+    render(<AssistantDrawer open onClose={() => {}} />);
+    await screen.findByPlaceholderText(/ask/i);
+
+    emitConfirm({ id: "c1", tool: "k8s.deletePod", args: { name: "web-1", namespace: "prod" } });
+    await screen.findByText("k8s.deletePod");
+    expect(screen.getByRole("button", { name: /approve/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /deny/i })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("c1", true));
+    expect(screen.queryByText("k8s.deletePod")).toBeFalsy();
   });
 });
