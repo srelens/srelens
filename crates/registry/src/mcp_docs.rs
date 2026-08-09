@@ -179,12 +179,22 @@ pub const TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 /// because Task 8's doc-scan tests in `lib.rs` use `json_blocks` too.
 pub mod tests_support {
     /// Extract the body of every ```json fenced block.
+    ///
+    /// Panics if a ```json fence is opened but never closed, because an
+    /// unterminated block in hand-written prose is an error that should be
+    /// caught during testing, not silently skipped. This is particularly
+    /// important for Task 8's doc-scan validation over `docs/MCP.md`.
     pub fn json_blocks(md: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut current: Option<String> = None;
-        for line in md.lines() {
-            match (&mut current, line.trim_start()) {
-                (None, l) if l.starts_with("```json") => current = Some(String::new()),
+        let mut fence_start_line = 0;
+        for (line_num, line) in md.lines().enumerate() {
+            let trimmed = line.trim_start();
+            match (&mut current, trimmed) {
+                (None, l) if l == "```json" => {
+                    current = Some(String::new());
+                    fence_start_line = line_num;
+                }
                 (Some(buf), l) if l.starts_with("```") => {
                     out.push(std::mem::take(buf));
                     current = None;
@@ -195,6 +205,14 @@ pub mod tests_support {
                 }
                 _ => {}
             }
+        }
+        if current.is_some() {
+            let first_line = md.lines().nth(fence_start_line).unwrap_or("(unknown)");
+            panic!(
+                "json_blocks: ```json fence opened at line {} but never closed: {}",
+                fence_start_line + 1,
+                first_line
+            );
         }
         out
     }
@@ -773,10 +791,21 @@ mod tests {
     #[test]
     fn client_configs_name_the_real_flags_and_token_env_var() {
         let md = render_client_configs();
-        assert!(md.contains(FLAG_STDIO), "got:\n{md}");
-        assert!(md.contains(TOKEN_ENV), "got:\n{md}");
-        assert!(md.contains("Claude Desktop"), "got:\n{md}");
-        assert!(md.contains("Claude Code"), "got:\n{md}");
+        // Check that all five constants appear. These assertions guard section
+        // presence (e.g., the entire "Headless consent" section could vanish
+        // without triggering failure elsewhere), not flag correctness — the
+        // `main.rs` cross-check below is what guards that flags are correct.
+        assert!(md.contains(FLAG_STDIO), "FLAG_STDIO missing:\n{md}");
+        assert!(md.contains(FLAG_HTTP), "FLAG_HTTP missing:\n{md}");
+        assert!(md.contains(FLAG_ALLOW_DESTRUCTIVE), "FLAG_ALLOW_DESTRUCTIVE missing:\n{md}");
+        assert!(md.contains(FLAG_ALLOW_SENSITIVE_READS), "FLAG_ALLOW_SENSITIVE_READS missing:\n{md}");
+        assert!(md.contains(TOKEN_ENV), "TOKEN_ENV missing:\n{md}");
+        // Also verify the sections that carry these constants exist.
+        assert!(md.contains("### Headless consent"), "Headless consent section missing:\n{md}");
+        assert!(md.contains("### HTTP transport"), "HTTP transport section missing:\n{md}");
+        // Verify client names are present.
+        assert!(md.contains("Claude Desktop"), "Claude Desktop name missing:\n{md}");
+        assert!(md.contains("Claude Code"), "Claude Code name missing:\n{md}");
     }
 
     /// Every fenced json block in the generated configs must parse — a
@@ -812,5 +841,19 @@ mod tests {
             main_rs.contains(&format!("\"{TOKEN_ENV}\"")),
             "{TOKEN_ENV} is documented but main.rs does not read it"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "json_blocks: ```json fence opened at line")]
+    fn json_blocks_panics_on_unterminated_fence() {
+        crate::mcp_docs::tests_support::json_blocks("```json\n{\"a\": 1}\n");
+    }
+
+    #[test]
+    fn json_blocks_only_matches_exactly_json_not_json5_or_jsonc() {
+        let md = "```json\n{\"a\": 1}\n```\n```json5\n{a: 1}\n```\n```jsonc\n{\"a\": 1}\n```";
+        let blocks = crate::mcp_docs::tests_support::json_blocks(md);
+        assert_eq!(blocks.len(), 1, "should only match ```json, not json5 or jsonc");
+        assert!(blocks[0].contains("\"a\""), "should contain the json block content");
     }
 }
