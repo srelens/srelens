@@ -4,6 +4,7 @@ import { Drawer } from "../ui/Drawer";
 import { Badge, Button, Spinner, TextInput } from "../ui";
 import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
 import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
+import { AssistantMarkdown } from "./AssistantMarkdown";
 
 export type AssistantContext = { context: string; namespace?: string; kind?: string; name?: string };
 
@@ -145,6 +146,11 @@ export function AssistantDrawer({
 
   const sessionRef = useRef<string | null>(null);
   const nextId = useRef(0);
+  // A single Claude turn streams several `textDelta`s onto the same assistant
+  // message, split up by tool calls in between. Left alone they'd concatenate
+  // raw ("cluster.This is a"); this tracks whether a tool event has landed
+  // since the last delta so the next delta can start a fresh paragraph.
+  const toolEventSincePendingDelta = useRef(false);
 
   // Only while open: the modal (`McpConfirmDialog`, mounted app-wide) already
   // answers a request that arrives while this drawer is closed, so there's
@@ -197,6 +203,7 @@ export function AssistantDrawer({
   function applyEvent(e: AgentEvent) {
     switch (e.type) {
       case "toolCallStart":
+        toolEventSincePendingDelta.current = true;
         setToolCalls((tc) => ({ ...tc, [e.id]: { tool: e.tool, args: e.args, status: null } }));
         setMessages((msgs) => {
           const last = msgs[msgs.length - 1];
@@ -205,15 +212,28 @@ export function AssistantDrawer({
         });
         break;
       case "toolResult":
+        toolEventSincePendingDelta.current = true;
         setToolCalls((tc) => (tc[e.id] ? { ...tc, [e.id]: { ...tc[e.id], status: e.status } } : tc));
         break;
-      case "textDelta":
+      case "textDelta": {
+        // Read + reset the flag synchronously, here, rather than inside the
+        // `setMessages` updater below: React batches updates from this
+        // (non-event-handler) callback, so the updater functions for
+        // several `textDelta`s can all run together during one flush, by
+        // which point a ref mutation made *inside* an updater would already
+        // reflect every event that happened after it, not just the ones
+        // before it — reading the flag here pins it to this event's turn.
+        const toolEventPending = toolEventSincePendingDelta.current;
+        toolEventSincePendingDelta.current = false;
         setMessages((msgs) => {
           const last = msgs[msgs.length - 1];
           if (!last || last.role !== "assistant") return msgs;
-          return [...msgs.slice(0, -1), { ...last, text: last.text + e.text }];
+          const needsBreak = toolEventPending && last.text.length > 0 && !/\s$/.test(last.text);
+          const separator = needsBreak ? "\n\n" : "";
+          return [...msgs.slice(0, -1), { ...last, text: last.text + separator + e.text }];
         });
         break;
+      }
       case "error":
         setMessages((msgs) => [...msgs, { id: nextId.current++, role: "error", text: e.message }]);
         break;
@@ -283,10 +303,14 @@ export function AssistantDrawer({
                     ? "inline-block whitespace-pre-wrap rounded-md bg-primary/10 px-3 py-2 text-left text-sm"
                     : m.role === "error"
                       ? "inline-block whitespace-pre-wrap rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-sm text-destructive"
-                      : "inline-block whitespace-pre-wrap rounded-md bg-muted px-3 py-2 text-left text-sm"
+                      : "inline-block max-w-full rounded-md bg-muted px-3 py-2 text-left text-sm"
                 }
               >
-                {m.text || (m.role === "assistant" && sending ? "…" : "")}
+                {m.role === "assistant" ? (
+                  m.text ? <AssistantMarkdown text={m.text} /> : sending ? "…" : ""
+                ) : (
+                  m.text
+                )}
               </div>
               {m.toolCallIds?.map((id) => {
                 const tc = toolCalls[id];

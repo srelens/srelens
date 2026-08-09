@@ -44,6 +44,27 @@ describe("AssistantDrawer", () => {
     expect(screen.getByText("k8s.listPods")).toBeTruthy();
   });
 
+  it("starts a new paragraph for a text segment that follows a tool call, instead of running it together", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "A." });
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "textDelta", text: "B." });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantDrawer open onClose={() => {}} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    const first = await screen.findByText("A.");
+    const second = await screen.findByText("B.");
+    // Two separate paragraph elements, not one node containing "A.B.".
+    expect(first).not.toBe(second);
+    expect(first.closest("p")).toBeTruthy();
+    expect(second.closest("p")).toBeTruthy();
+    expect(first.closest("p")).not.toBe(second.closest("p"));
+    expect(screen.queryByText("A.B.")).toBeFalsy();
+  });
+
   it("shows a context chip and removes it on click", async () => {
     render(
       <AssistantDrawer
