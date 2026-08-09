@@ -141,6 +141,19 @@ impl Drop for TempFile {
     }
 }
 
+/// Removes the wrapped directory (and everything under it) when dropped. The
+/// agent is spawned with this as its working directory so it has no code or
+/// files of ours to enumerate even if a tool tried; the directory is created
+/// empty per turn and torn down when the turn ends, same lifecycle as
+/// `TempFile` above.
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Send one user turn. Spawns the agent against our running MCP server and
 /// streams `AgentEvent`s on `chat://<session>`.
 #[tauri::command]
@@ -172,6 +185,14 @@ pub async fn chat_send(
     std::fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
     let _cfg_guard = TempFile(cfg_path.clone());
 
+    // A fresh, empty scratch directory for the agent's CWD — never the
+    // srelens process's own working directory (the user's repo or home) —
+    // so a tool that tried to enumerate its surroundings would find nothing.
+    // Removed on every exit from this function, same as `_cfg_guard` above.
+    let cwd_path = dir.join(format!("srelens-agent-cwd-{session}"));
+    std::fs::create_dir_all(&cwd_path).map_err(|e| e.to_string())?;
+    let _cwd_guard = TempDir(cwd_path.clone());
+
     let cmd = srelens_agent::adapter::claude_command(
         &agent_path,
         &prompt,
@@ -180,6 +201,7 @@ pub async fn chat_send(
     );
     let mut child = tokio::process::Command::new(&cmd.program)
         .args(&cmd.args)
+        .current_dir(&cwd_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -366,6 +388,19 @@ mod tests {
         std::fs::write(&path, b"secret").unwrap();
         {
             let _guard = TempFile(path.clone());
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temp_dir_guard_removes_the_directory_and_its_contents_on_drop() {
+        let path = std::env::temp_dir()
+            .join(format!("srelens-assistant-tempdir-test-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("nested.txt"), b"nothing to see here").unwrap();
+        {
+            let _guard = TempDir(path.clone());
             assert!(path.exists());
         }
         assert!(!path.exists());

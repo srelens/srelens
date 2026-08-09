@@ -75,6 +75,18 @@ pub struct AgentCommand {
     pub args: Vec<String>,
 }
 
+/// The only tools the agent may call: srelens's own MCP tools, exposed under
+/// the `srelens` server name configured in `McpConfig::http`. No `Read`,
+/// `Bash`, `Glob`, `WebFetch`, or other Claude Code built-in is allowed —
+/// the agent must operate exclusively through cluster tool calls.
+const ALLOWED_TOOLS: &str = "mcp__srelens__*";
+
+/// Establishes the assistant's identity and scope. Deliberately names no
+/// local path and makes no mention of srelens's own source, repo, or
+/// branches — it must not leak anything about the machine srelens runs on,
+/// only the cluster-operating role the agent is boxed into.
+pub const BASE_SYSTEM_PROMPT: &str = "You are srelens's Kubernetes assistant. Investigate and operate the selected cluster(s) ONLY through the srelens MCP tools (the mcp__srelens__* tools). You have no access to the local filesystem, shell, git, or network beyond those tools; do not attempt to read files or run commands. Be concise. Anything that changes cluster state will prompt the user for confirmation.";
+
 /// Build the Claude Code argv. `resume` carries a prior session id for a
 /// follow-up turn. Prompt is the trailing positional so it can't be mistaken
 /// for a flag value.
@@ -92,8 +104,15 @@ pub fn claude_command(
         "--mcp-config".to_string(),
         mcp_config_path.to_string(),
         // srelens gates tool calls itself, so bypass Claude's own permission
-        // prompt — otherwise every call blocks twice.
+        // prompt — otherwise every call blocks twice. Safe only because
+        // --allowedTools below restricts the agent to srelens's own MCP
+        // tools, whose destructive subset is still gated by srelens's
+        // confirm dialog.
         "--dangerously-skip-permissions".to_string(),
+        "--allowedTools".to_string(),
+        ALLOWED_TOOLS.to_string(),
+        "--append-system-prompt".to_string(),
+        BASE_SYSTEM_PROMPT.to_string(),
     ];
     if let Some(id) = resume {
         args.push("--resume".to_string());
@@ -125,6 +144,48 @@ mod tests {
     fn a_resume_id_adds_the_resume_flag() {
         let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", Some("sess-123"));
         assert!(cmd.args.windows(2).any(|w| w == ["--resume", "sess-123"]));
+    }
+
+    #[test]
+    fn only_srelens_mcp_tools_are_allowed() {
+        let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", None);
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w == ["--allowedTools", "mcp__srelens__*"]));
+    }
+
+    #[test]
+    fn the_base_system_prompt_is_appended() {
+        let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", None);
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--append-system-prompt" && w[1] == BASE_SYSTEM_PROMPT));
+    }
+
+    #[test]
+    fn the_prompt_stays_the_trailing_positional_with_all_new_flags() {
+        let cmd = claude_command("/usr/bin/claude", "Why is web-0 failing?", "/tmp/mcp.json", None);
+        assert_eq!(cmd.args.last().unwrap(), "Why is web-0 failing?");
+    }
+
+    #[test]
+    fn resume_still_only_appears_when_some() {
+        let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", None);
+        assert!(!cmd.args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn base_system_prompt_scopes_the_agent_without_leaking_local_details() {
+        assert!(BASE_SYSTEM_PROMPT.contains("mcp__srelens__"));
+        assert!(BASE_SYSTEM_PROMPT.contains("cluster"));
+        // Must not leak a local path, srelens's own repo, or its branches.
+        assert!(!BASE_SYSTEM_PROMPT.contains("/Users"));
+        assert!(!BASE_SYSTEM_PROMPT.contains("/home"));
+        assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("repo"));
+        assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("branch"));
+        assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("filesystem-access"));
     }
 
     #[test]
