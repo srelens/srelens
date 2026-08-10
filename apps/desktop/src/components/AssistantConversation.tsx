@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
 import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
 import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
@@ -31,6 +32,22 @@ function contextPreface(c: AssistantContext): string {
   if (c.namespace) text += `, namespace ${c.namespace}`;
   if (c.kind && c.name) text += `, ${c.kind} ${c.name}`;
   return `${text}.`;
+}
+
+/**
+ * Preface prepended to the outgoing prompt on the global (multi-context) tab
+ * so the agent knows which cluster(s) it may act on — a tool call always
+ * needs a context, and with more than one cluster selected the agent has to
+ * pick one per call rather than assume the default. Empty selection (Send is
+ * disabled in that state, see `canSend`) yields no preface at all.
+ */
+function multiContextPreface(contexts: string[]): string {
+  if (contexts.length === 0) return "";
+  if (contexts.length === 1) {
+    return `Work in the cluster \`${contexts[0]}\` (the default context). Pass its context to each tool call.\n\n`;
+  }
+  const list = contexts.map((c) => `\`${c}\``).join(", ");
+  return `You may work across these clusters: ${list}. Pass the appropriate context to each tool call.\n\n`;
 }
 
 interface ToolCallState {
@@ -167,6 +184,48 @@ function ConfirmCard({
 }
 
 /**
+ * "Contexts (N)" button opening a checklist of `available` kube contexts,
+ * for the global (multi-context) tab only — the drawer keeps its single
+ * resource `context` chip instead. Stays open across multiple toggles so
+ * several clusters can be picked in one pass.
+ */
+function ContextMultiSelect({
+  available,
+  selected,
+  onChange,
+}: {
+  available: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  function toggle(name: string) {
+    const set = new Set(selected);
+    if (set.has(name)) set.delete(name);
+    else set.add(name);
+    onChange([...set]);
+  }
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="secondary" size="xs">
+          Contexts ({selected.length})
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-56 p-1">
+        <div role="group" aria-label="Choose contexts">
+          {available.map((name) => (
+            <label key={name} className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent">
+              <input type="checkbox" checked={selected.includes(name)} onChange={() => toggle(name)} />
+              <span className="truncate">{name}</span>
+            </label>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
  * The assistant conversation: a streamed exchange with the configured coding
  * agent, plus collapsible tool-call cards for anything it invokes. `context`
  * (the resource/namespace the caller had active) is rendered as a removable
@@ -177,14 +236,25 @@ function ConfirmCard({
  * unavailable agent shows its install link, a gated one (Codex/Cursor, whose
  * sandbox isn't solved yet) shows a "coming soon" note instead — either way
  * Send stays disabled.
+ *
+ * `availableContexts`, when provided, switches this into multi-context mode
+ * (the global tab, which has no single resource `context` to attach): a
+ * "Contexts (N)" picker lets the user pick one or more kube contexts,
+ * rendered as removable chips, prefaced onto the outgoing prompt (see
+ * `multiContextPreface`), and required before Send is enabled — a tool call
+ * always needs a context. The drawer never passes this prop, so its
+ * single-resource `context` chip/preface/Send-gating (Task 10) is untouched.
  */
 export function AssistantConversation({
   context,
+  availableContexts,
   className,
 }: {
   context?: AssistantContext;
+  availableContexts?: string[];
   className?: string;
 }) {
+  const multiContextMode = availableContexts !== undefined;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({});
   const [input, setInput] = useState("");
@@ -192,6 +262,9 @@ export function AssistantConversation({
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedKind, setSelectedKind] = useState("");
   const [attachedContext, setAttachedContext] = useState<AssistantContext | undefined>(context);
+  // Multi-context mode only (`availableContexts` provided) — the kube
+  // contexts selected for this global chat, in pick order.
+  const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
   const [pendingConfirms, setPendingConfirms] = useState<ConfirmRequest[]>([]);
   // The saved-session picker (Task 19 builds the real rail; this is a
   // minimal control so New chat / reopen / delete work in the meantime).
@@ -281,7 +354,11 @@ export function AssistantConversation({
 
   const selectedAgent = agents.find((a) => a.kind === selectedKind);
   const agentPath = selectedAgent?.path ?? "";
-  const canSend = !!selectedAgent?.available && !selectedAgent?.gated;
+  const agentReady = !!selectedAgent?.available && !selectedAgent?.gated;
+  // In multi-context mode a tool call always needs a context, so Send stays
+  // disabled until at least one is picked; the drawer (single resource
+  // `context`, no `availableContexts`) is never gated on this.
+  const canSend = agentReady && (!multiContextMode || selectedContexts.length > 0);
 
   /** Serialize the current transcript and save it to disk. Best-effort: a
    * failed save is swallowed rather than surfaced, since it must never break
@@ -296,10 +373,10 @@ export function AssistantConversation({
       title: deriveTitle(msgs),
       createdAt: createdAtRef.current,
       updatedAt: now,
-      // Task 17 replaces this single-context derivation with a real
-      // multi-select; for now the session just remembers the one chip
-      // (if any) that was attached when the turn ran.
-      contexts: attachedContext?.context ? [attachedContext.context] : [],
+      // Multi-context mode (the global tab) persists the real multi-select;
+      // the drawer keeps remembering the one resource chip (if any) that was
+      // attached when the turn ran.
+      contexts: multiContextMode ? selectedContexts : attachedContext?.context ? [attachedContext.context] : [],
       skills: [],
       // Not wired yet — the `AgentEvent` stream doesn't carry the agent
       // CLI's own session id, and threading it through needs a backend
@@ -344,9 +421,10 @@ export function AssistantConversation({
       nextId.current = msgs.reduce((max, m) => Math.max(max, m.id + 1), 0);
       sessionRef.current = session.id;
       createdAtRef.current = session.createdAt;
-      // `session.contexts` is deliberately not restored into
-      // `attachedContext` yet — Task 17 owns the real multi-context
-      // select this would need to round-trip through.
+      // Restore the global tab's multi-select from what was persisted;
+      // meaningless in drawer mode, where the resource `context` prop drives
+      // `attachedContext` instead and this state is never read.
+      setSelectedContexts(session.contexts ?? []);
     } catch {
       // Leave the current conversation untouched on a bad load.
     }
@@ -415,7 +493,11 @@ export function AssistantConversation({
   async function handleSend() {
     const prompt = input.trim();
     if (!prompt || sending || !canSend) return;
-    const outgoing = attachedContext ? `${contextPreface(attachedContext)}\n\n${prompt}` : prompt;
+    const outgoing = multiContextMode
+      ? `${multiContextPreface(selectedContexts)}${prompt}`
+      : attachedContext
+        ? `${contextPreface(attachedContext)}\n\n${prompt}`
+        : prompt;
     setInput("");
     setMessagesTracked((msgs) => [
       ...msgs,
@@ -526,7 +608,7 @@ export function AssistantConversation({
           <ConfirmCard key={req.id} request={req} onAnswer={answerConfirm} />
         ))}
       </div>
-      {!canSend && (
+      {!agentReady && (
         <p className="shrink-0 text-xs text-muted-foreground">
           {selectedAgent
             ? selectedAgent.gated
@@ -555,6 +637,27 @@ export function AssistantConversation({
           >
             ✕
           </button>
+        </div>
+      )}
+      {availableContexts !== undefined && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <ContextMultiSelect available={availableContexts} selected={selectedContexts} onChange={setSelectedContexts} />
+          {selectedContexts.map((name) => (
+            <span
+              key={name}
+              className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
+            >
+              <span className="truncate">{name}</span>
+              <button
+                type="button"
+                aria-label={`Remove ${name}`}
+                onClick={() => setSelectedContexts((cs) => cs.filter((c) => c !== name))}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
         </div>
       )}
       <div className="flex shrink-0 items-end gap-2 border-t border-border pt-3">

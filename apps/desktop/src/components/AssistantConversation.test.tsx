@@ -338,3 +338,106 @@ describe("AssistantConversation session persistence", () => {
     expect(newest.compareDocumentPosition(oldest) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
+
+describe("AssistantConversation multi-context (global tab)", () => {
+  it("drawer path (no availableContexts): no Contexts control, and Send isn't gated on any context", async () => {
+    render(<AssistantConversation context={{ context: "prod-cluster" }} />);
+    await screen.findByRole("combobox", { name: /agent/i });
+    expect(screen.queryByRole("button", { name: /contexts \(/i })).toBeFalsy();
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("global tab shows a Contexts control and disables Send until at least one context is selected", async () => {
+    render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    await screen.findByRole("combobox", { name: /agent/i });
+    expect(screen.getByRole("button", { name: /contexts \(0\)/i })).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("a"));
+    expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("selecting two contexts shows two removable chips and prefaces the outgoing prompt enumerating both", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("a"));
+    fireEvent.click(screen.getByText("b"));
+
+    expect(screen.getByLabelText("Remove a")).toBeTruthy();
+    expect(screen.getByLabelText("Remove b")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "what's up?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    // Hand-written literal, not built from the component's own preface function.
+    expect(vi.mocked(chat.sendChat).mock.calls[0][1]).toBe(
+      "You may work across these clusters: `a`, `b`. Pass the appropriate context to each tool call.\n\nwhat's up?",
+    );
+  });
+
+  it("removing a chip updates both the chip list and the preface (down to the single-context wording)", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("a"));
+    fireEvent.click(screen.getByText("b"));
+
+    fireEvent.click(screen.getByLabelText("Remove a"));
+    expect(screen.queryByLabelText("Remove a")).toBeFalsy();
+    expect(screen.getByLabelText("Remove b")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "status?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(vi.mocked(chat.sendChat).mock.calls[0][1]).toBe(
+      "Work in the cluster `b` (the default context). Pass its context to each tool call.\n\nstatus?",
+    );
+  });
+
+  it("persists selectedContexts under the session's contexts field in multi-context mode", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation availableContexts={["a", "b"]} />);
+    fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("a"));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(chatHistory.saveSession).mock.calls[0][0].contexts).toEqual(["a"]);
+  });
+
+  it("a reloaded session restores its chips from the session's `contexts`", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "old-1",
+      title: "Old chat",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: ["a"],
+      skills: [],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text: "hi" }],
+    });
+    render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    fireEvent.click(await screen.findByText("Old chat"));
+
+    await screen.findByText("hi");
+    expect(screen.getByLabelText("Remove a")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /contexts \(1\)/i })).toBeTruthy();
+  });
+});

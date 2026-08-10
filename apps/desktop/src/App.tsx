@@ -625,7 +625,11 @@ export function App() {
                     <ToolboxView key={activeTab.id} initialContext={toolboxContext} />
                   ) : activeKind === "assistant" ? (
                     <div className="min-h-0 flex-1 overflow-hidden p-3">
-                      <AssistantTab cluster={activeCluster} namespace={activeTab.namespace} />
+                      <AssistantTab
+                        cluster={activeCluster}
+                        namespace={activeTab.namespace}
+                        availableContexts={contexts?.map((c) => c.name) ?? []}
+                      />
                     </div>
                   ) : activeTab.crd && activeCluster ? (
                     <CustomResourceBrowser
