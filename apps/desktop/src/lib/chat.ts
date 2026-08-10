@@ -16,7 +16,10 @@ export interface AgentInfo {
   path: string | null;
   version: string | null;
   installUrl: string;
-  /** Installed but not yet selectable — sandbox story pending (Codex/Cursor). */
+  /** Installed but not yet selectable — currently always `false` for every
+   * kind (Claude, Codex, and Cursor are all boxed to srelens's MCP tools and
+   * shipped); kept so a future agent whose sandbox story isn't solved yet has
+   * a place to gate from without a UI/wire-format change. */
   gated: boolean;
 }
 
@@ -48,9 +51,9 @@ export function startChat(): Promise<string> {
  * Send one user turn. Subscribes to the session channel BEFORE invoking so the
  * first streamed event can't race the listener (the logs pattern).
  *
- * `agentKind` selects which CLI + MCP wiring `chat_send` uses ("claude" or
- * "codex" today; "cursor" is rejected server-side while it's gated). Defaults
- * to `"claude"` so an existing caller that hasn't been updated to pass an
+ * `agentKind` selects which CLI + MCP wiring `chat_send` uses — "claude",
+ * "codex", or "cursor", all accepted server-side. Defaults to `"claude"` so
+ * an existing caller that hasn't been updated to pass an
  * agent's kind (e.g. `SkillsPanel`'s one-shot generation turn) keeps its prior
  * behavior rather than failing to compile or silently misrouting.
  */

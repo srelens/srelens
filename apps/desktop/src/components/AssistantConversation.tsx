@@ -427,8 +427,10 @@ function ContextMultiSelect({
  * Agent selector — a proper popover dropdown (not a bare native <select>): the
  * trigger shows the current agent with an icon, and the list marks the
  * selected one and disables agents that are not installed or still gated
- * (Codex/Cursor), so an unusable agent can't be picked. `role="combobox"` on
- * the trigger + `role="listbox"/"option"` on the list keep it accessible.
+ * (no kind is gated today — Claude, Codex, and Cursor are all selectable —
+ * but the mechanism stays wired for a future agent that isn't ready yet), so
+ * an unusable agent can't be picked. `role="combobox"` on the trigger +
+ * `role="listbox"/"option"` on the list keep it accessible.
  */
 function AgentPicker({
   agents,
@@ -589,9 +591,10 @@ export interface AssistantConversationHandle {
  * is entirely optional, so this same component serves both a resource-scoped
  * host (the `AssistantDrawer`) and a global one with no resource in scope
  * (the `AssistantTab`). The agent picker is sourced from `listAgents()`; an
- * unavailable agent shows its install link, a gated one (Codex/Cursor, whose
- * sandbox isn't solved yet) shows a "coming soon" note instead — either way
- * Send stays disabled.
+ * unavailable agent shows its install link, a gated one (none currently —
+ * Claude, Codex, and Cursor are all boxed to srelens's MCP tools and
+ * selectable) shows a "coming soon" note instead — either way Send stays
+ * disabled.
  *
  * `availableContexts`, when provided, switches this into multi-context mode
  * (the global tab, which has no single resource `context` to attach): a
@@ -1185,7 +1188,7 @@ export const AssistantConversation = forwardRef<
           <p className="mb-2 px-1 text-xs text-muted-foreground">
             {selectedAgent
               ? selectedAgent.gated
-                ? "Codex/Cursor support is coming — use Claude for now."
+                ? `${selectedAgent.label} support is coming — use Claude for now.`
                 : selectedAgent.installUrl
                   ? (
                     <>

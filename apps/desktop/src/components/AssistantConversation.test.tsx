@@ -125,6 +125,45 @@ describe("AssistantConversation", () => {
     expect(vi.mocked(chat.sendChat).mock.calls[0][5]).toBe("codex");
   });
 
+  it("Cursor is selectable like Claude and Codex now that no agent is gated", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      {
+        kind: "claude",
+        label: "Claude Code",
+        available: true,
+        path: "/usr/bin/claude",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
+      {
+        kind: "cursor",
+        label: "Cursor",
+        available: true,
+        path: "/usr/bin/cursor-agent",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
+    ]);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    fireEvent.click(trigger);
+    const cursorOption = await screen.findByRole("option", { name: /cursor/i });
+    // Not disabled and not marked "soon" — Cursor is a real, pickable option.
+    expect((cursorOption as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(cursorOption);
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(vi.mocked(chat.sendChat).mock.calls[0][2]).toBe("/usr/bin/cursor-agent");
+    expect(vi.mocked(chat.sendChat).mock.calls[0][5]).toBe("cursor");
+  });
+
   it("shows a context chip when context is provided, scoped like the drawer", async () => {
     render(<AssistantConversation context={{ context: "kind", namespace: "payments" }} />);
     expect(await screen.findByText("kind / payments")).toBeTruthy();
@@ -206,7 +245,7 @@ describe("AssistantConversation", () => {
     await screen.findByRole("combobox", { name: /agent/i });
     expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
     expect(
-      await screen.findByText(/Codex\/Cursor support is coming — use Claude for now\./)
+      await screen.findByText(/Codex support is coming — use Claude for now\./)
     ).toBeTruthy();
     expect(screen.queryByText("https://developers.openai.com/codex/cli/")).toBeFalsy();
   });

@@ -19,11 +19,13 @@ fn install_url(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Cursor is detected but not yet selectable — its sandbox story (what a
-/// spawned agent can touch on the user's machine) isn't solved yet. Claude
-/// and Codex are both boxed to srelens's own MCP tools and shipped.
-fn is_gated(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::Cursor)
+/// No agent is gated anymore: Claude, Codex, and Cursor are each boxed to
+/// srelens's own MCP tools (see `chat_send`'s per-kind spawn arms) and all
+/// three are selectable. Kept as a function (rather than deleted along with
+/// its call sites) so a future agent that isn't ready yet has an obvious,
+/// already-wired place to gate from again.
+fn is_gated(_kind: AgentKind) -> bool {
+    false
 }
 
 /// Build an `AgentInfo`, resolving availability through the injected `resolve`
@@ -238,12 +240,6 @@ pub async fn chat_send(
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     let kind = parse_agent_kind(&agent_kind)?;
-    // Cursor is detected and listed by `agent_list`, but its sandbox story
-    // isn't solved yet (see `is_gated`) — the picker itself refuses to select
-    // it, but this is the actual enforcement, not just a UI nicety.
-    if matches!(kind, AgentKind::Cursor) {
-        return Err("Cursor is not yet available".to_string());
-    }
 
     let token = mcp
         .session_token()
@@ -270,43 +266,58 @@ pub async fn chat_send(
     // guarded by a `TempFile` per image so every one is cleaned up on any
     // exit from this function. A decode or write failure is reported as an
     // `Error` event and that image is skipped rather than aborting the whole
-    // turn. Shared between both agents: Claude gets these paths folded into
-    // its prompt text (`prompt_with_images`), Codex takes them natively via
-    // `-i`.
+    // turn. Shared between Claude and Codex: Claude gets these paths folded
+    // into its prompt text (`prompt_with_images`), Codex takes them natively
+    // via `-i`. Cursor gets none of this — its Read tool is denied by
+    // `cursor_cli_config_json`, so it has no way to load a path-based image
+    // file even if we handed it one; a Cursor turn with attachments emits one
+    // note below and otherwise proceeds text-only.
     let mut image_guards: Vec<TempFile> = Vec::new();
     let mut image_paths: Vec<String> = Vec::new();
-    for (i, data) in images.iter().enumerate() {
-        let bytes = match decode_base64_image(data) {
-            Ok(bytes) => bytes,
-            Err(e) => {
+    if matches!(kind, AgentKind::Cursor) {
+        if !images.is_empty() {
+            sink.emit(
+                &channel,
+                serde_json::to_value(AgentEvent::Error {
+                    message: "image attachments aren't supported for Cursor".to_string(),
+                })
+                .unwrap(),
+            );
+        }
+    } else {
+        for (i, data) in images.iter().enumerate() {
+            let bytes = match decode_base64_image(data) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    sink.emit(
+                        &channel,
+                        serde_json::to_value(AgentEvent::Error {
+                            message: format!("could not decode attached image {i}: {e}"),
+                        })
+                        .unwrap(),
+                    );
+                    continue;
+                }
+            };
+            let image_path = dir.join(format!("srelens-img-{session}-{i}.png"));
+            // Guard the path before writing to it, not after: a `write` that
+            // fails partway through still leaves a (possibly partial) file on
+            // disk, and only a guard pushed before the call runs its `Drop` to
+            // clean that up. Pushing after `write` would only ever guard a fully
+            // successful write, leaking a partial file on the error path below.
+            image_guards.push(TempFile(image_path.clone()));
+            if let Err(e) = std::fs::write(&image_path, &bytes) {
                 sink.emit(
                     &channel,
                     serde_json::to_value(AgentEvent::Error {
-                        message: format!("could not decode attached image {i}: {e}"),
+                        message: format!("could not save attached image {i}: {e}"),
                     })
                     .unwrap(),
                 );
                 continue;
             }
-        };
-        let image_path = dir.join(format!("srelens-img-{session}-{i}.png"));
-        // Guard the path before writing to it, not after: a `write` that
-        // fails partway through still leaves a (possibly partial) file on
-        // disk, and only a guard pushed before the call runs its `Drop` to
-        // clean that up. Pushing after `write` would only ever guard a fully
-        // successful write, leaking a partial file on the error path below.
-        image_guards.push(TempFile(image_path.clone()));
-        if let Err(e) = std::fs::write(&image_path, &bytes) {
-            sink.emit(
-                &channel,
-                serde_json::to_value(AgentEvent::Error {
-                    message: format!("could not save attached image {i}: {e}"),
-                })
-                .unwrap(),
-            );
-            continue;
+            image_paths.push(image_path.to_string_lossy().into_owned());
         }
-        image_paths.push(image_path.to_string_lossy().into_owned());
     }
 
     // Only Claude reads its MCP server config from a file (`--mcp-config`);
@@ -316,8 +327,13 @@ pub async fn chat_send(
     // `Drop` (removing the cleartext-token file) still runs at the end of
     // this function on every exit, exactly like `_cwd_guard` above — a guard
     // built and dropped inside the match arm itself would be gone before the
-    // agent ever read the file.
+    // agent ever read the file. `_cursor_cfg_dir_guard` is Cursor's
+    // equivalent: unlike Claude's single file, Cursor reads a whole config
+    // *directory* (`cli-config.json` + `mcp.json`, the latter carrying the
+    // bearer token) pointed to by `CURSOR_CONFIG_DIR`, so it needs a `TempDir`
+    // guard rather than a `TempFile` one — same reasoning, same lifecycle.
     let mut _cfg_guard: Option<TempFile> = None;
+    let mut _cursor_cfg_dir_guard: Option<TempDir> = None;
     let cmd = match kind {
         AgentKind::Claude => {
             let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
@@ -340,13 +356,34 @@ pub async fn chat_send(
             &cwd_path.to_string_lossy(),
             &image_paths,
         ),
-        AgentKind::Cursor => unreachable!("rejected above"),
+        AgentKind::Cursor => {
+            let cursor_cfg_dir = dir.join(format!("srelens-cursor-cfg-{session}"));
+            std::fs::create_dir_all(&cursor_cfg_dir).map_err(|e| e.to_string())?;
+            _cursor_cfg_dir_guard = Some(TempDir(cursor_cfg_dir.clone()));
+            std::fs::write(
+                cursor_cfg_dir.join("cli-config.json"),
+                srelens_agent::adapter::cursor_cli_config_json(),
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::write(
+                cursor_cfg_dir.join("mcp.json"),
+                srelens_agent::adapter::cursor_mcp_json(&url, &token),
+            )
+            .map_err(|e| e.to_string())?;
+            srelens_agent::adapter::cursor_command(
+                &agent_path,
+                &prompt,
+                &cursor_cfg_dir.to_string_lossy(),
+                &cwd_path.to_string_lossy(),
+                None,
+            )
+        }
     };
 
     let parse_line: fn(&str) -> Vec<AgentEvent> = match kind {
         AgentKind::Claude => srelens_agent::claude::parse_line,
         AgentKind::Codex => srelens_agent::codex::parse_line,
-        AgentKind::Cursor => unreachable!("rejected above"),
+        AgentKind::Cursor => srelens_agent::cursor::parse_line,
     };
 
     let mut child = tokio::process::Command::new(&cmd.program)
@@ -461,10 +498,10 @@ mod tests {
     }
 
     #[test]
-    fn cursor_is_gated_but_claude_and_codex_are_not() {
+    fn no_agent_is_gated_anymore_claude_codex_and_cursor_are_all_selectable() {
         let info = detect(AgentKind::Cursor, |_| Some("/usr/bin/cursor-agent".into()));
         assert!(info.available);
-        assert!(info.gated);
+        assert!(!info.gated);
 
         let info = detect(AgentKind::Claude, |_| Some("/usr/bin/claude".into()));
         assert!(info.available);
@@ -598,6 +635,30 @@ mod tests {
             "chat://s1",
             lines.iter().map(|s| s.to_string()),
             srelens_agent::codex::parse_line,
+        );
+        let got = sink.0.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "chat://s1");
+        assert_eq!(got[0].1["type"], "textDelta");
+        assert_eq!(got[0].1["text"], "hi");
+        assert_eq!(got[1].1["type"], "turnDone");
+    }
+
+    /// Same contract again, driven through Cursor's stream-json shape and
+    /// parser — proves `emit_events` handles all three agent line formats,
+    /// not just Claude's and Codex's.
+    #[test]
+    fn emit_events_with_the_cursor_parser_emits_a_text_delta_then_turn_done() {
+        let sink = std::sync::Arc::new(RecordingSink(Default::default()));
+        let lines = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ];
+        emit_events(
+            sink.clone(),
+            "chat://s1",
+            lines.iter().map(|s| s.to_string()),
+            srelens_agent::cursor::parse_line,
         );
         let got = sink.0.lock().unwrap();
         assert_eq!(got.len(), 2);
