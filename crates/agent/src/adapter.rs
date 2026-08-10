@@ -234,15 +234,17 @@ pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 
 /// Build the Cursor CLI (`cursor-agent`) argv. These exact flags were
 /// verified live against the real CLI to box it to srelens's MCP tools:
-/// `--approve-mcps` auto-approves MCP tool calls so they don't hang waiting
-/// on a confirmation prompt Cursor has nowhere to show in non-interactive
-/// `-p` mode (srelens's own confirm dialog still gates anything destructive).
-/// The deliberate ABSENCE of `--force` leaves Cursor's built-in local tools
-/// (read/write/shell/fetch) default-denied; the deny-list written to
-/// `config_dir` via `cursor_cli_config_json` makes that explicit rather than
-/// relying on the default alone (belt-and-suspenders). NO `--verbose` —
-/// Cursor errors on that flag. Do not change these flags without
-/// re-verifying against the real CLI.
+/// `--approve-mcps` loads/approves the srelens MCP *server*; `--force` is
+/// what actually lets the tool *calls* run — without it, non-interactive `-p`
+/// mode auto-rejects every MCP call ("User rejected MCP") since Cursor has
+/// nowhere to show a per-call approval prompt.
+///
+/// SECURITY-CRITICAL: `--force` is "allow unless explicitly denied", so with
+/// it present the ONLY thing keeping Cursor boxed is the deny-list written to
+/// `config_dir` by `cursor_cli_config_json` (read/write/edit/shell/fetch/…).
+/// That deny-list is load-bearing, NOT belt-and-suspenders — do not remove it,
+/// and do not drop `--force` (MCP calls stop working). NO `--verbose` — Cursor
+/// errors on that flag. Do not change these flags without re-verifying live.
 ///
 /// The MCP bearer token travels only in the `mcp.json` file the desktop
 /// writes into `config_dir` (see `cursor_mcp_json`), never via argv or env —
@@ -299,11 +301,12 @@ pub fn cursor_command(
 /// The Cursor CLI config content (`cli-config.json`, written into the
 /// per-turn config dir pointed to by `CURSOR_CONFIG_DIR_ENV`) that denies its
 /// built-in local tools. Cursor's `-p` mode ships with full local
-/// read/write/shell/fetch access; this deny-list, combined with the
-/// deliberate absence of `--force` in `cursor_command` (which leaves local
-/// tools default-denied), boxes Cursor to MCP tools only. Verified live: a
-/// boxed Cursor refuses to read local files ("permission denied") while MCP
-/// tool calls still succeed.
+/// read/write/shell/fetch access; since `cursor_command` passes `--force`
+/// (required so MCP calls run), this deny-list is the ONLY thing boxing Cursor
+/// to MCP tools — it is load-bearing, not optional, and must stay comprehensive
+/// (`--force` allows any tool NOT listed here). Verified live: a boxed Cursor
+/// refuses to read local files ("permission denied") while MCP tool calls
+/// still succeed.
 pub fn cursor_cli_config_json() -> String {
     serde_json::json!({
         "version": 1,
