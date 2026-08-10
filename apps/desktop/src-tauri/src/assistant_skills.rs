@@ -46,6 +46,12 @@ pub struct Skill {
 pub struct SkillMeta {
     pub name: String,
     pub description: String,
+    /// True for a srelens-shipped default skill that has no user file
+    /// overriding it — the UI badges these and doesn't offer delete (there's
+    /// no file to remove). A user skill (or a user override of a default) is
+    /// `false`.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// `<base>/assistant/skills` — where skill `.md` files live.
@@ -194,10 +200,120 @@ fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
             // file, but keep listing every other skill that DOES parse.
             continue;
         };
-        metas.push(SkillMeta { name: skill.name, description: skill.description });
+        metas.push(SkillMeta { name: skill.name, description: skill.description, builtin: false });
     }
     metas.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(metas)
+}
+
+/// The srelens-shipped default skills — reusable Kubernetes triage playbooks
+/// so the Skills panel is useful out of the box, before a user writes any of
+/// their own. They're plain instruction text (agent-agnostic); each nudges the
+/// assistant to investigate through the srelens MCP tools and end on a likely
+/// cause plus a concrete next step. A user skill with the same `name`
+/// overrides the default (see [`list_all_skills`]/[`load_skill_or_builtin`]).
+pub fn builtin_skills() -> Vec<Skill> {
+    fn skill(name: &str, description: &str, body: &str) -> Skill {
+        Skill { name: name.to_string(), description: description.to_string(), body: body.to_string() }
+    }
+    vec![
+        skill(
+            "crashloop-triage",
+            "Triage a pod stuck in CrashLoopBackOff",
+            "When a pod keeps restarting (CrashLoopBackOff):\n\n\
+             1. Read the pod's recent events for the restart reason.\n\
+             2. Fetch the PREVIOUS container's logs (the crashed instance, not the live one) — that's where the real error is.\n\
+             3. Check the container's last exit code and reason (e.g. Error vs OOMKilled).\n\
+             4. Compare the container's resource requests/limits against its actual usage.\n\
+             5. Check recent rollout history for a bad image or config change.\n\n\
+             Report the most likely cause and one concrete next step.",
+        ),
+        skill(
+            "pending-pod",
+            "Diagnose a pod stuck in Pending / unschedulable",
+            "When a pod stays Pending:\n\n\
+             1. Read the pod's events — the scheduler explains why (Insufficient cpu/memory, no nodes match, taints, volume binding).\n\
+             2. Check node allocatable vs requested capacity across the cluster.\n\
+             3. Check the pod's nodeSelector / affinity / tolerations against the nodes' labels and taints.\n\
+             4. If it mounts a PVC, check the PVC is Bound and its StorageClass can provision.\n\n\
+             Report which constraint blocks scheduling and how to relieve it.",
+        ),
+        skill(
+            "oomkilled",
+            "Investigate a container that was OOMKilled",
+            "When a container is being OOMKilled:\n\n\
+             1. Confirm the OOMKill from the pod's last-state / events.\n\
+             2. Compare the container's memory limit against its working-set usage over time.\n\
+             3. Check whether the limit is set too low, or usage is genuinely growing (leak).\n\
+             4. Look for a recent image/config change that raised memory use.\n\n\
+             Report whether to raise the limit or fix the workload, with a suggested value.",
+        ),
+        skill(
+            "node-pressure",
+            "Investigate a node under CPU / memory / disk pressure",
+            "When a node is under pressure or NotReady:\n\n\
+             1. Check the node's conditions (MemoryPressure, DiskPressure, PIDPressure) and events.\n\
+             2. Review the node's allocatable vs the sum of pod requests and actual usage.\n\
+             3. Find the top resource-consuming pods on that node.\n\
+             4. Check for evicted pods as a symptom.\n\n\
+             Report the pressure source and whether to rebalance, scale, or cordon/drain.",
+        ),
+        skill(
+            "service-no-endpoints",
+            "Debug a Service that has no ready endpoints",
+            "When a Service isn't reachable / has no endpoints:\n\n\
+             1. Compare the Service's selector against the target pods' labels — a mismatch yields zero endpoints.\n\
+             2. Check the backing pods are Ready (failing readiness probes are excluded from endpoints).\n\
+             3. Confirm the Service targetPort matches the container's port.\n\
+             4. Inspect the EndpointSlices for the Service.\n\n\
+             Report why endpoints are empty and the exact fix.",
+        ),
+        skill(
+            "rollout-stuck",
+            "Diagnose a Deployment rollout that isn't progressing",
+            "When a Deployment rollout is stuck:\n\n\
+             1. Check the Deployment's status conditions (Progressing / Available) and the new ReplicaSet.\n\
+             2. Inspect the new pods — ImagePullBackOff, CrashLoopBackOff, or failing readiness all stall a rollout.\n\
+             3. Verify replica counts: desired vs updated vs available.\n\
+             4. Check events for quota, scheduling, or probe failures.\n\n\
+             Report what blocks the rollout and whether to fix forward or roll back.",
+        ),
+    ]
+}
+
+/// Every skill the picker should show: the defaults from [`builtin_skills`]
+/// merged with the user's own, where a user file with the same name overrides
+/// the default (and is marked `builtin: false`). The `BTreeMap` keeps the
+/// result sorted by name. Kept separate from [`list_skills`] so that pure
+/// helper stays "user files only" for its existing tests.
+fn list_all_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
+    use std::collections::BTreeMap;
+    let mut by_name: BTreeMap<String, SkillMeta> = BTreeMap::new();
+    for b in builtin_skills() {
+        by_name.insert(
+            b.name.clone(),
+            SkillMeta { name: b.name, description: b.description, builtin: true },
+        );
+    }
+    for m in list_skills(dir)? {
+        by_name.insert(m.name.clone(), SkillMeta { name: m.name, description: m.description, builtin: false });
+    }
+    Ok(by_name.into_values().collect())
+}
+
+/// Load a skill by name: the user's own file if it exists, otherwise the
+/// shipped default of that name, otherwise a clear `Err`. A user file that
+/// exists but is malformed still surfaces its parse error (it was chosen on
+/// purpose) rather than silently falling back to a default.
+fn load_skill_or_builtin(dir: &Path, name: &str) -> Result<Skill, String> {
+    validate_name(name)?;
+    if skill_path(dir, name).exists() {
+        return read_skill(dir, name);
+    }
+    builtin_skills()
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("no skill found named {name:?}"))
 }
 
 /// Resolve `<app config dir>/assistant/skills`, creating it if needed — the
@@ -209,16 +325,19 @@ fn resolve_skills_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// List saved skills (name + description only), sorted by name.
+/// List skills (name + description only), sorted by name — the shipped
+/// defaults plus the user's own, user files overriding a default of the same
+/// name.
 #[tauri::command]
 pub fn skills_list(app: AppHandle) -> Result<Vec<SkillMeta>, String> {
-    list_skills(&resolve_skills_dir(&app)?)
+    list_all_skills(&resolve_skills_dir(&app)?)
 }
 
-/// Load one full skill (including its body) by name.
+/// Load one full skill (including its body) by name — a user file if present,
+/// else the shipped default of that name.
 #[tauri::command]
 pub fn skill_load(app: AppHandle, name: String) -> Result<Skill, String> {
-    read_skill(&resolve_skills_dir(&app)?, &name)
+    load_skill_or_builtin(&resolve_skills_dir(&app)?, &name)
 }
 
 /// Persist a skill, creating or overwriting its file.
@@ -511,5 +630,84 @@ mod tests {
             vec!["...md".to_string()],
             "the only file written under dir must be the literal `...md`, got {entries:?}"
         );
+    }
+
+    #[test]
+    fn every_builtin_skill_is_valid_and_round_trips_through_the_on_disk_format() {
+        let builtins = builtin_skills();
+        assert!(!builtins.is_empty(), "srelens should ship some default skills");
+        for s in builtins {
+            validate_name(&s.name).unwrap_or_else(|e| panic!("builtin {:?} has an invalid name: {e}", s.name));
+            assert!(!s.description.trim().is_empty(), "builtin {:?} needs a description", s.name);
+            assert!(!s.body.trim().is_empty(), "builtin {:?} needs a body", s.name);
+            assert_eq!(parse_skill(&to_markdown(&s)).unwrap(), s, "builtin {:?} must round-trip", s.name);
+        }
+    }
+
+    #[test]
+    fn list_all_shows_the_builtins_marked_builtin_when_there_are_no_user_skills() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path()); // never created — the user has no skills of their own
+
+        let metas = list_all_skills(&dir).unwrap();
+        assert_eq!(metas.len(), builtin_skills().len(), "every default should be listed");
+        assert!(metas.iter().all(|m| m.builtin), "with no user files, every entry is a default");
+        assert!(metas.iter().any(|m| m.name == "crashloop-triage"), "a known default should be present");
+        // sorted by name (BTreeMap ordering)
+        let mut sorted = metas.clone();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(metas, sorted);
+    }
+
+    #[test]
+    fn list_all_shows_a_user_skill_alongside_the_builtins_not_marked_builtin() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path());
+        write_skill_atomic(&dir, &sample_skill("my-own")).unwrap();
+
+        let metas = list_all_skills(&dir).unwrap();
+        assert_eq!(metas.len(), builtin_skills().len() + 1);
+        let mine = metas.iter().find(|m| m.name == "my-own").expect("the user skill should be listed");
+        assert!(!mine.builtin, "a user-authored skill is not a default");
+    }
+
+    #[test]
+    fn a_user_file_overrides_a_builtin_of_the_same_name_without_duplicating_it() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path());
+        let override_skill = Skill {
+            name: "crashloop-triage".to_string(),
+            description: "MY custom crashloop steps".to_string(),
+            body: "do it my way\n".to_string(),
+        };
+        write_skill_atomic(&dir, &override_skill).unwrap();
+
+        let metas = list_all_skills(&dir).unwrap();
+        assert_eq!(metas.len(), builtin_skills().len(), "an override replaces the default, it doesn't add a row");
+        let hits: Vec<&SkillMeta> = metas.iter().filter(|m| m.name == "crashloop-triage").collect();
+        assert_eq!(hits.len(), 1, "the name must appear exactly once");
+        assert_eq!(hits[0].description, "MY custom crashloop steps", "the user's description wins");
+        assert!(!hits[0].builtin, "an overridden default is now a user skill");
+
+        // and load returns the user's body, not the shipped default's
+        assert_eq!(load_skill_or_builtin(&dir, "crashloop-triage").unwrap(), override_skill);
+    }
+
+    #[test]
+    fn load_falls_back_to_the_shipped_default_when_there_is_no_user_file() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path()); // no user files
+
+        let loaded = load_skill_or_builtin(&dir, "pending-pod").unwrap();
+        let default = builtin_skills().into_iter().find(|s| s.name == "pending-pod").unwrap();
+        assert_eq!(loaded, default, "with no user file, loading returns the shipped default verbatim");
+    }
+
+    #[test]
+    fn load_of_an_unknown_name_with_no_matching_default_errs() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path());
+        let err = load_skill_or_builtin(&dir, "no-such-skill").unwrap_err();
+        assert!(err.contains("no-such-skill"), "error should name the missing skill, got: {err}");
     }
 }

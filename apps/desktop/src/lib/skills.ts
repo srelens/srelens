@@ -11,6 +11,9 @@ import { invokeCommand } from "../transport/transport";
 export interface SkillMeta {
   name: string;
   description: string;
+  /** True for a srelens-shipped default skill with no user override — the UI
+   * badges these and doesn't offer delete (there's no file to remove). */
+  builtin?: boolean;
 }
 
 /** A full skill, including its instructions body. */

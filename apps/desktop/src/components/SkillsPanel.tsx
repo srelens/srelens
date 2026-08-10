@@ -221,18 +221,27 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
                         onClick={() => void select(s.name)}
                         disabled={generating}
                       >
-                        <span className="block truncate font-medium">{s.name}</span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="min-w-0 truncate font-medium">{s.name}</span>
+                          {s.builtin && (
+                            <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                              Default
+                            </span>
+                          )}
+                        </span>
                         <span className="block truncate text-xs text-muted-foreground">{s.description}</span>
                       </button>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${s.name}`}
-                        onClick={() => setPendingDelete(s.name)}
-                        disabled={generating}
-                        className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:pointer-events-none disabled:opacity-0"
-                      >
-                        ✕
-                      </button>
+                      {!s.builtin && (
+                        <button
+                          type="button"
+                          aria-label={`Delete ${s.name}`}
+                          onClick={() => setPendingDelete(s.name)}
+                          disabled={generating}
+                          className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:pointer-events-none disabled:opacity-0"
+                        >
+                          ✕
+                        </button>
+                      )}
                     </li>
                   ))}
                 </ul>

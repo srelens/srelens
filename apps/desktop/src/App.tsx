@@ -624,7 +624,7 @@ export function App() {
                   ) : activeKind === "toolbox" ? (
                     <ToolboxView key={activeTab.id} initialContext={toolboxContext} />
                   ) : activeKind === "assistant" ? (
-                    <div className="min-h-0 flex-1 overflow-hidden p-3">
+                    <div className="min-h-0 flex-1 overflow-hidden">
                       <AssistantTab
                         cluster={activeCluster}
                         namespace={activeTab.namespace}
