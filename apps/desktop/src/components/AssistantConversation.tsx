@@ -1066,7 +1066,7 @@ export const AssistantConversation = forwardRef<
       }
       const guidance = await loadSkillsGuidance(activeSkills);
       const outgoing = `${preface}${guidance}${prompt}`;
-      await sendChat(session, outgoing, agentPath, applyEvent, rawImages);
+      await sendChat(session, outgoing, agentPath, applyEvent, rawImages, selectedAgent?.kind ?? selectedKind);
     } catch (e) {
       // A rejection here means the transport itself failed before any
       // `error` event could stream (e.g. `chat_send` rejects outright when

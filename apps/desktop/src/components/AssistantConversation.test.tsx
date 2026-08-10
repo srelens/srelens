@@ -85,6 +85,44 @@ describe("AssistantConversation", () => {
     await waitFor(() => expect(screen.getByText(/Hello from the global assistant\./)).toBeTruthy());
     // The prompt sent to the agent carries no context preface since none was attached.
     expect(vi.mocked(chat.sendChat).mock.calls[0][1]).toBe("what's up?");
+    // Only Claude was in the mocked agent list, so it's the one auto-selected
+    // and threaded through as sendChat's agentKind argument.
+    expect(vi.mocked(chat.sendChat).mock.calls[0][5]).toBe("claude");
+  });
+
+  it("threads the selected agent's kind through to sendChat, not just its path", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      {
+        kind: "codex",
+        label: "Codex",
+        available: true,
+        path: "/usr/bin/codex",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
+      {
+        kind: "claude",
+        label: "Claude Code",
+        available: true,
+        path: "/usr/bin/claude",
+        version: null,
+        installUrl: "",
+        gated: false,
+      },
+    ]);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(vi.mocked(chat.sendChat).mock.calls[0][2]).toBe("/usr/bin/codex");
+    expect(vi.mocked(chat.sendChat).mock.calls[0][5]).toBe("codex");
   });
 
   it("shows a context chip when context is provided, scoped like the drawer", async () => {

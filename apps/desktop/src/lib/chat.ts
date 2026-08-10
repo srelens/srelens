@@ -47,6 +47,12 @@ export function startChat(): Promise<string> {
 /**
  * Send one user turn. Subscribes to the session channel BEFORE invoking so the
  * first streamed event can't race the listener (the logs pattern).
+ *
+ * `agentKind` selects which CLI + MCP wiring `chat_send` uses ("claude" or
+ * "codex" today; "cursor" is rejected server-side while it's gated). Defaults
+ * to `"claude"` so an existing caller that hasn't been updated to pass an
+ * agent's kind (e.g. `SkillsPanel`'s one-shot generation turn) keeps its prior
+ * behavior rather than failing to compile or silently misrouting.
  */
 export async function sendChat(
   session: string,
@@ -54,13 +60,14 @@ export async function sendChat(
   agentPath: string,
   onEvent: (e: AgentEvent) => void,
   images?: string[],
+  agentKind: string = "claude",
 ): Promise<void> {
   const unsub = await subscribe(`chat://${session}`, (payload: unknown) => {
     const e = parseAgentEvent(payload);
     if (e) onEvent(e);
   });
   try {
-    await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath });
+    await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath, agentKind });
   } finally {
     unsub();
   }

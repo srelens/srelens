@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use srelens_agent::adapter::{AgentInfo, AgentKind};
-use srelens_agent::claude::parse_line;
+use srelens_agent::event::AgentEvent;
 use srelens_streams::sink::EventSink;
 
 const CLAUDE_INSTALL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
@@ -19,11 +19,11 @@ fn install_url(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Codex and Cursor are detected but not yet selectable — their sandbox story
-/// (what a spawned agent can touch on the user's machine) isn't solved yet.
-/// Claude is the only agent shipped end-to-end in v1.
+/// Cursor is detected but not yet selectable — its sandbox story (what a
+/// spawned agent can touch on the user's machine) isn't solved yet. Claude
+/// and Codex are both boxed to srelens's own MCP tools and shipped.
 fn is_gated(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::Codex | AgentKind::Cursor)
+    matches!(kind, AgentKind::Cursor)
 }
 
 /// Build an `AgentInfo`, resolving availability through the injected `resolve`
@@ -76,15 +76,19 @@ fn which_on_path(bin: &str, path: &str) -> Option<String> {
 /// a `TurnDone` event was among them. Pure over the sink, so the parse→emit
 /// path is unit-tested without spawning a process; `chat_send` also drives its
 /// streaming loop through this so the tested contract is the one actually run.
+/// `parse` is the agent-specific line parser (`claude::parse_line` or
+/// `codex::parse_line`) — kept as a parameter rather than hardcoded so this
+/// stays agent-agnostic and testable against either shape.
 fn emit_events(
     sink: Arc<dyn EventSink>,
     channel: &str,
     lines: impl IntoIterator<Item = String>,
+    parse: fn(&str) -> Vec<AgentEvent>,
 ) -> bool {
     let mut saw_done = false;
     for line in lines {
-        for event in parse_line(&line) {
-            saw_done |= matches!(event, srelens_agent::event::AgentEvent::TurnDone);
+        for event in parse(&line) {
+            saw_done |= matches!(event, AgentEvent::TurnDone);
             sink.emit(channel, serde_json::to_value(&event).unwrap());
         }
     }
@@ -203,6 +207,20 @@ impl Drop for TempDir {
     }
 }
 
+/// Parse the frontend's serialized `AgentKind` tag — the exact camelCase
+/// string serde emits for the enum ("claude"/"codex"/"cursor") — back into
+/// the enum. Errors on anything else rather than silently defaulting: an
+/// unrecognized value is a frontend/backend skew bug, not something to paper
+/// over by falling back to some default agent.
+fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
+    match kind {
+        "claude" => Ok(AgentKind::Claude),
+        "codex" => Ok(AgentKind::Codex),
+        "cursor" => Ok(AgentKind::Cursor),
+        _ => Err("unknown agent".to_string()),
+    }
+}
+
 /// Send one user turn. Spawns the agent against our running MCP server and
 /// streams `AgentEvent`s on `chat://<session>`.
 #[tauri::command]
@@ -211,12 +229,21 @@ pub async fn chat_send(
     prompt: String,
     images: Vec<String>,
     agent_path: String,
+    agent_kind: String,
     app: tauri::AppHandle,
     mcp: tauri::State<'_, crate::mcp::McpHttpManager>,
     chats: tauri::State<'_, ChatManager>,
 ) -> Result<(), String> {
     use tauri::Manager;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    let kind = parse_agent_kind(&agent_kind)?;
+    // Cursor is detected and listed by `agent_list`, but its sandbox story
+    // isn't solved yet (see `is_gated`) — the picker itself refuses to select
+    // it, but this is the actual enforcement, not just a UI nicety.
+    if matches!(kind, AgentKind::Cursor) {
+        return Err("Cursor is not yet available".to_string());
+    }
 
     let token = mcp
         .session_token()
@@ -226,28 +253,26 @@ pub async fn chat_send(
     let channel = format!("chat://{session}");
     let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
 
-    // Write the MCP config to a temp file the child reads by path (never on
-    // argv). `_cfg_guard`'s Drop removes it on every subsequent exit from
-    // this function, success or error.
-    let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
     let dir = app.path().temp_dir().map_err(|e| e.to_string())?;
-    let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
-    std::fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
-    let _cfg_guard = TempFile(cfg_path.clone());
 
     // A fresh, empty scratch directory for the agent's CWD — never the
     // srelens process's own working directory (the user's repo or home) —
     // so a tool that tried to enumerate its surroundings would find nothing.
-    // Removed on every exit from this function, same as `_cfg_guard` above.
+    // Removed on every exit from this function. This is also Codex's `-C`
+    // workspace (see `codex_command`): genuinely empty, per-turn, and torn
+    // down here — that emptiness is the whole box, so this guard must never
+    // be pointed at anything else.
     let cwd_path = dir.join(format!("srelens-agent-cwd-{session}"));
     std::fs::create_dir_all(&cwd_path).map_err(|e| e.to_string())?;
     let _cwd_guard = TempDir(cwd_path.clone());
 
     // Decode each attached image to its own temp file under the same dir,
     // guarded by a `TempFile` per image so every one is cleaned up on any
-    // exit from this function, same lifecycle as `_cfg_guard` above. A
-    // decode or write failure is reported as an `Error` event and that image
-    // is skipped rather than aborting the whole turn.
+    // exit from this function. A decode or write failure is reported as an
+    // `Error` event and that image is skipped rather than aborting the whole
+    // turn. Shared between both agents: Claude gets these paths folded into
+    // its prompt text (`prompt_with_images`), Codex takes them natively via
+    // `-i`.
     let mut image_guards: Vec<TempFile> = Vec::new();
     let mut image_paths: Vec<String> = Vec::new();
     for (i, data) in images.iter().enumerate() {
@@ -256,7 +281,7 @@ pub async fn chat_send(
             Err(e) => {
                 sink.emit(
                     &channel,
-                    serde_json::to_value(srelens_agent::event::AgentEvent::Error {
+                    serde_json::to_value(AgentEvent::Error {
                         message: format!("could not decode attached image {i}: {e}"),
                     })
                     .unwrap(),
@@ -274,7 +299,7 @@ pub async fn chat_send(
         if let Err(e) = std::fs::write(&image_path, &bytes) {
             sink.emit(
                 &channel,
-                serde_json::to_value(srelens_agent::event::AgentEvent::Error {
+                serde_json::to_value(AgentEvent::Error {
                     message: format!("could not save attached image {i}: {e}"),
                 })
                 .unwrap(),
@@ -284,16 +309,52 @@ pub async fn chat_send(
         image_paths.push(image_path.to_string_lossy().into_owned());
     }
 
-    let effective_prompt = prompt_with_images(&prompt, &image_paths);
+    // Only Claude reads its MCP server config from a file (`--mcp-config`);
+    // Codex gets the same server via `-c` TOML overrides plus its bearer
+    // token in `env` (see `codex_command`), so no config file is written for
+    // it at all. `_cfg_guard` is declared here, outside the match, so its
+    // `Drop` (removing the cleartext-token file) still runs at the end of
+    // this function on every exit, exactly like `_cwd_guard` above — a guard
+    // built and dropped inside the match arm itself would be gone before the
+    // agent ever read the file.
+    let mut _cfg_guard: Option<TempFile> = None;
+    let cmd = match kind {
+        AgentKind::Claude => {
+            let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
+            let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
+            std::fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
+            _cfg_guard = Some(TempFile(cfg_path.clone()));
+            let effective_prompt = prompt_with_images(&prompt, &image_paths);
+            srelens_agent::adapter::claude_command(
+                &agent_path,
+                &effective_prompt,
+                &cfg_path.to_string_lossy(),
+                None,
+            )
+        }
+        AgentKind::Codex => srelens_agent::adapter::codex_command(
+            &agent_path,
+            &prompt,
+            &url,
+            &token,
+            &cwd_path.to_string_lossy(),
+            &image_paths,
+        ),
+        AgentKind::Cursor => unreachable!("rejected above"),
+    };
 
-    let cmd = srelens_agent::adapter::claude_command(
-        &agent_path,
-        &effective_prompt,
-        &cfg_path.to_string_lossy(),
-        None,
-    );
+    let parse_line: fn(&str) -> Vec<AgentEvent> = match kind {
+        AgentKind::Claude => srelens_agent::claude::parse_line,
+        AgentKind::Codex => srelens_agent::codex::parse_line,
+        AgentKind::Cursor => unreachable!("rejected above"),
+    };
+
     let mut child = tokio::process::Command::new(&cmd.program)
         .args(&cmd.args)
+        // Required so Codex's MCP bearer token (carried in `cmd.env`, never
+        // argv) actually reaches the child; harmless for Claude, whose `env`
+        // is always empty (its token travels via the `--mcp-config` file).
+        .envs(cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())))
         .current_dir(&cwd_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -309,13 +370,9 @@ pub async fn chat_send(
         let message = "the agent process had no stdout".to_string();
         sink.emit(
             &channel,
-            serde_json::to_value(srelens_agent::event::AgentEvent::Error { message: message.clone() })
-                .unwrap(),
+            serde_json::to_value(AgentEvent::Error { message: message.clone() }).unwrap(),
         );
-        sink.emit(
-            &channel,
-            serde_json::to_value(srelens_agent::event::AgentEvent::TurnDone).unwrap(),
-        );
+        sink.emit(&channel, serde_json::to_value(AgentEvent::TurnDone).unwrap());
         return Err(message);
     };
 
@@ -350,7 +407,7 @@ pub async fn chat_send(
     let mut lines = BufReader::new(stdout).lines();
     let mut saw_done = false;
     while let Ok(Some(line)) = lines.next_line().await {
-        saw_done |= emit_events(sink.clone(), &channel, std::iter::once(line));
+        saw_done |= emit_events(sink.clone(), &channel, std::iter::once(line), parse_line);
     }
 
     // Taken out of the map either here, or already by `chat_cancel` (a
@@ -404,11 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_cursor_are_gated_but_claude_is_not() {
-        let info = detect(AgentKind::Codex, |_| Some("/usr/bin/codex".into()));
-        assert!(info.available);
-        assert!(info.gated);
-
+    fn cursor_is_gated_but_claude_and_codex_are_not() {
         let info = detect(AgentKind::Cursor, |_| Some("/usr/bin/cursor-agent".into()));
         assert!(info.available);
         assert!(info.gated);
@@ -416,6 +469,24 @@ mod tests {
         let info = detect(AgentKind::Claude, |_| Some("/usr/bin/claude".into()));
         assert!(info.available);
         assert!(!info.gated);
+
+        let info = detect(AgentKind::Codex, |_| Some("/usr/bin/codex".into()));
+        assert!(info.available);
+        assert!(!info.gated);
+    }
+
+    #[test]
+    fn parse_agent_kind_maps_each_serialized_tag_to_its_enum_variant() {
+        assert_eq!(parse_agent_kind("claude"), Ok(AgentKind::Claude));
+        assert_eq!(parse_agent_kind("codex"), Ok(AgentKind::Codex));
+        assert_eq!(parse_agent_kind("cursor"), Ok(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn parse_agent_kind_rejects_anything_else() {
+        assert_eq!(parse_agent_kind("gpt5"), Err("unknown agent".to_string()));
+        assert_eq!(parse_agent_kind(""), Err("unknown agent".to_string()));
+        assert_eq!(parse_agent_kind("Claude"), Err("unknown agent".to_string()));
     }
 
     /// Builds a temp dir under `std::env::temp_dir()` with a single executable
@@ -498,11 +569,41 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
             r#"{"type":"result","subtype":"success"}"#,
         ];
-        emit_events(sink.clone(), "chat://s1", lines.iter().map(|s| s.to_string()));
+        emit_events(
+            sink.clone(),
+            "chat://s1",
+            lines.iter().map(|s| s.to_string()),
+            srelens_agent::claude::parse_line,
+        );
         let got = sink.0.lock().unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].0, "chat://s1");
         assert_eq!(got[0].1["type"], "textDelta");
+        assert_eq!(got[1].1["type"], "turnDone");
+    }
+
+    /// Same contract as `each_parsed_event_is_emitted_on_the_session_channel`
+    /// above, but driven through Codex's own JSONL shape and parser — proves
+    /// `emit_events` is genuinely agent-agnostic, not accidentally coupled to
+    /// Claude's line format via a hardcoded parser.
+    #[test]
+    fn emit_events_with_the_codex_parser_emits_a_text_delta_then_turn_done() {
+        let sink = std::sync::Arc::new(RecordingSink(Default::default()));
+        let lines = [
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hi"}}"#,
+            r#"{"type":"turn.completed","usage":{}}"#,
+        ];
+        emit_events(
+            sink.clone(),
+            "chat://s1",
+            lines.iter().map(|s| s.to_string()),
+            srelens_agent::codex::parse_line,
+        );
+        let got = sink.0.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "chat://s1");
+        assert_eq!(got[0].1["type"], "textDelta");
+        assert_eq!(got[0].1["text"], "hi");
         assert_eq!(got[1].1["type"], "turnDone");
     }
 
