@@ -267,6 +267,14 @@ pub fn cursor_command(
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--trust".to_string(),
+        // `--approve-mcps` loads/approves the srelens MCP *server*; `--force`
+        // auto-runs the tool *calls* — without `--force`, Cursor's headless
+        // `-p` mode auto-rejects every MCP call ("User rejected MCP") because
+        // there is no interactive approver, even for read-only tools. `--force`
+        // is "allow unless explicitly denied", so the local-tool deny-list in
+        // `cursor_cli_config_json` still blocks read/write/shell/etc. — verified
+        // live: MCP calls succeed while `read`/`shell` are denied.
+        "--force".to_string(),
         "--approve-mcps".to_string(),
         "--workspace".to_string(),
         empty_cwd.to_string(),
@@ -304,11 +312,15 @@ pub fn cursor_cli_config_json() -> String {
             "deny": [
                 "Read(**)",
                 "Write(**)",
+                "Edit(**)",
                 "Shell(**)",
                 "Fetch(**)",
+                "Grep(**)",
+                "Delete(**)",
                 "List(**)",
                 "Search(**)",
-                "Delete(**)"
+                "WebFetch(**)",
+                "WebSearch(**)"
             ]
         }
     })
@@ -583,6 +595,7 @@ mod tests {
             "--output-format",
             "stream-json",
             "--trust",
+            "--force",
             "--approve-mcps",
             "--workspace",
             "/tmp/srelens-empty-cwd",
@@ -601,10 +614,14 @@ mod tests {
     }
 
     #[test]
-    fn cursor_command_never_passes_verbose_or_force() {
+    fn cursor_command_forces_and_approves_mcps_but_never_verbose() {
         let cmd = cursor_cmd();
+        // `--force` (auto-run MCP calls) + `--approve-mcps` (load the server)
+        // are both required; the local-tool deny-list is what keeps `--force`
+        // safe. `--verbose` is a Claude-only flag Cursor errors on.
+        assert!(cmd.args.contains(&"--force".to_string()));
+        assert!(cmd.args.contains(&"--approve-mcps".to_string()));
         assert!(!cmd.args.contains(&"--verbose".to_string()));
-        assert!(!cmd.args.contains(&"--force".to_string()));
     }
 
     #[test]
@@ -661,17 +678,27 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&cursor_cli_config_json()).unwrap();
         assert_eq!(v["permissions"]["allow"], serde_json::json!([]));
         let deny = v["permissions"]["deny"].as_array().unwrap();
-        assert_eq!(deny.len(), 7);
+        // Comprehensive because `--force` allows any *un-denied* tool — every
+        // local-access tool (file read/write/edit, shell, grep, fetch, delete,
+        // list, search, web) must be denied. (Cursor's `Glob` is unpermissioned
+        // and can't be denied, but it's confined to the empty workspace.)
         for tool in [
             "Read(**)",
             "Write(**)",
+            "Edit(**)",
             "Shell(**)",
             "Fetch(**)",
+            "Grep(**)",
+            "Delete(**)",
             "List(**)",
             "Search(**)",
-            "Delete(**)",
+            "WebFetch(**)",
+            "WebSearch(**)",
         ] {
-            assert!(deny.contains(&serde_json::Value::String(tool.to_string())));
+            assert!(
+                deny.contains(&serde_json::Value::String(tool.to_string())),
+                "deny-list must include {tool}"
+            );
         }
     }
 

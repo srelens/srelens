@@ -72,7 +72,20 @@ pub async fn handle_request(
                     } else {
                         t.input_schema
                     };
-                    json!({ "name": t.name, "description": t.description, "inputSchema": schema })
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": schema,
+                        // MCP tool annotations. `readOnlyHint` lets a client
+                        // (Cursor) auto-approve read-only calls in headless
+                        // mode instead of rejecting them; destructive/consent-
+                        // gated tools are `false` and stay gated by srelens's
+                        // own confirm dialog.
+                        "annotations": {
+                            "readOnlyHint": t.read_only,
+                            "destructiveHint": t.destructive,
+                        },
+                    })
                 })
                 .collect();
             Some(ok(id?, json!({ "tools": tools })))
@@ -601,6 +614,10 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "ping");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        // A read-only capability advertises `readOnlyHint: true` so MCP clients
+        // (Cursor) can auto-approve the call in non-interactive mode.
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[0]["annotations"]["destructiveHint"], false);
     }
 
     #[tokio::test]
