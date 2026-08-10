@@ -35,6 +35,9 @@ beforeEach(() => {
   // earlier test in this file (`saveSession`, `startChat`, ...) would
   // otherwise bleed into the next test's assertions — clear it first.
   vi.clearAllMocks();
+  // The composer persists the last-used agent to localStorage; clear it so one
+  // test's selection doesn't become the next test's default.
+  localStorage.clear();
   nextSession = 0;
   vi.mocked(chat.listAgents).mockResolvedValue([
     {
@@ -1134,6 +1137,38 @@ describe("AssistantConversation agent persistence", () => {
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
     await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalled());
     expect(vi.mocked(chatHistory.saveSession).mock.calls[0][0].agentKind).toBe("codex");
+  });
+
+  it("a fresh chat defaults to the last-used agent from localStorage, not always the first", async () => {
+    localStorage.setItem("srelens.assistant.lastAgent", "codex");
+    vi.mocked(chat.listAgents).mockResolvedValue(twoAgents); // claude (first) + codex
+    render(<AssistantConversation />);
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    // Codex was last used, so it wins over the first-in-list Claude default.
+    await waitFor(() => expect(trigger.textContent).toMatch(/codex/i));
+  });
+
+  it("persists the agent used on send so the next chat defaults to it", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue(twoAgents);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.click(await screen.findByRole("combobox", { name: /agent/i }));
+    fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(localStorage.getItem("srelens.assistant.lastAgent")).toBe("codex");
+  });
+
+  it("falls back to the first available when the last-used agent is no longer installed", async () => {
+    localStorage.setItem("srelens.assistant.lastAgent", "codex");
+    // Only Claude is available now — the stored codex is gone.
+    vi.mocked(chat.listAgents).mockResolvedValue([twoAgents[0]]);
+    render(<AssistantConversation />);
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    await waitFor(() => expect(trigger.textContent).toMatch(/claude/i));
   });
 
   it("restores the agent used when a session is reopened", async () => {

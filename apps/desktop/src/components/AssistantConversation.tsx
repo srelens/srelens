@@ -101,6 +101,27 @@ export function stripDataUri(uri: string): string {
   return i === -1 ? uri : uri.slice(i + 1);
 }
 
+/** Persist the agent the user last actually used so a fresh chat defaults back
+ * to it instead of always falling to the first-available (Claude). Stored
+ * globally (not per-session — that's `Session.agentKind`); guarded so a missing
+ * `localStorage` (or a private-mode throw) degrades to the first-available
+ * default rather than erroring. */
+const LAST_AGENT_KEY = "srelens.assistant.lastAgent";
+function loadLastAgent(): string | null {
+  try {
+    return localStorage.getItem(LAST_AGENT_KEY);
+  } catch {
+    return null;
+  }
+}
+function saveLastAgent(kind: string) {
+  try {
+    if (kind) localStorage.setItem(LAST_AGENT_KEY, kind);
+  } catch {
+    /* ignore — persistence is a convenience, not required */
+  }
+}
+
 interface ToolCallState {
   tool: string;
   args: unknown;
@@ -789,8 +810,12 @@ export const AssistantConversation = forwardRef<
     listAgents()
       .then((list) => {
         setAgents(list);
+        // Prefer the last-used agent (if it's still installed and selectable),
+        // otherwise the first available non-gated one.
+        const stored = loadLastAgent();
+        const lastUsed = list.find((a) => a.kind === stored && a.available && !a.gated);
         const firstAvailable = list.find((a) => a.available && !a.gated) ?? list.find((a) => a.available) ?? list[0];
-        setSelectedKind(firstAvailable?.kind ?? "");
+        setSelectedKind((lastUsed ?? firstAvailable)?.kind ?? "");
       })
       .catch(() => {
         setAgents([]);
@@ -1144,7 +1169,9 @@ export const AssistantConversation = forwardRef<
       }
       const guidance = await loadSkillsGuidance(activeSkills);
       const outgoing = `${preface}${guidance}${prompt}`;
-      await sendChat(session, outgoing, agentPath, applyEvent, rawImages, selectedAgent?.kind ?? selectedKind);
+      const usedKind = selectedAgent?.kind ?? selectedKind;
+      saveLastAgent(usedKind); // remember what was actually used for the next fresh chat
+      await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind);
     } catch (e) {
       // A rejection here means the transport itself failed before any
       // `error` event could stream (e.g. `chat_send` rejects outright when
@@ -1167,7 +1194,14 @@ export const AssistantConversation = forwardRef<
   }
 
   const agentPicker = agents.length > 0 && (
-    <AgentPicker agents={agents} selectedKind={selectedKind} onSelect={setSelectedKind} />
+    <AgentPicker
+      agents={agents}
+      selectedKind={selectedKind}
+      onSelect={(kind) => {
+        setSelectedKind(kind);
+        saveLastAgent(kind);
+      }}
+    />
   );
 
   return (
