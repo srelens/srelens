@@ -863,4 +863,36 @@ describe("AssistantConversation skills activation (Task 23)", () => {
     await screen.findByText("hi");
     expect(screen.getByLabelText("Remove skill crashloop-triage")).toBeTruthy();
   });
+
+  it("a rejected loadSkill for one active skill doesn't abort the turn — its guidance is dropped, the surviving skill's still sends", async () => {
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    vi.mocked(skills.loadSkill).mockImplementation(async (name: string) => {
+      if (name === "pending-triage") throw new Error("skill file missing");
+      return { name, description: "", body: "Check the exit code first." };
+    });
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+    // Re-typing the exact same "/" value here wouldn't re-fire React's
+    // onChange (the DOM value is already "/", unchanged since the line
+    // above), so the token narrows to "/pending" instead — a genuinely
+    // different value that reopens the dismissed menu, filtered to the one
+    // remaining match.
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "/pending" } });
+    fireEvent.click(await screen.findByText("pending-triage"));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "pod-a is restarting" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    // Hand-written literal: only the surviving skill's guidance appears.
+    expect(vi.mocked(chat.sendChat).mock.calls[0][1]).toBe(
+      "Apply these skills:\n\nCheck the exit code first.\n\npod-a is restarting",
+    );
+    // The turn still sent despite the missing skill — no generic transport
+    // error bubble from an aborted `handleSend`.
+    expect(screen.queryByText(/skill file missing/i)).toBeFalsy();
+  });
 });

@@ -203,7 +203,7 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
 
           <div className="flex h-[28rem] min-h-0 gap-4">
             <div className="flex w-56 shrink-0 flex-col gap-2 border-r border-border pr-3">
-              <Button variant="secondary" size="sm" onClick={newSkill}>
+              <Button variant="secondary" size="sm" onClick={newSkill} disabled={generating}>
                 New skill
               </Button>
               {skills.length === 0 ? (
@@ -217,8 +217,9 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
                     >
                       <button
                         type="button"
-                        className="min-w-0 flex-1 truncate text-left"
+                        className="min-w-0 flex-1 truncate text-left disabled:pointer-events-none disabled:opacity-50"
                         onClick={() => void select(s.name)}
+                        disabled={generating}
                       >
                         <span className="block truncate font-medium">{s.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">{s.description}</span>
@@ -227,7 +228,8 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
                         type="button"
                         aria-label={`Delete ${s.name}`}
                         onClick={() => setPendingDelete(s.name)}
-                        className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                        disabled={generating}
+                        className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:pointer-events-none disabled:opacity-0"
                       >
                         ✕
                       </button>

@@ -58,11 +58,18 @@ function multiContextPreface(contexts: string[]): string {
  * block prepended to the outgoing prompt — after any context/multi-context
  * preface, before the user's own text — kept out of the visible transcript
  * exactly like that preface. Empty when no skill is active.
+ *
+ * Uses `allSettled` rather than `all`: an active skill can go missing (e.g.
+ * deleted from disk after being activated in an old, still-open session), and
+ * a `loadSkill` rejection must not abort the whole turn — it just drops that
+ * one skill's guidance and sends with whatever else loaded.
  */
 async function loadSkillsGuidance(names: string[]): Promise<string> {
   if (names.length === 0) return "";
-  const loaded = await Promise.all(names.map((name) => loadSkill(name)));
-  return `Apply these skills:\n\n${loaded.map((s) => s.body).join("\n\n")}\n\n`;
+  const results = await Promise.allSettled(names.map((name) => loadSkill(name)));
+  const bodies = results.filter((r) => r.status === "fulfilled").map((r) => r.value.body);
+  if (bodies.length === 0) return "";
+  return `Apply these skills:\n\n${bodies.join("\n\n")}\n\n`;
 }
 
 /** Picks the image files out of a paste event's clipboard data — everything

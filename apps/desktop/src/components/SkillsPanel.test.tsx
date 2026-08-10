@@ -287,4 +287,48 @@ describe("SkillsPanel — Generate with AI", () => {
 
     expect((screen.getByRole("button", { name: /generate with ai/i }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("disables New skill and the skill-list items while a generation is in flight, and the originally-open editor receives the result", async () => {
+    // A `sendChat` that doesn't settle until `resolveSend()` is called, so the
+    // test can assert mid-flight state (navigation disabled) before letting
+    // the turn complete — guards against a `turnDone` landing on whatever
+    // skill is open *then* rather than the one open when Generate was
+    // clicked (switching skills, or New skill, mid-generation must be
+    // blocked instead).
+    let resolveSend: () => void = () => {};
+    chatLibMock.sendChat.mockImplementation(
+      (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) =>
+        new Promise<void>((resolve) => {
+          resolveSend = () => {
+            onEvent({ type: "textDelta", text: "Body for crashloop-triage." });
+            onEvent({ type: "turnDone" });
+            resolve();
+          };
+        }),
+    );
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByText("alpha"));
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("Body for alpha");
+    });
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "New skill" }) as HTMLButtonElement).disabled).toBe(true);
+    });
+    expect((screen.getByText("alpha").closest("button") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByText("zeta").closest("button") as HTMLButtonElement).disabled).toBe(true);
+
+    resolveSend();
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("Body for crashloop-triage.");
+    });
+    // Still "alpha" the whole time — the originally-open skill got the result.
+    expect((screen.getByLabelText("Skill name") as HTMLInputElement).value).toBe("alpha");
+    expect((screen.getByRole("button", { name: "New skill" }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });
