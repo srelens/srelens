@@ -55,6 +55,9 @@ describe("AssistantDrawer", () => {
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
     await waitFor(() => expect(screen.getByText(/3 pods running/)).toBeTruthy());
+    // Tool calls fold into a collapsed "Tools · N" group above the answer;
+    // expand it to see the individual call.
+    fireEvent.click(screen.getByRole("button", { name: /tools \(1\)/i }));
     expect(screen.getByText("k8s.listPods")).toBeTruthy();
   });
 
@@ -188,6 +191,8 @@ describe("AssistantDrawer", () => {
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    // Expand the collapsed "Tools · N" group to reveal the individual call.
+    fireEvent.click(await screen.findByRole("button", { name: /tools \(1\)/i }));
     await screen.findByText("k8s.getSecret");
     expect(screen.queryByText(/db-creds/)).toBeFalsy();
 

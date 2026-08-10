@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, Paperclip, Sparkles } from "lucide-react";
+import { Bot, Check, ChevronDown, ChevronRight, Copy, Paperclip, Sparkles, Wrench } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
@@ -207,6 +207,71 @@ function ToolCallCard({ tool, args, status }: ToolCallState) {
       </button>
       {expanded && summary && <div className="mt-1 truncate font-mono text-muted-foreground">{summary}</div>}
     </div>
+  );
+}
+
+/**
+ * A turn's tool calls, folded into one collapsible "Tools · N" row so a busy
+ * turn's calls don't crowd out the answer. Collapsed by default; the row shows
+ * the count and a running spinner (any call still in flight) or an error badge
+ * (any call failed/denied). Expanding reveals each `ToolCallCard`.
+ */
+function ToolCallGroup({ toolCalls }: { toolCalls: ToolCallState[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const running = toolCalls.some((tc) => tc.status === null);
+  const failed = toolCalls.some((tc) => tc.status === "error" || tc.status === "denied");
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 text-xs">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-label={`Tools (${toolCalls.length})`}
+        onClick={() => setExpanded((e) => !e)}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-muted-foreground hover:text-foreground"
+      >
+        {expanded ? (
+          <ChevronDown aria-hidden="true" className="size-3.5 shrink-0" />
+        ) : (
+          <ChevronRight aria-hidden="true" className="size-3.5 shrink-0" />
+        )}
+        <Wrench aria-hidden="true" className="size-3.5 shrink-0" />
+        <span className="font-medium text-foreground">Tools</span>
+        <span>· {toolCalls.length}</span>
+        {running ? (
+          <Spinner className="size-3" label="Running" />
+        ) : failed ? (
+          <Badge variant="danger">error</Badge>
+        ) : null}
+      </button>
+      {expanded && (
+        <div className="border-t border-border px-2.5 pb-2">
+          {toolCalls.map((tc, i) => (
+            <ToolCallCard key={i} tool={tc.tool} args={tc.args} status={tc.status} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Small "Copy" affordance for an assistant answer — copies the raw markdown
+ * text and briefly flips to a check. */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label="Copy answer"
+      onClick={() => {
+        void navigator.clipboard?.writeText(text);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }}
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+    >
+      {copied ? <Check aria-hidden="true" className="size-3.5" /> : <Copy aria-hidden="true" className="size-3.5" />}
+      {copied ? "Copied" : "Copy"}
+    </button>
   );
 }
 
@@ -1078,24 +1143,27 @@ export const AssistantConversation = forwardRef<
                     {m.text}
                   </div>
                 ) : (
-                  <div className="text-sm leading-relaxed">
+                  <div className="space-y-2">
+                    {(() => {
+                      const calls = (m.toolCallIds ?? [])
+                        .map((id) => toolCalls[id])
+                        .filter((tc): tc is ToolCallState => Boolean(tc));
+                      return calls.length > 0 ? <ToolCallGroup toolCalls={calls} /> : null;
+                    })()}
                     {m.text ? (
-                      <AssistantMarkdown text={m.text} />
+                      <div className="group/answer relative">
+                        <div className="text-sm leading-relaxed">
+                          <AssistantMarkdown text={m.text} />
+                        </div>
+                        <div className="mt-1 opacity-0 transition-opacity group-hover/answer:opacity-100">
+                          <CopyButton text={m.text} />
+                        </div>
+                      </div>
                     ) : sending ? (
-                      <span className="text-muted-foreground">…</span>
-                    ) : (
-                      ""
-                    )}
+                      <span className="text-sm text-muted-foreground">…</span>
+                    ) : null}
                   </div>
                 )}
-                {m.toolCallIds?.map((id) => {
-                  const tc = toolCalls[id];
-                  return tc ? (
-                    <div key={id} className="mt-2">
-                      <ToolCallCard tool={tc.tool} args={tc.args} status={tc.status} />
-                    </div>
-                  ) : null;
-                })}
               </div>
             ))}
             {pendingConfirms.map((req) => (

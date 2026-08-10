@@ -990,3 +990,37 @@ describe("AssistantConversation skills activation (Task 23)", () => {
     expect(screen.queryByText(/skill file missing/i)).toBeFalsy();
   });
 });
+
+describe("AssistantConversation answer layout", () => {
+  it("folds a turn's tool calls into a collapsed Tools group, hidden until expanded", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "textDelta", text: "Here are the pods." });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "pods?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await screen.findByText(/here are the pods/i);
+    // Collapsed by default — the individual call isn't in the DOM yet.
+    expect(screen.queryByText("k8s.listPods")).toBeFalsy();
+    fireEvent.click(screen.getByRole("button", { name: /tools \(1\)/i }));
+    expect(screen.getByText("k8s.listPods")).toBeTruthy();
+  });
+
+  it("copies the assistant answer to the clipboard", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "The answer." });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await screen.findByText(/the answer/i);
+    fireEvent.click(screen.getByRole("button", { name: /copy answer/i }));
+    expect(writeText).toHaveBeenCalledWith("The answer.");
+  });
+});
