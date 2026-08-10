@@ -1,18 +1,22 @@
 import React, { useRef, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Wrench } from "lucide-react";
 import { Button } from "../ui";
 import { relativeTime } from "../lib/relativeTime";
 import type { SessionMeta } from "../lib/chatHistory";
 import { AssistantConversation, type AssistantConversationHandle } from "./AssistantConversation";
+import { SkillsPanel } from "./SkillsPanel";
 
 /**
  * Left history rail for the full-tab assistant: New Chat plus the saved
  * sessions (title + relative time, newest first — `sessions` already arrives
  * in that order from `AssistantConversation`'s `onSessionsChanged`), click to
  * load, hover to reveal delete. Collapses to a thin strip so the transcript
- * can reclaim the width. All three actions are forwarded straight through to
- * `AssistantConversation` via its imperative handle — this component holds
- * no session state of its own, only the mirrored list it renders.
+ * can reclaim the width. The three session actions are forwarded straight
+ * through to `AssistantConversation` via its imperative handle — this
+ * component holds no session state of its own, only the mirrored list it
+ * renders. A "Skills" footer button (Task 22) opens `SkillsPanel`, owned by
+ * the parent `AssistantTab` since the panel is a modal over the whole tab,
+ * not scoped to the rail.
  */
 function HistoryRail({
   collapsed,
@@ -21,6 +25,7 @@ function HistoryRail({
   onNewChat,
   onSelectSession,
   onDeleteSession,
+  onOpenSkills,
 }: {
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -28,6 +33,7 @@ function HistoryRail({
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  onOpenSkills: () => void;
 }) {
   if (collapsed) {
     return (
@@ -60,36 +66,44 @@ function HistoryRail({
           <ChevronLeft aria-hidden="true" className="size-4" />
         </button>
       </div>
-      {sessions.length === 0 ? (
-        <p className="px-3 py-2 text-xs text-muted-foreground">No saved chats yet.</p>
-      ) : (
-        <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-1">
-          {sessions.map((s) => (
-            <li
-              key={s.id}
-              className="group flex items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
-            >
-              <button
-                type="button"
-                className="min-w-0 flex-1 truncate text-left"
-                title={s.title}
-                onClick={() => onSelectSession(s.id)}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {sessions.length === 0 ? (
+          <p className="px-3 py-2 text-xs text-muted-foreground">No saved chats yet.</p>
+        ) : (
+          <ul className="space-y-0.5 p-1">
+            {sessions.map((s) => (
+              <li
+                key={s.id}
+                className="group flex items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
               >
-                <span className="block truncate">{s.title}</span>
-                <span className="block text-xs text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
-              </button>
-              <button
-                type="button"
-                aria-label={`Delete ${s.title}`}
-                onClick={() => onDeleteSession(s.id)}
-                className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate text-left"
+                  title={s.title}
+                  onClick={() => onSelectSession(s.id)}
+                >
+                  <span className="block truncate">{s.title}</span>
+                  <span className="block text-xs text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Delete ${s.title}`}
+                  onClick={() => onDeleteSession(s.id)}
+                  className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div className="shrink-0 border-t border-border p-1">
+        <Button variant="ghost" size="xs" className="w-full justify-start" onClick={onOpenSkills}>
+          <Wrench aria-hidden="true" data-icon="inline-start" />
+          Skills
+        </Button>
+      </div>
     </div>
   );
 }
@@ -122,6 +136,7 @@ export function AssistantTab({
   const convRef = useRef<AssistantConversationHandle>(null);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [collapsed, setCollapsed] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
 
   return (
     <div className="flex h-full min-h-0">
@@ -132,6 +147,7 @@ export function AssistantTab({
         onNewChat={() => convRef.current?.newChat()}
         onSelectSession={(id) => convRef.current?.selectSession(id)}
         onDeleteSession={(id) => convRef.current?.deleteSession(id)}
+        onOpenSkills={() => setSkillsOpen(true)}
       />
       <div className="min-w-0 flex-1">
         <AssistantConversation
@@ -143,6 +159,7 @@ export function AssistantTab({
           onSessionsChanged={setSessions}
         />
       </div>
+      {skillsOpen && <SkillsPanel onClose={() => setSkillsOpen(false)} />}
     </div>
   );
 }

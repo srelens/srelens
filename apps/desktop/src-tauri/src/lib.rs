@@ -3,6 +3,7 @@ mod appimage;
 mod assistant;
 mod assistant_history;
 mod assistant_prompts;
+mod assistant_skills;
 mod bridge;
 pub mod capabilities;
 mod cluster_oidc;
@@ -387,6 +388,10 @@ pub fn run() {
             assistant_history::chat_history_delete,
             assistant_prompts::assistant_prompts_list,
             assistant_prompts::assistant_prompt_get,
+            assistant_skills::skills_list,
+            assistant_skills::skill_load,
+            assistant_skills::skill_save,
+            assistant_skills::skill_delete,
             invoke_capability,
             start_resource_watch,
             stop_watch,
