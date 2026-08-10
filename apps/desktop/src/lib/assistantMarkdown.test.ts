@@ -101,4 +101,37 @@ describe("parseAssistantMarkdown", () => {
     expect(() => parseAssistantMarkdown("```\nunterminated")).not.toThrow();
     expect(parseAssistantMarkdown("```\nunterminated")).toEqual([{ kind: "code", text: "unterminated" }]);
   });
+
+  it("parses ATX headings at their level", () => {
+    const blocks = parseAssistantMarkdown("# Big\n## Cluster report\n### Nodes (11)");
+    expect(blocks.map((b) => b.kind)).toEqual(["heading", "heading", "heading"]);
+    expect(blocks.map((b) => (b.kind === "heading" ? b.level : null))).toEqual([1, 2, 3]);
+    // spans still parse inline markup
+    const nodes = blocks[2];
+    expect(nodes.kind === "heading" && nodes.spans.map((s) => s.text).join("")).toBe("Nodes (11)");
+  });
+
+  it("parses a GFM table into headers and rows", () => {
+    const md = "| Field | Value |\n|-------|-------|\n| Context | iway-kube1 |\n| Reachable | Yes |";
+    const blocks = parseAssistantMarkdown(md);
+    expect(blocks).toHaveLength(1);
+    const t = blocks[0];
+    if (t.kind !== "table") throw new Error("expected a table");
+    expect(t.headers.map((h) => h.map((s) => s.text).join(""))).toEqual(["Field", "Value"]);
+    expect(t.rows.map((r) => r.map((c) => c.map((s) => s.text).join("")))).toEqual([
+      ["Context", "iway-kube1"],
+      ["Reachable", "Yes"],
+    ]);
+  });
+
+  it("separates a heading from a following table (the run-together case)", () => {
+    const md = "### Connectivity\n| Field | Value |\n|---|---|\n| Reachable | Yes |";
+    const blocks = parseAssistantMarkdown(md);
+    expect(blocks.map((b) => b.kind)).toEqual(["heading", "table"]);
+  });
+
+  it("degrades a pipe-y line that isn't a real table to a paragraph", () => {
+    const blocks = parseAssistantMarkdown("a | b without a separator row");
+    expect(blocks.map((b) => b.kind)).toEqual(["paragraph"]);
+  });
 });

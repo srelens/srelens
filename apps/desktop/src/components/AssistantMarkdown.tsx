@@ -59,6 +59,47 @@ export function AssistantMarkdown({ text }: { text: string }) {
             </pre>
           );
         }
+        if (block.kind === "heading") {
+          const cls =
+            block.level <= 1
+              ? "text-base font-semibold"
+              : block.level === 2
+                ? "text-[0.95rem] font-semibold"
+                : "text-sm font-semibold text-muted-foreground";
+          return (
+            <p key={i} className={`${cls} mt-1`}>
+              <Spans spans={block.spans} />
+            </p>
+          );
+        }
+        if (block.kind === "table") {
+          return (
+            <div key={i} className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr>
+                    {block.headers.map((h, j) => (
+                      <th key={j} className="border border-border bg-muted/40 px-2 py-1 text-left font-semibold">
+                        <Spans spans={h} />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, r) => (
+                    <tr key={r}>
+                      {row.map((cell, c) => (
+                        <td key={c} className="border border-border px-2 py-1 align-top">
+                          <Spans spans={cell} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
         return (
           <p key={i}>
             <Spans spans={block.spans} />
