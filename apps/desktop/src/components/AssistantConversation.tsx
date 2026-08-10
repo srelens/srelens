@@ -4,6 +4,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Badge, Button, Spinner, TextInput } from "../ui";
 import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
 import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
+import { getPrompt, listPrompts, type PromptSummary } from "../lib/prompts";
 import {
   deleteSession as deleteSessionCmd,
   listSessions,
@@ -224,6 +225,38 @@ function ConfirmCard({
 }
 
 /**
+ * The `/` slash menu: a dropdown of srelens's diagnostic prompts (name +
+ * description), anchored above the composer's input row so it opens upward
+ * without being clipped by the transcript below. Styled to match the
+ * `PopoverContent` surface (`ContextMultiSelect`/`HistoryPopover`) even
+ * though this isn't a Radix popover itself — it needs to open purely from
+ * the composer's input value (a `/`-prefixed token), not a trigger click,
+ * so a plain positioned `div` is simpler than fighting Radix's own
+ * open/anchor model for that.
+ */
+function PromptMenu({ prompts, onPick }: { prompts: PromptSummary[]; onPick: (p: PromptSummary) => void }) {
+  return (
+    <div className="absolute bottom-full left-0 z-50 mb-1 max-h-64 w-80 overflow-y-auto rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md">
+      {prompts.length === 0 ? (
+        <p className="px-2 py-1.5 text-xs text-muted-foreground">No matching prompts.</p>
+      ) : (
+        prompts.map((p) => (
+          <button
+            key={p.name}
+            type="button"
+            className="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-accent"
+            onClick={() => onPick(p)}
+          >
+            <span className="font-mono text-xs font-medium">{p.name}</span>
+            <span className="w-full truncate text-xs text-muted-foreground">{p.description}</span>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
+/**
  * "Contexts (N)" button opening a checklist of `available` kube contexts,
  * for the global (multi-context) tab only — the drawer keeps its single
  * resource `context` chip instead. Stays open across multiple toggles so
@@ -403,6 +436,16 @@ export const AssistantConversation = forwardRef<
   // contexts selected for this global chat, in pick order.
   const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
   const [pendingConfirms, setPendingConfirms] = useState<ConfirmRequest[]>([]);
+  // Task 21's `/` slash menu — srelens's diagnostic prompts, loaded once on
+  // mount (an empty list on failure just means the menu never has anything
+  // to show, not a broken composer). `promptMenuDismissed` lets Escape close
+  // the menu even while the input still reads as a `/`-prefixed token; it's
+  // reset on every keystroke so the next slash reopens it. `promptError`
+  // surfaces a rejected `getPrompt` (e.g. a required arg this menu can't
+  // fill) inline, without touching the input.
+  const [prompts, setPrompts] = useState<PromptSummary[]>([]);
+  const [promptMenuDismissed, setPromptMenuDismissed] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
   // Images attached to the in-progress message, as displayable data URIs —
   // cleared on send (after being copied onto the outgoing user `ChatMessage`
   // and, base64-stripped, into `sendChat`'s `images` arg).
@@ -455,6 +498,14 @@ export const AssistantConversation = forwardRef<
     return () => {
       void unlisten.then((f) => f());
     };
+  }, []);
+
+  // Load the slash menu's prompt list once on mount — same "best-effort,
+  // empty on failure" treatment as `listAgents`/`listSessions` above.
+  useEffect(() => {
+    listPrompts()
+      .then(setPrompts)
+      .catch(() => setPrompts([]));
   }, []);
 
   async function answerConfirm(id: string, approved: boolean) {
@@ -510,6 +561,46 @@ export const AssistantConversation = forwardRef<
   // disabled until at least one is picked; the drawer (single resource
   // `context`, no `availableContexts`) is never gated on this.
   const canSend = agentReady && (!multiContextMode || selectedContexts.length > 0);
+
+  // The slash menu is open exactly when the composer holds "/" or a
+  // `/`-prefixed token with no whitespace (still mid-typing a prompt name),
+  // there's at least one prompt to offer, and the user hasn't dismissed it
+  // (Escape) since the last keystroke. The token after the slash narrows the
+  // list by a case-insensitive substring match on the prompt name; an empty
+  // token (just "/") shows everything.
+  const slashMatch = /^\/(\S*)$/.exec(input);
+  const promptMenuOpen = slashMatch !== null && !promptMenuDismissed && prompts.length > 0;
+  const promptQuery = (slashMatch?.[1] ?? "").toLowerCase();
+  const filteredPrompts = promptQuery
+    ? prompts.filter((p) => p.name.toLowerCase().includes(promptQuery))
+    : prompts;
+
+  function handleInputChange(value: string) {
+    setInput(value);
+    setPromptMenuDismissed(false);
+    setPromptError(null);
+  }
+
+  function handleComposerEscape() {
+    if (promptMenuOpen) setPromptMenuDismissed(true);
+  }
+
+  /** Render `p` (`context` from the multi-context selection or the drawer's
+   * resource context, empty if neither applies) and drop the result straight
+   * into the composer for review — never auto-sent. A rejection (e.g. a
+   * required arg this menu doesn't know how to fill) surfaces inline and
+   * leaves the input untouched, rather than crashing or clobbering it. */
+  async function selectPrompt(p: PromptSummary) {
+    const ctx = multiContextMode ? (selectedContexts[0] ?? "") : (attachedContext?.context ?? "");
+    try {
+      const text = await getPrompt(p.name, { context: ctx });
+      setInput(text);
+      setPromptMenuDismissed(true);
+      setPromptError(null);
+    } catch (e) {
+      setPromptError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   /** Serialize the current transcript and save it to disk. Best-effort: a
    * failed save is swallowed rather than surfaced, since it must never break
@@ -901,6 +992,7 @@ export const AssistantConversation = forwardRef<
             ))}
           </div>
         )}
+        {promptError && <p className="text-xs text-destructive">{promptError}</p>}
         <div className="flex items-end gap-2">
           <label
             title="Attach image"
@@ -918,14 +1010,20 @@ export const AssistantConversation = forwardRef<
             />
           </label>
           {agentPicker}
-          <TextInput
-            value={input}
-            onValueChange={setInput}
-            onEnter={handleSend}
-            placeholder="Ask about this cluster..."
-            disabled={sending}
-            className="flex-1"
-          />
+          <div className="relative flex-1">
+            {promptMenuOpen && <PromptMenu prompts={filteredPrompts} onPick={(p) => void selectPrompt(p)} />}
+            <TextInput
+              value={input}
+              onValueChange={handleInputChange}
+              onEnter={() => {
+                if (!promptMenuOpen) handleSend();
+              }}
+              onEscape={handleComposerEscape}
+              placeholder="Ask about this cluster..."
+              disabled={sending}
+              className="w-full"
+            />
+          </div>
           <Button
             variant={sending ? "secondary" : "primary"}
             onClick={sending ? handleStop : handleSend}

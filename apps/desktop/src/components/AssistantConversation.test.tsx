@@ -3,9 +3,11 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { AssistantConversation, stripDataUri } from "./AssistantConversation";
 import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
+import * as prompts from "../lib/prompts";
 
 vi.mock("../lib/chat");
 vi.mock("../lib/chatHistory");
+vi.mock("../lib/prompts");
 vi.mock("../lib/mcpSecurity", () => ({
   respondToConfirm: vi.fn(),
 }));
@@ -50,6 +52,7 @@ beforeEach(() => {
   vi.mocked(chatHistory.loadSession).mockRejectedValue(new Error("not stubbed"));
   vi.mocked(chatHistory.saveSession).mockResolvedValue(undefined);
   vi.mocked(chatHistory.deleteSession).mockResolvedValue(undefined);
+  vi.mocked(prompts.listPrompts).mockResolvedValue([]);
 });
 
 describe("stripDataUri", () => {
@@ -660,5 +663,66 @@ describe("AssistantConversation composer (Task 19)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
+  });
+});
+
+describe("AssistantConversation slash menu (Task 21)", () => {
+  const summaries = [
+    { name: "pod-crashloop", description: "Work out why a pod keeps restarting", arguments: [] },
+    { name: "pod-pending", description: "Work out why a pod is stuck pending", arguments: [] },
+  ];
+
+  it("typing `/` opens a menu listing the mocked prompt summaries by name and description", async () => {
+    vi.mocked(prompts.listPrompts).mockResolvedValue(summaries);
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+
+    expect(await screen.findByText("pod-crashloop")).toBeTruthy();
+    expect(screen.getByText("Work out why a pod keeps restarting")).toBeTruthy();
+    expect(screen.getByText("pod-pending")).toBeTruthy();
+  });
+
+  it("selecting a prompt renders it via getPrompt with a context arg, fills the input, and does NOT send", async () => {
+    vi.mocked(prompts.listPrompts).mockResolvedValue(summaries);
+    vi.mocked(prompts.getPrompt).mockResolvedValue("Triage `pod-a` on `prod-cluster`.");
+    render(<AssistantConversation context={{ context: "prod-cluster" }} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+
+    fireEvent.click(await screen.findByText("pod-crashloop"));
+
+    await waitFor(() =>
+      expect(prompts.getPrompt).toHaveBeenCalledWith("pod-crashloop", { context: "prod-cluster" }),
+    );
+    expect((await screen.findByPlaceholderText(/ask/i) as HTMLInputElement).value).toBe(
+      "Triage `pod-a` on `prod-cluster`.",
+    );
+    expect(chat.sendChat).not.toHaveBeenCalled();
+    // The menu itself is gone once a prompt has been picked.
+    expect(screen.queryByText("pod-pending")).toBeFalsy();
+  });
+
+  it("Escape closes the menu without changing the input", async () => {
+    vi.mocked(prompts.listPrompts).mockResolvedValue(summaries);
+    render(<AssistantConversation />);
+    const input = await screen.findByPlaceholderText(/ask/i);
+    fireEvent.change(input, { target: { value: "/" } });
+    await screen.findByText("pod-crashloop");
+
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(screen.queryByText("pod-crashloop")).toBeFalsy();
+    expect((input as HTMLInputElement).value).toBe("/");
+  });
+
+  it("a rejected getPrompt surfaces a small inline error and leaves the input as-is", async () => {
+    vi.mocked(prompts.listPrompts).mockResolvedValue(summaries);
+    vi.mocked(prompts.getPrompt).mockRejectedValue(new Error("missing required argument `context`"));
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+
+    fireEvent.click(await screen.findByText("pod-crashloop"));
+
+    expect(await screen.findByText(/missing required argument `context`/)).toBeTruthy();
+    expect((screen.getByPlaceholderText(/ask/i) as HTMLInputElement).value).toBe("/");
   });
 });

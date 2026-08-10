@@ -6,6 +6,8 @@ export interface TextInputProps {
   onValueChange: (value: string) => void;
   /** Called when the user presses Enter. */
   onEnter?: () => void;
+  /** Called when the user presses Escape. */
+  onEscape?: () => void;
   placeholder?: string;
   disabled?: boolean;
   className?: string;
@@ -23,6 +25,7 @@ export function TextInput({
   value,
   onValueChange,
   onEnter,
+  onEscape,
   placeholder,
   disabled,
   className,
@@ -36,6 +39,7 @@ export function TextInput({
       onChange={(e) => onValueChange(e.target.value)}
       onKeyDown={(e) => {
         if (e.key === "Enter" && onEnter) onEnter();
+        if (e.key === "Escape" && onEscape) onEscape();
       }}
       placeholder={placeholder}
       disabled={disabled}
