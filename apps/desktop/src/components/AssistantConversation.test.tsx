@@ -1062,3 +1062,47 @@ describe("AssistantConversation answer layout", () => {
     expect(writeText).toHaveBeenCalledWith("The answer.");
   });
 });
+
+describe("AssistantConversation agent persistence", () => {
+  const twoAgents: chat.AgentInfo[] = [
+    { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "", gated: false },
+    { kind: "codex", label: "Codex", available: true, path: "/usr/bin/codex", version: null, installUrl: "", gated: false },
+  ];
+
+  it("saves the selected agent kind with the session", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue(twoAgents);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.click(await screen.findByRole("combobox", { name: /agent/i }));
+    fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalled());
+    expect(vi.mocked(chatHistory.saveSession).mock.calls[0][0].agentKind).toBe("codex");
+  });
+
+  it("restores the agent used when a session is reopened", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue(twoAgents);
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([{ id: "s-old", title: "Old", createdAt: 1, updatedAt: 2 }]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "s-old",
+      title: "Old",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: [],
+      skills: [],
+      cliSessionId: null,
+      agentKind: "codex",
+      messages: [],
+    });
+    render(<AssistantConversation />);
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    // Default lands on Claude; reopening the Codex session restores Codex.
+    await waitFor(() => expect(trigger.textContent).toMatch(/claude/i));
+    await openHistory();
+    fireEvent.click(await screen.findByText("Old"));
+    await waitFor(() => expect(trigger.textContent).toMatch(/codex/i));
+  });
+});

@@ -148,7 +148,7 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
             }
             break;
         }
-      });
+      }, [], generateAgent.kind);
     } catch (e) {
       setGenerateError(e instanceof Error ? e.message : String(e));
     } finally {

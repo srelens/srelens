@@ -33,6 +33,11 @@ pub struct Session {
     pub skills: Vec<String>,
     #[serde(default)]
     pub cli_session_id: Option<String>,
+    /// The agent CLI this conversation used (e.g. "claude"/"codex"), so
+    /// reopening it restores the same agent in the picker. Defaulted for
+    /// session files written before this field existed.
+    #[serde(default)]
+    pub agent_kind: Option<String>,
     /// Opaque to the backend — the frontend owns the message shape. Stored
     /// and returned verbatim.
     pub messages: Vec<serde_json::Value>,
@@ -220,6 +225,7 @@ mod tests {
             contexts: vec!["ctx-a".to_string()],
             skills: vec!["skill-a".to_string()],
             cli_session_id: Some("cli-123".to_string()),
+            agent_kind: Some("codex".to_string()),
             messages: vec![serde_json::json!({"role": "user", "text": "hi"})],
         }
     }
@@ -262,6 +268,7 @@ mod tests {
         assert_eq!(session.contexts, Vec::<String>::new());
         assert_eq!(session.skills, Vec::<String>::new());
         assert_eq!(session.cli_session_id, None);
+        assert_eq!(session.agent_kind, None);
     }
 
     #[test]

@@ -33,6 +33,10 @@ export interface Session extends SessionMeta {
    * allows.
    */
   cliSessionId: string | null;
+  /** The agent CLI this conversation used ("claude"/"codex"), restored into
+   * the picker on reopen. Defaulted (optional) for sessions saved before this
+   * field existed. */
+  agentKind?: string | null;
   messages: unknown[];
 }
 

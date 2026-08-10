@@ -852,6 +852,9 @@ export const AssistantConversation = forwardRef<
       // attached when the turn ran.
       contexts: multiContextMode ? selectedContexts : attachedContext?.context ? [attachedContext.context] : [],
       skills: activeSkills,
+      // The agent this conversation ran on, so reopening it restores the same
+      // pick in the composer.
+      agentKind: selectedKind || null,
       // Not wired yet — the `AgentEvent` stream doesn't carry the agent
       // CLI's own session id, and threading it through needs a backend
       // change. `null` here means a reopened session is continued
@@ -911,6 +914,11 @@ export const AssistantConversation = forwardRef<
       setSelectedContexts(session.contexts ?? []);
       // Restore the activated-skills chips (Task 23) the same way.
       setActiveSkills(session.skills ?? []);
+      // Restore the agent the conversation used, as long as it's still a known
+      // agent (otherwise keep the current pick rather than blanking the picker).
+      if (session.agentKind && agents.some((a) => a.kind === session.agentKind)) {
+        setSelectedKind(session.agentKind);
+      }
     } catch {
       // Leave the current conversation untouched on a bad load.
     }
