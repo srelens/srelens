@@ -1,0 +1,327 @@
+//! Parse Cursor CLI (`cursor-agent`) `--output-format stream-json` lines into
+//! `AgentEvent`s.
+
+use crate::event::{AgentEvent, ToolStatus};
+
+/// Parse one Cursor stream-json line. Never errors: an unrecognized,
+/// malformed, or non-JSON line yields an empty vec, so a future line type the
+/// CLI adds is ignored rather than aborting the turn.
+pub fn parse_line(line: &str) -> Vec<AgentEvent> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
+
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("thinking") => thinking(&v),
+        Some("assistant") => content_blocks(&v).iter().filter_map(text_block).collect(),
+        Some("tool_call") => tool_call(&v),
+        // The `result` text duplicates the already-streamed assistant text
+        // deltas, so only the turn-boundary signal is emitted here.
+        Some("result") => vec![AgentEvent::TurnDone],
+        _ => Vec::new(),
+    }
+}
+
+fn thinking(v: &serde_json::Value) -> Vec<AgentEvent> {
+    match v.get("subtype").and_then(|s| s.as_str()) {
+        Some("delta") => vec![AgentEvent::Thinking {
+            text: v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn content_blocks(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v.get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn text_block(block: &serde_json::Value) -> Option<AgentEvent> {
+    if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+        return None;
+    }
+    Some(AgentEvent::TextDelta {
+        text: block.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+    })
+}
+
+/// `<name>ToolCall` -> `<name>`, e.g. `readToolCall` -> `read`,
+/// `getMcpToolsToolCall` -> `getMcpTools`. Left as-is if a future CLI version
+/// ships a key that doesn't follow the `...ToolCall` naming convention.
+fn tool_name(key: &str) -> String {
+    key.strip_suffix("ToolCall").unwrap_or(key).to_string()
+}
+
+fn tool_call(v: &serde_json::Value) -> Vec<AgentEvent> {
+    // `call_id` is shared verbatim (including any embedded `\n`) between the
+    // `started` and `completed` lines for the same call, so it's what
+    // correlates a `ToolResult` back to its `ToolCallStart`.
+    let id = v.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let Some(inner_map) = v.get("tool_call").and_then(|t| t.as_object()) else {
+        return Vec::new();
+    };
+    // The tool-specific payload lives under a key named for the tool (e.g.
+    // `readToolCall`), alongside bookkeeping siblings the CLI also puts in
+    // this object (`toolCallId`, `startedAtMs`, `hookAdditionalContexts`,
+    // ...). Find the payload key by its `...ToolCall` suffix rather than
+    // assuming it's the map's only (or first) entry — map iteration order
+    // isn't guaranteed to put it first.
+    let Some((key, inner)) = inner_map.iter().find(|(k, _)| k.ends_with("ToolCall")) else {
+        return Vec::new();
+    };
+
+    match v.get("subtype").and_then(|s| s.as_str()) {
+        Some("started") => vec![AgentEvent::ToolCallStart {
+            id,
+            tool: tool_name(key),
+            args: inner.get("args").cloned().unwrap_or(serde_json::Value::Null),
+        }],
+        Some("completed") => vec![AgentEvent::ToolResult { id, status: completion_status(inner) }],
+        _ => Vec::new(),
+    }
+}
+
+/// Cursor nests the actual outcome under `result` (e.g.
+/// `{"result":{"error":{...}}}` for a blocked read). Only a literal
+/// `error`/`isError`/`is_error` key there is recognized as failure; other
+/// failure shapes a given tool might use (e.g. a shell call's
+/// `result.permissionDenied`) are not detected here and parse as `Ok`. This
+/// is a known gap in the event stream's fidelity, not a security boundary —
+/// srelens's own MCP-tool gating (not this parser) is what actually enforces
+/// confirmation on destructive calls.
+fn completion_status(inner: &serde_json::Value) -> ToolStatus {
+    let candidate = inner.get("result").unwrap_or(inner);
+    let has_error = ["error", "isError", "is_error"]
+        .iter()
+        .any(|key| candidate.get(*key).map(is_truthy).unwrap_or(false));
+    if has_error { ToolStatus::Error } else { ToolStatus::Ok }
+}
+
+fn is_truthy(v: &serde_json::Value) -> bool {
+    !v.is_null() && v != &serde_json::Value::Bool(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_or_unknown_line_yields_nothing() {
+        assert!(parse_line("").is_empty());
+        assert!(parse_line("   ").is_empty());
+        assert!(parse_line("not json").is_empty());
+        assert!(parse_line(r#"{"no_type_field":true}"#).is_empty());
+        assert!(parse_line(r#"{"type":"something.unknown"}"#).is_empty());
+    }
+
+    #[test]
+    fn system_and_user_lines_are_ignored() {
+        assert!(parse_line(
+            r#"{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp","session_id":"s1","model":"Auto","permissionMode":"default"}"#
+        )
+        .is_empty());
+        assert!(parse_line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"session_id":"s1"}"#
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_thinking_delta_becomes_a_thinking_event() {
+        let out = parse_line(
+            r#"{"type":"thinking","subtype":"delta","text":"I will first call the","session_id":"s1","timestamp_ms":1}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::Thinking { text: "I will first call the".into() }]);
+    }
+
+    #[test]
+    fn a_thinking_completed_line_yields_nothing() {
+        assert!(parse_line(r#"{"type":"thinking","subtype":"completed","session_id":"s1"}"#).is_empty());
+    }
+
+    #[test]
+    fn an_assistant_text_block_becomes_a_text_delta() {
+        let out = parse_line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"session_id":"s1"}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::TextDelta { text: "hello".into() }]);
+    }
+
+    #[test]
+    fn multiple_text_blocks_in_one_assistant_message_all_become_text_deltas_in_order() {
+        let out = parse_line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"go"},{"type":"text","text":"then this"}]}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![
+                AgentEvent::TextDelta { text: "go".into() },
+                AgentEvent::TextDelta { text: "then this".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_call_started_becomes_a_tool_call_start_with_the_stripped_tool_name() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"started","call_id":"call-1\nfc_2","tool_call":{"getMcpToolsToolCall":{"args":{"pattern":"echo","toolCallId":"call-1\nfc_2"}},"toolCallId":"call-1\nfc_2"}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::ToolCallStart {
+                id: "call-1\nfc_2".into(),
+                tool: "getMcpTools".into(),
+                args: serde_json::json!({ "pattern": "echo", "toolCallId": "call-1\nfc_2" }),
+            }]
+        );
+    }
+
+    #[test]
+    fn readtoolcall_and_mcptoolcall_strip_to_read_and_mcp() {
+        let read = parse_line(
+            r#"{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"/etc/hosts"}}}}"#,
+        );
+        assert_eq!(
+            read,
+            vec![AgentEvent::ToolCallStart {
+                id: "c1".into(),
+                tool: "read".into(),
+                args: serde_json::json!({ "path": "/etc/hosts" }),
+            }]
+        );
+
+        let mcp = parse_line(
+            r#"{"type":"tool_call","subtype":"started","call_id":"c2","tool_call":{"mcpToolCall":{"args":{"tool":"k8s.listPods"}}}}"#,
+        );
+        assert_eq!(
+            mcp,
+            vec![AgentEvent::ToolCallStart {
+                id: "c2".into(),
+                tool: "mcp".into(),
+                args: serde_json::json!({ "tool": "k8s.listPods" }),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_tool_call_started_with_no_args_field_defaults_to_null() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"shellToolCall":{"workingDirectory":""}}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::ToolCallStart {
+                id: "c1".into(),
+                tool: "shell".into(),
+                args: serde_json::Value::Null,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_tool_call_completed_without_an_error_field_is_ok() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"getMcpToolsToolCall":{"args":{"pattern":"echo"},"result":{"success":{"content":"{}"}}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Ok }]);
+    }
+
+    #[test]
+    fn a_tool_call_completed_with_an_error_field_is_an_error() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"readToolCall":{"result":{"error":{"errorMessage":"Permission denied"}}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error }]);
+    }
+
+    #[test]
+    fn a_result_line_ends_the_turn_regardless_of_subtype() {
+        assert_eq!(
+            parse_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"hello"}"#),
+            vec![AgentEvent::TurnDone]
+        );
+        assert_eq!(
+            parse_line(r#"{"type":"result","subtype":"error","is_error":true,"result":"boom"}"#),
+            vec![AgentEvent::TurnDone]
+        );
+    }
+
+    #[test]
+    fn the_result_text_is_not_re_emitted_as_a_text_delta() {
+        let out = parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"this text already streamed as deltas"}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::TurnDone]);
+    }
+
+    #[test]
+    fn the_simple_transcript_fixture_parses_to_the_expected_shape() {
+        let raw = include_str!(
+            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/cursor-simple.stream-json"
+        );
+        let events: Vec<AgentEvent> = raw.lines().flat_map(parse_line).collect();
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::Thinking { text: "Preparing to reply with".into() },
+                AgentEvent::Thinking { text: " exactly \"hello\".".into() },
+                AgentEvent::TextDelta { text: "hello".into() },
+                AgentEvent::TurnDone,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_toolcalls_and_thinking_transcript_fixture_parses_to_the_expected_shape() {
+        let raw = include_str!(
+            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/cursor-toolcalls-and-thinking.jsonl"
+        );
+        let events: Vec<AgentEvent> = raw.lines().flat_map(parse_line).collect();
+
+        assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::Thinking { .. })).count(), 22);
+        assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta { .. })).count(), 3);
+        assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::ToolCallStart { .. })).count(), 3);
+        assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::ToolResult { .. })).count(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolResult { status: ToolStatus::Error, .. }))
+                .count(),
+            1
+        );
+        assert!(events.contains(&AgentEvent::TurnDone));
+
+        // The MCP tool lookup (getMcpToolsToolCall) started and completed
+        // sharing the same call_id, which itself contains an embedded `\n`.
+        let mcp_call_id =
+            "call-66b7c85a-02bc-43a3-a19f-5d5e18038a09-0\nfc_95a75205-f73a-97a5-9d18-e3821407dabd_0";
+        assert!(events.contains(&AgentEvent::ToolCallStart {
+            id: mcp_call_id.into(),
+            tool: "getMcpTools".into(),
+            args: serde_json::json!({
+                "pattern": "echo",
+                "toolCallId": mcp_call_id,
+            }),
+        }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok }));
+
+        // The blocked local read: the completed line's call_id must match its
+        // started line's call_id verbatim, embedded `\n` and all.
+        let read_call_id =
+            "call-7a856b08-042f-4c3a-8625-ba222350614a-2\nfc_fc0a70f1-704d-99b6-b60b-dcb932bc30c4_1";
+        assert!(events.contains(&AgentEvent::ToolCallStart {
+            id: read_call_id.into(),
+            tool: "read".into(),
+            args: serde_json::json!({ "path": "/etc/hosts" }),
+        }));
+        assert!(events
+            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error }));
+    }
+}

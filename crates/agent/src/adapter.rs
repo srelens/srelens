@@ -226,6 +226,105 @@ pub fn codex_command(
     }
 }
 
+/// Environment variable the desktop sets to point the Cursor CLI at a
+/// per-turn config directory instead of its real `~/.cursor` config. The
+/// desktop writes `cursor_cli_config_json()` and `cursor_mcp_json()` into
+/// that directory before spawning; never passed via argv.
+pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
+
+/// Build the Cursor CLI (`cursor-agent`) argv. These exact flags were
+/// verified live against the real CLI to box it to srelens's MCP tools:
+/// `--approve-mcps` auto-approves MCP tool calls so they don't hang waiting
+/// on a confirmation prompt Cursor has nowhere to show in non-interactive
+/// `-p` mode (srelens's own confirm dialog still gates anything destructive).
+/// The deliberate ABSENCE of `--force` leaves Cursor's built-in local tools
+/// (read/write/shell/fetch) default-denied; the deny-list written to
+/// `config_dir` via `cursor_cli_config_json` makes that explicit rather than
+/// relying on the default alone (belt-and-suspenders). NO `--verbose` —
+/// Cursor errors on that flag. Do not change these flags without
+/// re-verifying against the real CLI.
+///
+/// The MCP bearer token travels only in the `mcp.json` file the desktop
+/// writes into `config_dir` (see `cursor_mcp_json`), never via argv or env —
+/// both of which are visible to anyone who can list processes on the
+/// machine.
+pub fn cursor_command(
+    binary: &str,
+    prompt: &str,
+    config_dir: &str,
+    empty_cwd: &str,
+    resume: Option<&str>,
+) -> AgentCommand {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--trust".to_string(),
+        "--approve-mcps".to_string(),
+        "--workspace".to_string(),
+        empty_cwd.to_string(),
+    ];
+    if let Some(id) = resume {
+        args.push("--resume".to_string());
+        args.push(id.to_string());
+    }
+    // `--` ends option parsing so a prompt that itself looks like a flag
+    // (e.g. a pasted `--force reply`) can never be reinterpreted as
+    // overriding the flags above — it is always treated as the trailing
+    // positional message. Verified live against the real CLI.
+    args.push("--".to_string());
+    args.push(prompt.to_string());
+    AgentCommand {
+        program: binary.to_string(),
+        args,
+        env: vec![(CURSOR_CONFIG_DIR_ENV.to_string(), config_dir.to_string())],
+    }
+}
+
+/// The Cursor CLI config content (`cli-config.json`, written into the
+/// per-turn config dir pointed to by `CURSOR_CONFIG_DIR_ENV`) that denies its
+/// built-in local tools. Cursor's `-p` mode ships with full local
+/// read/write/shell/fetch access; this deny-list, combined with the
+/// deliberate absence of `--force` in `cursor_command` (which leaves local
+/// tools default-denied), boxes Cursor to MCP tools only. Verified live: a
+/// boxed Cursor refuses to read local files ("permission denied") while MCP
+/// tool calls still succeed.
+pub fn cursor_cli_config_json() -> String {
+    serde_json::json!({
+        "version": 1,
+        "permissions": {
+            "allow": [],
+            "deny": [
+                "Read(**)",
+                "Write(**)",
+                "Shell(**)",
+                "Fetch(**)",
+                "List(**)",
+                "Search(**)",
+                "Delete(**)"
+            ]
+        }
+    })
+    .to_string()
+}
+
+/// The srelens MCP server entry Cursor reads from `mcp.json`, written into
+/// the same per-turn config dir. Built with `serde_json` (not hand-formatted)
+/// so `url`/`token` are always properly JSON-escaped rather than risking a
+/// malformed or attacker-controlled value breaking out of a hand-built
+/// string.
+pub fn cursor_mcp_json(url: &str, token: &str) -> String {
+    serde_json::json!({
+        "mcpServers": {
+            "srelens": {
+                "url": url,
+                "headers": { "Authorization": format!("Bearer {token}") }
+            }
+        }
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +556,128 @@ mod tests {
         let expected =
             "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp?x=\\\"evil\\\"\\\\\"";
         assert!(cmd.args.windows(2).any(|w| w[0] == "-c" && w[1] == expected));
+    }
+
+    fn cursor_cmd() -> AgentCommand {
+        cursor_command(
+            "/usr/bin/cursor-agent",
+            "Why is web-0 failing?",
+            "/tmp/srelens-cursor-config",
+            "/tmp/srelens-empty-cwd",
+            None,
+        )
+    }
+
+    #[test]
+    fn cursor_command_has_the_exact_boxing_flags_in_order() {
+        let cmd = cursor_cmd();
+        let expected: Vec<String> = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--trust",
+            "--approve-mcps",
+            "--workspace",
+            "/tmp/srelens-empty-cwd",
+            "--",
+            "Why is web-0 failing?",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(cmd.args, expected);
+        assert_eq!(cmd.program, "/usr/bin/cursor-agent");
+    }
+
+    #[test]
+    fn cursor_command_never_passes_verbose_or_force() {
+        let cmd = cursor_cmd();
+        assert!(!cmd.args.contains(&"--verbose".to_string()));
+        assert!(!cmd.args.contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn cursor_command_ends_options_before_the_prompt_so_it_cannot_inject_flags() {
+        let prompt = "--force reply";
+        let cmd = cursor_command(
+            "/usr/bin/cursor-agent",
+            prompt,
+            "/tmp/srelens-cursor-config",
+            "/tmp/srelens-empty-cwd",
+            None,
+        );
+        assert_eq!(cmd.args[cmd.args.len() - 2], "--");
+        assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    #[test]
+    fn cursor_command_carries_only_the_config_dir_in_env_never_a_token() {
+        let cmd = cursor_cmd();
+        assert_eq!(
+            cmd.env,
+            vec![(CURSOR_CONFIG_DIR_ENV.to_string(), "/tmp/srelens-cursor-config".to_string())]
+        );
+        assert!(cmd.args.iter().all(|a| !a.contains("srelens-cursor-config")));
+    }
+
+    #[test]
+    fn a_resume_id_adds_the_resume_flag_before_the_end_of_options_guard() {
+        let cmd = cursor_command(
+            "/usr/bin/cursor-agent",
+            "and now?",
+            "/tmp/srelens-cursor-config",
+            "/tmp/srelens-empty-cwd",
+            Some("sess-123"),
+        );
+        assert!(cmd.args.windows(2).any(|w| w == ["--resume", "sess-123"]));
+        let dashdash_idx = cmd.args.iter().position(|a| a == "--").unwrap();
+        let resume_idx = cmd.args.iter().position(|a| a == "--resume").unwrap();
+        assert!(resume_idx < dashdash_idx);
+        assert_eq!(cmd.args[cmd.args.len() - 2], "--");
+        assert_eq!(cmd.args[cmd.args.len() - 1], "and now?");
+    }
+
+    #[test]
+    fn resume_is_absent_when_none() {
+        let cmd = cursor_cmd();
+        assert!(!cmd.args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn cursor_cli_config_json_denies_local_tools_and_allows_nothing() {
+        let v: serde_json::Value = serde_json::from_str(&cursor_cli_config_json()).unwrap();
+        assert_eq!(v["permissions"]["allow"], serde_json::json!([]));
+        let deny = v["permissions"]["deny"].as_array().unwrap();
+        assert_eq!(deny.len(), 7);
+        for tool in [
+            "Read(**)",
+            "Write(**)",
+            "Shell(**)",
+            "Fetch(**)",
+            "List(**)",
+            "Search(**)",
+            "Delete(**)",
+        ] {
+            assert!(deny.contains(&serde_json::Value::String(tool.to_string())));
+        }
+    }
+
+    #[test]
+    fn cursor_mcp_json_points_at_our_server_with_the_bearer_token() {
+        let s = cursor_mcp_json("http://127.0.0.1:8765/mcp", "deadbeef");
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["mcpServers"]["srelens"]["url"], "http://127.0.0.1:8765/mcp");
+        assert_eq!(v["mcpServers"]["srelens"]["headers"]["Authorization"], "Bearer deadbeef");
+    }
+
+    #[test]
+    fn cursor_mcp_json_escapes_a_token_containing_a_quote_and_round_trips() {
+        let token = "dead\"beef";
+        let s = cursor_mcp_json("http://127.0.0.1:8765/mcp", token);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v["mcpServers"]["srelens"]["headers"]["Authorization"],
+            format!("Bearer {token}")
+        );
     }
 }
