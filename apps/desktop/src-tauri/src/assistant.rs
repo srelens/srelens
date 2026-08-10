@@ -19,15 +19,12 @@ fn install_url(kind: AgentKind) -> &'static str {
     }
 }
 
-/// Cursor is gated: its sandbox is solved (it's boxed to MCP tools, local
-/// file/shell access denied — the `cursor_command`/config layer is complete
-/// and tested), but its headless MCP client connects to srelens's HTTP server
-/// unreliably (it frequently reports the server "not connected" mid-turn), so
-/// it isn't dependable enough to select yet. Claude and Codex are fully wired
-/// and boxed. The Cursor spawn path stays in `chat_send` for when the
-/// connection issue is resolved.
-fn is_gated(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::Cursor)
+/// No agent is gated: Claude, Codex, and Cursor are each boxed to srelens's
+/// own MCP tools (see `chat_send`'s per-kind spawn arms) and all three connect
+/// and are selectable. Kept as a function (rather than deleted) so a future
+/// agent that isn't ready can gate from here again.
+fn is_gated(_kind: AgentKind) -> bool {
+    false
 }
 
 /// Build an `AgentInfo`, resolving availability through the injected `resolve`
@@ -359,6 +356,13 @@ pub async fn chat_send(
             &image_paths,
         ),
         AgentKind::Cursor => {
+            // Cursor loads permissions and MCP servers from DIFFERENT places:
+            // the deny-list is read from `CURSOR_CONFIG_DIR/cli-config.json`,
+            // but MCP servers are read from the WORKSPACE's `.cursor/mcp.json`
+            // (project config), NOT from `CURSOR_CONFIG_DIR` (verified live:
+            // an mcp.json in CURSOR_CONFIG_DIR is silently ignored, so the
+            // server never connects). So the deny-list goes in the config dir
+            // and the MCP server goes in `<workspace>/.cursor/mcp.json`.
             let cursor_cfg_dir = dir.join(format!("srelens-cursor-cfg-{session}"));
             std::fs::create_dir_all(&cursor_cfg_dir).map_err(|e| e.to_string())?;
             _cursor_cfg_dir_guard = Some(TempDir(cursor_cfg_dir.clone()));
@@ -367,8 +371,14 @@ pub async fn chat_send(
                 srelens_agent::adapter::cursor_cli_config_json(),
             )
             .map_err(|e| e.to_string())?;
+            // `mcp.json` (carrying the bearer token) goes under the per-turn
+            // empty workspace's `.cursor/`; the `_cwd_guard` TempDir removes
+            // the whole workspace (and this token file) on every exit. The
+            // model can't read it back — the deny-list blocks `Read`.
+            let cursor_dir = cwd_path.join(".cursor");
+            std::fs::create_dir_all(&cursor_dir).map_err(|e| e.to_string())?;
             std::fs::write(
-                cursor_cfg_dir.join("mcp.json"),
+                cursor_dir.join("mcp.json"),
                 srelens_agent::adapter::cursor_mcp_json(&url, &token),
             )
             .map_err(|e| e.to_string())?;
@@ -500,12 +510,10 @@ mod tests {
     }
 
     #[test]
-    fn cursor_is_gated_but_claude_and_codex_are_selectable() {
-        // Cursor is installed + boxed, but its MCP connection is unreliable —
-        // gated (not selectable) until that's fixed.
+    fn no_agent_is_gated_claude_codex_and_cursor_are_all_selectable() {
         let info = detect(AgentKind::Cursor, |_| Some("/usr/bin/cursor-agent".into()));
         assert!(info.available);
-        assert!(info.gated);
+        assert!(!info.gated);
 
         let info = detect(AgentKind::Claude, |_| Some("/usr/bin/claude".into()));
         assert!(info.available);
