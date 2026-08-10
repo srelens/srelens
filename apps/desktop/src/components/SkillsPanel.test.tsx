@@ -11,8 +11,26 @@ const skillsLibMock = vi.hoisted(() => ({
 }));
 vi.mock("../lib/skills", () => skillsLibMock);
 
+const chatLibMock = vi.hoisted(() => ({
+  listAgents: vi.fn(),
+  startChat: vi.fn(),
+  sendChat: vi.fn(),
+}));
+vi.mock("../lib/chat", () => chatLibMock);
+
 import { SkillsPanel } from "./SkillsPanel";
 import type { Skill, SkillMeta } from "../lib/skills";
+import type { AgentEvent, AgentInfo } from "../lib/chat";
+
+const AVAILABLE_AGENT: AgentInfo = {
+  kind: "claude",
+  label: "Claude Code",
+  available: true,
+  path: "/usr/bin/claude",
+  version: null,
+  installUrl: "",
+  gated: false,
+};
 
 const METAS: SkillMeta[] = [
   { name: "alpha", description: "First skill" },
@@ -27,6 +45,9 @@ describe("SkillsPanel", () => {
     skillsLibMock.loadSkill.mockReset().mockResolvedValue(ALPHA);
     skillsLibMock.saveSkill.mockReset().mockResolvedValue(undefined);
     skillsLibMock.deleteSkill.mockReset().mockResolvedValue(undefined);
+    chatLibMock.listAgents.mockReset().mockResolvedValue([AVAILABLE_AGENT]);
+    chatLibMock.startChat.mockReset().mockResolvedValue("gen-session-1");
+    chatLibMock.sendChat.mockReset().mockResolvedValue(undefined);
   });
 
   it("lists skills by name and description", async () => {
@@ -117,5 +138,153 @@ describe("SkillsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(skillsLibMock.deleteSkill).not.toHaveBeenCalled();
+  });
+});
+
+describe("SkillsPanel — Generate with AI", () => {
+  beforeEach(() => {
+    skillsLibMock.listSkills.mockReset().mockResolvedValue(METAS);
+    skillsLibMock.loadSkill.mockReset().mockResolvedValue(ALPHA);
+    skillsLibMock.saveSkill.mockReset().mockResolvedValue(undefined);
+    skillsLibMock.deleteSkill.mockReset().mockResolvedValue(undefined);
+    chatLibMock.listAgents.mockReset().mockResolvedValue([AVAILABLE_AGENT]);
+    chatLibMock.startChat.mockReset().mockResolvedValue("gen-session-1");
+    chatLibMock.sendChat.mockReset().mockResolvedValue(undefined);
+  });
+
+  async function openNewSkillEditor() {
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByRole("button", { name: "New skill" }));
+    await screen.findByLabelText("Skill name");
+  }
+
+  it("clicking Generate invokes the bridge with the exact meta-prompt, built from the typed need", async () => {
+    chatLibMock.sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) => {
+      onEvent({ type: "textDelta", text: "## crashloop-triage\n" });
+      onEvent({ type: "turnDone" });
+    });
+    await openNewSkillEditor();
+
+    fireEvent.change(await screen.findByLabelText("Skill need"), {
+      target: { value: "triage a pod that keeps restarting" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    await waitFor(() => expect(chatLibMock.sendChat).toHaveBeenCalledTimes(1));
+    expect(chatLibMock.startChat).toHaveBeenCalledTimes(1);
+    const [session, prompt, agentPath] = chatLibMock.sendChat.mock.calls[0];
+    expect(session).toBe("gen-session-1");
+    expect(agentPath).toBe("/usr/bin/claude");
+    // Hand-written literal built from the brief's meta-prompt text, not by
+    // echoing the component's own builder.
+    expect(prompt).toBe(
+      "Write a srelens assistant skill as markdown with name/description front-matter for the following need: triage a pod that keeps restarting. Output only the markdown.",
+    );
+  });
+
+  it("the streamed markdown lands in the body field once the turn completes", async () => {
+    chatLibMock.sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) => {
+      onEvent({ type: "textDelta", text: "Step 1: check the exit code.\n" });
+      onEvent({ type: "textDelta", text: "Step 2: check the logs." });
+      onEvent({ type: "turnDone" });
+    });
+    await openNewSkillEditor();
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe(
+        "Step 1: check the exit code.\nStep 2: check the logs.",
+      );
+    });
+  });
+
+  it("parses name/description front-matter out of the generated markdown into their fields", async () => {
+    chatLibMock.sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) => {
+      onEvent({
+        type: "textDelta",
+        text: "---\nname: crashloop-triage\ndescription: Systematic triage for a crashlooping pod\n---\n# Steps\nCheck exit code.",
+      });
+      onEvent({ type: "turnDone" });
+    });
+    await openNewSkillEditor();
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill name") as HTMLInputElement).value).toBe("crashloop-triage");
+    });
+    expect((screen.getByLabelText("Skill description") as HTMLInputElement).value).toBe(
+      "Systematic triage for a crashlooping pod",
+    );
+    expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("# Steps\nCheck exit code.");
+  });
+
+  it("a stream error surfaces inline near Generate and does not wipe existing editor content", async () => {
+    chatLibMock.sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) => {
+      onEvent({ type: "error", message: "agent crashed" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByText("alpha"));
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("Body for alpha");
+    });
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    expect(await screen.findByText("agent crashed")).toBeTruthy();
+    expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("Body for alpha");
+  });
+
+  it("a thrown sendChat surfaces inline and does not wipe existing editor content", async () => {
+    chatLibMock.sendChat.mockRejectedValue(new Error("transport down"));
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByText("alpha"));
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("Body for alpha");
+    });
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    expect(await screen.findByText("transport down")).toBeTruthy();
+    expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("Body for alpha");
+  });
+
+  it("Generate is disabled with a short note when no agent is available/ungated", async () => {
+    chatLibMock.listAgents.mockResolvedValue([{ ...AVAILABLE_AGENT, available: false }]);
+    await openNewSkillEditor();
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: /generate with ai/i }) as HTMLButtonElement).disabled).toBe(true);
+    });
+    expect(screen.getByText(/install\/enable an agent to generate/i)).toBeTruthy();
+    expect(chatLibMock.sendChat).not.toHaveBeenCalled();
+  });
+
+  it("Generate is disabled when only a gated agent is available", async () => {
+    chatLibMock.listAgents.mockResolvedValue([{ ...AVAILABLE_AGENT, gated: true }]);
+    await openNewSkillEditor();
+
+    fireEvent.change(screen.getByLabelText("Skill need"), { target: { value: "triage a crashlooping pod" } });
+
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: /generate with ai/i }) as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
+
+  it("Generate is disabled until a need is typed", async () => {
+    await openNewSkillEditor();
+
+    expect((screen.getByRole("button", { name: /generate with ai/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

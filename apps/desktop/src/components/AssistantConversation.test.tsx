@@ -4,10 +4,12 @@ import { AssistantConversation, stripDataUri } from "./AssistantConversation";
 import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
 import * as prompts from "../lib/prompts";
+import * as skills from "../lib/skills";
 
 vi.mock("../lib/chat");
 vi.mock("../lib/chatHistory");
 vi.mock("../lib/prompts");
+vi.mock("../lib/skills");
 vi.mock("../lib/mcpSecurity", () => ({
   respondToConfirm: vi.fn(),
 }));
@@ -53,6 +55,8 @@ beforeEach(() => {
   vi.mocked(chatHistory.saveSession).mockResolvedValue(undefined);
   vi.mocked(chatHistory.deleteSession).mockResolvedValue(undefined);
   vi.mocked(prompts.listPrompts).mockResolvedValue([]);
+  vi.mocked(skills.listSkills).mockResolvedValue([]);
+  vi.mocked(skills.loadSkill).mockRejectedValue(new Error("not stubbed"));
 });
 
 describe("stripDataUri", () => {
@@ -724,5 +728,139 @@ describe("AssistantConversation slash menu (Task 21)", () => {
 
     expect(await screen.findByText(/missing required argument `context`/)).toBeTruthy();
     expect((screen.getByPlaceholderText(/ask/i) as HTMLInputElement).value).toBe("/");
+  });
+});
+
+describe("AssistantConversation skills activation (Task 23)", () => {
+  const SKILL_METAS = [
+    { name: "crashloop-triage", description: "Systematic triage for a crashlooping pod" },
+    { name: "pending-triage", description: "Work out why a pod is stuck pending" },
+  ];
+
+  it("typing `/` lists skills under a Skills group alongside a Prompts group", async () => {
+    vi.mocked(prompts.listPrompts).mockResolvedValue([
+      { name: "pod-crashloop", description: "Work out why a pod keeps restarting", arguments: [] },
+    ]);
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+
+    expect(await screen.findByText("Prompts")).toBeTruthy();
+    expect(screen.getByText("Skills")).toBeTruthy();
+    expect(screen.getByText("pod-crashloop")).toBeTruthy();
+    expect(screen.getByText("crashloop-triage")).toBeTruthy();
+    expect(screen.getByText("pending-triage")).toBeTruthy();
+  });
+
+  it("selecting a skill adds a removable chip and does NOT fill the input (unlike picking a prompt)", async () => {
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+
+    expect(await screen.findByLabelText("Remove skill crashloop-triage")).toBeTruthy();
+    expect((screen.getByPlaceholderText(/ask/i) as HTMLInputElement).value).toBe("/");
+    expect(prompts.getPrompt).not.toHaveBeenCalled();
+  });
+
+  it("selecting the same skill twice does not duplicate its chip", async () => {
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+    await screen.findByLabelText("Remove skill crashloop-triage");
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+
+    expect(screen.getAllByLabelText("Remove skill crashloop-triage")).toHaveLength(1);
+  });
+
+  it("removing the chip drops the activated skill", async () => {
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+    await screen.findByLabelText("Remove skill crashloop-triage");
+
+    fireEvent.click(screen.getByLabelText("Remove skill crashloop-triage"));
+
+    expect(screen.queryByLabelText("Remove skill crashloop-triage")).toBeFalsy();
+  });
+
+  it("on send, fetches each active skill's body and prepends a guidance block after the preface and before the user text; the visible bubble shows only the typed text", async () => {
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    vi.mocked(skills.loadSkill).mockImplementation(async (name: string) => ({
+      name,
+      description: "",
+      body: "Check the exit code first.",
+    }));
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation context={{ context: "prod-cluster" }} />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "pod-a is restarting" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(skills.loadSkill).toHaveBeenCalledWith("crashloop-triage");
+    // Hand-written expected string built from the mocked skill body — never
+    // echoed from the component's own guidance-block builder.
+    expect(vi.mocked(chat.sendChat).mock.calls[0][1]).toBe(
+      "Current context: cluster prod-cluster.\n\n" +
+        "Apply these skills:\n\n" +
+        "Check the exit code first.\n\n" +
+        "pod-a is restarting",
+    );
+
+    // The visible user bubble shows only the typed text, never the guidance.
+    expect(await screen.findByText("pod-a is restarting")).toBeTruthy();
+    expect(screen.queryByText(/apply these skills/i)).toBeFalsy();
+    expect(screen.queryByText(/check the exit code first/i)).toBeFalsy();
+  });
+
+  it("persists activeSkills into the saved session's `skills` field", async () => {
+    vi.mocked(skills.listSkills).mockResolvedValue(SKILL_METAS);
+    vi.mocked(skills.loadSkill).mockResolvedValue({
+      name: "crashloop-triage",
+      description: "Systematic triage for a crashlooping pod",
+      body: "Check the exit code first.",
+    });
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("crashloop-triage"));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(chatHistory.saveSession).mock.calls[0][0].skills).toEqual(["crashloop-triage"]);
+  });
+
+  it("a reloaded session restores its chips from the session's `skills`", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "old-1",
+      title: "Old chat",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: [],
+      skills: ["crashloop-triage"],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text: "hi" }],
+    });
+    render(<AssistantConversation />);
+    await openHistory();
+    fireEvent.click(await screen.findByText("Old chat"));
+
+    await screen.findByText("hi");
+    expect(screen.getByLabelText("Remove skill crashloop-triage")).toBeTruthy();
   });
 });

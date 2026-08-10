@@ -5,6 +5,7 @@ import { Badge, Button, Spinner, TextInput } from "../ui";
 import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
 import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
 import { getPrompt, listPrompts, type PromptSummary } from "../lib/prompts";
+import { listSkills, loadSkill, type SkillMeta } from "../lib/skills";
 import {
   deleteSession as deleteSessionCmd,
   listSessions,
@@ -50,6 +51,18 @@ function multiContextPreface(contexts: string[]): string {
   }
   const list = contexts.map((c) => `\`${c}\``).join(", ");
   return `You may work across these clusters: ${list}. Pass the appropriate context to each tool call.\n\n`;
+}
+
+/**
+ * Fetches each active skill's body and concatenates them into a guidance
+ * block prepended to the outgoing prompt — after any context/multi-context
+ * preface, before the user's own text — kept out of the visible transcript
+ * exactly like that preface. Empty when no skill is active.
+ */
+async function loadSkillsGuidance(names: string[]): Promise<string> {
+  if (names.length === 0) return "";
+  const loaded = await Promise.all(names.map((name) => loadSkill(name)));
+  return `Apply these skills:\n\n${loaded.map((s) => s.body).join("\n\n")}\n\n`;
 }
 
 /** Picks the image files out of a paste event's clipboard data — everything
@@ -225,32 +238,71 @@ function ConfirmCard({
 }
 
 /**
- * The `/` slash menu: a dropdown of srelens's diagnostic prompts (name +
- * description), anchored above the composer's input row so it opens upward
- * without being clipped by the transcript below. Styled to match the
- * `PopoverContent` surface (`ContextMultiSelect`/`HistoryPopover`) even
- * though this isn't a Radix popover itself — it needs to open purely from
- * the composer's input value (a `/`-prefixed token), not a trigger click,
- * so a plain positioned `div` is simpler than fighting Radix's own
- * open/anchor model for that.
+ * The `/` slash menu: a dropdown listing srelens's diagnostic prompts (Task
+ * 21) and saved skills (Task 23) under their own clearly-headed groups,
+ * anchored above the composer's input row so it opens upward without being
+ * clipped by the transcript below. Styled to match the `PopoverContent`
+ * surface (`ContextMultiSelect`/`HistoryPopover`) even though this isn't a
+ * Radix popover itself — it needs to open purely from the composer's input
+ * value (a `/`-prefixed token), not a trigger click, so a plain positioned
+ * `div` is simpler than fighting Radix's own open/anchor model for that.
+ * Picking a prompt renders it into the composer input (`onPickPrompt`);
+ * picking a skill just activates it (`onPickSkill`) — see `selectSkill`.
  */
-function PromptMenu({ prompts, onPick }: { prompts: PromptSummary[]; onPick: (p: PromptSummary) => void }) {
+function SlashMenu({
+  prompts,
+  skills,
+  onPickPrompt,
+  onPickSkill,
+}: {
+  prompts: PromptSummary[];
+  skills: SkillMeta[];
+  onPickPrompt: (p: PromptSummary) => void;
+  onPickSkill: (s: SkillMeta) => void;
+}) {
   return (
     <div className="absolute bottom-full left-0 z-50 mb-1 max-h-64 w-80 overflow-y-auto rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md">
-      {prompts.length === 0 ? (
-        <p className="px-2 py-1.5 text-xs text-muted-foreground">No matching prompts.</p>
+      {prompts.length === 0 && skills.length === 0 ? (
+        <p className="px-2 py-1.5 text-xs text-muted-foreground">No matches.</p>
       ) : (
-        prompts.map((p) => (
-          <button
-            key={p.name}
-            type="button"
-            className="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-accent"
-            onClick={() => onPick(p)}
-          >
-            <span className="font-mono text-xs font-medium">{p.name}</span>
-            <span className="w-full truncate text-xs text-muted-foreground">{p.description}</span>
-          </button>
-        ))
+        <>
+          {prompts.length > 0 && (
+            <div>
+              <p className="px-2 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Prompts
+              </p>
+              {prompts.map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  className="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-accent"
+                  onClick={() => onPickPrompt(p)}
+                >
+                  <span className="font-mono text-xs font-medium">{p.name}</span>
+                  <span className="w-full truncate text-xs text-muted-foreground">{p.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {skills.length > 0 && (
+            <div>
+              <p className="px-2 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Skills
+              </p>
+              {skills.map((s) => (
+                <button
+                  key={s.name}
+                  type="button"
+                  className="flex w-full flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-accent"
+                  onClick={() => onPickSkill(s)}
+                >
+                  <span className="font-mono text-xs font-medium">{s.name}</span>
+                  <span className="w-full truncate text-xs text-muted-foreground">{s.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -446,6 +498,14 @@ export const AssistantConversation = forwardRef<
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [promptMenuDismissed, setPromptMenuDismissed] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
+  // Task 23's skills half of the same slash menu — loaded once on mount,
+  // same best-effort treatment as `prompts` above. Picking one (`selectSkill`)
+  // adds its name to `activeSkills` (deduped) instead of touching the input;
+  // each active skill shows as a removable chip in the composer and, on
+  // send, has its body fetched and folded into a guidance block prefaced
+  // onto the outgoing prompt (see `loadSkillsGuidance`).
+  const [skills, setSkills] = useState<SkillMeta[]>([]);
+  const [activeSkills, setActiveSkills] = useState<string[]>([]);
   // Images attached to the in-progress message, as displayable data URIs —
   // cleared on send (after being copied onto the outgoing user `ChatMessage`
   // and, base64-stripped, into `sendChat`'s `images` arg).
@@ -506,6 +566,14 @@ export const AssistantConversation = forwardRef<
     listPrompts()
       .then(setPrompts)
       .catch(() => setPrompts([]));
+  }, []);
+
+  // Load the slash menu's skills list once on mount — same treatment as
+  // `listPrompts` above.
+  useEffect(() => {
+    listSkills()
+      .then(setSkills)
+      .catch(() => setSkills([]));
   }, []);
 
   async function answerConfirm(id: string, approved: boolean) {
@@ -569,11 +637,15 @@ export const AssistantConversation = forwardRef<
   // list by a case-insensitive substring match on the prompt name; an empty
   // token (just "/") shows everything.
   const slashMatch = /^\/(\S*)$/.exec(input);
-  const promptMenuOpen = slashMatch !== null && !promptMenuDismissed && prompts.length > 0;
+  const promptMenuOpen =
+    slashMatch !== null && !promptMenuDismissed && (prompts.length > 0 || skills.length > 0);
   const promptQuery = (slashMatch?.[1] ?? "").toLowerCase();
   const filteredPrompts = promptQuery
     ? prompts.filter((p) => p.name.toLowerCase().includes(promptQuery))
     : prompts;
+  const filteredSkills = promptQuery
+    ? skills.filter((s) => s.name.toLowerCase().includes(promptQuery))
+    : skills;
 
   function handleInputChange(value: string) {
     setInput(value);
@@ -602,6 +674,21 @@ export const AssistantConversation = forwardRef<
     }
   }
 
+  /** Activates a skill from the slash menu — unlike `selectPrompt`, this
+   * never touches the composer input: it just adds the skill's name to
+   * `activeSkills` (deduped) so it renders as a removable chip and gets
+   * folded into the next turn's guidance block (see `loadSkillsGuidance`).
+   * The menu is dismissed the same way Escape dismisses it, since picking a
+   * skill doesn't change `input` and so wouldn't otherwise close the menu. */
+  function selectSkill(s: SkillMeta) {
+    setActiveSkills((prev) => (prev.includes(s.name) ? prev : [...prev, s.name]));
+    setPromptMenuDismissed(true);
+  }
+
+  function removeSkill(name: string) {
+    setActiveSkills((prev) => prev.filter((n) => n !== name));
+  }
+
   /** Serialize the current transcript and save it to disk. Best-effort: a
    * failed save is swallowed rather than surfaced, since it must never break
    * the live chat the user is actually looking at. */
@@ -619,7 +706,7 @@ export const AssistantConversation = forwardRef<
       // the drawer keeps remembering the one resource chip (if any) that was
       // attached when the turn ran.
       contexts: multiContextMode ? selectedContexts : attachedContext?.context ? [attachedContext.context] : [],
-      skills: [],
+      skills: activeSkills,
       // Not wired yet — the `AgentEvent` stream doesn't carry the agent
       // CLI's own session id, and threading it through needs a backend
       // change. `null` here means a reopened session is continued
@@ -667,6 +754,8 @@ export const AssistantConversation = forwardRef<
       // meaningless in drawer mode, where the resource `context` prop drives
       // `attachedContext` instead and this state is never read.
       setSelectedContexts(session.contexts ?? []);
+      // Restore the activated-skills chips (Task 23) the same way.
+      setActiveSkills(session.skills ?? []);
     } catch {
       // Leave the current conversation untouched on a bad load.
     }
@@ -789,11 +878,16 @@ export const AssistantConversation = forwardRef<
   async function handleSend() {
     const prompt = input.trim();
     if (!prompt || sending || !canSend) return;
-    const outgoing = multiContextMode
-      ? `${multiContextPreface(selectedContexts)}${prompt}`
+    // The context/multi-context preface, still ending in a blank line when
+    // non-empty — the skills guidance block (fetched below, once the turn is
+    // actually committed to sending) slots in after it and before `prompt`,
+    // same as the preface: never part of the visible user bubble, which
+    // always shows `prompt` alone.
+    const preface = multiContextMode
+      ? multiContextPreface(selectedContexts)
       : attachedContext
-        ? `${contextPreface(attachedContext)}\n\n${prompt}`
-        : prompt;
+        ? `${contextPreface(attachedContext)}\n\n`
+        : "";
     const attachedImages = pendingImages;
     const rawImages = attachedImages.map(stripDataUri);
     setInput("");
@@ -815,6 +909,8 @@ export const AssistantConversation = forwardRef<
         session = await startChat();
         sessionRef.current = session;
       }
+      const guidance = await loadSkillsGuidance(activeSkills);
+      const outgoing = `${preface}${guidance}${prompt}`;
       await sendChat(session, outgoing, agentPath, applyEvent, rawImages);
     } catch (e) {
       // A rejection here means the transport itself failed before any
@@ -937,7 +1033,10 @@ export const AssistantConversation = forwardRef<
         className="flex shrink-0 flex-col gap-2 border-t border-border pt-3"
         onPaste={onComposerPaste}
       >
-        {(attachedContext || availableContexts !== undefined || pendingImages.length > 0) && (
+        {(attachedContext ||
+          availableContexts !== undefined ||
+          pendingImages.length > 0 ||
+          activeSkills.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
             {attachedContext && (
               <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs">
@@ -990,6 +1089,22 @@ export const AssistantConversation = forwardRef<
                 </button>
               </span>
             ))}
+            {activeSkills.map((name) => (
+              <span
+                key={name}
+                className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
+              >
+                <span className="truncate">{name}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove skill ${name}`}
+                  onClick={() => removeSkill(name)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
           </div>
         )}
         {promptError && <p className="text-xs text-destructive">{promptError}</p>}
@@ -1011,7 +1126,14 @@ export const AssistantConversation = forwardRef<
           </label>
           {agentPicker}
           <div className="relative flex-1">
-            {promptMenuOpen && <PromptMenu prompts={filteredPrompts} onPick={(p) => void selectPrompt(p)} />}
+            {promptMenuOpen && (
+              <SlashMenu
+                prompts={filteredPrompts}
+                skills={filteredSkills}
+                onPickPrompt={(p) => void selectPrompt(p)}
+                onPickSkill={selectSkill}
+              />
+            )}
             <TextInput
               value={input}
               onValueChange={handleInputChange}

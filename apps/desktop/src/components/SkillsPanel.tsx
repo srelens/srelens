@@ -10,8 +10,38 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button, ConfirmDialog, Field, TextInput } from "../ui";
 import { notify } from "../lib/notify";
 import { listSkills, loadSkill, saveSkill, deleteSkill, type Skill, type SkillMeta } from "../lib/skills";
+import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "../lib/chat";
 
 const BLANK: Skill = { name: "", description: "", body: "" };
+
+/**
+ * Fixed meta-prompt (Task 23) sent as a single non-conversational turn to
+ * generate a skill: name/description front-matter plus a body, for the
+ * user's one-sentence need. Output only the markdown, so the whole reply can
+ * be dropped straight into the editor.
+ */
+function buildMetaPrompt(need: string): string {
+  return `Write a srelens assistant skill as markdown with name/description front-matter for the following need: ${need}. Output only the markdown.`;
+}
+
+/**
+ * Pulls a leading `---\nname: ...\ndescription: ...\n---` front-matter block
+ * off generated markdown. When the markdown doesn't start with that shape,
+ * `name`/`description` come back `null` and `body` is the markdown
+ * unchanged — the caller just drops the whole thing into the body field.
+ */
+export function parseFrontMatter(markdown: string): { name: string | null; description: string | null; body: string } {
+  const match = /^---[ \t]*\n([\s\S]*?)\n---[ \t]*\n?([\s\S]*)$/.exec(markdown);
+  if (!match) return { name: null, description: null, body: markdown };
+  const [, frontMatter, rest] = match;
+  const nameMatch = /^name:\s*(.+)$/m.exec(frontMatter);
+  const descMatch = /^description:\s*(.+)$/m.exec(frontMatter);
+  return {
+    name: nameMatch ? nameMatch[1].trim() : null,
+    description: descMatch ? descMatch[1].trim() : null,
+    body: rest,
+  };
+}
 
 /**
  * Skills — reusable instruction files the AI assistant can draw on (Task 22;
@@ -28,6 +58,13 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
   const [editing, setEditing] = useState<Skill | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // Generate-with-AI (Task 23): a one-sentence need, run through a single
+  // non-conversational bridge turn, that fills the editor's fields for the
+  // user to review before Save — never auto-saved.
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [need, setNeed] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState("");
 
   async function refresh() {
     try {
@@ -41,8 +78,15 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
     void refresh();
   }, []);
 
+  useEffect(() => {
+    listAgents()
+      .then(setAgents)
+      .catch(() => setAgents([]));
+  }, []);
+
   async function select(name: string) {
     setError("");
+    setGenerateError("");
     try {
       const skill = await loadSkill(name);
       setSelected(name);
@@ -54,8 +98,62 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
 
   function newSkill() {
     setError("");
+    setGenerateError("");
     setSelected(null);
     setEditing({ ...BLANK });
+  }
+
+  const generateAgent = agents.find((a) => a.available && !a.gated);
+  const canGenerate = !!editing && !!generateAgent && need.trim().length > 0 && !generating;
+
+  /**
+   * Runs ONE non-conversational turn through the same bridge the chat uses
+   * (`startChat`/`sendChat`) with the fixed meta-prompt, accumulates the
+   * streamed `textDelta`s, and — only once the turn finishes with no
+   * `error` — drops the result into the editor's body (and name/description,
+   * if the markdown carries recognizable front-matter). A stream `error` (or
+   * a thrown `sendChat`) surfaces inline instead, leaving whatever was
+   * already in the editor untouched — never a partial overwrite.
+   */
+  async function generate() {
+    if (!editing || !generateAgent?.path || !need.trim() || generating) return;
+    setGenerateError("");
+    setGenerating(true);
+    let accumulated = "";
+    let errored = false;
+    try {
+      const session = await startChat();
+      await sendChat(session, buildMetaPrompt(need), generateAgent.path, (e: AgentEvent) => {
+        switch (e.type) {
+          case "textDelta":
+            accumulated += e.text;
+            break;
+          case "error":
+            errored = true;
+            setGenerateError(e.message);
+            break;
+          case "turnDone":
+            if (!errored) {
+              const parsed = parseFrontMatter(accumulated);
+              setEditing((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      body: parsed.body,
+                      name: parsed.name ?? prev.name,
+                      description: parsed.description ?? prev.description,
+                    }
+                  : prev,
+              );
+            }
+            break;
+        }
+      });
+    } catch (e) {
+      setGenerateError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenerating(false);
+    }
   }
 
   async function save() {
@@ -142,6 +240,30 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
             <div className="flex min-w-0 flex-1 flex-col gap-3">
               {editing ? (
                 <>
+                  <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 p-3">
+                    <Field label="Generate with AI — describe the need">
+                      <TextInput
+                        aria-label="Skill need"
+                        value={need}
+                        onValueChange={setNeed}
+                        placeholder="Triage a pod that keeps restarting"
+                        disabled={generating}
+                      />
+                    </Field>
+                    <div className="flex items-center gap-2">
+                      <Button variant="secondary" size="sm" onClick={() => void generate()} disabled={!canGenerate}>
+                        {generating ? "Generating…" : "Generate with AI"}
+                      </Button>
+                      {!generateAgent && (
+                        <span className="text-xs text-muted-foreground">Install/enable an agent to generate</span>
+                      )}
+                    </div>
+                    {generateError && (
+                      <p role="alert" className="text-xs text-destructive">
+                        {generateError}
+                      </p>
+                    )}
+                  </div>
                   <Field label="Name">
                     <TextInput
                       aria-label="Skill name"
