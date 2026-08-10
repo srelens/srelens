@@ -71,8 +71,9 @@ function readImageFile(file: File): Promise<string> {
 }
 
 /** Strips the `data:image/...;base64,` prefix off a data URI, leaving the
- * raw base64 payload `chat_send`'s `images: Vec<String>` (Task 15) expects. */
-function stripDataUri(uri: string): string {
+ * raw base64 payload `chat_send`'s `images: Vec<String>` (Task 15) expects.
+ * Exported for a direct unit test of the no-prefix branch. */
+export function stripDataUri(uri: string): string {
   const i = uri.indexOf(",");
   return i === -1 ? uri : uri.slice(i + 1);
 }

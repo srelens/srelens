@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { AssistantConversation } from "./AssistantConversation";
+import { AssistantConversation, stripDataUri } from "./AssistantConversation";
 import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
 
@@ -43,6 +43,12 @@ beforeEach(() => {
   vi.mocked(chatHistory.loadSession).mockRejectedValue(new Error("not stubbed"));
   vi.mocked(chatHistory.saveSession).mockResolvedValue(undefined);
   vi.mocked(chatHistory.deleteSession).mockResolvedValue(undefined);
+});
+
+describe("stripDataUri", () => {
+  it("leaves a bare base64 string (no `data:` prefix, no comma) unchanged", () => {
+    expect(stripDataUri("AAAA")).toBe("AAAA");
+  });
 });
 
 describe("AssistantConversation", () => {
@@ -347,6 +353,12 @@ describe("AssistantConversation image attachments", () => {
     return new File([Uint8Array.from([0, 0, 0])], name, { type: "image/png" });
   }
 
+  // Different byte content (4, 16, 65) -> base64 "BBBB" — distinguishable
+  // from `pngFile()`'s "AAAA" so a two-image test can tell them apart.
+  function pngFile2(name = "b.png"): File {
+    return new File([Uint8Array.from([4, 16, 65])], name, { type: "image/png" });
+  }
+
   it("attaching an image via the attach control shows a thumbnail chip", async () => {
     render(<AssistantConversation />);
     const attach = await screen.findByLabelText(/attach image/i);
@@ -381,6 +393,31 @@ describe("AssistantConversation image attachments", () => {
     await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
     expect(vi.mocked(chat.sendChat).mock.calls[0][4]).toEqual([]);
     expect(screen.queryByAltText(/attached image/i)).toBeFalsy();
+  });
+
+  it("removing a non-last pending image (index 0 of 2) keeps the other one, not just drops the last", async () => {
+    // Guards against a regressed `removePendingImage` that always drops the
+    // last element (e.g. `imgs.slice(0, -1)`) — with only one pending image
+    // (as in the test above) that bug would still pass.
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile(), pngFile2()] } });
+    await screen.findByAltText(/pending image 2/i);
+
+    // Remove the first chip (base64 "AAAA") — the second ("BBBB") must remain.
+    fireEvent.click(screen.getByLabelText(/remove image 1/i));
+
+    expect(screen.queryByAltText(/pending image 2/i)).toBeFalsy();
+    const remaining = (await screen.findByAltText(/pending image 1/i)) as HTMLImageElement;
+    expect(remaining.src).toBe("data:image/png;base64,BBBB");
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(vi.mocked(chat.sendChat).mock.calls[0][4]).toEqual(["BBBB"]);
   });
 
   it("sending strips the data URI prefix, passing raw base64 as sendChat's 5th arg", async () => {
