@@ -38,6 +38,17 @@ fn block_to_event(block: &serde_json::Value) -> Option<AgentEvent> {
         Some("text") => Some(AgentEvent::TextDelta {
             text: block.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
         }),
+        // The `thinking` field is the documented key for this block, but we
+        // fall back to `text` defensively in case a future CLI version
+        // shapes it like a text block instead.
+        Some("thinking") => Some(AgentEvent::Thinking {
+            text: block
+                .get("thinking")
+                .or_else(|| block.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }),
         Some("tool_use") => Some(AgentEvent::ToolCallStart {
             id: block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
             tool: block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
@@ -96,6 +107,14 @@ mod tests {
                 args: serde_json::json!({ "replicas": 3 }),
             }]
         );
+    }
+
+    #[test]
+    fn a_thinking_block_becomes_a_thinking_event() {
+        let out = parse_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"let me consider the options"}]}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::Thinking { text: "let me consider the options".into() }]);
     }
 
     #[test]

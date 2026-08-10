@@ -76,6 +76,11 @@ impl McpConfig {
 pub struct AgentCommand {
     pub program: String,
     pub args: Vec<String>,
+    /// Environment variables the desktop must set on the child process.
+    /// Used for secrets (e.g. Codex's MCP bearer token) that must never
+    /// appear in argv, where they'd be visible to anyone who can list
+    /// processes on the machine.
+    pub env: Vec<(String, String)>,
 }
 
 /// The only tools the agent may call: srelens's own MCP tools, exposed under
@@ -138,8 +143,87 @@ pub fn claude_command(
         args.push("--resume".to_string());
         args.push(id.to_string());
     }
+    // `--` ends option parsing so a prompt that itself looks like a flag
+    // (e.g. a pasted `--disallowedTools none`) can never be reinterpreted by
+    // clap as overriding the flags above — it is always treated as the
+    // trailing positional message. Verified live against the real CLI.
+    args.push("--".to_string());
     args.push(prompt.to_string());
-    AgentCommand { program: binary.to_string(), args }
+    // Claude passes its MCP bearer token via the config file at
+    // `mcp_config_path`, never via env.
+    AgentCommand { program: binary.to_string(), args, env: Vec::new() }
+}
+
+/// Escape a string for embedding inside a double-quoted TOML value (used for
+/// the `-c mcp_servers.srelens.*` fragments below). Defensive: `mcp_url` is a
+/// trusted localhost URL today, but this prevents a malformed or attacker-
+/// controlled URL from breaking out of the quoted literal and injecting
+/// extra TOML keys.
+fn escape_toml_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// The environment variable name the desktop must set on the Codex child
+/// process to carry the MCP bearer token. Never passed via argv (see
+/// `codex_command`).
+pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
+
+/// Build the Codex CLI argv. This is the security-critical sandbox: these
+/// exact flags were verified live against the real `codex` CLI to box it to
+/// srelens's MCP tools with no other escape.
+///
+/// `--disable shell_tool --disable unified_exec` removes Codex's shell — its
+/// only whole-disk-read escape hatch. What remains is Codex's internal file
+/// tool, which is confined to the empty directory passed via `-C` under
+/// `-s read-only` (so it can read nothing outside that empty workspace and
+/// write nothing at all). MCP tools (srelens's own) still work normally,
+/// configured via the two `-c mcp_servers.srelens.*` TOML overrides below.
+/// Do not change these flags without re-verifying against the real CLI.
+///
+/// The bearer token is passed only via `env` (`CODEX_TOKEN_ENV`), never as an
+/// argv value — argv is visible to anyone who can list processes on the
+/// machine, whereas `env` is only visible to the process's own user/owner.
+pub fn codex_command(
+    binary: &str,
+    prompt: &str,
+    mcp_url: &str,
+    token: &str,
+    empty_cwd: &str,
+    image_paths: &[String],
+) -> AgentCommand {
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--skip-git-repo-check".to_string(),
+        "--disable".to_string(),
+        "shell_tool".to_string(),
+        "--disable".to_string(),
+        "unified_exec".to_string(),
+        "-s".to_string(),
+        "read-only".to_string(),
+        "-C".to_string(),
+        empty_cwd.to_string(),
+        "-c".to_string(),
+        format!("mcp_servers.srelens.url=\"{}\"", escape_toml_string(mcp_url)),
+        "-c".to_string(),
+        format!("mcp_servers.srelens.bearer_token_env_var=\"{CODEX_TOKEN_ENV}\""),
+    ];
+    for path in image_paths {
+        args.push("-i".to_string());
+        args.push(path.clone());
+    }
+    // `--` ends option parsing so a prompt that itself looks like a flag
+    // (e.g. a pasted `-s danger-full-access`) can never be reinterpreted by
+    // clap as overriding `-s read-only`/`-C <empty_cwd>` above — it is always
+    // treated as the trailing positional message. Verified live against the
+    // real CLI.
+    args.push("--".to_string());
+    args.push(prompt.to_string());
+    AgentCommand {
+        program: binary.to_string(),
+        args,
+        env: vec![(CODEX_TOKEN_ENV.to_string(), token.to_string())],
+    }
 }
 
 #[cfg(test)]
@@ -229,5 +313,149 @@ mod tests {
             v["mcpServers"]["srelens"]["headers"]["Authorization"],
             "Bearer deadbeef"
         );
+    }
+
+    fn codex_cmd() -> AgentCommand {
+        codex_command(
+            "/usr/bin/codex",
+            "Why is web-0 failing?",
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+        )
+    }
+
+    #[test]
+    fn codex_command_disables_the_shell_and_unified_exec_tools() {
+        let cmd = codex_cmd();
+        assert!(cmd.args.windows(2).any(|w| w == ["--disable", "shell_tool"]));
+        assert!(cmd.args.windows(2).any(|w| w == ["--disable", "unified_exec"]));
+    }
+
+    #[test]
+    fn codex_command_is_sandboxed_to_a_read_only_empty_workspace() {
+        let cmd = codex_cmd();
+        assert!(cmd.args.windows(2).any(|w| w == ["-s", "read-only"]));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w[0] == "-C" && w[1] == "/tmp/srelens-empty-cwd"));
+    }
+
+    #[test]
+    fn codex_command_points_the_mcp_config_at_our_server() {
+        let cmd = codex_cmd();
+        assert!(cmd.args.windows(2).any(|w| {
+            w[0] == "-c" && w[1] == "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp\""
+        }));
+        assert!(cmd.args.windows(2).any(|w| {
+            w[0] == "-c"
+                && w[1] == "mcp_servers.srelens.bearer_token_env_var=\"SRELENS_MCP_TOKEN\""
+        }));
+    }
+
+    #[test]
+    fn codex_command_carries_the_token_only_in_env_never_in_argv() {
+        let cmd = codex_cmd();
+        assert_eq!(cmd.env, vec![(CODEX_TOKEN_ENV.to_string(), "deadbeef".to_string())]);
+        assert!(!cmd.args.iter().any(|a| a.contains("deadbeef")));
+    }
+
+    #[test]
+    fn codex_command_turns_each_image_path_into_an_i_flag_pair_in_order() {
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            "describe these",
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &["/tmp/img1.png".to_string(), "/tmp/img2.png".to_string()],
+        );
+        let i_pairs: Vec<&[String]> =
+            cmd.args.windows(2).filter(|w| w[0] == "-i").collect();
+        assert_eq!(i_pairs.len(), 2);
+        assert_eq!(i_pairs[0][1], "/tmp/img1.png");
+        assert_eq!(i_pairs[1][1], "/tmp/img2.png");
+    }
+
+    #[test]
+    fn codex_command_keeps_the_prompt_as_the_trailing_positional() {
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            "Why is web-0 failing?",
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &["/tmp/img1.png".to_string()],
+        );
+        assert_eq!(cmd.args.last().unwrap(), "Why is web-0 failing?");
+    }
+
+    #[test]
+    fn claude_command_sets_no_env_since_its_token_travels_via_config_file() {
+        let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", None);
+        assert!(cmd.env.is_empty());
+    }
+
+    #[test]
+    fn claude_command_ends_options_before_the_prompt_so_it_cannot_inject_flags() {
+        let prompt = "--disallowedTools none";
+        let cmd = claude_command("/usr/bin/claude", prompt, "/tmp/mcp.json", None);
+        assert_eq!(cmd.args[cmd.args.len() - 2], "--");
+        assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    #[test]
+    fn claude_command_ends_options_before_the_prompt_even_with_a_resume_id() {
+        let prompt = "--allowedTools Bash";
+        let cmd = claude_command("/usr/bin/claude", prompt, "/tmp/mcp.json", Some("sess-123"));
+        assert_eq!(cmd.args[cmd.args.len() - 2], "--");
+        assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    #[test]
+    fn codex_command_ends_options_before_the_prompt_so_it_cannot_inject_flags() {
+        let prompt = "-s danger-full-access reply";
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            prompt,
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+        );
+        assert_eq!(cmd.args[cmd.args.len() - 2], "--");
+        assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    #[test]
+    fn codex_command_ends_options_before_the_prompt_even_with_images() {
+        let prompt = "-C /evil";
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            prompt,
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &["/tmp/img1.png".to_string()],
+        );
+        assert_eq!(cmd.args[cmd.args.len() - 2], "--");
+        assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    #[test]
+    fn codex_command_escapes_quotes_and_backslashes_in_the_mcp_url_toml_fragment() {
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            "hi",
+            "http://127.0.0.1:8765/mcp?x=\"evil\"\\",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+        );
+        let expected =
+            "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp?x=\\\"evil\\\"\\\\\"";
+        assert!(cmd.args.windows(2).any(|w| w[0] == "-c" && w[1] == expected));
     }
 }

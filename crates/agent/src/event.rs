@@ -23,6 +23,9 @@ pub enum AgentEvent {
     ToolCallStart { id: String, tool: String, args: serde_json::Value },
     /// A tool call finished with this status.
     ToolResult { id: String, status: ToolStatus },
+    /// A chunk of the agent's internal reasoning/thinking, shown separately
+    /// from its final response text.
+    Thinking { text: String },
     /// The agent finished this turn and is waiting for the next user message.
     TurnDone,
     /// A fatal error for this turn (parse failure, process died, transport).
@@ -60,6 +63,14 @@ mod tests {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["type"], "toolResult");
         assert_eq!(v["status"], "ok");
+    }
+
+    #[test]
+    fn thinking_serializes_with_a_tagged_type() {
+        let e = AgentEvent::Thinking { text: "pondering...".into() };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "thinking");
+        assert_eq!(v["text"], "pondering...");
     }
 
     #[test]
