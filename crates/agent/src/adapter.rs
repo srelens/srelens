@@ -248,6 +248,13 @@ pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 /// writes into `config_dir` (see `cursor_mcp_json`), never via argv or env —
 /// both of which are visible to anyone who can list processes on the
 /// machine.
+/// Rides at the front of Cursor's prompt (it has no `--append-system-prompt`
+/// flag) so the model operates through the srelens MCP tools instead of
+/// flailing at its local shell/kubectl/file tools — which the box deny-lists,
+/// so they only fail and waste turns. Never shown in srelens's own transcript
+/// (it's part of the outgoing prompt, like the context preface).
+pub const CURSOR_GUIDANCE: &str = "You are srelens's Kubernetes assistant. Operate the selected cluster(s) ONLY through the srelens MCP tools (from the `srelens` MCP server). You have NO working shell, kubectl, git, or local filesystem access — those tools are blocked and will fail, so never run shell commands or kubectl or read local files; use the srelens MCP tools for everything. Anything that changes cluster state prompts the user for confirmation.";
+
 pub fn cursor_command(
     binary: &str,
     prompt: &str,
@@ -273,7 +280,7 @@ pub fn cursor_command(
     // overriding the flags above — it is always treated as the trailing
     // positional message. Verified live against the real CLI.
     args.push("--".to_string());
-    args.push(prompt.to_string());
+    args.push(format!("{CURSOR_GUIDANCE}\n\n{prompt}"));
     AgentCommand {
         program: binary.to_string(),
         args,
@@ -571,7 +578,7 @@ mod tests {
     #[test]
     fn cursor_command_has_the_exact_boxing_flags_in_order() {
         let cmd = cursor_cmd();
-        let expected: Vec<String> = [
+        let expected_flags: Vec<String> = [
             "-p",
             "--output-format",
             "stream-json",
@@ -580,12 +587,16 @@ mod tests {
             "--workspace",
             "/tmp/srelens-empty-cwd",
             "--",
-            "Why is web-0 failing?",
         ]
         .into_iter()
         .map(str::to_string)
         .collect();
-        assert_eq!(cmd.args, expected);
+        // Everything up to the trailing positional is exactly the boxing flags.
+        assert_eq!(cmd.args[..cmd.args.len() - 1], expected_flags[..]);
+        // The trailing positional is the guidance preface followed by the prompt.
+        let last = cmd.args.last().unwrap();
+        assert!(last.starts_with(CURSOR_GUIDANCE));
+        assert!(last.ends_with("Why is web-0 failing?"));
         assert_eq!(cmd.program, "/usr/bin/cursor-agent");
     }
 
@@ -607,7 +618,9 @@ mod tests {
             None,
         );
         assert_eq!(cmd.args[cmd.args.len() - 2], "--");
-        assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+        // `--` guards it: the flag-looking prompt is the trailing positional
+        // (after the guidance preface), never parsed as a flag.
+        assert!(cmd.args[cmd.args.len() - 1].ends_with(prompt));
     }
 
     #[test]
@@ -634,7 +647,7 @@ mod tests {
         let resume_idx = cmd.args.iter().position(|a| a == "--resume").unwrap();
         assert!(resume_idx < dashdash_idx);
         assert_eq!(cmd.args[cmd.args.len() - 2], "--");
-        assert_eq!(cmd.args[cmd.args.len() - 1], "and now?");
+        assert!(cmd.args[cmd.args.len() - 1].ends_with("and now?"));
     }
 
     #[test]

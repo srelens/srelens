@@ -88,16 +88,17 @@ fn tool_call(v: &serde_json::Value) -> Vec<AgentEvent> {
     }
 }
 
-/// Cursor nests the actual outcome under `result` (e.g.
-/// `{"result":{"error":{...}}}` for a blocked read). Only a literal
-/// `error`/`isError`/`is_error` key there is recognized as failure; other
-/// failure shapes a given tool might use (e.g. a shell call's
-/// `result.permissionDenied`) are not detected here and parse as `Ok`. This
-/// is a known gap in the event stream's fidelity, not a security boundary —
-/// srelens's own MCP-tool gating (not this parser) is what actually enforces
-/// confirmation on destructive calls.
+/// Cursor nests the actual outcome under `result`. A tool blocked by the
+/// sandbox deny-list reports the denial under `result.permissionDenied` (e.g.
+/// a `shell`/`read` call refused because the srelens box denies local tools) —
+/// surface that as `Denied` so the UI shows the box working, not a spurious
+/// "ok". A genuine failure reports `result.error`/`isError`/`is_error` and maps
+/// to `Error`. Everything else is `Ok`.
 fn completion_status(inner: &serde_json::Value) -> ToolStatus {
     let candidate = inner.get("result").unwrap_or(inner);
+    if candidate.get("permissionDenied").map(is_truthy).unwrap_or(false) {
+        return ToolStatus::Denied;
+    }
     let has_error = ["error", "isError", "is_error"]
         .iter()
         .any(|key| candidate.get(*key).map(is_truthy).unwrap_or(false));
@@ -239,6 +240,17 @@ mod tests {
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"readToolCall":{"result":{"error":{"errorMessage":"Permission denied"}}}}}"#,
         );
         assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error }]);
+    }
+
+    #[test]
+    fn a_tool_call_blocked_by_the_sandbox_is_denied_not_ok() {
+        // A shell/read the box deny-lists reports its refusal under
+        // `result.permissionDenied` (real shape from a boxed Cursor run) — it
+        // must surface as Denied so the UI shows the box working, not "ok".
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"shellToolCall":{"result":{"permissionDenied":{"command":"cat /etc/hosts"}}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied }]);
     }
 
     #[test]
