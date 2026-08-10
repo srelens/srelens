@@ -116,6 +116,12 @@ interface ChatMessage {
   text: string;
   /** Tool calls started during this (assistant) turn, in order. */
   toolCallIds?: string[];
+  /** Reasoning/thinking text streamed before the answer — only some agents
+   * emit it (Cursor does; Claude/Codex headless don't). Shown in a collapsible
+   * "Thoughts" section above the tools and answer. */
+  thoughts?: string;
+  /** Seconds spent thinking, for the "Thoughts · Ns" label. */
+  thoughtSecs?: number;
   /** Data URIs (`data:image/...;base64,...`) attached when this (user)
    * message was sent — the displayable form, rendered inline in the bubble
    * and round-tripped via `StoredMessage.images` so a reloaded session keeps
@@ -272,6 +278,41 @@ function CopyButton({ text }: { text: string }) {
       {copied ? <Check aria-hidden="true" className="size-3.5" /> : <Copy aria-hidden="true" className="size-3.5" />}
       {copied ? "Copied" : "Copy"}
     </button>
+  );
+}
+
+/**
+ * The agent's reasoning for a turn, folded into a collapsible "Thoughts · Ns"
+ * row above the tools and answer. Only rendered when the agent actually
+ * streamed reasoning (Cursor does; Claude/Codex headless don't), collapsed by
+ * default.
+ */
+function ThoughtsGroup({ text, secs }: { text: string; secs?: number }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 text-xs">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-label="Thoughts"
+        onClick={() => setExpanded((e) => !e)}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-muted-foreground hover:text-foreground"
+      >
+        {expanded ? (
+          <ChevronDown aria-hidden="true" className="size-3.5 shrink-0" />
+        ) : (
+          <ChevronRight aria-hidden="true" className="size-3.5 shrink-0" />
+        )}
+        <Sparkles aria-hidden="true" className="size-3.5 shrink-0" />
+        <span className="font-medium text-foreground">Thoughts</span>
+        {secs ? <span>· {secs}s</span> : null}
+      </button>
+      {expanded && (
+        <div className="whitespace-pre-wrap border-t border-border px-2.5 py-2 leading-relaxed text-muted-foreground">
+          {text}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -695,6 +736,9 @@ export const AssistantConversation = forwardRef<
   // raw ("cluster.This is a"); this tracks whether a tool event has landed
   // since the last delta so the next delta can start a fresh paragraph.
   const toolEventSincePendingDelta = useRef(false);
+  // When the current turn began streaming reasoning, so the Thoughts section
+  // can show how long it thought once the thinking ends.
+  const thinkingStartRef = useRef<number | null>(null);
 
   // This component only exists while its host (the drawer or the tab) is
   // showing it, so a subscription made on mount already covers "each time
@@ -994,8 +1038,29 @@ export const AssistantConversation = forwardRef<
   }
 
   function applyEvent(e: AgentEvent) {
+    // Thinking ends the moment any non-thinking event arrives — stamp how long
+    // it thought onto the current assistant message (only if it thought at all).
+    function endThinking() {
+      if (thinkingStartRef.current === null) return;
+      const secs = Math.max(1, Math.round((Date.now() - thinkingStartRef.current) / 1000));
+      thinkingStartRef.current = null;
+      setMessagesTracked((msgs) => {
+        const last = msgs[msgs.length - 1];
+        if (!last || last.role !== "assistant" || !last.thoughts) return msgs;
+        return [...msgs.slice(0, -1), { ...last, thoughtSecs: secs }];
+      });
+    }
     switch (e.type) {
+      case "thinking":
+        if (thinkingStartRef.current === null) thinkingStartRef.current = Date.now();
+        setMessagesTracked((msgs) => {
+          const last = msgs[msgs.length - 1];
+          if (!last || last.role !== "assistant") return msgs;
+          return [...msgs.slice(0, -1), { ...last, thoughts: (last.thoughts ?? "") + e.text }];
+        });
+        break;
       case "toolCallStart":
+        endThinking();
         toolEventSincePendingDelta.current = true;
         setToolCallsTracked((tc) => ({ ...tc, [e.id]: { tool: e.tool, args: e.args, status: null } }));
         setMessagesTracked((msgs) => {
@@ -1009,6 +1074,7 @@ export const AssistantConversation = forwardRef<
         setToolCallsTracked((tc) => (tc[e.id] ? { ...tc, [e.id]: { ...tc[e.id], status: e.status } } : tc));
         break;
       case "textDelta": {
+        endThinking();
         // Read + reset the flag synchronously, here, rather than inside the
         // `setMessages` updater below: React batches updates from this
         // (non-event-handler) callback, so the updater functions for
@@ -1036,6 +1102,7 @@ export const AssistantConversation = forwardRef<
         setMessagesTracked((msgs) => [...msgs, { id: nextId.current++, role: "error", text: e.message }]);
         break;
       case "turnDone":
+        endThinking();
         void persistSession(messagesRef.current, toolCallsRef.current);
         break;
     }
@@ -1155,6 +1222,7 @@ export const AssistantConversation = forwardRef<
                   </div>
                 ) : (
                   <div className="space-y-2">
+                    {m.thoughts ? <ThoughtsGroup text={m.thoughts} secs={m.thoughtSecs} /> : null}
                     {(() => {
                       const calls = (m.toolCallIds ?? [])
                         .map((id) => toolCalls[id])

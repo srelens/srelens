@@ -4,6 +4,7 @@ export type ToolStatus = "ok" | "error" | "denied";
 
 export type AgentEvent =
   | { type: "textDelta"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "toolCallStart"; id: string; tool: string; args: unknown }
   | { type: "toolResult"; id: string; status: ToolStatus }
   | { type: "turnDone" }
@@ -29,6 +30,7 @@ export function parseAgentEvent(raw: unknown): AgentEvent | null {
   const t = (raw as { type?: unknown }).type;
   switch (t) {
     case "textDelta":
+    case "thinking":
     case "toolCallStart":
     case "toolResult":
     case "turnDone":

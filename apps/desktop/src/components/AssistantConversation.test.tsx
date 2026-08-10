@@ -1100,6 +1100,22 @@ describe("AssistantConversation answer layout", () => {
     fireEvent.click(screen.getByRole("button", { name: /copy answer/i }));
     expect(writeText).toHaveBeenCalledWith("The answer.");
   });
+
+  it("folds streamed thinking into a collapsed Thoughts group above the answer", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "thinking", text: "Let me reason about this." });
+      onEvent({ type: "textDelta", text: "The answer." });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await screen.findByText(/the answer/i);
+    // Collapsed by default — the reasoning text isn't shown until expanded.
+    expect(screen.queryByText(/let me reason/i)).toBeFalsy();
+    fireEvent.click(screen.getByRole("button", { name: /thoughts/i }));
+    expect(screen.getByText(/let me reason/i)).toBeTruthy();
+  });
 });
 
 describe("AssistantConversation agent persistence", () => {
