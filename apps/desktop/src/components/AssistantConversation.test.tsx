@@ -125,7 +125,7 @@ describe("AssistantConversation", () => {
     expect(vi.mocked(chat.sendChat).mock.calls[0][5]).toBe("codex");
   });
 
-  it("Cursor is selectable like Claude and Codex now that no agent is gated", async () => {
+  it("renders a gated Cursor as a disabled option so it can't be picked", async () => {
     vi.mocked(chat.listAgents).mockResolvedValue([
       {
         kind: "claude",
@@ -143,25 +143,18 @@ describe("AssistantConversation", () => {
         path: "/usr/bin/cursor-agent",
         version: null,
         installUrl: "",
-        gated: false,
+        gated: true,
       },
     ]);
-    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
-      onEvent({ type: "turnDone" });
-    });
     render(<AssistantConversation />);
     const trigger = await screen.findByRole("combobox", { name: /agent/i });
     fireEvent.click(trigger);
     const cursorOption = await screen.findByRole("option", { name: /cursor/i });
-    // Not disabled and not marked "soon" — Cursor is a real, pickable option.
-    expect((cursorOption as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(cursorOption);
+    // Gated (MCP connection unreliable) — disabled, can't be selected.
+    expect((cursorOption as HTMLButtonElement).disabled).toBe(true);
+    // Claude stays the selection and Send works.
     fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
     expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: /send/i }));
-    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
-    expect(vi.mocked(chat.sendChat).mock.calls[0][2]).toBe("/usr/bin/cursor-agent");
-    expect(vi.mocked(chat.sendChat).mock.calls[0][5]).toBe("cursor");
   });
 
   it("shows a context chip when context is provided, scoped like the drawer", async () => {

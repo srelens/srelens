@@ -19,13 +19,15 @@ fn install_url(kind: AgentKind) -> &'static str {
     }
 }
 
-/// No agent is gated anymore: Claude, Codex, and Cursor are each boxed to
-/// srelens's own MCP tools (see `chat_send`'s per-kind spawn arms) and all
-/// three are selectable. Kept as a function (rather than deleted along with
-/// its call sites) so a future agent that isn't ready yet has an obvious,
-/// already-wired place to gate from again.
-fn is_gated(_kind: AgentKind) -> bool {
-    false
+/// Cursor is gated: its sandbox is solved (it's boxed to MCP tools, local
+/// file/shell access denied — the `cursor_command`/config layer is complete
+/// and tested), but its headless MCP client connects to srelens's HTTP server
+/// unreliably (it frequently reports the server "not connected" mid-turn), so
+/// it isn't dependable enough to select yet. Claude and Codex are fully wired
+/// and boxed. The Cursor spawn path stays in `chat_send` for when the
+/// connection issue is resolved.
+fn is_gated(kind: AgentKind) -> bool {
+    matches!(kind, AgentKind::Cursor)
 }
 
 /// Build an `AgentInfo`, resolving availability through the injected `resolve`
@@ -498,10 +500,12 @@ mod tests {
     }
 
     #[test]
-    fn no_agent_is_gated_anymore_claude_codex_and_cursor_are_all_selectable() {
+    fn cursor_is_gated_but_claude_and_codex_are_selectable() {
+        // Cursor is installed + boxed, but its MCP connection is unreliable —
+        // gated (not selectable) until that's fixed.
         let info = detect(AgentKind::Cursor, |_| Some("/usr/bin/cursor-agent".into()));
         assert!(info.available);
-        assert!(!info.gated);
+        assert!(info.gated);
 
         let info = detect(AgentKind::Claude, |_| Some("/usr/bin/claude".into()));
         assert!(info.available);
