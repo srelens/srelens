@@ -364,6 +364,98 @@ describe("AssistantConversation session persistence", () => {
   });
 });
 
+describe("AssistantConversation New chat resets composer state", () => {
+  // 3 zero bytes -> base64 "AAAA" with no padding — mirrors the helper in the
+  // image-attachments describe block below (not shared across `describe`s).
+  function pngFile(name = "a.png"): File {
+    return new File([Uint8Array.from([0, 0, 0])], name, { type: "image/png" });
+  }
+
+  it("New chat clears skill and context chips restored from a reopened session", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "old-1",
+      title: "Old chat",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: ["prod"],
+      skills: ["deploy-triage"],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text: "hi" }],
+    });
+    render(<AssistantConversation availableContexts={["prod", "staging"]} />);
+    await openHistory();
+    fireEvent.click(await screen.findByText("Old chat"));
+    await screen.findByText("hi");
+
+    // The reopened session's skill and context chips are visible.
+    expect(screen.getByLabelText("Remove skill deploy-triage")).toBeTruthy();
+    expect(screen.getByLabelText("Remove prod")).toBeTruthy();
+
+    await openHistory();
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+
+    // A true fresh start: neither chip survives New chat.
+    expect(screen.queryByLabelText("Remove skill deploy-triage")).toBeFalsy();
+    expect(screen.queryByLabelText("Remove prod")).toBeFalsy();
+  });
+
+  it("after New chat, a freshly picked context sends with no bleed from the previous session's skill/context", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "old-1",
+      title: "Old chat",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: ["prod"],
+      skills: ["deploy-triage"],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text: "hi" }],
+    });
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation availableContexts={["prod", "staging"]} />);
+    await openHistory();
+    fireEvent.click(await screen.findByText("Old chat"));
+    await screen.findByText("hi");
+
+    await openHistory();
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("staging"));
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "what's up?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    const sentPrompt = vi.mocked(chat.sendChat).mock.calls[0][1] as string;
+    // Staging's single-context preface is present...
+    expect(sentPrompt).toContain("Work in the cluster `staging` (the default context).");
+    // ...but nothing from the previous session (its skill guidance or its
+    // "prod" context) leaked into this brand-new one.
+    expect(sentPrompt).not.toContain("deploy-triage");
+    expect(sentPrompt).not.toContain("Apply these skills");
+    expect(sentPrompt).not.toContain("prod");
+  });
+
+  it("New chat clears a pending image thumbnail", async () => {
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
+    await screen.findByAltText(/pending image 1/i);
+
+    await openHistory();
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+
+    expect(screen.queryByAltText(/pending image 1/i)).toBeFalsy();
+  });
+});
+
 describe("AssistantConversation image attachments", () => {
   // 3 zero bytes -> base64 "AAAA" with no padding, so the data URI jsdom's
   // real (in-memory, no filesystem) FileReader produces is a stable literal:

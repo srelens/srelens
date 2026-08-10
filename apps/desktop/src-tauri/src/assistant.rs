@@ -265,6 +265,12 @@ pub async fn chat_send(
             }
         };
         let image_path = dir.join(format!("srelens-img-{session}-{i}.png"));
+        // Guard the path before writing to it, not after: a `write` that
+        // fails partway through still leaves a (possibly partial) file on
+        // disk, and only a guard pushed before the call runs its `Drop` to
+        // clean that up. Pushing after `write` would only ever guard a fully
+        // successful write, leaking a partial file on the error path below.
+        image_guards.push(TempFile(image_path.clone()));
         if let Err(e) = std::fs::write(&image_path, &bytes) {
             sink.emit(
                 &channel,
@@ -275,7 +281,6 @@ pub async fn chat_send(
             );
             continue;
         }
-        image_guards.push(TempFile(image_path.clone()));
         image_paths.push(image_path.to_string_lossy().into_owned());
     }
 
@@ -557,6 +562,28 @@ mod tests {
         std::fs::write(&path, b"secret").unwrap();
         {
             let _guard = TempFile(path.clone());
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
+    }
+
+    /// Pins the ordering `chat_send`'s image loop relies on: the guard must
+    /// be constructed *before* `std::fs::write` is attempted, not after a
+    /// successful write. This doesn't inject a real fs failure (that would be
+    /// a lot of mocking for one ordering guarantee) — it just proves a guard
+    /// built ahead of the write still cleans up whatever lands on disk at
+    /// that path, including a write that only partially completes, which a
+    /// guard pushed *after* `write` returns would never get the chance to do.
+    #[test]
+    fn temp_file_guard_created_before_the_write_still_cleans_up_a_partial_write() {
+        let path = std::env::temp_dir().join(format!(
+            "srelens-assistant-tempfile-partial-write-test-{}",
+            std::process::id()
+        ));
+        assert!(!path.exists());
+        {
+            let _guard = TempFile(path.clone()); // guard first, as in chat_send's loop
+            std::fs::write(&path, b"partial").unwrap(); // stands in for a write that landed bytes before failing
             assert!(path.exists());
         }
         assert!(!path.exists());

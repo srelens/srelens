@@ -742,6 +742,16 @@ export const AssistantConversation = forwardRef<
     setInput("");
     sessionRef.current = null;
     createdAtRef.current = null;
+    // Composer state is per-conversation, not global — without resetting
+    // these, a "New chat" (or deleting the currently-open session, which
+    // routes through here) would silently carry the old session's active
+    // skills/pending images/selected contexts into the brand-new one, and
+    // they'd get folded into the very next outgoing prompt and persisted
+    // under the new session id.
+    setActiveSkills([]);
+    setPendingImages([]);
+    setSelectedContexts([]);
+    setPromptError(null);
   }
 
   /** Load a saved session and replay it into state read-only — no event
