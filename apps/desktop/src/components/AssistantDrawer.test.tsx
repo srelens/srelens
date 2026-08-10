@@ -141,7 +141,7 @@ describe("AssistantDrawer", () => {
     expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("defaults to the first available agent, and disables Send when the user switches to an unavailable one", async () => {
+  it("defaults to the first available agent, and shows an unavailable one as a disabled option", async () => {
     vi.mocked(chat.listAgents).mockResolvedValue([
       {
         kind: "codex",
@@ -171,11 +171,12 @@ describe("AssistantDrawer", () => {
       expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false),
     );
 
-    fireEvent.change(screen.getByRole("combobox", { name: /agent/i }), { target: { value: "codex" } });
-    await waitFor(() =>
-      expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true),
-    );
-    expect(screen.getByText(/example\.com\/install-codex/)).toBeTruthy();
+    // The unavailable agent can't be switched to — it's a disabled option
+    // in the picker, marked "not installed".
+    fireEvent.click(screen.getByRole("combobox", { name: /agent/i }));
+    const codexOption = await screen.findByRole("option", { name: /codex/i });
+    expect((codexOption as HTMLButtonElement).disabled).toBe(true);
+    expect(codexOption.textContent).toMatch(/not installed/i);
   });
 
   it("keeps a tool call's args collapsed until the disclosure toggle is clicked", async () => {

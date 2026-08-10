@@ -114,13 +114,14 @@ describe("AssistantConversation", () => {
       },
     ]);
     render(<AssistantConversation />);
-    const select = await screen.findByRole("combobox", { name: /agent/i });
-    await waitFor(() => expect((select as HTMLSelectElement).value).toBe("claude"));
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    // The trigger shows the selected agent's label — Claude, never the gated Codex.
+    await waitFor(() => expect(trigger.textContent).toMatch(/claude/i));
     fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
     expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("disables Send and shows a coming-soon note when a gated agent is selected", async () => {
+  it("renders a gated agent as a disabled option so it can't be picked", async () => {
     vi.mocked(chat.listAgents).mockResolvedValue([
       {
         kind: "codex",
@@ -142,12 +143,13 @@ describe("AssistantConversation", () => {
       },
     ]);
     render(<AssistantConversation />);
-    const select = await screen.findByRole("combobox", { name: /agent/i });
-    fireEvent.change(select, { target: { value: "codex" } });
-    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect(
-      await screen.findByText(/Codex\/Cursor support is coming — use Claude for now\./)
-    ).toBeTruthy();
+    const trigger = await screen.findByRole("combobox", { name: /agent/i });
+    fireEvent.click(trigger);
+    const codexOption = await screen.findByRole("option", { name: /codex/i });
+    expect((codexOption as HTMLButtonElement).disabled).toBe(true);
+    // Claude stays the selection and Send works.
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("a gated-only agent list keeps Send disabled and shows the coming note, not an install link", async () => {

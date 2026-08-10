@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Wrench } from "lucide-react";
+import { ChevronLeft, ChevronRight, MessageSquarePlus, Plus, Trash2, Wrench } from "lucide-react";
 import { Button } from "../ui";
 import { relativeTime } from "../lib/relativeTime";
 import type { SessionMeta } from "../lib/chatHistory";
@@ -37,12 +37,12 @@ function HistoryRail({
 }) {
   if (collapsed) {
     return (
-      <div className="flex w-9 shrink-0 flex-col items-center border-r border-border bg-card py-2">
+      <div className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-card py-2">
         <button
           type="button"
           aria-label="Expand history"
           onClick={onToggleCollapsed}
-          className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <ChevronRight aria-hidden="true" className="size-4" />
         </button>
@@ -52,11 +52,9 @@ function HistoryRail({
 
   const now = Date.now();
   return (
-    <div className="flex w-[260px] shrink-0 flex-col border-r border-border bg-card">
-      <div className="flex shrink-0 items-center gap-1 border-b border-border p-2">
-        <Button variant="secondary" size="xs" className="flex-1 justify-start" onClick={onNewChat}>
-          New chat
-        </Button>
+    <div className="flex w-[264px] shrink-0 flex-col border-r border-border bg-card">
+      <div className="flex shrink-0 items-center justify-between gap-2 px-3 pb-2 pt-3">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Chats</span>
         <button
           type="button"
           aria-label="Collapse history"
@@ -66,15 +64,24 @@ function HistoryRail({
           <ChevronLeft aria-hidden="true" className="size-4" />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="shrink-0 px-2 pb-2">
+        <Button variant="primary" size="sm" className="w-full justify-center gap-1.5" onClick={onNewChat}>
+          <Plus aria-hidden="true" className="size-4" />
+          New chat
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2">
         {sessions.length === 0 ? (
-          <p className="px-3 py-2 text-xs text-muted-foreground">No saved chats yet.</p>
+          <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
+            <MessageSquarePlus aria-hidden="true" className="size-5 text-muted-foreground/50" />
+            <p className="text-xs text-muted-foreground">No saved chats yet.</p>
+          </div>
         ) : (
-          <ul className="space-y-0.5 p-1">
+          <ul className="space-y-0.5 pb-2">
             {sessions.map((s) => (
               <li
                 key={s.id}
-                className="group flex items-center gap-1 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
+                className="group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
               >
                 <button
                   type="button"
@@ -82,25 +89,25 @@ function HistoryRail({
                   title={s.title}
                   onClick={() => onSelectSession(s.id)}
                 >
-                  <span className="block truncate">{s.title}</span>
+                  <span className="block truncate font-medium">{s.title}</span>
                   <span className="block text-xs text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
                 </button>
                 <button
                   type="button"
                   aria-label={`Delete ${s.title}`}
                   onClick={() => onDeleteSession(s.id)}
-                  className="shrink-0 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                  className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 hover:bg-background hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
                 >
-                  ✕
+                  <Trash2 aria-hidden="true" className="size-3.5" />
                 </button>
               </li>
             ))}
           </ul>
         )}
       </div>
-      <div className="shrink-0 border-t border-border p-1">
-        <Button variant="ghost" size="xs" className="w-full justify-start" onClick={onOpenSkills}>
-          <Wrench aria-hidden="true" data-icon="inline-start" />
+      <div className="shrink-0 border-t border-border p-2">
+        <Button variant="ghost" size="sm" className="w-full justify-start gap-2" onClick={onOpenSkills}>
+          <Wrench aria-hidden="true" className="size-4" />
           Skills
         </Button>
       </div>

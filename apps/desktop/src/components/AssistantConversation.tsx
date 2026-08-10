@@ -1,5 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { Paperclip, Sparkles } from "lucide-react";
+import { Bot, Check, ChevronDown, Paperclip, Sparkles } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
@@ -352,6 +352,78 @@ function ContextMultiSelect({
               <span className="truncate">{name}</span>
             </label>
           ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * Agent selector — a proper popover dropdown (not a bare native <select>): the
+ * trigger shows the current agent with an icon, and the list marks the
+ * selected one and disables agents that are not installed or still gated
+ * (Codex/Cursor), so an unusable agent can't be picked. `role="combobox"` on
+ * the trigger + `role="listbox"/"option"` on the list keep it accessible.
+ */
+function AgentPicker({
+  agents,
+  selectedKind,
+  onSelect,
+}: {
+  agents: AgentInfo[];
+  selectedKind: string;
+  onSelect: (kind: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = agents.find((a) => a.kind === selectedKind);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="secondary"
+          size="sm"
+          role="combobox"
+          aria-label="Agent"
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          className="gap-1.5"
+        >
+          <Bot aria-hidden="true" className="size-3.5 shrink-0" />
+          <span className="max-w-[8rem] truncate">{current?.label ?? "Agent"}</span>
+          <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 opacity-60" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-56 p-1">
+        <div role="listbox" aria-label="Choose agent">
+          {agents.map((a) => {
+            const disabled = !a.available || a.gated;
+            const selected = a.kind === selectedKind;
+            return (
+              <button
+                key={a.kind}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                disabled={disabled}
+                onClick={() => {
+                  onSelect(a.kind);
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+              >
+                <Check
+                  aria-hidden="true"
+                  className={`size-3.5 shrink-0 ${selected ? "opacity-100" : "opacity-0"}`}
+                />
+                <span className="min-w-0 flex-1 truncate">{a.label}</span>
+                {!a.available ? (
+                  <span className="shrink-0 text-xs text-muted-foreground">not installed</span>
+                ) : a.gated ? (
+                  <span className="shrink-0 text-xs text-muted-foreground">soon</span>
+                ) : null}
+              </button>
+            );
+          })}
         </div>
       </PopoverContent>
     </Popover>
@@ -952,19 +1024,7 @@ export const AssistantConversation = forwardRef<
   }
 
   const agentPicker = agents.length > 0 && (
-    <select
-      aria-label="Agent"
-      className="fl-select h-8 py-0 text-xs"
-      value={selectedKind}
-      onChange={(e) => setSelectedKind(e.target.value)}
-    >
-      {agents.map((a) => (
-        <option key={a.kind} value={a.kind} disabled={!a.available || a.gated}>
-          {a.label}
-          {!a.available ? " (not installed)" : a.gated ? " (not yet available)" : ""}
-        </option>
-      ))}
-    </select>
+    <AgentPicker agents={agents} selectedKind={selectedKind} onSelect={setSelectedKind} />
   );
 
   return (
