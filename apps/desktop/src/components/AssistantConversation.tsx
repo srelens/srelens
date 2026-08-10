@@ -1,4 +1,5 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { Paperclip, Sparkles } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
@@ -953,7 +954,7 @@ export const AssistantConversation = forwardRef<
   const agentPicker = agents.length > 0 && (
     <select
       aria-label="Agent"
-      className="fl-select text-xs"
+      className="fl-select h-8 py-0 text-xs"
       value={selectedKind}
       onChange={(e) => setSelectedKind(e.target.value)}
     >
@@ -978,171 +979,169 @@ export const AssistantConversation = forwardRef<
           />
         </div>
       )}
-      <div className="flex-1 space-y-3 overflow-y-auto">
-        {messages.length === 0 && (
-          <p className="text-sm text-muted-foreground">Ask about this cluster to get started.</p>
-        )}
-        {messages.map((m) => (
-          <div key={m.id} className={m.role === "user" ? "text-right" : "text-left"}>
-            <div
-              className={
-                m.role === "user"
-                  ? "inline-block whitespace-pre-wrap rounded-md bg-primary/10 px-3 py-2 text-left text-sm"
-                  : m.role === "error"
-                    ? "inline-block whitespace-pre-wrap rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-sm text-destructive"
-                    : "inline-block max-w-full rounded-md bg-muted px-3 py-2 text-left text-sm"
-              }
-            >
-              {m.role === "assistant" ? (
-                m.text ? <AssistantMarkdown text={m.text} /> : sending ? "…" : ""
-              ) : (
-                <>
-                  {m.text}
-                  {m.role === "user" && m.images && m.images.length > 0 && (
-                    <div className="mt-1 flex flex-wrap justify-end gap-1">
-                      {m.images.map((src, i) => (
-                        <img
-                          key={i}
-                          src={src}
-                          alt={`Attached image ${i + 1}`}
-                          className="h-16 w-16 rounded-md border border-border object-cover"
-                        />
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
+      <div className="flex-1 overflow-y-auto">
+        {messages.length === 0 && pendingConfirms.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+            <div className="flex size-14 items-center justify-center rounded-2xl border border-border bg-muted/40 text-muted-foreground">
+              <Sparkles aria-hidden="true" className="size-7" />
             </div>
-            {m.toolCallIds?.map((id) => {
-              const tc = toolCalls[id];
-              return tc ? <ToolCallCard key={id} tool={tc.tool} args={tc.args} status={tc.status} /> : null;
-            })}
+            <div className="space-y-1.5">
+              <p className="text-lg font-semibold text-foreground">Your Kubernetes assistant</p>
+              <p className="max-w-sm text-sm text-muted-foreground">
+                Ask about this cluster to get started. Type <span className="font-mono text-foreground">/</span> for
+                prompts &amp; skills.
+              </p>
+            </div>
           </div>
-        ))}
-        {pendingConfirms.map((req) => (
-          <ConfirmCard key={req.id} request={req} onAnswer={answerConfirm} />
-        ))}
-      </div>
-      {!agentReady && (
-        <p className="shrink-0 text-xs text-muted-foreground">
-          {selectedAgent
-            ? selectedAgent.gated
-              ? "Codex/Cursor support is coming — use Claude for now."
-              : selectedAgent.installUrl
-                ? (
-                  <>
-                    {selectedAgent.label} isn&apos;t installed.{" "}
-                    <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
-                      {selectedAgent.installUrl}
-                    </a>
-                  </>
-                )
-                : `${selectedAgent.label} isn't installed.`
-            : "No coding agent available. Install one to use the assistant."}
-        </p>
-      )}
-      {/* Composer: chip row (resource/multi-context/pending images) above the
-          input row (attach, inline agent picker, text field, Send/Stop) — all
-          of Task 17/18's controls plus the agent picker now live in one
-          grouped surface instead of scattered bars above it. */}
-      <div
-        data-testid="assistant-composer"
-        className="flex shrink-0 flex-col gap-2 border-t border-border pt-3"
-        onPaste={onComposerPaste}
-      >
-        {(attachedContext ||
-          availableContexts !== undefined ||
-          pendingImages.length > 0 ||
-          activeSkills.length > 0) && (
-          <div className="flex flex-wrap items-center gap-2">
-            {attachedContext && (
-              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs">
-                <span className="min-w-0 max-w-[16rem] truncate">{formatContext(attachedContext)}</span>
-                <button
-                  type="button"
-                  aria-label="Remove context"
-                  onClick={() => setAttachedContext(undefined)}
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  ✕
-                </button>
+        ) : (
+          <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+            {messages.map((m) => (
+              <div key={m.id}>
+                {m.role === "user" ? (
+                  <div className="rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm">
+                    <p className="whitespace-pre-wrap">{m.text}</p>
+                    {m.images && m.images.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {m.images.map((src, i) => (
+                          <img
+                            key={i}
+                            src={src}
+                            alt={`Attached image ${i + 1}`}
+                            className="h-20 w-20 rounded-md border border-border object-cover"
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : m.role === "error" ? (
+                  <div className="whitespace-pre-wrap rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                    {m.text}
+                  </div>
+                ) : (
+                  <div className="text-sm leading-relaxed">
+                    {m.text ? (
+                      <AssistantMarkdown text={m.text} />
+                    ) : sending ? (
+                      <span className="text-muted-foreground">…</span>
+                    ) : (
+                      ""
+                    )}
+                  </div>
+                )}
+                {m.toolCallIds?.map((id) => {
+                  const tc = toolCalls[id];
+                  return tc ? (
+                    <div key={id} className="mt-2">
+                      <ToolCallCard tool={tc.tool} args={tc.args} status={tc.status} />
+                    </div>
+                  ) : null;
+                })}
               </div>
-            )}
-            {availableContexts !== undefined && (
-              <>
-                <ContextMultiSelect available={availableContexts} selected={selectedContexts} onChange={setSelectedContexts} />
-                {selectedContexts.map((name) => (
-                  <span
-                    key={name}
-                    className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
-                  >
-                    <span className="truncate">{name}</span>
-                    <button
-                      type="button"
-                      aria-label={`Remove ${name}`}
-                      onClick={() => setSelectedContexts((cs) => cs.filter((c) => c !== name))}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      ✕
-                    </button>
-                  </span>
-                ))}
-              </>
-            )}
-            {pendingImages.map((src, i) => (
-              <span key={i} className="relative inline-flex">
-                <img
-                  src={src}
-                  alt={`Pending image ${i + 1}`}
-                  className="h-12 w-12 rounded-md border border-border object-cover"
-                />
-                <button
-                  type="button"
-                  aria-label={`Remove image ${i + 1}`}
-                  onClick={() => removePendingImage(i)}
-                  className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-background text-[10px] leading-none text-muted-foreground hover:text-foreground"
-                >
-                  ✕
-                </button>
-              </span>
             ))}
-            {activeSkills.map((name) => (
-              <span
-                key={name}
-                className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
-              >
-                <span className="truncate">{name}</span>
-                <button
-                  type="button"
-                  aria-label={`Remove skill ${name}`}
-                  onClick={() => removeSkill(name)}
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  ✕
-                </button>
-              </span>
+            {pendingConfirms.map((req) => (
+              <ConfirmCard key={req.id} request={req} onAnswer={answerConfirm} />
             ))}
           </div>
         )}
-        {promptError && <p className="text-xs text-destructive">{promptError}</p>}
-        <div className="flex items-end gap-2">
-          <label
-            title="Attach image"
-            className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md border border-border text-sm text-muted-foreground hover:bg-accent"
-          >
-            <span aria-hidden="true">+</span>
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              aria-label="Attach image"
-              onChange={onAttachFiles}
-              disabled={sending}
-              className="hidden"
-            />
-          </label>
-          {agentPicker}
-          <div className="relative flex-1">
+      </div>
+      <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
+        {!agentReady && (
+          <p className="mb-2 px-1 text-xs text-muted-foreground">
+            {selectedAgent
+              ? selectedAgent.gated
+                ? "Codex/Cursor support is coming — use Claude for now."
+                : selectedAgent.installUrl
+                  ? (
+                    <>
+                      {selectedAgent.label} isn&apos;t installed.{" "}
+                      <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
+                        {selectedAgent.installUrl}
+                      </a>
+                    </>
+                  )
+                  : `${selectedAgent.label} isn't installed.`
+              : "No coding agent available. Install one to use the assistant."}
+          </p>
+        )}
+        {/* Composer card: a chip row (context / skills / pending images) and a
+            borderless input sit above a compact toolbar (attach, agent picker,
+            contexts, Send/Stop) — one grouped surface, Cursor-style. */}
+        <div
+          data-testid="assistant-composer"
+          className="flex flex-col gap-2 rounded-2xl border border-border bg-card p-2 shadow-sm transition-colors focus-within:border-ring/70"
+          onPaste={onComposerPaste}
+        >
+          {(attachedContext ||
+            selectedContexts.length > 0 ||
+            pendingImages.length > 0 ||
+            activeSkills.length > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5 px-1 pt-1">
+              {attachedContext && (
+                <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1 text-xs">
+                  <span className="min-w-0 max-w-[16rem] truncate">{formatContext(attachedContext)}</span>
+                  <button
+                    type="button"
+                    aria-label="Remove context"
+                    onClick={() => setAttachedContext(undefined)}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+              {selectedContexts.map((name) => (
+                <span
+                  key={name}
+                  className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
+                >
+                  <span className="truncate">{name}</span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${name}`}
+                    onClick={() => setSelectedContexts((cs) => cs.filter((c) => c !== name))}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+              {pendingImages.map((src, i) => (
+                <span key={i} className="relative inline-flex">
+                  <img
+                    src={src}
+                    alt={`Pending image ${i + 1}`}
+                    className="h-12 w-12 rounded-md border border-border object-cover"
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove image ${i + 1}`}
+                    onClick={() => removePendingImage(i)}
+                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-background text-[10px] leading-none text-muted-foreground hover:text-foreground"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+              {activeSkills.map((name) => (
+                <span
+                  key={name}
+                  className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-primary"
+                >
+                  <span className="truncate">{name}</span>
+                  <button
+                    type="button"
+                    aria-label={`Remove skill ${name}`}
+                    onClick={() => removeSkill(name)}
+                    className="opacity-70 hover:opacity-100"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {promptError && <p className="px-1 text-xs text-destructive">{promptError}</p>}
+          <div className="relative">
             {promptMenuOpen && (
               <SlashMenu
                 prompts={filteredPrompts}
@@ -1158,18 +1157,41 @@ export const AssistantConversation = forwardRef<
                 if (!promptMenuOpen) handleSend();
               }}
               onEscape={handleComposerEscape}
-              placeholder="Ask about this cluster..."
+              placeholder="Ask about this cluster…   /  for prompts & skills"
               disabled={sending}
-              className="w-full"
+              className="w-full border-0 bg-transparent px-2 py-2 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
             />
           </div>
-          <Button
-            variant={sending ? "secondary" : "primary"}
-            onClick={sending ? handleStop : handleSend}
-            disabled={!sending && (!input.trim() || !canSend)}
-          >
-            {sending ? "Stop" : "Send"}
-          </Button>
+          <div className="flex items-center gap-1">
+            <label
+              title="Attach image"
+              className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <Paperclip aria-hidden="true" className="size-4" />
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                aria-label="Attach image"
+                onChange={onAttachFiles}
+                disabled={sending}
+                className="hidden"
+              />
+            </label>
+            {agentPicker}
+            {availableContexts !== undefined && (
+              <ContextMultiSelect available={availableContexts} selected={selectedContexts} onChange={setSelectedContexts} />
+            )}
+            <div className="flex-1" />
+            <Button
+              variant={sending ? "secondary" : "primary"}
+              size="sm"
+              onClick={sending ? handleStop : handleSend}
+              disabled={!sending && (!input.trim() || !canSend)}
+            >
+              {sending ? "Stop" : "Send"}
+            </Button>
+          </div>
         </div>
       </div>
     </div>
