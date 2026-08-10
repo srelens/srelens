@@ -163,6 +163,14 @@ fn delete_skill(dir: &Path, name: &str) -> Result<(), String> {
 /// Every `*.md` in `dir`, parsed to `SkillMeta` and sorted by name. A missing
 /// directory is silent — a user who never created one has no skills, not an
 /// error.
+///
+/// The skills folder is user-hand-editable (it's plain markdown files on
+/// disk), so one broken file — bad front-matter, a stray hand-edit mistake —
+/// must not take down the whole list. Mirrors how
+/// `srelens_mcp::prompts::load_dir`/`resolve` tolerate a bad file: skip it,
+/// keep the rest. `skill_load` of that same broken file still returns a
+/// clear `Err` — only the LIST is tolerant; loading a specific, presumably
+/// intentionally-selected file is not.
 fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -176,8 +184,16 @@ fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
         if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
             continue;
         }
-        let raw = fs::read_to_string(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-        let skill = parse_skill(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        let Ok(raw) = fs::read_to_string(&path) else {
+            // Unreadable file (permissions, race with a concurrent delete,
+            // etc.): skip it, same tolerance as a parse failure below.
+            continue;
+        };
+        let Ok(skill) = parse_skill(&raw) else {
+            // Malformed front matter or similar hand-edit mistake: skip this
+            // file, but keep listing every other skill that DOES parse.
+            continue;
+        };
         metas.push(SkillMeta { name: skill.name, description: skill.description });
     }
     metas.sort_by(|a, b| a.name.cmp(&b.name));
@@ -371,6 +387,39 @@ mod tests {
         assert_eq!(list_skills(&dir).unwrap(), Vec::new());
     }
 
+    /// The skills folder is user-hand-editable (plain markdown files on
+    /// disk), so one broken file must not take the whole list down —
+    /// `list_skills` skips it and returns everything that DOES parse, the
+    /// same tolerance `srelens_mcp::prompts::load_dir` gives a bad prompt
+    /// file. `skill_load` of that same broken file is deliberately NOT
+    /// covered by this tolerance — see the next test.
+    #[test]
+    fn list_skips_a_malformed_file_and_keeps_the_valid_ones() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path());
+        write_skill_atomic(&dir, &sample_skill("good")).unwrap();
+        fs::write(dir.join("broken.md"), "not front matter at all\n").unwrap();
+
+        let result = list_skills(&dir);
+        assert!(result.is_ok(), "one broken file must not fail the whole list, got {result:?}");
+        let names: Vec<String> = result.unwrap().into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["good"], "the malformed file must be skipped, not surfaced or aborting the list");
+    }
+
+    /// The list tolerates a bad file (previous test); loading one specific,
+    /// presumably intentionally-selected file by name does not — that path
+    /// is unchanged and must still surface a clear `Err`.
+    #[test]
+    fn load_of_a_malformed_file_still_returns_a_clear_err() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("broken.md"), "not front matter at all\n").unwrap();
+
+        let err = read_skill(&dir, "broken").unwrap_err();
+        assert!(err.contains("front matter"), "got: {err}");
+    }
+
     #[test]
     fn delete_removes_the_file() {
         let tmp = TempDir::new();
@@ -413,15 +462,7 @@ mod tests {
         let dir = skills_dir(tmp.path());
         fs::create_dir_all(&dir).unwrap();
 
-        for bad in ["../evil", "a/b", "a\\b", "..", "../../etc/passwd"] {
-            // `..` alone is charset-legal (only dots) but every OTHER case
-            // here contains `/` or `\`, which is exactly what must be
-            // rejected — `..` is included to confirm it's harmless even
-            // though it passes the charset check (it can only ever produce
-            // the inert filename `...md`, never traverse a directory).
-            if bad == ".." {
-                continue;
-            }
+        for bad in ["../evil", "a/b", "a\\b", "../../etc/passwd"] {
             let save_err = write_skill_atomic(&dir, &sample_skill(bad)).unwrap_err();
             assert!(save_err.contains("invalid skill name"), "save({bad:?}) got: {save_err}");
 
@@ -431,5 +472,44 @@ mod tests {
             let delete_err = delete_skill(&dir, bad).unwrap_err();
             assert!(delete_err.contains("invalid skill name"), "delete({bad:?}) got: {delete_err}");
         }
+    }
+
+    /// `..` alone is charset-legal under `validate_name` (it's made of only
+    /// dots, and name validation itself is unchanged — the `.md` suffix is
+    /// what neutralizes it), so it must NOT be rejected the way `../evil` is.
+    /// What makes it safe is `skill_path` always appending `.md` to the whole
+    /// name as one atomic step before it ever becomes a path component: `..`
+    /// can only ever produce the literal, inert filename `...md`, never the
+    /// parent-directory special path. This is a machine-checked proof of
+    /// that, not prose: the resolved path stays inside `dir`, its filename is
+    /// exactly the literal string `...md`, and after a save the directory's
+    /// only entry is that same literal file — nothing escaped upward.
+    #[test]
+    fn a_double_dot_name_resolves_to_a_literal_filename_inside_the_dir_not_a_parent_escape() {
+        let tmp = TempDir::new();
+        let dir = skills_dir(tmp.path());
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = skill_path(&dir, "..");
+        assert!(path.starts_with(&dir), "skill_path(\"..\") must stay inside dir, got {path:?}");
+        assert_eq!(
+            path.file_name(),
+            Some(std::ffi::OsStr::new("...md")),
+            "must resolve to the literal filename `...md`, not a parent-dir escape, got {path:?}"
+        );
+
+        let skill = sample_skill("..");
+        write_skill_atomic(&dir, &skill).unwrap();
+        assert_eq!(read_skill(&dir, "..").unwrap(), skill, "save/load of `..` round-trips like any other name");
+
+        let entries: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            entries,
+            vec!["...md".to_string()],
+            "the only file written under dir must be the literal `...md`, got {entries:?}"
+        );
     }
 }
