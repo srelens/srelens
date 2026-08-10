@@ -54,6 +54,9 @@ export interface StoredMessage {
   role: "user" | "assistant" | "error";
   text: string;
   toolCalls?: StoredToolCall[];
+  /** Data URIs (`data:image/...;base64,...`) attached to a user message
+   * (Task 18) — only ever set for `role: "user"`. */
+  images?: string[];
 }
 
 /** Saved sessions, newest first. */

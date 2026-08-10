@@ -339,6 +339,125 @@ describe("AssistantConversation session persistence", () => {
   });
 });
 
+describe("AssistantConversation image attachments", () => {
+  // 3 zero bytes -> base64 "AAAA" with no padding, so the data URI jsdom's
+  // real (in-memory, no filesystem) FileReader produces is a stable literal:
+  // `data:image/png;base64,AAAA`.
+  function pngFile(name = "a.png"): File {
+    return new File([Uint8Array.from([0, 0, 0])], name, { type: "image/png" });
+  }
+
+  it("attaching an image via the attach control shows a thumbnail chip", async () => {
+    render(<AssistantConversation />);
+    const attach = await screen.findByLabelText(/attach image/i);
+    fireEvent.change(attach, { target: { files: [pngFile()] } });
+
+    const thumb = (await screen.findByAltText(/pending image 1/i)) as HTMLImageElement;
+    expect(thumb.src).toBe("data:image/png;base64,AAAA");
+  });
+
+  it("pasting an image into the composer shows a thumbnail chip", async () => {
+    render(<AssistantConversation />);
+    const textbox = await screen.findByPlaceholderText(/ask/i);
+    fireEvent.paste(textbox, { clipboardData: { files: [pngFile("clip.png")] } });
+
+    expect(await screen.findByAltText(/pending image 1/i)).toBeTruthy();
+  });
+
+  it("removing a pending image chip clears it, and it isn't sent", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
+    await screen.findByAltText(/pending image 1/i);
+
+    fireEvent.click(screen.getByLabelText(/remove image 1/i));
+    expect(screen.queryByAltText(/pending image 1/i)).toBeFalsy();
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    expect(vi.mocked(chat.sendChat).mock.calls[0][4]).toEqual([]);
+    expect(screen.queryByAltText(/attached image/i)).toBeFalsy();
+  });
+
+  it("sending strips the data URI prefix, passing raw base64 as sendChat's 5th arg", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
+    await screen.findByAltText(/pending image 1/i);
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "check this" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalled());
+    // Hand-written literal: data:image/png;base64,AAAA -> "AAAA".
+    expect(vi.mocked(chat.sendChat).mock.calls[0][4]).toEqual(["AAAA"]);
+  });
+
+  it("renders the sent image inline in the user bubble, and clears the pending chip", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
+    await screen.findByAltText(/pending image 1/i);
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "look at this" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    const img = (await screen.findByAltText(/attached image 1/i)) as HTMLImageElement;
+    expect(img.src).toBe("data:image/png;base64,AAAA");
+    expect(screen.queryByAltText(/pending image/i)).toBeFalsy();
+  });
+
+  it("auto-save persists the attached images on the stored user message", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
+    await screen.findByAltText(/pending image 1/i);
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "check this" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
+    const saved = vi.mocked(chatHistory.saveSession).mock.calls[0][0];
+    expect(saved.messages[0]).toEqual({
+      id: 0,
+      role: "user",
+      text: "check this",
+      images: ["data:image/png;base64,AAAA"],
+    });
+  });
+
+  it("a reloaded session with images renders them inline", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    vi.mocked(chatHistory.loadSession).mockResolvedValue({
+      id: "old-1",
+      title: "Old chat",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: [],
+      skills: [],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text: "check this", images: ["data:image/png;base64,AAAA"] }],
+    });
+    render(<AssistantConversation />);
+    fireEvent.click(await screen.findByText("Old chat"));
+
+    const img = (await screen.findByAltText(/attached image 1/i)) as HTMLImageElement;
+    expect(img.src).toBe("data:image/png;base64,AAAA");
+  });
+});
+
 describe("AssistantConversation multi-context (global tab)", () => {
   it("drawer path (no availableContexts): no Contexts control, and Send isn't gated on any context", async () => {
     render(<AssistantConversation context={{ context: "prod-cluster" }} />);

@@ -50,6 +50,33 @@ function multiContextPreface(contexts: string[]): string {
   return `You may work across these clusters: ${list}. Pass the appropriate context to each tool call.\n\n`;
 }
 
+/** Picks the image files out of a paste event's clipboard data — everything
+ * else (plain text, HTML) is left for the composer's normal paste handling. */
+function extractImageFiles(clipboardData: DataTransfer | null | undefined): File[] {
+  if (!clipboardData) return [];
+  return Array.from(clipboardData.files ?? []).filter((f) => f.type.startsWith("image/"));
+}
+
+/** Reads a `File`'s bytes into a base64 data URI. Split out on its own so a
+ * test can drive it with an in-memory `File` — no real filesystem I/O either
+ * way, since a `File` picked from an `<input>` or clipboard is already just
+ * bytes in memory. */
+function readImageFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("failed to read image file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Strips the `data:image/...;base64,` prefix off a data URI, leaving the
+ * raw base64 payload `chat_send`'s `images: Vec<String>` (Task 15) expects. */
+function stripDataUri(uri: string): string {
+  const i = uri.indexOf(",");
+  return i === -1 ? uri : uri.slice(i + 1);
+}
+
 interface ToolCallState {
   tool: string;
   args: unknown;
@@ -65,6 +92,11 @@ interface ChatMessage {
   text: string;
   /** Tool calls started during this (assistant) turn, in order. */
   toolCallIds?: string[];
+  /** Data URIs (`data:image/...;base64,...`) attached when this (user)
+   * message was sent — the displayable form, rendered inline in the bubble
+   * and round-tripped via `StoredMessage.images` so a reloaded session keeps
+   * them. Only ever set for `role: "user"`. */
+  images?: string[];
 }
 
 const STATUS_LABEL: Record<ToolStatus, string> = { ok: "ok", error: "error", denied: "denied" };
@@ -92,7 +124,10 @@ function toStoredMessages(msgs: ChatMessage[], calls: Record<string, ToolCallSta
     const toolCalls = (m.toolCallIds ?? [])
       .map((id) => (calls[id] ? { id, tool: calls[id].tool, args: calls[id].args, status: calls[id].status } : null))
       .filter((tc): tc is StoredToolCall => tc !== null);
-    return toolCalls.length > 0 ? { id: m.id, role: m.role, text: m.text, toolCalls } : { id: m.id, role: m.role, text: m.text };
+    const stored: StoredMessage = { id: m.id, role: m.role, text: m.text };
+    if (m.images && m.images.length > 0) stored.images = m.images;
+    if (toolCalls.length > 0) stored.toolCalls = toolCalls;
+    return stored;
   });
 }
 
@@ -103,7 +138,10 @@ function fromStoredMessages(stored: StoredMessage[]): { msgs: ChatMessage[]; cal
   const msgs: ChatMessage[] = stored.map((m) => {
     for (const tc of m.toolCalls ?? []) calls[tc.id] = { tool: tc.tool, args: tc.args, status: tc.status };
     const toolCallIds = m.toolCalls?.map((tc) => tc.id);
-    return toolCallIds?.length ? { id: m.id, role: m.role, text: m.text, toolCallIds } : { id: m.id, role: m.role, text: m.text };
+    const msg: ChatMessage = { id: m.id, role: m.role, text: m.text };
+    if (m.images && m.images.length > 0) msg.images = m.images;
+    if (toolCallIds?.length) msg.toolCallIds = toolCallIds;
+    return msg;
   });
   return { msgs, calls };
 }
@@ -266,6 +304,10 @@ export function AssistantConversation({
   // contexts selected for this global chat, in pick order.
   const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
   const [pendingConfirms, setPendingConfirms] = useState<ConfirmRequest[]>([]);
+  // Images attached to the in-progress message, as displayable data URIs —
+  // cleared on send (after being copied onto the outgoing user `ChatMessage`
+  // and, base64-stripped, into `sendChat`'s `images` arg).
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
   // The saved-session picker (Task 19 builds the real rail; this is a
   // minimal control so New chat / reopen / delete work in the meantime).
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -442,6 +484,42 @@ export function AssistantConversation({
     if (sessionRef.current === id) onNewChat();
   }
 
+  /** Reads each file and appends its data URI to `pendingImages` as it
+   * resolves — a non-image or unreadable file is silently skipped, since
+   * there's nothing useful to attach for it. */
+  async function addImageFiles(files: File[]) {
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      try {
+        const dataUri = await readImageFile(file);
+        setPendingImages((imgs) => [...imgs, dataUri]);
+      } catch {
+        // Unreadable file — nothing to attach, silently skipped.
+      }
+    }
+  }
+
+  /** The attach control's hidden `<input type="file">`. */
+  function onAttachFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-selecting the same file later
+    void addImageFiles(files);
+  }
+
+  /** Cmd/Ctrl-V of an image anywhere in the composer. Only intercepts the
+   * paste when it actually carries an image — plain-text paste into the
+   * input still behaves normally. */
+  function onComposerPaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    const files = extractImageFiles(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addImageFiles(files);
+  }
+
+  function removePendingImage(index: number) {
+    setPendingImages((imgs) => imgs.filter((_, i) => i !== index));
+  }
+
   function applyEvent(e: AgentEvent) {
     switch (e.type) {
       case "toolCallStart":
@@ -498,10 +576,18 @@ export function AssistantConversation({
       : attachedContext
         ? `${contextPreface(attachedContext)}\n\n${prompt}`
         : prompt;
+    const attachedImages = pendingImages;
+    const rawImages = attachedImages.map(stripDataUri);
     setInput("");
+    setPendingImages([]);
     setMessagesTracked((msgs) => [
       ...msgs,
-      { id: nextId.current++, role: "user", text: prompt },
+      {
+        id: nextId.current++,
+        role: "user",
+        text: prompt,
+        ...(attachedImages.length > 0 ? { images: attachedImages } : {}),
+      },
       { id: nextId.current++, role: "assistant", text: "" },
     ]);
     setSending(true);
@@ -511,7 +597,7 @@ export function AssistantConversation({
         session = await startChat();
         sessionRef.current = session;
       }
-      await sendChat(session, outgoing, agentPath, applyEvent);
+      await sendChat(session, outgoing, agentPath, applyEvent, rawImages);
     } catch (e) {
       // A rejection here means the transport itself failed before any
       // `error` event could stream (e.g. `chat_send` rejects outright when
@@ -595,7 +681,21 @@ export function AssistantConversation({
               {m.role === "assistant" ? (
                 m.text ? <AssistantMarkdown text={m.text} /> : sending ? "…" : ""
               ) : (
-                m.text
+                <>
+                  {m.text}
+                  {m.role === "user" && m.images && m.images.length > 0 && (
+                    <div className="mt-1 flex flex-wrap justify-end gap-1">
+                      {m.images.map((src, i) => (
+                        <img
+                          key={i}
+                          src={src}
+                          alt={`Attached image ${i + 1}`}
+                          className="h-16 w-16 rounded-md border border-border object-cover"
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
             {m.toolCallIds?.map((id) => {
@@ -660,7 +760,43 @@ export function AssistantConversation({
           ))}
         </div>
       )}
-      <div className="flex shrink-0 items-end gap-2 border-t border-border pt-3">
+      {pendingImages.length > 0 && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {pendingImages.map((src, i) => (
+            <span key={i} className="relative inline-flex">
+              <img
+                src={src}
+                alt={`Pending image ${i + 1}`}
+                className="h-12 w-12 rounded-md border border-border object-cover"
+              />
+              <button
+                type="button"
+                aria-label={`Remove image ${i + 1}`}
+                onClick={() => removePendingImage(i)}
+                className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-background text-[10px] leading-none text-muted-foreground hover:text-foreground"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex shrink-0 items-end gap-2 border-t border-border pt-3" onPaste={onComposerPaste}>
+        <label
+          title="Attach image"
+          className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md border border-border text-sm text-muted-foreground hover:bg-accent"
+        >
+          <span aria-hidden="true">+</span>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            aria-label="Attach image"
+            onChange={onAttachFiles}
+            disabled={sending}
+            className="hidden"
+          />
+        </label>
         <TextInput
           value={input}
           onValueChange={setInput}
