@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { AssistantConversation, stripDataUri } from "./AssistantConversation";
 import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
@@ -18,6 +18,13 @@ vi.mock("@tauri-apps/api/event", () => ({
 // `toBeInTheDocument`.
 
 let nextSession = 0;
+
+/** Opens the compact `HistoryPopover` (Task 19) — New Chat and the saved
+ * sessions only render once it's open, so any test that used to find them
+ * inline now opens it first. */
+async function openHistory() {
+  fireEvent.click(await screen.findByRole("button", { name: /^history$/i }));
+}
 
 beforeEach(() => {
   // Every completed turn now auto-saves, so a mock's call history from an
@@ -225,10 +232,11 @@ describe("AssistantConversation session persistence", () => {
     await waitFor(() => expect(screen.getByText("first reply")).toBeTruthy());
     await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
 
+    await openHistory();
     fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
     // The transcript is empty again — back to the placeholder — even though
-    // the just-saved session still shows up as a chip (New chat clears the
-    // *editing* state; it doesn't delete anything from disk).
+    // the just-saved session still shows up in the history popover (New chat
+    // clears the *editing* state; it doesn't delete anything from disk).
     expect(await screen.findByText(/ask about this cluster to get started/i)).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "second question" } });
@@ -280,6 +288,7 @@ describe("AssistantConversation session persistence", () => {
       onEvent({ type: "turnDone" });
     });
     render(<AssistantConversation />);
+    await openHistory();
     fireEvent.click(await screen.findByText("Old chat"));
     await screen.findByText("what pods are crashing?");
 
@@ -311,6 +320,7 @@ describe("AssistantConversation session persistence", () => {
       ],
     });
     render(<AssistantConversation />);
+    await openHistory();
     fireEvent.click(await screen.findByText("Old chat"));
 
     expect(await screen.findByText("what pods are crashing?")).toBeTruthy();
@@ -323,6 +333,7 @@ describe("AssistantConversation session persistence", () => {
       { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
     ]);
     render(<AssistantConversation />);
+    await openHistory();
     await screen.findByText("Old chat");
 
     fireEvent.click(screen.getByLabelText("Delete Old chat"));
@@ -337,6 +348,7 @@ describe("AssistantConversation session persistence", () => {
       { id: "oldest", title: "Oldest chat", createdAt: 1, updatedAt: 10 },
     ]);
     render(<AssistantConversation />);
+    await openHistory();
     await screen.findByText("Newest chat");
 
     const newest = screen.getByText("Newest chat");
@@ -488,6 +500,7 @@ describe("AssistantConversation image attachments", () => {
       messages: [{ id: 0, role: "user", text: "check this", images: ["data:image/png;base64,AAAA"] }],
     });
     render(<AssistantConversation />);
+    await openHistory();
     fireEvent.click(await screen.findByText("Old chat"));
 
     const img = (await screen.findByAltText(/attached image 1/i)) as HTMLImageElement;
@@ -590,10 +603,62 @@ describe("AssistantConversation multi-context (global tab)", () => {
       messages: [{ id: 0, role: "user", text: "hi" }],
     });
     render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    await openHistory();
     fireEvent.click(await screen.findByText("Old chat"));
 
     await screen.findByText("hi");
     expect(screen.getByLabelText("Remove a")).toBeTruthy();
     expect(screen.getByRole("button", { name: /contexts \(1\)/i })).toBeTruthy();
+  });
+});
+
+describe("AssistantConversation composer (Task 19)", () => {
+  it("groups the inline agent picker and attach control into one composer surface", async () => {
+    render(<AssistantConversation />);
+    const composer = (await screen.findByTestId("assistant-composer")) as HTMLElement;
+    const { getByRole: composerRole, getByLabelText: composerLabel } = within(composer);
+    expect(composerRole("combobox", { name: /agent/i })).toBeTruthy();
+    expect(composerLabel(/attach image/i)).toBeTruthy();
+  });
+
+  it("also places the multi-context control inside the composer on the global tab", async () => {
+    render(<AssistantConversation availableContexts={["a", "b"]} />);
+    const composer = (await screen.findByTestId("assistant-composer")) as HTMLElement;
+    expect(within(composer).getByRole("button", { name: /contexts \(0\)/i })).toBeTruthy();
+  });
+
+  it("Send becomes Stop while a turn is streaming, and Stop calls cancelChat with the active session", async () => {
+    vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
+    let resolveSend: () => void = () => {};
+    vi.mocked(chat.sendChat).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = () => resolve(undefined);
+        }),
+    );
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "keep going" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    const stopButton = await screen.findByRole("button", { name: /^stop$/i });
+    expect(screen.queryByRole("button", { name: /^send$/i })).toBeFalsy();
+
+    fireEvent.click(stopButton);
+    expect(chat.cancelChat).toHaveBeenCalledWith("s1");
+
+    // Clean up the still-pending sendChat promise so it doesn't leak into
+    // the next test.
+    resolveSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
+  });
+
+  it("Send is restored once the (cancelled) turn settles", async () => {
+    vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
+    vi.mocked(chat.sendChat).mockResolvedValue(undefined);
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
   });
 });

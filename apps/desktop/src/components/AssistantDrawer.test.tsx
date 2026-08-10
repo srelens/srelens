@@ -3,11 +3,13 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantDrawer } from "./AssistantDrawer";
 import * as chat from "../lib/chat";
+import * as chatHistory from "../lib/chatHistory";
 
 const respondToConfirm = vi.fn();
 let emitConfirm: (payload: unknown) => void = () => {};
 
 vi.mock("../lib/chat");
+vi.mock("../lib/chatHistory");
 vi.mock("../lib/mcpSecurity", () => ({
   respondToConfirm: (...a: unknown[]) => respondToConfirm(...a),
 }));
@@ -34,6 +36,10 @@ beforeEach(() => {
     },
   ]);
   vi.mocked(chat.startChat).mockResolvedValue("s1");
+  vi.mocked(chatHistory.listSessions).mockResolvedValue([]);
+  vi.mocked(chatHistory.loadSession).mockRejectedValue(new Error("not stubbed"));
+  vi.mocked(chatHistory.saveSession).mockResolvedValue(undefined);
+  vi.mocked(chatHistory.deleteSession).mockResolvedValue(undefined);
   respondToConfirm.mockReset();
 });
 
@@ -228,5 +234,25 @@ describe("AssistantDrawer", () => {
     await userEvent.click(screen.getByRole("button", { name: /approve/i }));
     await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("c1", true));
     expect(screen.queryByText("k8s.deletePod")).toBeFalsy();
+  });
+
+  it("shows the compact history popover (Task 19), not the full-tab rail", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "old-1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    render(<AssistantDrawer open onClose={() => {}} />);
+    await screen.findByPlaceholderText(/ask/i);
+
+    // A single compact trigger, not a rail with New Chat/sessions always
+    // visible — the recent-sessions list only appears once it's opened.
+    const trigger = screen.getByRole("button", { name: /^history$/i });
+    expect(screen.queryByRole("button", { name: /^new chat$/i })).toBeFalsy();
+    expect(screen.queryByText("Old chat")).toBeFalsy();
+    expect(screen.queryByLabelText(/expand history/i)).toBeFalsy();
+    expect(screen.queryByLabelText(/collapse history/i)).toBeFalsy();
+
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("button", { name: /^new chat$/i })).toBeTruthy();
+    expect(await screen.findByText("Old chat")).toBeTruthy();
   });
 });

@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
-import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
+import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
 import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
 import {
   deleteSession as deleteSessionCmd,
@@ -14,6 +14,7 @@ import {
   type StoredMessage,
   type StoredToolCall,
 } from "../lib/chatHistory";
+import { relativeTime } from "../lib/relativeTime";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 
 export type AssistantContext = { context: string; namespace?: string; kind?: string; name?: string };
@@ -265,6 +266,92 @@ function ContextMultiSelect({
 }
 
 /**
+ * Compact session-history control used by the drawer (and standalone uses of
+ * this component) — a single trigger button opens a popover with New Chat
+ * plus the recent-sessions list (title + relative time, newest first,
+ * click-to-load, always-visible delete). The full tab doesn't render this at
+ * all: it renders the equivalent `HistoryRail` instead, driven by the same
+ * `sessions`/`onNewChat`/`onSelectSession`/`onDeleteSession` via
+ * `AssistantConversationHandle` (see `hideSessionControls`) — one source of
+ * truth for the session list either way.
+ */
+function HistoryPopover({
+  sessions,
+  onNewChat,
+  onSelectSession,
+  onDeleteSession,
+}: {
+  sessions: SessionMeta[];
+  onNewChat: () => void;
+  onSelectSession: (id: string) => void;
+  onDeleteSession: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const now = Date.now();
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="secondary" size="xs">
+          History
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64 p-1">
+        <Button
+          variant="ghost"
+          size="xs"
+          className="w-full justify-start"
+          onClick={() => {
+            onNewChat();
+            setOpen(false);
+          }}
+        >
+          New chat
+        </Button>
+        {sessions.length === 0 ? (
+          <p className="px-2 py-1.5 text-xs text-muted-foreground">No saved chats yet.</p>
+        ) : (
+          <ul className="mt-1 max-h-72 overflow-y-auto">
+            {sessions.map((s) => (
+              <li key={s.id} className="flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-accent">
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate text-left"
+                  title={s.title}
+                  onClick={() => {
+                    onSelectSession(s.id);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="block truncate">{s.title}</span>
+                  <span className="block text-[10px] text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Delete ${s.title}`}
+                  onClick={() => onDeleteSession(s.id)}
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** Imperative surface a host (the full-tab rail) drives to operate the same
+ * session state this component owns internally — see `hideSessionControls`
+ * below. */
+export interface AssistantConversationHandle {
+  newChat: () => void;
+  selectSession: (id: string) => void;
+  deleteSession: (id: string) => void;
+}
+
+/**
  * The assistant conversation: a streamed exchange with the configured coding
  * agent, plus collapsible tool-call cards for anything it invokes. `context`
  * (the resource/namespace the caller had active) is rendered as a removable
@@ -283,16 +370,27 @@ function ContextMultiSelect({
  * `multiContextPreface`), and required before Send is enabled — a tool call
  * always needs a context. The drawer never passes this prop, so its
  * single-resource `context` chip/preface/Send-gating (Task 10) is untouched.
+ *
+ * `hideSessionControls` (Task 19's full-tab rail) suppresses this
+ * component's own `HistoryPopover` entirely — the host renders a
+ * `HistoryRail` (or any other UI) instead, driving the same session state via
+ * the imperative handle (`newChat`/`selectSession`/`deleteSession`) and
+ * `onSessionsChanged`, so there is exactly one owner of `sessions` (this
+ * component) and no risk of two independently-fetched copies drifting apart.
  */
-export function AssistantConversation({
-  context,
-  availableContexts,
-  className,
-}: {
-  context?: AssistantContext;
-  availableContexts?: string[];
-  className?: string;
-}) {
+export const AssistantConversation = forwardRef<
+  AssistantConversationHandle,
+  {
+    context?: AssistantContext;
+    availableContexts?: string[];
+    className?: string;
+    hideSessionControls?: boolean;
+    onSessionsChanged?: (sessions: SessionMeta[]) => void;
+  }
+>(function AssistantConversation(
+  { context, availableContexts, className, hideSessionControls, onSessionsChanged },
+  ref,
+) {
   const multiContextMode = availableContexts !== undefined;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({});
@@ -309,8 +407,10 @@ export function AssistantConversation({
   // cleared on send (after being copied onto the outgoing user `ChatMessage`
   // and, base64-stripped, into `sendChat`'s `images` arg).
   const [pendingImages, setPendingImages] = useState<string[]>([]);
-  // The saved-session picker (Task 19 builds the real rail; this is a
-  // minimal control so New chat / reopen / delete work in the meantime).
+  // The single source of truth for the saved-session list — rendered here via
+  // `HistoryPopover` unless `hideSessionControls` is set, in which case the
+  // host (the full-tab `HistoryRail`) mirrors it through `onSessionsChanged`
+  // and drives it back through the imperative handle below.
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
 
   const sessionRef = useRef<string | null>(null);
@@ -394,6 +494,14 @@ export function AssistantConversation({
       .then(setSessions)
       .catch(() => setSessions([]));
   }, []);
+
+  // Mirror every change to `sessions` (initial load, a save, a delete) out to
+  // the host — the full-tab rail's only view of the list, so it never fetches
+  // or stores its own copy.
+  useEffect(() => {
+    onSessionsChanged?.(sessions);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions]);
 
   const selectedAgent = agents.find((a) => a.kind === selectedKind);
   const agentPath = selectedAgent?.path ?? "";
@@ -484,6 +592,24 @@ export function AssistantConversation({
     setSessions((prev) => prev.filter((s) => s.id !== id));
     if (sessionRef.current === id) onNewChat();
   }
+
+  // Exposes the same three handlers the internal `HistoryPopover` calls so a
+  // host that hides it (the full-tab `HistoryRail`, via `hideSessionControls`)
+  // can drive the identical session state instead of keeping its own copy.
+  useImperativeHandle(
+    ref,
+    () => ({
+      newChat: onNewChat,
+      selectSession: (id: string) => void onSelectSession(id),
+      deleteSession: (id: string) => void onDeleteSession(id),
+    }),
+    // onNewChat/onSelectSession/onDeleteSession close over state via refs and
+    // setState updaters, not over any value that changes across renders, so
+    // there's nothing meaningful to list as a dependency here — the handle
+    // only needs to be (re)built once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   /** Reads each file and appends its data URI to `pendingImages` as it
    * resolves — a non-image or unreadable file is silently skipped, since
@@ -612,6 +738,14 @@ export function AssistantConversation({
     }
   }
 
+  /** Cancels the in-flight turn. `handleSend`'s own `finally` clears
+   * `sending` once the (now-cancelled) `sendChat` call settles — nothing
+   * further to do here besides asking the backend to stop. */
+  function handleStop() {
+    const session = sessionRef.current;
+    if (session) void cancelChat(session);
+  }
+
   const agentPicker = agents.length > 0 && (
     <select
       aria-label="Agent"
@@ -628,42 +762,18 @@ export function AssistantConversation({
     </select>
   );
 
-  // Minimal session picker: a New chat button plus one chip per saved
-  // session (title + delete). Task 19 replaces this with the real history
-  // rail; `sessions`/`onNewChat`/`onSelectSession`/`onDeleteSession` above
-  // are already shaped for that to just wire in.
-  const sessionBar = (
-    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-      <div className="flex flex-wrap items-center gap-1">
-        <Button variant="secondary" size="xs" onClick={onNewChat}>
-          New chat
-        </Button>
-        {sessions.map((s) => (
-          <span
-            key={s.id}
-            className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border px-2 py-1 text-xs"
-          >
-            <button type="button" className="truncate" title={s.title} onClick={() => void onSelectSession(s.id)}>
-              {s.title}
-            </button>
-            <button
-              type="button"
-              aria-label={`Delete ${s.title}`}
-              onClick={() => void onDeleteSession(s.id)}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              ✕
-            </button>
-          </span>
-        ))}
-      </div>
-      {agentPicker}
-    </div>
-  );
-
   return (
     <div className={`flex h-full flex-col gap-3${className ? ` ${className}` : ""}`}>
-      {sessionBar}
+      {!hideSessionControls && (
+        <div className="flex shrink-0 items-center justify-end">
+          <HistoryPopover
+            sessions={sessions}
+            onNewChat={onNewChat}
+            onSelectSession={(id) => void onSelectSession(id)}
+            onDeleteSession={(id) => void onDeleteSession(id)}
+          />
+        </div>
+      )}
       <div className="flex-1 space-y-3 overflow-y-auto">
         {messages.length === 0 && (
           <p className="text-sm text-muted-foreground">Ask about this cluster to get started.</p>
@@ -727,89 +837,104 @@ export function AssistantConversation({
             : "No coding agent available. Install one to use the assistant."}
         </p>
       )}
-      {attachedContext && (
-        <div className="flex shrink-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs">
-          <span className="min-w-0 flex-1 truncate">{formatContext(attachedContext)}</span>
-          <button
-            type="button"
-            aria-label="Remove context"
-            onClick={() => setAttachedContext(undefined)}
-            className="text-muted-foreground hover:text-foreground"
+      {/* Composer: chip row (resource/multi-context/pending images) above the
+          input row (attach, inline agent picker, text field, Send/Stop) — all
+          of Task 17/18's controls plus the agent picker now live in one
+          grouped surface instead of scattered bars above it. */}
+      <div
+        data-testid="assistant-composer"
+        className="flex shrink-0 flex-col gap-2 border-t border-border pt-3"
+        onPaste={onComposerPaste}
+      >
+        {(attachedContext || availableContexts !== undefined || pendingImages.length > 0) && (
+          <div className="flex flex-wrap items-center gap-2">
+            {attachedContext && (
+              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs">
+                <span className="min-w-0 max-w-[16rem] truncate">{formatContext(attachedContext)}</span>
+                <button
+                  type="button"
+                  aria-label="Remove context"
+                  onClick={() => setAttachedContext(undefined)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+            {availableContexts !== undefined && (
+              <>
+                <ContextMultiSelect available={availableContexts} selected={selectedContexts} onChange={setSelectedContexts} />
+                {selectedContexts.map((name) => (
+                  <span
+                    key={name}
+                    className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
+                  >
+                    <span className="truncate">{name}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${name}`}
+                      onClick={() => setSelectedContexts((cs) => cs.filter((c) => c !== name))}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </>
+            )}
+            {pendingImages.map((src, i) => (
+              <span key={i} className="relative inline-flex">
+                <img
+                  src={src}
+                  alt={`Pending image ${i + 1}`}
+                  className="h-12 w-12 rounded-md border border-border object-cover"
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove image ${i + 1}`}
+                  onClick={() => removePendingImage(i)}
+                  className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-background text-[10px] leading-none text-muted-foreground hover:text-foreground"
+                >
+                  ✕
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="flex items-end gap-2">
+          <label
+            title="Attach image"
+            className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md border border-border text-sm text-muted-foreground hover:bg-accent"
           >
-            ✕
-          </button>
-        </div>
-      )}
-      {availableContexts !== undefined && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <ContextMultiSelect available={availableContexts} selected={selectedContexts} onChange={setSelectedContexts} />
-          {selectedContexts.map((name) => (
-            <span
-              key={name}
-              className="inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs"
-            >
-              <span className="truncate">{name}</span>
-              <button
-                type="button"
-                aria-label={`Remove ${name}`}
-                onClick={() => setSelectedContexts((cs) => cs.filter((c) => c !== name))}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                ✕
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {pendingImages.length > 0 && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {pendingImages.map((src, i) => (
-            <span key={i} className="relative inline-flex">
-              <img
-                src={src}
-                alt={`Pending image ${i + 1}`}
-                className="h-12 w-12 rounded-md border border-border object-cover"
-              />
-              <button
-                type="button"
-                aria-label={`Remove image ${i + 1}`}
-                onClick={() => removePendingImage(i)}
-                className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-background text-[10px] leading-none text-muted-foreground hover:text-foreground"
-              >
-                ✕
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="flex shrink-0 items-end gap-2 border-t border-border pt-3" onPaste={onComposerPaste}>
-        <label
-          title="Attach image"
-          className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md border border-border text-sm text-muted-foreground hover:bg-accent"
-        >
-          <span aria-hidden="true">+</span>
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            aria-label="Attach image"
-            onChange={onAttachFiles}
+            <span aria-hidden="true">+</span>
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              aria-label="Attach image"
+              onChange={onAttachFiles}
+              disabled={sending}
+              className="hidden"
+            />
+          </label>
+          {agentPicker}
+          <TextInput
+            value={input}
+            onValueChange={setInput}
+            onEnter={handleSend}
+            placeholder="Ask about this cluster..."
             disabled={sending}
-            className="hidden"
+            className="flex-1"
           />
-        </label>
-        <TextInput
-          value={input}
-          onValueChange={setInput}
-          onEnter={handleSend}
-          placeholder="Ask about this cluster..."
-          disabled={sending}
-          className="flex-1"
-        />
-        <Button onClick={handleSend} disabled={sending || !input.trim() || !canSend}>
-          Send
-        </Button>
+          <Button
+            variant={sending ? "secondary" : "primary"}
+            onClick={sending ? handleStop : handleSend}
+            disabled={!sending && (!input.trim() || !canSend)}
+          >
+            {sending ? "Stop" : "Send"}
+          </Button>
+        </div>
       </div>
     </div>
   );
-}
+});
