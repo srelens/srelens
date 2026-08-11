@@ -126,6 +126,12 @@ pub fn claude_command(
         "--verbose".to_string(),
         "--mcp-config".to_string(),
         mcp_config_path.to_string(),
+        // Use ONLY the srelens server supplied above — without this, Claude also
+        // loads the user's global/project `.mcp.json` servers, whose tools the
+        // model could invoke (we run with --dangerously-skip-permissions and the
+        // deny-list below covers only built-in tools), breaking the srelens-only
+        // box. Verified against the CLI reference.
+        "--strict-mcp-config".to_string(),
         // srelens gates tool calls itself, so bypass Claude's own permission
         // prompt — otherwise every call blocks twice. Safe only because
         // --allowedTools below restricts the agent to srelens's own MCP
@@ -195,6 +201,12 @@ pub fn codex_command(
         "exec".to_string(),
         "--json".to_string(),
         "--skip-git-repo-check".to_string(),
+        // Do NOT load `$CODEX_HOME/config.toml` — otherwise the user's own MCP
+        // servers there stay active alongside srelens's, exposing filesystem/
+        // shell/network tools and breaking the srelens-only box. The `-c`
+        // overrides below still add srelens, and auth still uses CODEX_HOME
+        // (per `codex exec --help`).
+        "--ignore-user-config".to_string(),
         "--disable".to_string(),
         "shell_tool".to_string(),
         "--disable".to_string(),
@@ -366,6 +378,15 @@ mod tests {
     }
 
     #[test]
+    fn claude_command_uses_only_the_supplied_mcp_config_not_the_users_servers() {
+        // Without --strict-mcp-config, the user's global/project MCP servers
+        // would load alongside srelens's and the model could call their tools
+        // (we bypass Claude's permission prompt), escaping the srelens-only box.
+        let cmd = claude_command("/usr/bin/claude", "hi", "/tmp/mcp.json", None);
+        assert!(cmd.args.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
     fn a_resume_id_adds_the_resume_flag() {
         let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", Some("sess-123"));
         assert!(cmd.args.windows(2).any(|w| w == ["--resume", "sess-123"]));
@@ -452,6 +473,14 @@ mod tests {
         let cmd = codex_cmd();
         assert!(cmd.args.windows(2).any(|w| w == ["--disable", "shell_tool"]));
         assert!(cmd.args.windows(2).any(|w| w == ["--disable", "unified_exec"]));
+    }
+
+    #[test]
+    fn codex_command_ignores_the_users_config_so_their_mcp_servers_dont_leak_in() {
+        // The user's `$CODEX_HOME/config.toml` MCP servers must not stay active
+        // alongside srelens's — that would reopen filesystem/shell/network tools.
+        let cmd = codex_cmd();
+        assert!(cmd.args.contains(&"--ignore-user-config".to_string()));
     }
 
     #[test]
