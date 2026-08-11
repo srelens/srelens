@@ -234,6 +234,7 @@ mod tests {
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "call_1".into(),
+                name: "k8s_scale".into(),
                 content: "scaled".into(),
                 is_error: false,
             }]),

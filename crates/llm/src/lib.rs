@@ -10,8 +10,18 @@
 //! the thin client wrappers touch the network, and the agentic loop is driven
 //! against those pure pieces so its contract is unit-tested without a live API.
 
+pub mod agent_loop;
 pub mod anthropic;
+pub mod client;
+pub mod error;
+pub mod gemini;
+pub mod openai;
+pub mod provider;
 pub mod types;
+
+pub use client::{HttpProvider, ProviderConfig};
+pub use error::LlmError;
+pub use provider::{Provider, ToolCallResult, ToolInvoker};
 
 pub use types::{
     ModelInfo, ProviderKind, StopReason, StreamItem, ToolCall, ToolDef, ToolOutcome, Turn,

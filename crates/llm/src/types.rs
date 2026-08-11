@@ -41,9 +41,13 @@ pub struct ToolCall {
 }
 
 /// The result of running a tool, fed back to the model on the next request.
+/// Carries both the call `id` (Anthropic/OpenAI correlate by id) and the tool
+/// `name` (Gemini's `functionResponse` correlates by name) so every adapter has
+/// what it needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutcome {
     pub id: String,
+    pub name: String,
     pub content: String,
     pub is_error: bool,
 }
