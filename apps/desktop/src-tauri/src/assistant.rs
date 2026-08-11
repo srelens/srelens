@@ -99,9 +99,29 @@ fn which_on_path(bin: &str, path: &str) -> Option<String> {
     std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
         executable_candidates(bin, pathext.as_deref()).into_iter().find_map(|name| {
             let candidate = dir.join(&name);
-            candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+            is_executable(&candidate).then(|| candidate.to_string_lossy().into_owned())
         })
     })
+}
+
+/// Whether `path` is a file we can actually run. On Unix a PATH entry only
+/// counts if it carries an execute bit — a plain `0644` file named `claude`
+/// sitting earlier on PATH would otherwise be reported as the installed agent,
+/// and every send would then fail with `Permission denied`. On Windows
+/// executability comes from the `PATHEXT` extension (handled by
+/// `executable_candidates`), so being a regular file is sufficient.
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Map a sequence of raw stream-json lines to channel emits, returning whether
@@ -239,11 +259,13 @@ impl Drop for TempDir {
     }
 }
 
-/// Write a file that carries the MCP bearer token with owner-only permissions
-/// (`0600` on Unix), so another local account can't read the token out of the
-/// world-readable shared temp dir while a turn runs. On non-Unix the default
-/// per-user temp permissions apply.
-fn write_token_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+/// Write a per-turn scratch file with owner-only permissions (`0600` on Unix),
+/// so another local account can't read it out of the world-readable shared temp
+/// dir while a turn runs. Used for everything sensitive we drop there: the MCP
+/// bearer-token configs (Claude `--mcp-config`, Cursor `mcp.json`) and attached
+/// image files (their paths are visible in Codex's `-i` argv). On non-Unix the
+/// default per-user temp permissions apply.
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -370,7 +392,10 @@ pub async fn chat_send(
             // clean that up. Pushing after `write` would only ever guard a fully
             // successful write, leaking a partial file on the error path below.
             image_guards.push(TempFile(image_path.clone()));
-            if let Err(e) = std::fs::write(&image_path, &bytes) {
+            // Owner-only: the path is exposed in Codex's `-i` argv, so another
+            // local account could otherwise read the attachment from the shared
+            // temp dir.
+            if let Err(e) = write_private_file(&image_path, &bytes) {
                 sink.emit(
                     &channel,
                     serde_json::to_value(AgentEvent::Error {
@@ -402,7 +427,7 @@ pub async fn chat_send(
         AgentKind::Claude => {
             let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
             let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
-            write_token_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
+            write_private_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
             _cfg_guard = Some(TempFile(cfg_path.clone()));
             let effective_prompt = prompt_with_images(&prompt, &image_paths);
             srelens_agent::adapter::claude_command(
@@ -442,7 +467,7 @@ pub async fn chat_send(
             // model can't read it back — the deny-list blocks `Read`.
             let cursor_dir = cwd_path.join(".cursor");
             std::fs::create_dir_all(&cursor_dir).map_err(|e| e.to_string())?;
-            write_token_file(
+            write_private_file(
                 &cursor_dir.join("mcp.json"),
                 srelens_agent::adapter::cursor_mcp_json(&url, &token).as_bytes(),
             )
@@ -624,16 +649,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_token_file_is_written_owner_only() {
+    fn a_private_file_is_written_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("srelens-token-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("srelens-private-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mcp.json");
-        write_token_file(&path, b"secret-bearer-token").unwrap();
+        write_private_file(&path, b"secret-bearer-token").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         // Only the owner may read/write; group and other bits must be clear.
-        assert_eq!(mode & 0o777, 0o600, "token file must be 0600, got {:o}", mode & 0o777);
+        assert_eq!(mode & 0o777, 0o600, "private file must be 0600, got {:o}", mode & 0o777);
         assert_eq!(std::fs::read(&path).unwrap(), b"secret-bearer-token");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_file_on_path_is_not_treated_as_an_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("srelens-exec-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A plain 0644 file named `claude` must NOT be reported as the agent —
+        // spawning it would fail with EACCES.
+        let plain = dir.join("claude");
+        std::fs::write(&plain, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(which_on_path("claude", dir.to_str().unwrap()), None);
+        // Once it carries an execute bit, it resolves.
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(which_on_path("claude", dir.to_str().unwrap()).as_deref(), plain.to_str());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

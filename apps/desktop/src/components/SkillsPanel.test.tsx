@@ -116,6 +116,42 @@ describe("SkillsPanel", () => {
     expect(await screen.findByText("crashloop-triage")).toBeTruthy();
   });
 
+  it("renaming an existing skill deletes the old file after writing the new one", async () => {
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+
+    // Open the existing "alpha" skill and rename it.
+    fireEvent.click(screen.getByText("alpha"));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Skill name") as HTMLInputElement).value).toBe("alpha"),
+    );
+    fireEvent.change(screen.getByLabelText("Skill name"), { target: { value: "alpha-renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // New file written, then the old one removed so both don't linger.
+    await waitFor(() =>
+      expect(skillsLibMock.saveSkill).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "alpha-renamed" }),
+      ),
+    );
+    await waitFor(() => expect(skillsLibMock.deleteSkill).toHaveBeenCalledWith("alpha"));
+  });
+
+  it("saving an existing skill without renaming does not delete anything", async () => {
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+
+    fireEvent.click(screen.getByText("alpha"));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Skill name") as HTMLInputElement).value).toBe("alpha"),
+    );
+    fireEvent.change(screen.getByLabelText("Skill body"), { target: { value: "edited body" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(skillsLibMock.saveSkill).toHaveBeenCalledTimes(1));
+    expect(skillsLibMock.deleteSkill).not.toHaveBeenCalled();
+  });
+
   it("Delete, once confirmed, calls deleteSkill with the skill's name", async () => {
     render(<SkillsPanel onClose={vi.fn()} />);
     await screen.findByText("alpha");

@@ -750,6 +750,16 @@ export const AssistantConversation = forwardRef<
   // session change mid-stream would let the running turn's `turnDone` persist
   // its transcript under the newly selected session id, corrupting it.
   const sendingRef = useRef(false);
+  // Monotonic token for async session loads. Every session action (select /
+  // New chat / delete-then-new) bumps it; a `loadSession` that resolves after a
+  // newer action fired sees its captured token is stale and drops its result,
+  // so a slow read (e.g. an image-heavy session) can't clobber a later
+  // selection.
+  const loadSeqRef = useRef(0);
+  // Set by Stop, read by `handleSend` right before it launches the agent, so a
+  // Stop pressed during the async prep window (before any cancellable child
+  // exists) still prevents the launch.
+  const cancelRequestedRef = useRef(false);
   // Set once per disk session, on its first save; cleared by New chat and
   // restored from the loaded value when reopening a session, so re-saving
   // never stomps the original `createdAt`.
@@ -972,6 +982,9 @@ export const AssistantConversation = forwardRef<
     // applying events and its `turnDone` would persist a mixed transcript under
     // the wrong session. Stop the turn first, or wait for it to finish.
     if (sendingRef.current) return;
+    // Invalidate any in-flight session load so its result can't land after this
+    // reset and repopulate the transcript we're clearing.
+    loadSeqRef.current++;
     setMessagesTracked(() => []);
     setToolCallsTracked(() => ({}));
     setInput("");
@@ -997,8 +1010,12 @@ export const AssistantConversation = forwardRef<
     // See onNewChat: don't swap sessions while a turn is streaming, or its
     // events would land in (and be saved under) the newly loaded session.
     if (sendingRef.current) return;
+    const seq = ++loadSeqRef.current;
     try {
       const session = await loadSession(id);
+      // A newer session action fired while this read was in flight — discard
+      // this now-stale result rather than overwriting the newer selection.
+      if (loadSeqRef.current !== seq) return;
       const { msgs, calls } = fromStoredMessages(session.messages as unknown as StoredMessage[]);
       setMessagesTracked(() => msgs);
       setToolCallsTracked(() => calls);
@@ -1193,6 +1210,10 @@ export const AssistantConversation = forwardRef<
     ]);
     setSending(true);
     sendingRef.current = true;
+    // Fresh turn: clear any Stop left set from a prior turn. A Stop pressed
+    // during the async prep below (startChat / skills load) sets this, and we
+    // check it right before launching so the agent isn't started after all.
+    cancelRequestedRef.current = false;
     try {
       let session = sessionRef.current;
       if (!session) {
@@ -1202,6 +1223,16 @@ export const AssistantConversation = forwardRef<
       const guidance = await loadSkillsGuidance(activeSkills);
       const outgoing = `${preface}${guidance}${prompt}`;
       const usedKind = selectedAgent?.kind ?? selectedKind;
+      // Stop was pressed while we were preparing, before any child existed for
+      // `cancelChat` to kill. Honor it: don't launch the agent, and drop the
+      // empty assistant placeholder so no blank reply lingers.
+      if (cancelRequestedRef.current) {
+        setMessagesTracked((msgs) => {
+          const last = msgs[msgs.length - 1];
+          return last && last.role === "assistant" && last.text === "" ? msgs.slice(0, -1) : msgs;
+        });
+        return;
+      }
       saveLastAgent(usedKind); // remember what was actually used for the next fresh chat
       await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind);
     } catch (e) {
@@ -1222,6 +1253,10 @@ export const AssistantConversation = forwardRef<
    * `sending` once the (now-cancelled) `sendChat` call settles — nothing
    * further to do here besides asking the backend to stop. */
   function handleStop() {
+    // Set unconditionally: if Stop lands while `handleSend` is still preparing
+    // (before a child exists, so the `cancelChat` below would be a no-op), this
+    // flag makes `handleSend` skip the launch entirely.
+    cancelRequestedRef.current = true;
     const session = sessionRef.current;
     if (session) void cancelChat(session);
   }

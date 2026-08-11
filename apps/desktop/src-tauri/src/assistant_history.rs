@@ -118,14 +118,39 @@ fn upsert_index(dir: &Path, meta: &SessionMeta) -> Result<(), String> {
     write_index(dir, &metas)
 }
 
+/// Write `contents` to `path` with owner-only permissions (`0600` on Unix).
+/// A saved transcript can contain secrets returned by the consent-gated
+/// `k8s.getSecret` tool (plus logs/manifests), so on a shared Unix host it must
+/// not be left world-readable by the default `022`-umask `0644`. On non-Unix
+/// the default per-user permissions apply.
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+    }
+}
+
 /// Write `<id>.json.tmp` then rename onto `<id>.json` — a crash mid-write (or
-/// a concurrent read) never observes a half-written session file.
+/// a concurrent read) never observes a half-written session file. The tmp file
+/// is created `0600` and `rename` preserves that mode onto the final file.
 fn write_session_atomic(dir: &Path, session: &Session) -> Result<(), String> {
     let path = session_path(dir, &session.id)?;
     fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let tmp = dir.join(format!("{}.json.tmp", session.id));
     let raw = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
-    fs::write(&tmp, raw).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    write_private(&tmp, &raw).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, &path).map_err(|e| format!("could not finalize {}: {e}", path.display()))
 }
 
@@ -377,5 +402,19 @@ mod tests {
         }
         // A normal uuid-shaped id is accepted.
         assert!(session_path(&dir, "0b3e97f0-1234-4abc-9def-000000000000").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_session_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new();
+        let dir = sessions_dir(tmp.path());
+        let session = sample_session("0b3e97f0-1234-4abc-9def-000000000000", 1);
+        write_session_atomic(&dir, &session).unwrap();
+        let path = session_path(&dir, &session.id).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // Transcripts can contain k8s.getSecret output — never world/group readable.
+        assert_eq!(mode & 0o777, 0o600, "saved session must be 0600, got {:o}", mode & 0o777);
     }
 }

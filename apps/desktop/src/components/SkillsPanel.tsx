@@ -161,6 +161,13 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
     setError("");
     try {
       await saveSkill(editing);
+      // Renaming an existing skill writes `<new>.md` but the old `<selected>.md`
+      // would linger — both would show in the list and the stale one stay
+      // selectable. Remove it once the new file is safely written.
+      const renamedFrom = selected;
+      if (renamedFrom && renamedFrom !== editing.name) {
+        await deleteSkill(renamedFrom);
+      }
       setSelected(editing.name);
       await refresh();
       notify.success("Skill saved");

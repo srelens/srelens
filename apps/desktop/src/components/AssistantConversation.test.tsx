@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import { AssistantConversation, stripDataUri } from "./AssistantConversation";
+import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
+import { createRef } from "react";
+import {
+  AssistantConversation,
+  stripDataUri,
+  type AssistantConversationHandle,
+} from "./AssistantConversation";
 import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
 import * as prompts from "../lib/prompts";
@@ -839,6 +844,61 @@ describe("AssistantConversation composer (Task 19)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
+  });
+
+  it("Stop pressed while the turn is still preparing prevents the agent launch", async () => {
+    vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
+    // Hold the turn in its prep phase: startChat never resolves until we say so,
+    // so no child exists yet and cancelChat would be a no-op.
+    let resolveStart: (id: string) => void = () => {};
+    vi.mocked(chat.startChat).mockImplementation(
+      () => new Promise((resolve) => { resolveStart = (id) => resolve(id); }),
+    );
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "do a thing" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    // Mid-prep the button is Stop; press it before any child is registered.
+    fireEvent.click(await screen.findByRole("button", { name: /^stop$/i }));
+
+    // Now let startChat resolve — handleSend must see the cancel and bail.
+    await act(async () => resolveStart("s1"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
+    expect(chat.sendChat).not.toHaveBeenCalled();
+  });
+
+  it("a slow session load can't clobber a newer selection", async () => {
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    vi.mocked(chatHistory.loadSession).mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          resolvers[id] = resolve as (v: unknown) => void;
+        }),
+    );
+    const sessionOf = (id: string, text: string) => ({
+      id,
+      title: id,
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: [],
+      skills: [],
+      cliSessionId: null,
+      messages: [{ id: 0, role: "user", text }],
+    });
+
+    const ref = createRef<AssistantConversationHandle>();
+    render(<AssistantConversation ref={ref} />);
+    // Two selections in flight; the first (A) will resolve LAST.
+    act(() => void ref.current!.selectSession("A"));
+    act(() => void ref.current!.selectSession("B"));
+
+    // Resolve the newest (B) first, then the stale A.
+    await act(async () => resolvers["B"](sessionOf("B", "from session B")));
+    await act(async () => resolvers["A"](sessionOf("A", "from session A")));
+
+    // B's transcript stands; the late A load was discarded.
+    expect(await screen.findByText("from session B")).toBeTruthy();
+    expect(screen.queryByText("from session A")).toBeFalsy();
   });
 });
 
