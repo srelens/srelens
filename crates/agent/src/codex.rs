@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn the_simple_transcript_fixture_parses_to_the_expected_shape() {
         let raw = include_str!(
-            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/codex-simple.jsonl"
+            "../tests/fixtures/codex-simple.jsonl"
         );
         let events: Vec<AgentEvent> = raw
             .lines()
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn the_mcp_tool_call_transcript_fixture_parses_to_the_expected_shape() {
         let raw = include_str!(
-            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/codex-mcp-tool-call.jsonl"
+            "../tests/fixtures/codex-mcp-tool-call.jsonl"
         );
         let events: Vec<AgentEvent> = raw.lines().flat_map(parse_line).collect();
         assert_eq!(
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn the_command_execution_transcript_fixture_parses_to_the_expected_shape() {
         let raw = include_str!(
-            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/codex-command-execution.jsonl"
+            "../tests/fixtures/codex-command-execution.jsonl"
         );
         let events: Vec<AgentEvent> = raw.lines().flat_map(parse_line).collect();
         assert!(events.contains(&AgentEvent::ToolCallStart {

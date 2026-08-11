@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn the_simple_transcript_fixture_parses_to_the_expected_shape() {
         let raw = include_str!(
-            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/cursor-simple.stream-json"
+            "../tests/fixtures/cursor-simple.stream-json"
         );
         let events: Vec<AgentEvent> = raw.lines().flat_map(parse_line).collect();
         assert_eq!(
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn the_toolcalls_and_thinking_transcript_fixture_parses_to_the_expected_shape() {
         let raw = include_str!(
-            "../../../.superpowers/sdd/2026-08-09-ai-assistant/agent-transcripts/cursor-toolcalls-and-thinking.jsonl"
+            "../tests/fixtures/cursor-toolcalls-and-thinking.jsonl"
         );
         let events: Vec<AgentEvent> = raw.lines().flat_map(parse_line).collect();
 

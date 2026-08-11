@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"019fe8af-b630-7da3-b2b3-7c47090a329e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run that exact command and report its output."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo srelens-probe'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo srelens-probe'","aggregated_output":"srelens-probe\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"It printed:\n\n```text\nsrelens-probe\n```"}}
+{"type":"turn.completed","usage":{"input_tokens":30107,"cached_input_tokens":24064,"output_tokens":97,"reasoning_output_tokens":0}}
