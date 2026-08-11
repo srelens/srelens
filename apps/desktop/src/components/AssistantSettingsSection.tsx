@@ -83,7 +83,9 @@ export function AssistantSettingsSection() {
   async function fetchModels(provider: ProviderKind) {
     setBusy(`models:${provider}`);
     try {
-      const list = await llmListModels(provider);
+      // Pass the currently-typed base URL so first-time OpenAI-compatible setup
+      // fetches against it without needing a separate "Save settings" first.
+      const list = await llmListModels(provider, settings.baseUrls[providerSlug(provider)]);
       setModels((m) => ({ ...m, [provider]: list }));
       if (list.length === 0) notify.info("The provider returned no models");
     } catch (e) {

@@ -61,6 +61,9 @@ export function llmKeyStatus(): Promise<ProviderKind[]> {
   return invokeCommand("llm_key_status");
 }
 
-export function llmListModels(provider: ProviderKind): Promise<ModelInfo[]> {
-  return invokeCommand("llm_list_models", { provider });
+/** Fetch a provider's models. `baseUrl` overrides the stored one so the
+ * OpenAI-compatible setup flow can fetch against a just-typed URL before the
+ * settings are saved. */
+export function llmListModels(provider: ProviderKind, baseUrl?: string): Promise<ModelInfo[]> {
+  return invokeCommand("llm_list_models", { provider, baseUrl });
 }

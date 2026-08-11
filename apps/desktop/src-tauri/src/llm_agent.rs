@@ -142,10 +142,22 @@ pub async fn run_native_agent(
     chats: &ChatManager,
     session: String,
     prompt: String,
+    has_images: bool,
 ) -> Result<(), String> {
     let channel = format!("chat://{session}");
     let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
     let emit = |ev: AgentEvent| sink.emit(&channel, serde_json::to_value(&ev).unwrap());
+
+    // Fresh turn: drop any pending-cancel from a previous turn on this session.
+    chats.clear_pending_cancel(&session);
+
+    // Image input isn't wired for the native agent yet; tell the user rather
+    // than silently dropping an attachment the composer still displays.
+    if has_images {
+        emit(AgentEvent::Error {
+            message: "image attachments aren't supported by the srelens agent yet".to_string(),
+        });
+    }
 
     // Resolve the provider config (default provider + its key/model) up front;
     // a missing key or model ends the turn with a clear, actionable message.
@@ -202,6 +214,10 @@ pub async fn run_native_agent(
     });
 
     chats.register_native(session.clone(), handle.abort_handle());
+    // Honor a Stop that landed during prep, before the task was registered.
+    if chats.take_pending_cancel(&session) {
+        handle.abort();
+    }
     let joined = handle.await;
     chats.unregister_native(&session);
 
@@ -267,13 +283,21 @@ pub async fn llm_key_status(app: tauri::AppHandle) -> Result<Vec<ProviderKind>, 
 }
 
 /// Fetch the model list for a provider from its API, using the stored key and
-/// (for the custom provider) base URL. Backs the model dropdown in Settings.
+/// base URL. `base_url` overrides the stored one so the OpenAI-compatible setup
+/// flow can fetch models against a just-typed URL before Settings are saved.
 #[tauri::command]
-pub async fn llm_list_models(app: tauri::AppHandle, provider: ProviderKind) -> Result<Vec<ModelInfo>, String> {
+pub async fn llm_list_models(
+    app: tauri::AppHandle,
+    provider: ProviderKind,
+    base_url: Option<String>,
+) -> Result<Vec<ModelInfo>, String> {
     let dir = llm_dir(&app)?;
     let settings = crate::llm_config::load_settings(&settings_path(&app)?);
-    let cfg = crate::llm_config::provider_config(&dir, &settings, provider)
+    let mut cfg = crate::llm_config::provider_config(&dir, &settings, provider)
         .ok_or("Add an API key for this provider first.")?;
+    if let Some(url) = base_url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+        cfg.base_url = url;
+    }
     srelens_llm::HttpProvider::new(cfg).list_models().await.map_err(|e| e.to_string())
 }
 

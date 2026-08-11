@@ -137,6 +137,24 @@ describe("SkillsPanel", () => {
     await waitFor(() => expect(skillsLibMock.deleteSkill).toHaveBeenCalledWith("alpha"));
   });
 
+  it("refuses to rename a skill onto another existing skill's name", async () => {
+    render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+
+    fireEvent.click(screen.getByText("alpha"));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Skill name") as HTMLInputElement).value).toBe("alpha"),
+    );
+    // "zeta" is another existing skill (METAS[1]).
+    fireEvent.change(screen.getByLabelText("Skill name"), { target: { value: "zeta" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // Neither overwrite nor delete — the collision is refused with a message.
+    expect(await screen.findByText(/already exists/i)).toBeTruthy();
+    expect(skillsLibMock.saveSkill).not.toHaveBeenCalled();
+    expect(skillsLibMock.deleteSkill).not.toHaveBeenCalled();
+  });
+
   it("saving an existing skill without renaming does not delete anything", async () => {
     render(<SkillsPanel onClose={vi.fn()} />);
     await screen.findByText("alpha");

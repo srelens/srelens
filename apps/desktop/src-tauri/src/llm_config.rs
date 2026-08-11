@@ -94,13 +94,24 @@ pub fn set_key(dir: &Path, kind: ProviderKind, key: &str) -> Result<(), String> 
 
 /// Remove a provider's API key from both the keychain and the fallback file.
 pub fn clear_key(dir: &Path, kind: ProviderKind) -> Result<(), String> {
-    if let Ok(entry) = keyring::Entry::new(SERVICE, &key_account(kind)) {
-        let _ = entry.delete_credential();
-    }
+    // Attempt both backends. A locked/unavailable keychain that refuses the
+    // delete must NOT be reported as success — the credential would still be
+    // there and could reactivate once the keychain is reachable. `NoEntry` (or
+    // an entry that never existed) is a clean "already gone".
+    let keychain_err = match keyring::Entry::new(SERVICE, &key_account(kind))
+        .and_then(|e| e.delete_credential())
+    {
+        Ok(()) | Err(keyring::Error::NoEntry) => None,
+        Err(e) => Some(e.to_string()),
+    };
     match std::fs::remove_file(key_file(dir, kind)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.to_string()),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    match keychain_err {
+        Some(e) => Err(format!("removed the local copy, but the keychain entry could not be deleted: {e}")),
+        None => Ok(()),
     }
 }
 

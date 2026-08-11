@@ -102,7 +102,9 @@ fn write_index(dir: &Path, metas: &[SessionMeta]) -> Result<(), String> {
     let path = index_path(dir);
     let tmp = dir.join("index.json.tmp");
     let raw = serde_json::to_string_pretty(metas).map_err(|e| e.to_string())?;
-    fs::write(&tmp, raw).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    // Owner-only: the index holds session titles derived from the first user
+    // prompt, which can name clusters/resources/incidents.
+    write_private(&tmp, &raw).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, &path).map_err(|e| format!("could not finalize {}: {e}", path.display()))
 }
 

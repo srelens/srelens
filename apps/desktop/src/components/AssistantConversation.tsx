@@ -762,6 +762,12 @@ export const AssistantConversation = forwardRef<
   // Stop pressed during the async prep window (before any cancellable child
   // exists) still prevents the launch.
   const cancelRequestedRef = useRef(false);
+  // Bumped each turn so tool-call state keys are unique per turn. Agents that
+  // restart their tool-call ids every turn (Codex reuses `item_1`; the native
+  // Gemini path reuses `gemini-call-0`) would otherwise collide across turns —
+  // a later turn overwriting an earlier turn's tool card and corrupting the
+  // persisted transcript. Prefixing the id with this nonce keeps them distinct.
+  const turnNonceRef = useRef(0);
   // Set once per disk session, on its first save; cleared by New chat and
   // restored from the loaded value when reopening a session, so re-saving
   // never stomps the original `createdAt`.
@@ -796,6 +802,13 @@ export const AssistantConversation = forwardRef<
     });
     return () => {
       void unlisten.then((f) => f());
+      // If the conversation unmounts mid-turn (drawer/tab closed, or the user
+      // switched to another tab), the backend turn and its event subscription
+      // would otherwise keep running invisibly — burning quota and invoking MCP
+      // tools with no one watching. Cancel the in-flight turn on the way out.
+      if (sendingRef.current && sessionRef.current) {
+        void cancelChat(sessionRef.current);
+      }
     };
   }, []);
 
@@ -1134,20 +1147,26 @@ export const AssistantConversation = forwardRef<
           return [...msgs.slice(0, -1), { ...last, thoughts: (last.thoughts ?? "") + e.text }];
         });
         break;
-      case "toolCallStart":
+      case "toolCallStart": {
         endThinking();
         toolEventSincePendingDelta.current = true;
-        setToolCallsTracked((tc) => ({ ...tc, [e.id]: { tool: e.tool, args: e.args, status: null } }));
+        // Namespace the id by turn so a later turn's reused id can't overwrite
+        // this turn's card (see `turnNonceRef`).
+        const key = `${turnNonceRef.current}#${e.id}`;
+        setToolCallsTracked((tc) => ({ ...tc, [key]: { tool: e.tool, args: e.args, status: null } }));
         setMessagesTracked((msgs) => {
           const last = msgs[msgs.length - 1];
           if (!last || last.role !== "assistant") return msgs;
-          return [...msgs.slice(0, -1), { ...last, toolCallIds: [...(last.toolCallIds ?? []), e.id] }];
+          return [...msgs.slice(0, -1), { ...last, toolCallIds: [...(last.toolCallIds ?? []), key] }];
         });
         break;
-      case "toolResult":
+      }
+      case "toolResult": {
         toolEventSincePendingDelta.current = true;
-        setToolCallsTracked((tc) => (tc[e.id] ? { ...tc, [e.id]: { ...tc[e.id], status: e.status } } : tc));
+        const key = `${turnNonceRef.current}#${e.id}`;
+        setToolCallsTracked((tc) => (tc[key] ? { ...tc, [key]: { ...tc[key], status: e.status } } : tc));
         break;
+      }
       case "textDelta": {
         endThinking();
         // Read + reset the flag synchronously, here, rather than inside the
@@ -1212,6 +1231,8 @@ export const AssistantConversation = forwardRef<
     ]);
     setSending(true);
     sendingRef.current = true;
+    // New turn: bump the tool-call key namespace (see `turnNonceRef`).
+    turnNonceRef.current += 1;
     // Fresh turn: clear any Stop left set from a prior turn. A Stop pressed
     // during the async prep below (startChat / skills load) sets this, and we
     // check it right before launching so the agent isn't started after all.

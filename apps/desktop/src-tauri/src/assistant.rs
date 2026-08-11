@@ -255,6 +255,31 @@ pub struct ChatManager {
     /// turn runs as a task whose `AbortHandle` is parked here so `chat_cancel`
     /// can stop it the same way it kills a CLI child.
     natives: std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+    /// Sessions whose `chat_cancel` arrived while the turn was still preparing —
+    /// after `chat_send` began but before it registered anything cancellable
+    /// (spawning the child, writing config/image files). `chat_send` consumes
+    /// this once the child/task exists and stops it, so a Stop pressed during
+    /// prep is never silently dropped.
+    pending_cancels: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl ChatManager {
+    /// Clear any stale pending-cancel for a session at the start of a fresh
+    /// turn, so a cancel from a previous turn can't kill this one.
+    pub fn clear_pending_cancel(&self, session: &str) {
+        self.pending_cancels.lock().unwrap().remove(session);
+    }
+
+    /// Record that a cancel arrived before anything cancellable was registered.
+    pub fn arm_pending_cancel(&self, session: String) {
+        self.pending_cancels.lock().unwrap().insert(session);
+    }
+
+    /// Take (and clear) a session's pending-cancel flag — true if a Stop landed
+    /// during this turn's preparation.
+    pub fn take_pending_cancel(&self, session: &str) -> bool {
+        self.pending_cancels.lock().unwrap().remove(session)
+    }
 }
 
 impl ChatManager {
@@ -314,17 +339,28 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Resul
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        // Remove any leftover of OUR own from a prior turn, then `create_new`
+        // (O_CREAT|O_EXCL): the open refuses if anything exists at `path` —
+        // including a symlink another local account pre-created at a
+        // predictable/reused scratch path to redirect the write or read the
+        // token. Removing a symlink drops the link, not its target; if the
+        // attacker re-creates it in the race window the exclusive open fails,
+        // so we never follow it. `.mode(0o600)` only governs a fresh file.
+        let _ = std::fs::remove_file(path);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(path)?;
         f.write_all(contents)
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, contents)
+        // Match the fail-closed semantics on other platforms too.
+        use std::io::Write;
+        let _ = std::fs::remove_file(path);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        f.write_all(contents)
     }
 }
 
@@ -338,6 +374,7 @@ fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
         "claude" => Ok(AgentKind::Claude),
         "codex" => Ok(AgentKind::Codex),
         "cursor" => Ok(AgentKind::Cursor),
+        "srelens" => Ok(AgentKind::Srelens),
         _ => Err("unknown agent".to_string()),
     }
 }
@@ -377,8 +414,13 @@ pub async fn chat_send(
     // the same consent/audit server the CLIs reach over HTTP. Handle it here so
     // the CLI machinery below only ever sees the three CLI kinds.
     if matches!(kind, AgentKind::Srelens) {
-        return crate::llm_agent::run_native_agent(app, &chats, session, prompt).await;
+        return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty()).await;
     }
+
+    // Fresh turn: drop any pending-cancel left from a previous turn on this
+    // session so it can't kill this one. A Stop pressed during the prep below
+    // re-arms it, and it's consumed once the child is registered.
+    chats.clear_pending_cancel(&session);
 
     let token = mcp
         .session_token()
@@ -599,6 +641,16 @@ pub async fn chat_send(
 
     chats.children.lock().unwrap().insert(session.clone(), child);
 
+    // Honor a Stop that landed while we were preparing (before the child was
+    // registered, so `chat_cancel` armed a pending flag instead of killing
+    // anything): now that the child exists, kill it. The stream loop below then
+    // reads EOF and `finish_turn` emits the closing `TurnDone`.
+    if chats.take_pending_cancel(&session) {
+        if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
+            let _ = child.start_kill();
+        }
+    }
+
     let mut lines = BufReader::new(stdout).lines();
     let mut saw_done = false;
     while let Ok(Some(line)) = lines.next_line().await {
@@ -630,12 +682,21 @@ pub async fn chat_send(
 /// Kill a running turn's agent process, if any.
 #[tauri::command]
 pub async fn chat_cancel(session: String, chats: tauri::State<'_, ChatManager>) -> Result<(), String> {
+    let mut stopped = false;
     if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
         let _ = child.start_kill();
+        stopped = true;
     }
     // The native agent's turn is a task, not a child process.
     if let Some(handle) = chats.natives.lock().unwrap().remove(&session) {
         handle.abort();
+        stopped = true;
+    }
+    // Nothing running yet — the turn is mid-preparation. Arm a pending cancel so
+    // `chat_send` stops it the moment the child/task is registered, instead of
+    // this Stop being lost.
+    if !stopped {
+        chats.arm_pending_cancel(session);
     }
     Ok(())
 }
@@ -679,6 +740,7 @@ mod tests {
         assert_eq!(parse_agent_kind("claude"), Ok(AgentKind::Claude));
         assert_eq!(parse_agent_kind("codex"), Ok(AgentKind::Codex));
         assert_eq!(parse_agent_kind("cursor"), Ok(AgentKind::Cursor));
+        assert_eq!(parse_agent_kind("srelens"), Ok(AgentKind::Srelens));
     }
 
     #[test]
@@ -738,6 +800,20 @@ mod tests {
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(which_on_path("claude", dir.to_str().unwrap()).as_deref(), plain.to_str());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pending_cancel_is_armed_taken_once_and_clearable() {
+        let chats = ChatManager::default();
+        assert!(!chats.take_pending_cancel("s1"), "nothing armed yet");
+        // A Stop during prep arms it; chat_send consumes it exactly once.
+        chats.arm_pending_cancel("s1".into());
+        assert!(chats.take_pending_cancel("s1"));
+        assert!(!chats.take_pending_cancel("s1"), "consumed on first take");
+        // A fresh turn clears a stale one so it can't kill the new turn.
+        chats.arm_pending_cancel("s2".into());
+        chats.clear_pending_cancel("s2");
+        assert!(!chats.take_pending_cancel("s2"));
     }
 
     #[test]

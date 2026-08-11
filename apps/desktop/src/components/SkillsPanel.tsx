@@ -159,12 +159,20 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
   async function save() {
     if (!editing) return;
     setError("");
+    const renamedFrom = selected;
+    // Refuse to clobber a DIFFERENT existing skill — whether creating a new one
+    // or renaming onto another's name. Without this, `saveSkill` would overwrite
+    // that file and the rename-cleanup below would then delete the source,
+    // silently destroying the target skill.
+    if (skills.some((s) => s.name === editing.name && s.name !== renamedFrom)) {
+      setError(`A skill named "${editing.name}" already exists — choose a different name.`);
+      return;
+    }
     try {
       await saveSkill(editing);
       // Renaming an existing skill writes `<new>.md` but the old `<selected>.md`
       // would linger — both would show in the list and the stale one stay
       // selectable. Remove it once the new file is safely written.
-      const renamedFrom = selected;
       if (renamedFrom && renamedFrom !== editing.name) {
         await deleteSkill(renamedFrom);
       }

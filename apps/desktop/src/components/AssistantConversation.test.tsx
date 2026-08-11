@@ -846,6 +846,24 @@ describe("AssistantConversation composer (Task 19)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
   });
 
+  it("cancels the in-flight turn when the conversation unmounts", async () => {
+    vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
+    let resolveSend: () => void = () => {};
+    vi.mocked(chat.sendChat).mockImplementation(
+      () => new Promise((resolve) => { resolveSend = () => resolve(undefined); }),
+    );
+    const { unmount } = render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "keep going" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await screen.findByRole("button", { name: /^stop$/i });
+
+    // Closing the drawer/tab (unmount) mid-turn must stop the backend turn.
+    unmount();
+    expect(chat.cancelChat).toHaveBeenCalled();
+
+    resolveSend();
+  });
+
   it("Stop pressed while the turn is still preparing prevents the agent launch", async () => {
     vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
     // Hold the turn in its prep phase: startChat never resolves until we say so,
