@@ -20,8 +20,24 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         Some("assistant") => content_blocks(&v).iter().filter_map(text_block).collect(),
         Some("tool_call") => tool_call(&v),
         // The `result` text duplicates the already-streamed assistant text
-        // deltas, so only the turn-boundary signal is emitted here.
-        Some("result") => vec![AgentEvent::TurnDone],
+        // deltas, so a success only emits the turn-boundary signal. A FAILURE
+        // (`is_error`) surfaces its message as an `Error` first — otherwise an
+        // auth/quota/CLI failure ends the turn with a blank reply (the
+        // desktop's crash reporting stops as soon as it sees a `TurnDone`).
+        Some("result") => {
+            let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+            if is_error {
+                let message = v
+                    .get("result")
+                    .and_then(|r| r.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("the agent ended the turn with an error")
+                    .to_string();
+                vec![AgentEvent::Error { message }, AgentEvent::TurnDone]
+            } else {
+                vec![AgentEvent::TurnDone]
+            }
+        }
         _ => Vec::new(),
     }
 }
@@ -259,10 +275,26 @@ mod tests {
             parse_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"hello"}"#),
             vec![AgentEvent::TurnDone]
         );
+    }
+
+    #[test]
+    fn a_failed_result_surfaces_its_error_before_ending_the_turn() {
+        // A failed result must emit an `Error` first, otherwise the turn ends
+        // with no visible reply — the desktop stops crash-reporting at TurnDone.
         assert_eq!(
             parse_line(r#"{"type":"result","subtype":"error","is_error":true,"result":"boom"}"#),
-            vec![AgentEvent::TurnDone]
+            vec![
+                AgentEvent::Error { message: "boom".into() },
+                AgentEvent::TurnDone,
+            ]
         );
+    }
+
+    #[test]
+    fn a_failed_result_with_no_text_still_reports_an_error() {
+        let out = parse_line(r#"{"type":"result","subtype":"error","is_error":true}"#);
+        assert!(matches!(out.first(), Some(AgentEvent::Error { .. })));
+        assert_eq!(out.last(), Some(&AgentEvent::TurnDone));
     }
 
     #[test]

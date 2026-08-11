@@ -741,6 +741,11 @@ export const AssistantConversation = forwardRef<
   // batch several of this turn's `setState` calls together.
   const messagesRef = useRef<ChatMessage[]>([]);
   const toolCallsRef = useRef<Record<string, ToolCallState>>({});
+  // Mirrors `sending` so the imperative-handle session actions (captured with
+  // empty deps) can see whether a turn is in flight and refuse to switch — a
+  // session change mid-stream would let the running turn's `turnDone` persist
+  // its transcript under the newly selected session id, corrupting it.
+  const sendingRef = useRef(false);
   // Set once per disk session, on its first save; cleared by New chat and
   // restored from the loaded value when reopening a session, so re-saving
   // never stomps the original `createdAt`.
@@ -957,6 +962,10 @@ export const AssistantConversation = forwardRef<
   /** Clear the transcript and drop the channel/disk session id so the next
    * `handleSend` mints a fresh one via `startChat()`. */
   function onNewChat() {
+    // Refuse to switch away mid-turn: the running turn's listener would keep
+    // applying events and its `turnDone` would persist a mixed transcript under
+    // the wrong session. Stop the turn first, or wait for it to finish.
+    if (sendingRef.current) return;
     setMessagesTracked(() => []);
     setToolCallsTracked(() => ({}));
     setInput("");
@@ -979,6 +988,9 @@ export const AssistantConversation = forwardRef<
    * to type and send afterward appends further turns onto the same disk
    * session (see the deferred-`cliSessionId` note on `persistSession`). */
   async function onSelectSession(id: string) {
+    // See onNewChat: don't swap sessions while a turn is streaming, or its
+    // events would land in (and be saved under) the newly loaded session.
+    if (sendingRef.current) return;
     try {
       const session = await loadSession(id);
       const { msgs, calls } = fromStoredMessages(session.messages as unknown as StoredMessage[]);
@@ -1009,6 +1021,9 @@ export const AssistantConversation = forwardRef<
   /** Delete a saved session from disk and drop it from the picker. If it was
    * the one currently open, this behaves like New chat. */
   async function onDeleteSession(id: string) {
+    // Don't delete mid-turn: if it's the open session, the running turn would
+    // re-save it right after; if it isn't, blocking is the safe simple rule.
+    if (sendingRef.current) return;
     try {
       await deleteSessionCmd(id);
     } catch {
@@ -1171,6 +1186,7 @@ export const AssistantConversation = forwardRef<
       { id: nextId.current++, role: "assistant", text: "" },
     ]);
     setSending(true);
+    sendingRef.current = true;
     try {
       let session = sessionRef.current;
       if (!session) {
@@ -1192,6 +1208,7 @@ export const AssistantConversation = forwardRef<
       void persistSession(messagesRef.current, toolCallsRef.current);
     } finally {
       setSending(false);
+      sendingRef.current = false;
     }
   }
 

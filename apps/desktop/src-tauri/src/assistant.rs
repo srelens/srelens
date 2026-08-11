@@ -211,6 +211,29 @@ impl Drop for TempDir {
     }
 }
 
+/// Write a file that carries the MCP bearer token with owner-only permissions
+/// (`0600` on Unix), so another local account can't read the token out of the
+/// world-readable shared temp dir while a turn runs. On non-Unix the default
+/// per-user temp permissions apply.
+fn write_token_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 /// Parse the frontend's serialized `AgentKind` tag — the exact camelCase
 /// string serde emits for the enum ("claude"/"codex"/"cursor") — back into
 /// the enum. Errors on anything else rather than silently defaulting: an
@@ -243,6 +266,17 @@ pub async fn chat_send(
 
     let kind = parse_agent_kind(&agent_kind)?;
 
+    // The session id (from IPC) becomes a `chat://` channel AND temp-path
+    // components (`srelens-agent-cwd-<id>`, config/image files). A crafted id
+    // with `/`, `\`, or `..` would let `create_dir_all` — and `_cwd_guard`'s
+    // later `remove_dir_all` — resolve OUTSIDE the temp dir, so validate it to
+    // a bare component before it touches any path. Real ids are startChat uuids.
+    if session.is_empty()
+        || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(format!("invalid session id {session:?}"));
+    }
+
     let token = mcp
         .session_token()
         .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
@@ -268,20 +302,20 @@ pub async fn chat_send(
     // guarded by a `TempFile` per image so every one is cleaned up on any
     // exit from this function. A decode or write failure is reported as an
     // `Error` event and that image is skipped rather than aborting the whole
-    // turn. Shared between Claude and Codex: Claude gets these paths folded
-    // into its prompt text (`prompt_with_images`), Codex takes them natively
-    // via `-i`. Cursor gets none of this — its Read tool is denied by
-    // `cursor_cli_config_json`, so it has no way to load a path-based image
-    // file even if we handed it one; a Cursor turn with attachments emits one
-    // note below and otherwise proceeds text-only.
+    // turn. Only CODEX can actually use an attached image — it takes image
+    // files natively via `-i`. Claude and Cursor CANNOT: both have their
+    // file-read tool denied by the sandbox (Claude's `Read` is in
+    // `DISALLOWED_TOOLS`, Cursor's by `cursor_cli_config_json`), so a path
+    // folded into the prompt is unreadable dead text. A Claude/Cursor turn with
+    // attachments emits one note and proceeds text-only instead.
     let mut image_guards: Vec<TempFile> = Vec::new();
     let mut image_paths: Vec<String> = Vec::new();
-    if matches!(kind, AgentKind::Cursor) {
+    if !matches!(kind, AgentKind::Codex) {
         if !images.is_empty() {
             sink.emit(
                 &channel,
                 serde_json::to_value(AgentEvent::Error {
-                    message: "image attachments aren't supported for Cursor".to_string(),
+                    message: "image attachments are only supported with the Codex agent".to_string(),
                 })
                 .unwrap(),
             );
@@ -340,7 +374,7 @@ pub async fn chat_send(
         AgentKind::Claude => {
             let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
             let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
-            std::fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
+            write_token_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
             _cfg_guard = Some(TempFile(cfg_path.clone()));
             let effective_prompt = prompt_with_images(&prompt, &image_paths);
             srelens_agent::adapter::claude_command(
@@ -380,9 +414,9 @@ pub async fn chat_send(
             // model can't read it back — the deny-list blocks `Read`.
             let cursor_dir = cwd_path.join(".cursor");
             std::fs::create_dir_all(&cursor_dir).map_err(|e| e.to_string())?;
-            std::fs::write(
-                cursor_dir.join("mcp.json"),
-                srelens_agent::adapter::cursor_mcp_json(&url, &token),
+            write_token_file(
+                &cursor_dir.join("mcp.json"),
+                srelens_agent::adapter::cursor_mcp_json(&url, &token).as_bytes(),
             )
             .map_err(|e| e.to_string())?;
             srelens_agent::adapter::cursor_command(
@@ -532,6 +566,21 @@ mod tests {
         assert_eq!(parse_agent_kind("claude"), Ok(AgentKind::Claude));
         assert_eq!(parse_agent_kind("codex"), Ok(AgentKind::Codex));
         assert_eq!(parse_agent_kind("cursor"), Ok(AgentKind::Cursor));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_token_file_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("srelens-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp.json");
+        write_token_file(&path, b"secret-bearer-token").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // Only the owner may read/write; group and other bits must be clear.
+        assert_eq!(mode & 0o777, 0o600, "token file must be 0600, got {:o}", mode & 0o777);
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret-bearer-token");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
