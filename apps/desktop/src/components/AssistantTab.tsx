@@ -144,6 +144,9 @@ export function AssistantTab({
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [collapsed, setCollapsed] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  // Bumped when the Skills panel closes so the conversation reloads its slash
+  // menu — the panel may have created, renamed, or deleted skills.
+  const [skillsRefreshKey, setSkillsRefreshKey] = useState(0);
 
   return (
     <div className="flex h-full min-h-0">
@@ -164,9 +167,17 @@ export function AssistantTab({
           availableContexts={availableContexts}
           hideSessionControls
           onSessionsChanged={setSessions}
+          skillsRefreshKey={skillsRefreshKey}
         />
       </div>
-      {skillsOpen && <SkillsPanel onClose={() => setSkillsOpen(false)} />}
+      {skillsOpen && (
+        <SkillsPanel
+          onClose={() => {
+            setSkillsOpen(false);
+            setSkillsRefreshKey((k) => k + 1);
+          }}
+        />
+      )}
     </div>
   );
 }

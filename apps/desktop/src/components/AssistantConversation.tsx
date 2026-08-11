@@ -681,9 +681,13 @@ export const AssistantConversation = forwardRef<
     className?: string;
     hideSessionControls?: boolean;
     onSessionsChanged?: (sessions: SessionMeta[]) => void;
+    /** Bumped by the host whenever the Skills panel mutates the skill set (e.g.
+     * on panel close), so the slash menu reloads instead of showing a stale
+     * list until the whole assistant tab is reopened. */
+    skillsRefreshKey?: number;
   }
 >(function AssistantConversation(
-  { context, availableContexts, className, hideSessionControls, onSessionsChanged },
+  { context, availableContexts, className, hideSessionControls, onSessionsChanged, skillsRefreshKey },
   ref,
 ) {
   const multiContextMode = availableContexts !== undefined;
@@ -791,13 +795,15 @@ export const AssistantConversation = forwardRef<
       .catch(() => setPrompts([]));
   }, []);
 
-  // Load the slash menu's skills list once on mount — same treatment as
-  // `listPrompts` above.
+  // Load the slash menu's skills list — same "best-effort, empty on failure"
+  // treatment as `listPrompts` above. Re-runs when `skillsRefreshKey` changes
+  // so creating/renaming/deleting a skill in the Skills panel is reflected in
+  // the slash menu without reopening the whole assistant tab.
   useEffect(() => {
     listSkills()
       .then(setSkills)
       .catch(() => setSkills([]));
-  }, []);
+  }, [skillsRefreshKey]);
 
   async function answerConfirm(id: string, approved: boolean) {
     setPendingConfirms((q) => q.filter((r) => r.id !== id));

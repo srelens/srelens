@@ -357,6 +357,12 @@ export function App() {
    *  global chat with the configured coding agent, not scoped to any
    *  particular resource. */
   function openAssistant() {
+    // The assistant drives agent CLIs through Tauri-only backend commands
+    // (agent_list / chat_start / chat_send). In a web build those fall through
+    // the server's command match to a 404, so the tab would mount with an empty
+    // agent list and Send permanently disabled — don't open it there. This also
+    // backstops the command-palette and search paths that funnel here.
+    if (!isTauri()) return;
     const existing = tabs.find((t) => t.kind === "assistant" && !t.cluster);
     if (existing) {
       setActiveTabId(existing.id);
@@ -566,7 +572,7 @@ export function App() {
         onToggleTheme={toggleThemeMode}
         onOpenSettings={openSettings}
         onOpenToolbox={openToolbox}
-        onOpenAssistant={openAssistant}
+        onOpenAssistant={isTauri() ? openAssistant : undefined}
         contextProfiles={contextProfiles}
         kubeconfigFiles={kubeconfigFiles}
         contextOrder={contextOrder}

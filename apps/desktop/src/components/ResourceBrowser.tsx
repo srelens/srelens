@@ -59,6 +59,7 @@ import { BulkActionBar } from "./BulkActionBar";
 import { NodeCordonAction } from "./NodeCordonAction";
 import { ResourceDetail } from "./ResourceDetail";
 import { AssistantDrawer, type AssistantContext } from "./AssistantDrawer";
+import { isTauri } from "../transport/platform";
 import type { OpenResource } from "../lib/resourceNavigation";
 import { describeError } from "../lib/errors";
 import {
@@ -918,6 +919,11 @@ export function ResourceBrowser({
     <>{otherDetail.kind}: <code>{otherDetail.name}</code></>
   ) : null;
 
+  // The assistant is a Tauri-only feature (its agent CLIs run through desktop
+  // backend commands the web server doesn't implement), so only surface the
+  // "Ask assistant" action — and mount its drawer — in the desktop build.
+  const askAssistant = isTauri() ? setAssistantContext : undefined;
+
   const detailActions = selectedPod ? (
     <PodActions
       context={context}
@@ -926,7 +932,7 @@ export function ResourceBrowser({
       onOpenTerminal={onOpenTerminal}
       onOpenLogs={onOpenLogs}
       onEdit={onOpenEdit ? () => onOpenEdit("Pod", selectedPod.namespace, selectedPod.name) : undefined}
-      onAskAssistant={setAssistantContext}
+      onAskAssistant={askAssistant}
     />
   ) : otherDetail ? (
     <>
@@ -956,7 +962,7 @@ export function ResourceBrowser({
         onEdit={
           onOpenEdit ? () => onOpenEdit(otherDetail.kind, otherDetail.namespace, otherDetail.name) : undefined
         }
-        onAskAssistant={setAssistantContext}
+        onAskAssistant={askAssistant}
       />
     </>
   ) : null;
@@ -1124,11 +1130,13 @@ export function ResourceBrowser({
         )}
       </Drawer>
 
-      <AssistantDrawer
-        open={!!assistantContext}
-        onClose={() => setAssistantContext(null)}
-        context={assistantContext ?? undefined}
-      />
+      {isTauri() && (
+        <AssistantDrawer
+          open={!!assistantContext}
+          onClose={() => setAssistantContext(null)}
+          context={assistantContext ?? undefined}
+        />
+      )}
     </div>
   );
 }

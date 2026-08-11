@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { AssistantTab } from "./AssistantTab";
 import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
+import * as skills from "../lib/skills";
 
 // This repo doesn't pull in @testing-library/jest-dom, so assert directly on
 // DOM presence (`getByText`/`queryByText` throws-or-null) instead of
@@ -10,6 +11,14 @@ import * as chatHistory from "../lib/chatHistory";
 
 vi.mock("../lib/chat");
 vi.mock("../lib/chatHistory");
+vi.mock("../lib/skills");
+// Stub the Skills panel down to a close affordance so a test can drive its
+// close callback without standing up the whole editor dialog.
+vi.mock("./SkillsPanel", () => ({
+  SkillsPanel: ({ onClose }: { onClose: () => void }) => (
+    <button onClick={onClose}>close-skills-panel</button>
+  ),
+}));
 vi.mock("../lib/mcpSecurity", () => ({
   respondToConfirm: vi.fn(),
 }));
@@ -34,6 +43,7 @@ beforeEach(() => {
   vi.mocked(chatHistory.loadSession).mockRejectedValue(new Error("not stubbed"));
   vi.mocked(chatHistory.saveSession).mockResolvedValue(undefined);
   vi.mocked(chatHistory.deleteSession).mockResolvedValue(undefined);
+  vi.mocked(skills.listSkills).mockResolvedValue([]);
 });
 
 describe("AssistantTab", () => {
@@ -131,5 +141,21 @@ describe("AssistantTab", () => {
 
     fireEvent.click(screen.getByLabelText(/expand history/i));
     expect(await screen.findByText("Old chat")).toBeTruthy();
+  });
+
+  it("reloads the slash-menu skills after the Skills panel closes", async () => {
+    render(<AssistantTab cluster={null} availableContexts={["a", "b"]} />);
+    // Let the initial mount/settle finish, then take the load count as baseline.
+    await screen.findByRole("button", { name: /^skills$/i });
+    const before = vi.mocked(skills.listSkills).mock.calls.length;
+
+    // Open the Skills panel from the rail, then close it — the panel may have
+    // created/renamed/deleted a skill, so the slash menu must reload.
+    fireEvent.click(screen.getByRole("button", { name: /^skills$/i }));
+    fireEvent.click(screen.getByText("close-skills-panel"));
+
+    await waitFor(() =>
+      expect(vi.mocked(skills.listSkills).mock.calls.length).toBeGreaterThan(before),
+    );
   });
 });

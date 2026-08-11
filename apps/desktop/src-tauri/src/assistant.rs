@@ -64,15 +64,43 @@ fn resolve_agent(bin: &str, paths: &srelens_kube::toolbox::SearchPaths) -> Optio
     which_on_path(bin, &paths.app_path).or_else(|| which_on_path(bin, &paths.system_path))
 }
 
+/// File names to probe for `bin` within a single PATH directory. On Unix a CLI
+/// is its bare name, but Windows resolves `claude` by appending each `PATHEXT`
+/// extension (`.EXE`, `.CMD`, …) — an installed `claude.cmd`/`claude.exe` is
+/// invisible if we only probe the extensionless path — so we return the bare
+/// name followed by one candidate per extension. Kept pure (PATHEXT passed in,
+/// `None` off Windows) so the extension logic is testable on any host. When the
+/// caller already named a concrete extension we don't append more.
+fn executable_candidates(bin: &str, pathext: Option<&str>) -> Vec<String> {
+    let mut names = vec![bin.to_string()];
+    if let Some(pathext) = pathext {
+        if std::path::Path::new(bin).extension().is_none() {
+            for ext in pathext.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+                // Each PATHEXT entry carries its own leading dot (".EXE").
+                names.push(format!("{bin}{ext}"));
+            }
+        }
+    }
+    names
+}
+
 /// First directory on `path` (a platform-delimited PATH string) that holds an
 /// executable `bin`, as an absolute path. Uses `std::env::split_paths` rather
 /// than splitting on `:` so a Windows `;`-delimited PATH with drive-letter
 /// colons (`C:\...;D:\...`) resolves correctly instead of shredding into
-/// invalid directories.
+/// invalid directories, and honors `PATHEXT` so a `.exe`/`.cmd` install is found.
 fn which_on_path(bin: &str, path: &str) -> Option<String> {
+    #[cfg(windows)]
+    let pathext =
+        Some(std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string()));
+    #[cfg(not(windows))]
+    let pathext: Option<String> = None;
+
     std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
-        let candidate = dir.join(bin);
-        candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+        executable_candidates(bin, pathext.as_deref()).into_iter().find_map(|name| {
+            let candidate = dir.join(&name);
+            candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+        })
     })
 }
 
@@ -566,6 +594,32 @@ mod tests {
         assert_eq!(parse_agent_kind("claude"), Ok(AgentKind::Claude));
         assert_eq!(parse_agent_kind("codex"), Ok(AgentKind::Codex));
         assert_eq!(parse_agent_kind("cursor"), Ok(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn off_windows_a_binary_is_probed_by_its_bare_name_only() {
+        assert_eq!(executable_candidates("claude", None), vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn on_windows_pathext_extensions_are_appended_to_the_bare_name() {
+        assert_eq!(
+            executable_candidates("cursor-agent", Some(".COM;.EXE;.CMD")),
+            vec![
+                "cursor-agent".to_string(),
+                "cursor-agent.COM".to_string(),
+                "cursor-agent.EXE".to_string(),
+                "cursor-agent.CMD".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_explicit_extension_is_not_doubled_up() {
+        // A bin that already names its extension resolves as-is.
+        assert_eq!(executable_candidates("claude.exe", Some(".EXE;.CMD")), vec![
+            "claude.exe".to_string()
+        ]);
     }
 
     #[cfg(unix)]
