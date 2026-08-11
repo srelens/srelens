@@ -20,7 +20,24 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
             .filter_map(block_to_event)
             .collect(),
         Some("user") => content_blocks(&v).iter().filter_map(tool_result).collect(),
-        Some("result") => vec![AgentEvent::TurnDone],
+        // A terminal `result` ends the turn. When it's a failure (auth/quota/
+        // max-turns/etc.) surface its message as an `Error` first — otherwise
+        // the turn ends with no visible reply, since the desktop's crash-path
+        // reporting stops as soon as it sees a `TurnDone`.
+        Some("result") => {
+            let is_error = v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+            if is_error {
+                let message = v
+                    .get("result")
+                    .and_then(|r| r.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("the agent ended the turn with an error")
+                    .to_string();
+                vec![AgentEvent::Error { message }, AgentEvent::TurnDone]
+            } else {
+                vec![AgentEvent::TurnDone]
+            }
+        }
         _ => Vec::new(),
     }
 }
@@ -157,6 +174,27 @@ mod tests {
     #[test]
     fn a_result_line_ends_the_turn() {
         assert_eq!(parse_line(r#"{"type":"result","subtype":"success"}"#), vec![AgentEvent::TurnDone]);
+    }
+
+    #[test]
+    fn a_failed_result_surfaces_its_error_before_ending_the_turn() {
+        let out = parse_line(
+            r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Credit balance too low"}"#,
+        );
+        assert_eq!(
+            out,
+            vec![
+                AgentEvent::Error { message: "Credit balance too low".into() },
+                AgentEvent::TurnDone,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_result_with_no_text_still_reports_an_error() {
+        let out = parse_line(r#"{"type":"result","is_error":true}"#);
+        assert!(matches!(out.first(), Some(AgentEvent::Error { .. })));
+        assert_eq!(out.last(), Some(&AgentEvent::TurnDone));
     }
 
     #[test]

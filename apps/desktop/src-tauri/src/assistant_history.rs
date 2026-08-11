@@ -62,8 +62,26 @@ fn index_path(dir: &Path) -> PathBuf {
     dir.join("index.json")
 }
 
-fn session_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.json"))
+/// Reject a session id that isn't a bare `[A-Za-z0-9._-]+` filename component,
+/// so an id arriving over IPC (or read back from a crafted `index.json` entry)
+/// can never resolve outside the sessions directory via `/`, `\`, or an
+/// absolute path — the same guard `assistant_skills::validate_name` gives
+/// skill names. Real ids are `startChat`-minted uuids, which pass.
+fn validate_id(id: &str) -> Result<(), String> {
+    let ok = !id.is_empty()
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid session id {id:?}: must match ^[A-Za-z0-9._-]+$ (no `/`, `\\`, or other separators)"
+        ))
+    }
+}
+
+fn session_path(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    validate_id(id)?;
+    Ok(dir.join(format!("{id}.json")))
 }
 
 /// Read `index.json`, treating a missing file as an empty index — the state
@@ -103,8 +121,8 @@ fn upsert_index(dir: &Path, meta: &SessionMeta) -> Result<(), String> {
 /// Write `<id>.json.tmp` then rename onto `<id>.json` — a crash mid-write (or
 /// a concurrent read) never observes a half-written session file.
 fn write_session_atomic(dir: &Path, session: &Session) -> Result<(), String> {
+    let path = session_path(dir, &session.id)?;
     fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let path = session_path(dir, &session.id);
     let tmp = dir.join(format!("{}.json.tmp", session.id));
     let raw = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
     fs::write(&tmp, raw).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
@@ -114,7 +132,7 @@ fn write_session_atomic(dir: &Path, session: &Session) -> Result<(), String> {
 /// Read one session's full file back off disk. A missing file (unknown id)
 /// is reported as a clear, id-carrying `Err` rather than a raw IO message.
 fn read_session(dir: &Path, id: &str) -> Result<Session, String> {
-    let path = session_path(dir, id);
+    let path = session_path(dir, id)?;
     let raw = fs::read_to_string(&path).map_err(|_| format!("no chat session found for id {id:?}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("corrupt session {}: {e}", path.display()))
 }
@@ -122,7 +140,7 @@ fn read_session(dir: &Path, id: &str) -> Result<Session, String> {
 /// Remove a session's file and its `index.json` entry. Removing an id that
 /// has no file is not an error — deleting is idempotent.
 fn delete_session(dir: &Path, id: &str) -> Result<(), String> {
-    let path = session_path(dir, id);
+    let path = session_path(dir, id)?;
     if let Err(e) = fs::remove_file(&path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("could not delete {}: {e}", path.display()));
@@ -325,7 +343,7 @@ mod tests {
 
         delete_session(&dir, "gone").unwrap();
 
-        assert!(!session_path(&dir, "gone").exists(), "session file should be removed");
+        assert!(!session_path(&dir, "gone").unwrap().exists(), "session file should be removed");
         let remaining_ids: Vec<String> = read_index(&dir).unwrap().into_iter().map(|m| m.id).collect();
         assert_eq!(remaining_ids, vec!["stays"]);
     }
@@ -338,5 +356,26 @@ mod tests {
 
         let err = read_session(&dir, "does-not-exist").unwrap_err();
         assert!(err.contains("does-not-exist"), "error should name the missing id, got: {err}");
+    }
+
+    /// Security: a session id from IPC (or a crafted `index.json` entry) that
+    /// isn't a bare filename component must be rejected everywhere it becomes a
+    /// path, so it can never read/write/delete `.json` files outside the
+    /// sessions directory.
+    #[test]
+    fn a_session_id_with_traversal_or_separators_is_rejected_everywhere() {
+        let tmp = TempDir::new();
+        let dir = sessions_dir(tmp.path());
+        fs::create_dir_all(&dir).unwrap();
+
+        for bad in ["../evil", "a/b", "a\\b", "/etc/passwd", "../../secret", ""] {
+            assert!(read_session(&dir, bad).is_err(), "read({bad:?}) must be rejected");
+            assert!(delete_session(&dir, bad).is_err(), "delete({bad:?}) must be rejected");
+            let mut s = sample_session("valid", 1);
+            s.id = bad.to_string();
+            assert!(write_session_atomic(&dir, &s).is_err(), "save({bad:?}) must be rejected");
+        }
+        // A normal uuid-shaped id is accepted.
+        assert!(session_path(&dir, "0b3e97f0-1234-4abc-9def-000000000000").is_ok());
     }
 }

@@ -692,6 +692,11 @@ export const AssistantConversation = forwardRef<
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  // Mirrors `agents` so the imperative-handle callbacks (which are captured
+  // once, with an empty dep array) read the current list rather than the empty
+  // one from first render — otherwise a session reopened from the full-tab
+  // rail never restores its saved `agentKind`.
+  const agentsRef = useRef<AgentInfo[]>([]);
   const [selectedKind, setSelectedKind] = useState("");
   const [attachedContext, setAttachedContext] = useState<AssistantContext | undefined>(context);
   // Multi-context mode only (`availableContexts` provided) — the kube
@@ -810,6 +815,7 @@ export const AssistantConversation = forwardRef<
     listAgents()
       .then((list) => {
         setAgents(list);
+        agentsRef.current = list;
         // Prefer the last-used agent (if it's still installed and selectable),
         // otherwise the first available non-gated one.
         const stored = loadLastAgent();
@@ -819,6 +825,7 @@ export const AssistantConversation = forwardRef<
       })
       .catch(() => {
         setAgents([]);
+        agentsRef.current = [];
         setSelectedKind("");
       });
   }, []);
@@ -988,7 +995,10 @@ export const AssistantConversation = forwardRef<
       setActiveSkills(session.skills ?? []);
       // Restore the agent the conversation used, as long as it's still a known
       // agent (otherwise keep the current pick rather than blanking the picker).
-      if (session.agentKind && agents.some((a) => a.kind === session.agentKind)) {
+      // Read via the ref, not `agents` state: `onSelectSession` is captured in
+      // the imperative handle with an empty dep array, so the `agents` closure
+      // would be the empty first-render value.
+      if (session.agentKind && agentsRef.current.some((a) => a.kind === session.agentKind)) {
         setSelectedKind(session.agentKind);
       }
     } catch {

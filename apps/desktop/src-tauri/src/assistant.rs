@@ -64,11 +64,14 @@ fn resolve_agent(bin: &str, paths: &srelens_kube::toolbox::SearchPaths) -> Optio
     which_on_path(bin, &paths.app_path).or_else(|| which_on_path(bin, &paths.system_path))
 }
 
-/// First directory in `path` (a `:`-separated PATH string) that holds an
-/// executable `bin`, as an absolute path.
+/// First directory on `path` (a platform-delimited PATH string) that holds an
+/// executable `bin`, as an absolute path. Uses `std::env::split_paths` rather
+/// than splitting on `:` so a Windows `;`-delimited PATH with drive-letter
+/// colons (`C:\...;D:\...`) resolves correctly instead of shredding into
+/// invalid directories.
 fn which_on_path(bin: &str, path: &str) -> Option<String> {
-    path.split(':').filter(|d| !d.is_empty()).find_map(|dir| {
-        let candidate = std::path::Path::new(dir).join(bin);
+    std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
+        let candidate = dir.join(bin);
         candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
     })
 }
