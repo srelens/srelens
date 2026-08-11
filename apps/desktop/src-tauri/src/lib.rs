@@ -8,6 +8,8 @@ mod bridge;
 pub mod capabilities;
 mod cluster_oidc;
 mod cluster_oidc_cmd;
+mod llm_agent;
+mod llm_config;
 mod exec;
 mod files;
 mod forward;
@@ -382,6 +384,12 @@ pub fn run() {
             assistant::chat_start,
             assistant::chat_send,
             assistant::chat_cancel,
+            llm_agent::llm_get_settings,
+            llm_agent::llm_set_settings,
+            llm_agent::llm_set_key,
+            llm_agent::llm_clear_key,
+            llm_agent::llm_key_status,
+            llm_agent::llm_list_models,
             assistant_history::chat_history_list,
             assistant_history::chat_history_load,
             assistant_history::chat_history_save,

@@ -67,6 +67,35 @@ impl McpHttpManager {
         let running = self.running.lock().unwrap();
         running.as_ref().map(|r| url_for(r.addr))
     }
+
+    /// Build an `McpServer` wired with the same registry, consent policy, audit,
+    /// prompts, and resources the HTTP transport uses. Both the loopback HTTP
+    /// server (for the CLI agents) and the in-process native agent build their
+    /// server this way, so all agents get identical tools, the same
+    /// destructive-tool confirm dialog, and the same audit log — the native
+    /// agent just calls `handle_request` directly instead of over the wire.
+    pub fn build_server(
+        &self,
+        app: &tauri::AppHandle,
+        pending: &Arc<crate::mcp_confirm::Pending>,
+        audit_path: &std::path::Path,
+        prompts_dir: &std::path::Path,
+    ) -> srelens_mcp::McpServer {
+        let registry = build_registry_with(self.cache.clone());
+        srelens_mcp::McpServer::new(Arc::new(registry))
+            .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
+                app.clone(),
+                pending.clone(),
+                std::time::Duration::from_secs(60),
+            )))
+            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+                audit_path.to_path_buf(),
+                5 * 1024 * 1024,
+            )))
+            .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))
+            .with_resources(srelens_registry::kind_resolver())
+            .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(self.cache.clone())))
+    }
 }
 
 /// Proof that the caller holds `McpHttpManager::lifecycle`. Only exists to make
@@ -132,24 +161,7 @@ async fn start_server(
         .await
         .map_err(|e| format!("Could not bind {addr}: {e}"))?;
 
-    let registry = build_registry_with(manager.cache.clone());
-    let server = srelens_mcp::McpServer::new(Arc::new(registry))
-        .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
-            app.clone(),
-            pending.clone(),
-            std::time::Duration::from_secs(60),
-        )))
-        .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-            audit_path.to_path_buf(),
-            5 * 1024 * 1024,
-        )))
-        .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
-            prompts_dir.to_path_buf(),
-        )))
-        .with_resources(srelens_registry::kind_resolver())
-        .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(
-            manager.cache.clone(),
-        )));
+    let server = manager.build_server(app, pending, audit_path, prompts_dir);
     let running_token = token.clone();
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {

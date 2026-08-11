@@ -4,23 +4,27 @@
 
 use serde::Serialize;
 
-/// Which agent CLI. Only Claude ships in v1; the others are placeholders so
-/// the picker and detection can already enumerate them.
+/// Which agent backs a turn. The first three shell out to their vendor CLIs;
+/// `Srelens` is srelens's own in-process agent, which talks directly to a
+/// provider API with the user's key and needs no external binary at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
+    Srelens,
 }
 
 impl AgentKind {
-    /// The binary name to look for on PATH.
-    pub fn binary(self) -> &'static str {
+    /// The binary name to look for on PATH, or `None` for the native agent
+    /// (`Srelens`), which runs in-process and resolves no executable.
+    pub fn binary(self) -> Option<&'static str> {
         match self {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-            AgentKind::Cursor => "cursor-agent",
+            AgentKind::Claude => Some("claude"),
+            AgentKind::Codex => Some("codex"),
+            AgentKind::Cursor => Some("cursor-agent"),
+            AgentKind::Srelens => None,
         }
     }
 
@@ -29,6 +33,8 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::Codex => "Codex",
             AgentKind::Cursor => "Cursor",
+            // Lowercase brand, deliberately.
+            AgentKind::Srelens => "srelens",
         }
     }
 }

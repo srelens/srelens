@@ -5689,6 +5689,7 @@ dependencies = [
  "srelens-agent",
  "srelens-capability",
  "srelens-kube",
+ "srelens-llm",
  "srelens-mcp",
  "srelens-registry",
  "srelens-server",
@@ -5725,6 +5726,20 @@ dependencies = [
  "srelens-capability",
  "tar",
  "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "srelens-llm"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "srelens-agent",
  "thiserror 1.0.69",
  "tokio",
 ]

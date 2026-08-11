@@ -16,6 +16,8 @@ fn install_url(kind: AgentKind) -> &'static str {
         AgentKind::Claude => CLAUDE_INSTALL,
         AgentKind::Codex => CODEX_INSTALL,
         AgentKind::Cursor => CURSOR_INSTALL,
+        // The native agent installs nothing — it needs an API key, not a CLI.
+        AgentKind::Srelens => "",
     }
 }
 
@@ -30,7 +32,8 @@ fn is_gated(_kind: AgentKind) -> bool {
 /// Build an `AgentInfo`, resolving availability through the injected `resolve`
 /// (real code passes a PATH lookup; tests pass a stub).
 fn detect(kind: AgentKind, resolve: impl Fn(&str) -> Option<String>) -> AgentInfo {
-    let path = resolve(kind.binary());
+    // The native agent has no binary to resolve; CLI kinds look theirs up.
+    let path = kind.binary().and_then(&resolve);
     AgentInfo {
         kind,
         label: kind.label().to_string(),
@@ -42,16 +45,40 @@ fn detect(kind: AgentKind, resolve: impl Fn(&str) -> Option<String>) -> AgentInf
     }
 }
 
-/// Enumerate every known agent CLI with its availability, for the picker.
+/// Enumerate every agent with its availability, for the picker: the three CLIs
+/// (resolved on PATH) plus srelens's native agent (always listed, "available"
+/// once a key is configured for the default provider).
 #[tauri::command]
-pub async fn agent_list() -> Result<Vec<AgentInfo>, String> {
+pub async fn agent_list(app: tauri::AppHandle) -> Result<Vec<AgentInfo>, String> {
     let paths = srelens_kube::toolbox::SearchPaths::from_env();
     let resolve = |bin: &str| resolve_agent(bin, &paths);
     Ok(vec![
+        native_agent_info(&app),
         detect(AgentKind::Claude, resolve),
         detect(AgentKind::Codex, resolve),
         detect(AgentKind::Cursor, resolve),
     ])
+}
+
+/// The native agent's picker entry. It resolves no binary; it's "available"
+/// once the default provider has an API key, otherwise it's shown but not
+/// selectable (the composer points the user to Settings → Assistant).
+fn native_agent_info(app: &tauri::AppHandle) -> AgentInfo {
+    let available = crate::llm_agent::llm_dir(app)
+        .map(|dir| {
+            let settings = crate::llm_config::load_settings(&dir.join("settings.json"));
+            crate::llm_config::has_key(&dir, settings.default_provider)
+        })
+        .unwrap_or(false);
+    AgentInfo {
+        kind: AgentKind::Srelens,
+        label: AgentKind::Srelens.label().to_string(),
+        available,
+        path: None,
+        version: None,
+        install_url: String::new(),
+        gated: false,
+    }
 }
 
 /// Locate an agent binary across both search paths: the app's own PATH first
@@ -224,6 +251,23 @@ fn decode_base64_image(data: &str) -> Result<Vec<u8>, base64::DecodeError> {
 #[derive(Default)]
 pub struct ChatManager {
     children: std::sync::Mutex<std::collections::HashMap<String, tokio::process::Child>>,
+    /// The native (in-process) agent has no child process to kill; instead its
+    /// turn runs as a task whose `AbortHandle` is parked here so `chat_cancel`
+    /// can stop it the same way it kills a CLI child.
+    natives: std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+}
+
+impl ChatManager {
+    /// Park a native turn's task handle so `chat_cancel` can abort it.
+    pub fn register_native(&self, session: String, handle: tokio::task::AbortHandle) {
+        self.natives.lock().unwrap().insert(session, handle);
+    }
+
+    /// Drop a finished native turn's handle (a no-op if `chat_cancel` already
+    /// took it).
+    pub fn unregister_native(&self, session: &str) {
+        self.natives.lock().unwrap().remove(session);
+    }
 }
 
 /// Begin a conversation. Returns a fresh session id; the WebView subscribes to
@@ -325,6 +369,15 @@ pub async fn chat_send(
         || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Err(format!("invalid session id {session:?}"));
+    }
+
+    // The native agent takes an entirely different path from the CLI spawns
+    // below: no process, no PATH binary, no loopback HTTP. It runs the loop
+    // in-process against a provider API and drives MCP tools directly through
+    // the same consent/audit server the CLIs reach over HTTP. Handle it here so
+    // the CLI machinery below only ever sees the three CLI kinds.
+    if matches!(kind, AgentKind::Srelens) {
+        return crate::llm_agent::run_native_agent(app, &chats, session, prompt).await;
     }
 
     let token = mcp
@@ -480,12 +533,15 @@ pub async fn chat_send(
                 None,
             )
         }
+        // Handled by the early return above, before any CLI machinery.
+        AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
     };
 
     let parse_line: fn(&str) -> Vec<AgentEvent> = match kind {
         AgentKind::Claude => srelens_agent::claude::parse_line,
         AgentKind::Codex => srelens_agent::codex::parse_line,
         AgentKind::Cursor => srelens_agent::cursor::parse_line,
+        AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
     };
 
     let mut child = tokio::process::Command::new(&cmd.program)
@@ -576,6 +632,10 @@ pub async fn chat_send(
 pub async fn chat_cancel(session: String, chats: tauri::State<'_, ChatManager>) -> Result<(), String> {
     if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
         let _ = child.start_kill();
+    }
+    // The native agent's turn is a task, not a child process.
+    if let Some(handle) = chats.natives.lock().unwrap().remove(&session) {
+        handle.abort();
     }
     Ok(())
 }

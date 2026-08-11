@@ -1,0 +1,254 @@
+//! The native (in-process) agent turn. Builds a provider client from the stored
+//! config and drives srelens's MCP tools through the SAME consent/audit server
+//! the CLI agents reach over HTTP — but called directly in-process via
+//! `handle_request`, so read-only tools auto-run and destructive ones raise the
+//! identical confirm dialog and land in the same audit log.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use srelens_agent::event::AgentEvent;
+use srelens_llm::types::ToolDef;
+use srelens_llm::{LlmError, ToolCallResult, ToolInvoker};
+use srelens_mcp::McpServer;
+use srelens_streams::sink::EventSink;
+use tauri::Manager;
+
+use crate::assistant::ChatManager;
+
+/// A `ToolInvoker` backed by an in-process `McpServer`. Each call is a JSON-RPC
+/// request handed to `handle_request`, which applies the consent policy and
+/// audit before touching the registry.
+pub struct McpToolInvoker {
+    server: Arc<McpServer>,
+}
+
+#[async_trait]
+impl ToolInvoker for McpToolInvoker {
+    async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
+            .await
+            .ok_or_else(|| LlmError::Api("tools/list returned no response".into()))?;
+        let tools = resp
+            .get("result")
+            .and_then(|r| r.get("tools"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(tools.iter().map(tool_def_from_json).collect())
+    }
+
+    async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolCallResult, LlmError> {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args },
+        });
+        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
+            .await
+            .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
+        // A JSON-RPC error (unknown tool / bad params) is fed back as a failed
+        // result so the model can correct itself rather than aborting the turn.
+        if let Some(err) = resp.get("error") {
+            let msg = err.get("message").and_then(Value::as_str).unwrap_or("tool call failed");
+            return Ok(ToolCallResult { content: msg.to_string(), is_error: true, denied: false });
+        }
+        let result = resp.get("result");
+        let is_error = result.and_then(|r| r.get("isError")).and_then(Value::as_bool).unwrap_or(false);
+        // MCP results carry `content: [{type:"text", text}]`; concatenate the
+        // text parts (a denied destructive call comes back here as isError:true
+        // with the reason text, which we feed straight to the model).
+        let content = result
+            .and_then(|r| r.get("content"))
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        Ok(ToolCallResult { content, is_error, denied: false })
+    }
+}
+
+fn tool_def_from_json(v: &Value) -> ToolDef {
+    ToolDef {
+        name: v.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+        description: v.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+        input_schema: v.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object" })),
+        read_only: v
+            .get("annotations")
+            .and_then(|a| a.get("readOnlyHint"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+/// The directory holding the native agent's config (settings + fallback keys).
+pub fn llm_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("llm"))
+}
+
+/// Run one native-agent turn end to end, streaming `AgentEvent`s on the
+/// session's `chat://` channel. The loop runs as a task whose `AbortHandle` is
+/// parked in `ChatManager`, so `chat_cancel` stops it just like a CLI child.
+pub async fn run_native_agent(
+    app: tauri::AppHandle,
+    chats: &ChatManager,
+    session: String,
+    prompt: String,
+) -> Result<(), String> {
+    let channel = format!("chat://{session}");
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
+    let emit = |ev: AgentEvent| sink.emit(&channel, serde_json::to_value(&ev).unwrap());
+
+    // Resolve the provider config (default provider + its key/model) up front;
+    // a missing key or model ends the turn with a clear, actionable message.
+    let dir = match llm_dir(&app) {
+        Ok(d) => d,
+        Err(e) => {
+            emit(AgentEvent::Error { message: e });
+            emit(AgentEvent::TurnDone);
+            return Ok(());
+        }
+    };
+    let settings = crate::llm_config::load_settings(&dir.join("settings.json"));
+    let cfg = match crate::llm_config::provider_config(&dir, &settings, settings.default_provider) {
+        Some(c) if !c.model.is_empty() => c,
+        Some(_) => {
+            emit(AgentEvent::Error {
+                message: "Choose a model for the srelens agent in Settings → Assistant.".into(),
+            });
+            emit(AgentEvent::TurnDone);
+            return Ok(());
+        }
+        None => {
+            emit(AgentEvent::Error {
+                message: "Add an API key for the srelens agent in Settings → Assistant.".into(),
+            });
+            emit(AgentEvent::TurnDone);
+            return Ok(());
+        }
+    };
+
+    // Build the in-process MCP server (identical consent/audit to the CLIs).
+    let pending = app.state::<Arc<crate::mcp_confirm::Pending>>();
+    let audit = app.state::<crate::mcp::McpAuditPath>();
+    let prompts = app.state::<crate::mcp::McpPromptsDir>();
+    let mcp = app.state::<crate::mcp::McpHttpManager>();
+    let server = Arc::new(mcp.build_server(&app, pending.inner(), &audit.0, &prompts.0));
+    let invoker = McpToolInvoker { server };
+    let provider = srelens_llm::HttpProvider::new(cfg);
+
+    // Run the loop as a task so `chat_cancel` can abort it. `run` already emits
+    // a `TurnDone` on every non-cancelled path; on cancellation the task is
+    // dropped mid-flight, so we emit the closing `TurnDone` ourselves below.
+    let task_sink = sink.clone();
+    let task_channel = channel.clone();
+    let handle = tokio::spawn(async move {
+        let mut on_event =
+            |ev: AgentEvent| task_sink.emit(&task_channel, serde_json::to_value(&ev).unwrap());
+        let _ = srelens_llm::agent_loop::run(&provider, &invoker, Vec::new(), prompt, &mut on_event).await;
+    });
+
+    chats.register_native(session.clone(), handle.abort_handle());
+    let joined = handle.await;
+    chats.unregister_native(&session);
+
+    // A cancelled (aborted) task never reached `run`'s own `TurnDone`; re-enable
+    // the composer so the drawer doesn't hang.
+    if joined.is_err() {
+        emit(AgentEvent::TurnDone);
+    }
+    Ok(())
+}
+
+// ---- Tauri commands backing the Settings → Assistant section ----
+
+use srelens_llm::types::{ModelInfo, ProviderKind};
+use srelens_llm::Provider;
+
+use crate::llm_config::LlmSettings;
+
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(llm_dir(app)?.join("settings.json"))
+}
+
+/// The native agent's non-secret settings (default provider, chosen models,
+/// custom base URLs). Keys are never returned here — see `llm_key_status`.
+#[tauri::command]
+pub async fn llm_get_settings(app: tauri::AppHandle) -> Result<LlmSettings, String> {
+    Ok(crate::llm_config::load_settings(&settings_path(&app)?))
+}
+
+#[tauri::command]
+pub async fn llm_set_settings(app: tauri::AppHandle, settings: LlmSettings) -> Result<(), String> {
+    crate::llm_config::save_settings(&settings_path(&app)?, &settings)
+}
+
+/// Store an API key for `provider` in the keychain (0600-file fallback).
+#[tauri::command]
+pub async fn llm_set_key(app: tauri::AppHandle, provider: ProviderKind, key: String) -> Result<(), String> {
+    crate::llm_config::set_key(&llm_dir(&app)?, provider, key.trim())
+}
+
+#[tauri::command]
+pub async fn llm_clear_key(app: tauri::AppHandle, provider: ProviderKind) -> Result<(), String> {
+    crate::llm_config::clear_key(&llm_dir(&app)?, provider)
+}
+
+/// Which providers currently have a key configured — so Settings can show a
+/// "key set" state without ever returning the secret itself.
+#[tauri::command]
+pub async fn llm_key_status(app: tauri::AppHandle) -> Result<Vec<ProviderKind>, String> {
+    let dir = llm_dir(&app)?;
+    Ok(crate::llm_config::all_providers()
+        .into_iter()
+        .filter(|k| crate::llm_config::has_key(&dir, *k))
+        .collect())
+}
+
+/// Fetch the model list for a provider from its API, using the stored key and
+/// (for the custom provider) base URL. Backs the model dropdown in Settings.
+#[tauri::command]
+pub async fn llm_list_models(app: tauri::AppHandle, provider: ProviderKind) -> Result<Vec<ModelInfo>, String> {
+    let dir = llm_dir(&app)?;
+    let settings = crate::llm_config::load_settings(&settings_path(&app)?);
+    let cfg = crate::llm_config::provider_config(&dir, &settings, provider)
+        .ok_or("Add an API key for this provider first.")?;
+    srelens_llm::HttpProvider::new(cfg).list_models().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_defs_come_from_the_mcp_tools_list_shape_with_the_read_only_hint() {
+        let v = json!({
+            "name": "k8s_listPods",
+            "description": "list pods",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true, "destructiveHint": false }
+        });
+        let t = tool_def_from_json(&v);
+        assert_eq!(t.name, "k8s_listPods");
+        assert_eq!(t.description, "list pods");
+        assert!(t.read_only);
+        assert_eq!(t.input_schema["type"], "object");
+    }
+
+    #[test]
+    fn a_tool_without_a_read_only_hint_defaults_to_destructive_side() {
+        let v = json!({ "name": "k8s_deletePod", "description": "delete" });
+        let t = tool_def_from_json(&v);
+        assert!(!t.read_only);
+        // Missing inputSchema is coerced to an empty object schema.
+        assert_eq!(t.input_schema["type"], "object");
+    }
+}
