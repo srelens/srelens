@@ -17,6 +17,46 @@ use tauri::Manager;
 
 use crate::assistant::ChatManager;
 
+/// How many conversation turns to keep per session before trimming the oldest.
+/// Bounds both memory and the tokens re-sent on every follow-up.
+const MAX_HISTORY_TURNS: usize = 40;
+
+/// In-memory native-agent conversation history, keyed by chat session id, so
+/// follow-up messages in the same session carry the earlier exchange as context
+/// (the CLIs are stateless per turn; the native agent runs in-process, so it
+/// can hold this). Not persisted: reopening a saved session starts a fresh
+/// native context. A "New chat" mints a new session id, so its history is empty.
+#[derive(Default)]
+pub struct NativeHistory(std::sync::Mutex<std::collections::HashMap<String, Vec<srelens_llm::types::Turn>>>);
+
+impl NativeHistory {
+    fn get(&self, session: &str) -> Vec<srelens_llm::types::Turn> {
+        self.0.lock().unwrap().get(session).cloned().unwrap_or_default()
+    }
+
+    fn set(&self, session: String, turns: Vec<srelens_llm::types::Turn>) {
+        self.0.lock().unwrap().insert(session, turns);
+    }
+}
+
+/// Trim a conversation to at most `max` turns, dropping the oldest. A
+/// conversation must begin on a user turn (an assistant or tool-result turn with
+/// no preceding user message is invalid for every provider), so after removing
+/// the oldest turn we keep dropping any leading non-user turns.
+fn trim_history(
+    mut turns: Vec<srelens_llm::types::Turn>,
+    max: usize,
+) -> Vec<srelens_llm::types::Turn> {
+    use srelens_llm::types::Turn;
+    while turns.len() > max {
+        turns.remove(0);
+        while turns.first().is_some_and(|t| !matches!(t, Turn::User(_))) {
+            turns.remove(0);
+        }
+    }
+    turns
+}
+
 /// A `ToolInvoker` backed by an in-process `McpServer`. Each call is a JSON-RPC
 /// request handed to `handle_request`, which applies the consent policy and
 /// audit before touching the registry.
@@ -145,25 +185,38 @@ pub async fn run_native_agent(
     let invoker = McpToolInvoker { server };
     let provider = srelens_llm::HttpProvider::new(cfg);
 
-    // Run the loop as a task so `chat_cancel` can abort it. `run` already emits
-    // a `TurnDone` on every non-cancelled path; on cancellation the task is
-    // dropped mid-flight, so we emit the closing `TurnDone` ourselves below.
+    // Seed the turn with this session's prior conversation so follow-ups have
+    // context. `run` returns the conversation to continue from next time.
+    let history_state = app.state::<NativeHistory>();
+    let prior = history_state.get(&session);
+
+    // Run the loop as a task so `chat_cancel` can abort it. `run` emits a
+    // `TurnDone` on every non-cancelled path; on cancellation the task is dropped
+    // mid-flight, so we emit the closing `TurnDone` ourselves below.
     let task_sink = sink.clone();
     let task_channel = channel.clone();
     let handle = tokio::spawn(async move {
         let mut on_event =
             |ev: AgentEvent| task_sink.emit(&task_channel, serde_json::to_value(&ev).unwrap());
-        let _ = srelens_llm::agent_loop::run(&provider, &invoker, Vec::new(), prompt, &mut on_event).await;
+        srelens_llm::agent_loop::run(&provider, &invoker, prior, prompt, &mut on_event).await
     });
 
     chats.register_native(session.clone(), handle.abort_handle());
     let joined = handle.await;
     chats.unregister_native(&session);
 
-    // A cancelled (aborted) task never reached `run`'s own `TurnDone`; re-enable
-    // the composer so the drawer doesn't hang.
-    if joined.is_err() {
-        emit(AgentEvent::TurnDone);
+    match joined {
+        // Normal/handled finish: persist the continued conversation (trimmed).
+        Ok(Ok(updated)) => history_state.set(session, trim_history(updated, MAX_HISTORY_TURNS)),
+        // Setup failure (e.g. tools couldn't be listed) — `run` emitted nothing,
+        // so surface it here and keep the prior history untouched.
+        Ok(Err(e)) => {
+            emit(AgentEvent::Error { message: e.to_string() });
+            emit(AgentEvent::TurnDone);
+        }
+        // Cancelled (aborted) mid-flight: re-enable the composer; history for the
+        // discarded turn is left as it was.
+        Err(_) => emit(AgentEvent::TurnDone),
     }
     Ok(())
 }
@@ -250,5 +303,44 @@ mod tests {
         assert!(!t.read_only);
         // Missing inputSchema is coerced to an empty object schema.
         assert_eq!(t.input_schema["type"], "object");
+    }
+
+    #[test]
+    fn native_history_round_trips_per_session_and_defaults_to_empty() {
+        use srelens_llm::types::Turn;
+        let h = NativeHistory::default();
+        assert!(h.get("s1").is_empty());
+        h.set("s1".into(), vec![Turn::User("hi".into())]);
+        assert_eq!(h.get("s1"), vec![Turn::User("hi".into())]);
+        // Sessions are isolated.
+        assert!(h.get("s2").is_empty());
+    }
+
+    #[test]
+    fn trimming_keeps_the_newest_turns_and_starts_on_a_user_turn() {
+        use srelens_llm::types::Turn;
+        let a = |t: &str| Turn::Assistant { text: t.into(), tool_calls: Vec::new() };
+        let turns = vec![
+            Turn::User("q1".into()),
+            a("a1"),
+            Turn::User("q2".into()),
+            a("a2"),
+            Turn::User("q3".into()),
+            a("a3"),
+        ];
+        // Cap at 3: dropping the oldest would leave [a1, q2, a2, ...]; the
+        // leading assistant turn is invalid, so it's dropped too — the result
+        // begins on a user turn and is within the cap.
+        let trimmed = trim_history(turns, 3);
+        assert!(trimmed.len() <= 3);
+        assert!(matches!(trimmed.first(), Some(Turn::User(_))));
+        assert_eq!(trimmed.last(), Some(&a("a3")));
+    }
+
+    #[test]
+    fn trimming_a_short_history_is_a_no_op() {
+        use srelens_llm::types::Turn;
+        let turns = vec![Turn::User("q".into())];
+        assert_eq!(trim_history(turns.clone(), 40), turns);
     }
 }

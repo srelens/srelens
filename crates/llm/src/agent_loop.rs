@@ -18,15 +18,23 @@ const MAX_ROUNDS: usize = 24;
 /// `Err` only for a setup failure (e.g. tools couldn't be listed); provider and
 /// tool errors are surfaced as `AgentEvent::Error` and end the turn cleanly, so
 /// the caller always sees a `TurnDone`.
+///
+/// Returns the conversation to continue from on the NEXT user turn. On a normal
+/// finish that's `history` + this turn's user message, any tool exchanges, and
+/// the assistant's final reply — always ending on an assistant turn, so it's a
+/// valid base for the next message. On a provider error or the round-cap
+/// backstop the failed turn is discarded and the untouched `history` is returned
+/// (never a dangling user/tool-result turn that would make the next request
+/// invalid).
 pub async fn run(
     provider: &dyn Provider,
     invoker: &dyn ToolInvoker,
     history: Vec<Turn>,
     prompt: String,
     on_event: &mut (dyn FnMut(AgentEvent) + Send),
-) -> Result<(), LlmError> {
+) -> Result<Vec<Turn>, LlmError> {
     let tools = invoker.list_tools().await?;
-    let mut turns = history;
+    let mut turns = history.clone();
     turns.push(Turn::User(prompt));
 
     for _ in 0..MAX_ROUNDS {
@@ -51,13 +59,16 @@ pub async fn run(
         if let Some(message) = stream_error {
             on_event(AgentEvent::Error { message });
             on_event(AgentEvent::TurnDone);
-            return Ok(());
+            // Discard the failed turn: continue next time from the prior history.
+            return Ok(history);
         }
 
         // No tool calls → the model gave its final reply; the turn is done.
         if calls.is_empty() {
+            // Record the reply so a follow-up message sees it in context.
+            turns.push(Turn::Assistant { text, tool_calls: Vec::new() });
             on_event(AgentEvent::TurnDone);
-            return Ok(());
+            return Ok(turns);
         }
 
         // Record what the model said and requested, then run each call.
@@ -79,7 +90,8 @@ pub async fn run(
         message: "the assistant kept calling tools without finishing; stopping this turn.".into(),
     });
     on_event(AgentEvent::TurnDone);
-    Ok(())
+    // The runaway turn ended mid-exchange; drop it so the next request is valid.
+    Ok(history)
 }
 
 /// Run one tool call, emit its `ToolResult`, and return the outcome to feed
@@ -188,14 +200,82 @@ mod tests {
     }
 
     fn drive(provider: &dyn Provider, invoker: &dyn ToolInvoker, prompt: &str) -> Vec<AgentEvent> {
+        drive_from(provider, invoker, Vec::new(), prompt).0
+    }
+
+    /// Like `drive`, but seeds prior `history` and also returns the conversation
+    /// `run` hands back for the next turn.
+    fn drive_from(
+        provider: &dyn Provider,
+        invoker: &dyn ToolInvoker,
+        history: Vec<Turn>,
+        prompt: &str,
+    ) -> (Vec<AgentEvent>, Vec<Turn>) {
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
         let mut on_event = move |e: AgentEvent| sink.lock().unwrap().push(e);
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        rt.block_on(run(provider, invoker, Vec::new(), prompt.to_string(), &mut on_event)).unwrap();
+        let out = rt.block_on(run(provider, invoker, history, prompt.to_string(), &mut on_event)).unwrap();
         drop(on_event);
         let collected = events.lock().unwrap().clone();
-        collected
+        (collected, out)
+    }
+
+    #[test]
+    fn the_returned_conversation_records_the_user_prompt_and_final_reply() {
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamItem::Text("all healthy".into()),
+            StreamItem::Done(StopReason::EndTurn),
+        ]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            calls: Mutex::new(Vec::new()),
+        };
+        let (_events, history) = drive_from(&provider, &invoker, Vec::new(), "status?");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0], Turn::User("status?".into()));
+        assert_eq!(history[1], Turn::Assistant { text: "all healthy".into(), tool_calls: Vec::new() });
+    }
+
+    #[test]
+    fn a_follow_up_turn_carries_prior_history_into_the_provider_request() {
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamItem::Text("still healthy".into()),
+            StreamItem::Done(StopReason::EndTurn),
+        ]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            calls: Mutex::new(Vec::new()),
+        };
+        let prior = vec![
+            Turn::User("what pods are down?".into()),
+            Turn::Assistant { text: "web-0".into(), tool_calls: Vec::new() },
+        ];
+        let (_events, history) = drive_from(&provider, &invoker, prior.clone(), "and now?");
+        // The provider saw the full prior conversation plus the new prompt.
+        let seen = provider.seen_turns.lock().unwrap();
+        assert_eq!(seen[0].len(), 3);
+        assert_eq!(seen[0][0], prior[0]);
+        assert_eq!(seen[0][2], Turn::User("and now?".into()));
+        // And the returned history grows to include the new exchange.
+        assert_eq!(history.len(), 4);
+    }
+
+    #[test]
+    fn a_failed_turn_is_discarded_from_the_continued_history() {
+        let provider = ScriptedProvider::new(vec![vec![StreamItem::Error("Overloaded".into())]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            calls: Mutex::new(Vec::new()),
+        };
+        let prior = vec![
+            Turn::User("hi".into()),
+            Turn::Assistant { text: "hello".into(), tool_calls: Vec::new() },
+        ];
+        let (_events, history) = drive_from(&provider, &invoker, prior.clone(), "do a thing");
+        // The failed turn (its user message and any partial reply) is dropped,
+        // so the next request continues cleanly from the prior history.
+        assert_eq!(history, prior);
     }
 
     #[test]

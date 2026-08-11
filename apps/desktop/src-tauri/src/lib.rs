@@ -376,6 +376,7 @@ pub fn run() {
         .manage(ForwardManager::new(cache.clone()))
         .manage(McpHttpManager::new(cache.clone()))
         .manage(assistant::ChatManager::default())
+        .manage(llm_agent::NativeHistory::default())
         .manage(LogStreamManager::new(cache))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
