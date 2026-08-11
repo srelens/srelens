@@ -10,8 +10,13 @@ export type AgentEvent =
   | { type: "turnDone" }
   | { type: "error"; message: string };
 
+/** Agent kinds: the three vendor CLIs plus srelens's own native in-process
+ * agent (`srelens`), which talks directly to a provider API with the user's
+ * key and needs no installed binary. */
+export type AgentKind = "claude" | "codex" | "cursor" | "srelens";
+
 export interface AgentInfo {
-  kind: "claude" | "codex" | "cursor";
+  kind: AgentKind;
   label: string;
   available: boolean;
   path: string | null;

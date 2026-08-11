@@ -21,6 +21,7 @@ import {
   GripVertical,
   ClipboardPaste,
   Plug,
+  Bot,
   ScrollText,
   Trash2,
 } from "lucide-react";
@@ -62,6 +63,7 @@ import {
 import { updateRequestTimeout } from "../lib/requestTimeout";
 import { ContextAvatar, CONTEXT_LOGO_OPTIONS } from "./ContextAvatar";
 import { McpSettingsSection } from "./McpSettingsSection";
+import { AssistantSettingsSection } from "./AssistantSettingsSection";
 import { AppLogView } from "./AppLogView";
 import { pickKubeconfigFiles, savePastedKubeconfig } from "../lib/files";
 import { checkForUpdate, installUpdate, type UpdateMeta } from "../lib/updater";
@@ -78,7 +80,15 @@ const MODE_OPTIONS: Array<{ mode: ThemeMode; label: string; description: string;
   { mode: "system", label: "System", description: "Follow the OS appearance", icon: Monitor },
 ];
 
-export type SettingsSection = "appearance" | "layout" | "kubernetes" | "contexts" | "mcp" | "logs" | "updates";
+export type SettingsSection =
+  | "appearance"
+  | "layout"
+  | "kubernetes"
+  | "contexts"
+  | "mcp"
+  | "assistant"
+  | "logs"
+  | "updates";
 
 type UpdatePhase =
   | { phase: "idle" }
@@ -105,6 +115,7 @@ const SETTINGS_SECTIONS: Array<{
   { id: "kubernetes", label: "Kubernetes", description: "Workspace defaults", icon: Network },
   { id: "contexts", label: "Contexts", description: "Names, logos and colors", icon: Boxes },
   { id: "mcp", label: "MCP", description: "Agent access and client config", icon: Plug },
+  { id: "assistant", label: "Assistant", description: "srelens agent API keys and model", icon: Bot },
   { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
@@ -154,7 +165,7 @@ export function SettingsView({
   // of leaving empty panes behind.
   const visibleSections = isTauri()
     ? SETTINGS_SECTIONS
-    : SETTINGS_SECTIONS.filter((s) => s.id !== "mcp" && s.id !== "updates");
+    : SETTINGS_SECTIONS.filter((s) => s.id !== "mcp" && s.id !== "assistant" && s.id !== "updates");
 
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [internalContexts, setInternalContexts] = useState<ClusterContext[] | null>(null);
@@ -903,6 +914,15 @@ export function SettingsView({
               description="Expose srelens to agents and MCP clients, and get ready-to-paste client config."
             >
               <McpSettingsSection />
+            </SectionPanel>
+          )}
+
+          {section === "assistant" && isTauri() && (
+            <SectionPanel
+              title="Assistant"
+              description="Configure srelens's own agent: an API key per provider, the default provider, and the model."
+            >
+              <AssistantSettingsSection />
             </SectionPanel>
           )}
 

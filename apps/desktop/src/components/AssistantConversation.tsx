@@ -546,7 +546,9 @@ function AgentPicker({
                 />
                 <span className="min-w-0 flex-1 truncate">{a.label}</span>
                 {!a.available ? (
-                  <span className="shrink-0 text-xs text-muted-foreground">not installed</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {a.kind === "srelens" ? "needs API key" : "not installed"}
+                  </span>
                 ) : a.gated ? (
                   <span className="shrink-0 text-xs text-muted-foreground">soon</span>
                 ) : null}
@@ -1359,16 +1361,18 @@ export const AssistantConversation = forwardRef<
             {selectedAgent
               ? selectedAgent.gated
                 ? `${selectedAgent.label} support is coming — use Claude for now.`
-                : selectedAgent.installUrl
-                  ? (
-                    <>
-                      {selectedAgent.label} isn&apos;t installed.{" "}
-                      <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
-                        {selectedAgent.installUrl}
-                      </a>
-                    </>
-                  )
-                  : `${selectedAgent.label} isn't installed.`
+                : selectedAgent.kind === "srelens"
+                  ? "Add an API key for the srelens agent in Settings → Assistant to use it."
+                  : selectedAgent.installUrl
+                    ? (
+                      <>
+                        {selectedAgent.label} isn&apos;t installed.{" "}
+                        <a href={selectedAgent.installUrl} target="_blank" rel="noreferrer" className="underline">
+                          {selectedAgent.installUrl}
+                        </a>
+                      </>
+                    )
+                    : `${selectedAgent.label} isn't installed.`
               : "No coding agent available. Install one to use the assistant."}
           </p>
         )}
