@@ -213,10 +213,19 @@ impl Vault {
     /// actually read the existing vault (a stale biometric item must not be
     /// accepted; the caller purges it on this error).
     pub(crate) fn unlock_with(&self, key: [u8; KEY_LEN], source: &'static str) -> Result<(), String> {
-        if let Ok(bytes) = std::fs::read(&self.path) {
-            if decrypt(&key, &bytes).is_none() {
-                return Err("the stored biometric key does not match this vault".into());
+        match std::fs::read(&self.path) {
+            Ok(bytes) => {
+                if decrypt(&key, &bytes).is_none() {
+                    return Err("this key does not match the vault".into());
+                }
             }
+            // No vault yet — nothing to verify against.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A transient read error must REFUSE the unlock: accepting an
+            // unverified key here would let the old password's success path
+            // clean up a staged transition whose metadata is the only way to
+            // derive the (already re-keyed) vault's key.
+            Err(e) => return Err(format!("the vault file could not be read ({e}); unlock refused")),
         }
         *self.key.write().unwrap() = Some(key);
         *self.key_source.write().unwrap() = source;
@@ -1326,6 +1335,40 @@ mod tests {
         // The re-keyed vault is untouched.
         let bytes = std::fs::read(dir.join("secrets.enc")).unwrap();
         assert_eq!(decrypt(&new_key, &bytes).unwrap().mcp_token.as_deref(), Some("dd".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unverifiable_unlock_is_refused_and_leaves_the_stage_intact() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("permunlock");
+        // A password change crashed after the re-key, before the promote:
+        // the stage is the only metadata deriving the vault's key.
+        let v = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        v.update(|s| s.mcp_token = Some("ef".repeat(32))).unwrap();
+        let (old_meta, old_key) = build_meta(&test_pw("pold")).unwrap();
+        let _ = old_key;
+        write_meta(&dir, &old_meta).unwrap();
+        let (new_meta, new_key) = build_meta(&test_pw("pnew")).unwrap();
+        write_meta_next(&dir, &new_meta).unwrap();
+        v.rekey_from_current(new_key, "password").unwrap();
+
+        // The vault is momentarily unreadable: the OLD password's verifier
+        // still passes, but the vault check can't run — the unlock must be
+        // REFUSED (not silently accepted) so its success path never deletes
+        // the live stage.
+        let vault_file = dir.join("secrets.enc");
+        std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let reopened = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        let err = unlock_with_master_password(&reopened, &dir, &test_pw("pold")).unwrap_err();
+        assert!(err.contains("could not be read"), "got: {err}");
+        assert!(meta_next_path(&dir).exists(), "the stage must survive the refusal");
+
+        // Access restored: the new password recovers via the stage.
+        std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        unlock_with_master_password(&reopened, &dir, &test_pw("pnew")).unwrap();
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("ef".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

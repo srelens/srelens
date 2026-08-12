@@ -96,10 +96,19 @@ pub async fn vault_setup_password(
     // setup can simply be retried.
     if keep_recovery {
         vault::store_recovery_password(&password)?;
+        // The marker IS the opt-in as far as every later flow is concerned —
+        // its write is part of the transaction, before anything irreversible:
+        // a failure here rolls the copy back and aborts with nothing changed,
+        // instead of stranding a stored copy no flow will ever consult.
+        if let Err(e) = std::fs::write(vault::recovery_marker_path(&dir), b"") {
+            vault::delete_recovery_password();
+            return Err(format!("could not record the recovery choice: {e}"));
+        }
     } else {
         // Opting out purges BOTH keychain accounts — a stale main or staged
         // copy from a prior install must not survive an explicit opt-out.
         vault::delete_recovery_password();
+        let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
     }
     // A stale staged copy (prior install, interrupted change) never belongs
     // to a fresh setup either way.
@@ -115,17 +124,11 @@ pub async fn vault_setup_password(
         let _ = std::fs::remove_file(vault::meta_next_path(&dir));
         if keep_recovery {
             vault::delete_recovery_password();
+            let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
         }
         return Err(e.to_string());
     }
     vault::promote_meta_next(&dir)?;
-    // Record the opt-in OUTSIDE the keychain, so keychain-less hosts still
-    // know whether later password changes have a copy to refresh.
-    if keep_recovery {
-        let _ = std::fs::write(vault::recovery_marker_path(&dir), b"");
-    } else {
-        let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
-    }
     // Retire the machine-key homes: the password is the key's origin now.
     vault::delete_master_key_from_keychain();
     let _ = std::fs::remove_file(dir.join("master.key"));
