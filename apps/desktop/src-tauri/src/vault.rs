@@ -404,6 +404,10 @@ fn write_meta_at(path: &Path, meta: &VaultMeta) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
+/// Direct meta write — production flows go through the staged
+/// `write_meta_next` + `promote_meta_next` transaction; tests use this to
+/// construct starting states.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write_meta(dir: &Path, meta: &VaultMeta) -> Result<(), String> {
     write_meta_at(&meta_path(dir), meta)
 }
@@ -521,6 +525,7 @@ pub(crate) fn unlock_key_for(meta: &VaultMeta, password: &str) -> Result<[u8; KE
 
 /// Whether `key` is the one this vault's password derives — validates a
 /// biometric-restored key without needing the password.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn key_matches_meta(meta: &VaultMeta, key: &[u8; KEY_LEN]) -> bool {
     let Some(verifier) = bytes_from_hex(&meta.verifier) else { return false };
     matches!(open_bytes(key, &verifier), Some(plain) if plain == VERIFIER)
