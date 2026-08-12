@@ -16,7 +16,7 @@ describe("sendChat", () => {
     subscribeMock.mockReset().mockResolvedValue(() => {});
   });
 
-  it("defaults agentKind to claude when the caller doesn't pass one", async () => {
+  it("defaults agentKind to claude and turn to 0 when the caller doesn't pass them", async () => {
     const { sendChat } = await import("./chat");
     await sendChat("s1", "hi", "/usr/bin/claude", () => {});
     expect(invokeCommandMock).toHaveBeenCalledWith("chat_send", {
@@ -25,19 +25,27 @@ describe("sendChat", () => {
       images: [],
       agentPath: "/usr/bin/claude",
       agentKind: "claude",
+      turn: 0,
     });
   });
 
-  it("threads an explicit agentKind through to chat_send's invoke args", async () => {
+  it("threads an explicit agentKind and turn through to chat_send's invoke args", async () => {
     const { sendChat } = await import("./chat");
-    await sendChat("s1", "hi", "/usr/bin/codex", () => {}, ["AAAA"], "codex");
+    await sendChat("s1", "hi", "/usr/bin/codex", () => {}, ["AAAA"], "codex", 3);
     expect(invokeCommandMock).toHaveBeenCalledWith("chat_send", {
       session: "s1",
       prompt: "hi",
       images: ["AAAA"],
       agentPath: "/usr/bin/codex",
       agentKind: "codex",
+      turn: 3,
     });
+  });
+
+  it("cancelChat passes the session and turn generation to chat_cancel", async () => {
+    const { cancelChat } = await import("./chat");
+    await cancelChat("s1", 2);
+    expect(invokeCommandMock).toHaveBeenCalledWith("chat_cancel", { session: "s1", turn: 2 });
   });
 });
 

@@ -42,11 +42,16 @@ impl ProviderConfig {
 pub struct HttpProvider {
     config: ProviderConfig,
     http: reqwest::Client,
+    /// Counts Gemini `stream_turn` calls (tool rounds) on this provider.
+    /// Gemini has no per-call ids, so its parser synthesizes them; the round
+    /// namespaces those ids, which would otherwise repeat every round because
+    /// each round gets a fresh parser.
+    gemini_round: std::sync::atomic::AtomicU64,
 }
 
 impl HttpProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        Self { config, http: reqwest::Client::new() }
+        Self { config, http: reqwest::Client::new(), gemini_round: std::sync::atomic::AtomicU64::new(0) }
     }
 
     fn base(&self) -> &str {
@@ -97,7 +102,9 @@ impl Provider for HttpProvider {
             ProviderKind::Gemini => (
                 format!("{}/v1beta/models/{}:streamGenerateContent?alt=sse", self.base(), self.config.model),
                 gemini::build_request(system, turns, tools),
-                StreamParser::Gemini(gemini::Stream::new()),
+                StreamParser::Gemini(gemini::Stream::for_round(
+                    self.gemini_round.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                )),
             ),
         };
 

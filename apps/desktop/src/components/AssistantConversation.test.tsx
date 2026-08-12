@@ -811,7 +811,7 @@ describe("AssistantConversation composer (Task 19)", () => {
     expect(within(composer).getByRole("button", { name: /contexts \(0\)/i })).toBeTruthy();
   });
 
-  it("Send becomes Stop while a turn is streaming, and Stop calls cancelChat with the active session", async () => {
+  it("Send becomes Stop while a turn is streaming, and Stop calls cancelChat with the active session and turn", async () => {
     vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
     let resolveSend: () => void = () => {};
     vi.mocked(chat.sendChat).mockImplementation(
@@ -828,7 +828,9 @@ describe("AssistantConversation composer (Task 19)", () => {
     expect(screen.queryByRole("button", { name: /^send$/i })).toBeFalsy();
 
     fireEvent.click(stopButton);
-    expect(chat.cancelChat).toHaveBeenCalledWith("s1");
+    // The turn generation matches what sendChat was stamped with (first turn
+    // bumps the nonce to 1), so the backend can pair this Stop with that send.
+    expect(chat.cancelChat).toHaveBeenCalledWith("s1", 1);
 
     // Clean up the still-pending sendChat promise so it doesn't leak into
     // the next test.

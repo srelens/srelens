@@ -60,8 +60,39 @@ fn trim_history(
 /// A `ToolInvoker` backed by an in-process `McpServer`. Each call is a JSON-RPC
 /// request handed to `handle_request`, which applies the consent policy and
 /// audit before touching the registry.
+///
+/// Registry ids are dotted (`k8s.listPods`), but Anthropic and OpenAI only
+/// accept `[A-Za-z0-9_-]` in function names, so `list_tools` advertises a
+/// provider-safe alias for each tool and `call_tool` translates the alias back
+/// to the registry id before the JSON-RPC call.
 pub struct McpToolInvoker {
     server: Arc<McpServer>,
+    /// Provider-safe alias → registry id, populated by `list_tools`.
+    aliases: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+impl McpToolInvoker {
+    pub fn new(server: Arc<McpServer>) -> Self {
+        Self { server, aliases: Default::default() }
+    }
+}
+
+/// Rewrite a registry id into a name every provider accepts: any character
+/// outside `[A-Za-z0-9_-]` becomes `_` (`k8s.listPods` → `k8s_listPods`).
+fn provider_safe_name(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' }).collect()
+}
+
+/// Pick an unused alias for `id` and record it in `aliases`. Two ids that
+/// sanitize identically (e.g. `k8s.x` and `k8s_x`) get distinct aliases by
+/// suffixing, so a model call can never be routed to the wrong tool.
+fn assign_alias(aliases: &mut std::collections::HashMap<String, String>, id: &str) -> String {
+    let mut alias = provider_safe_name(id);
+    while aliases.get(&alias).is_some_and(|existing| existing != id) {
+        alias.push('_');
+    }
+    aliases.insert(alias.clone(), id.to_string());
+    alias
 }
 
 #[async_trait]
@@ -77,10 +108,22 @@ impl ToolInvoker for McpToolInvoker {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        Ok(tools.iter().map(tool_def_from_json).collect())
+        let mut aliases = self.aliases.lock().unwrap();
+        Ok(tools
+            .iter()
+            .map(|v| {
+                let mut def = tool_def_from_json(v);
+                def.name = assign_alias(&mut aliases, &def.name);
+                def
+            })
+            .collect())
     }
 
     async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolCallResult, LlmError> {
+        // The model calls the advertised alias; the registry knows only the
+        // dotted id. An unknown name passes through unchanged and surfaces as
+        // the server's own "unknown tool" error below.
+        let name = self.aliases.lock().unwrap().get(name).cloned().unwrap_or_else(|| name.to_string());
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -143,13 +186,19 @@ pub async fn run_native_agent(
     session: String,
     prompt: String,
     has_images: bool,
+    turn: u64,
 ) -> Result<(), String> {
     let channel = format!("chat://{session}");
     let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
     let emit = |ev: AgentEvent| sink.emit(&channel, serde_json::to_value(&ev).unwrap());
 
-    // Fresh turn: drop any pending-cancel from a previous turn on this session.
-    chats.clear_pending_cancel(&session);
+    // A Stop aimed at this turn can arrive before we do (the frontend awaits
+    // channel subscription before invoking `chat_send`); honor it instead of
+    // launching. A stale pending-cancel from a previous turn has a different
+    // generation and is dropped by the same take.
+    if chats.take_pending_cancel(&session, turn) {
+        return Ok(());
+    }
 
     // Image input isn't wired for the native agent yet; tell the user rather
     // than silently dropping an attachment the composer still displays.
@@ -194,7 +243,7 @@ pub async fn run_native_agent(
     let prompts = app.state::<crate::mcp::McpPromptsDir>();
     let mcp = app.state::<crate::mcp::McpHttpManager>();
     let server = Arc::new(mcp.build_server(&app, pending.inner(), &audit.0, &prompts.0));
-    let invoker = McpToolInvoker { server };
+    let invoker = McpToolInvoker::new(server);
     let provider = srelens_llm::HttpProvider::new(cfg);
 
     // Seed the turn with this session's prior conversation so follow-ups have
@@ -215,7 +264,7 @@ pub async fn run_native_agent(
 
     chats.register_native(session.clone(), handle.abort_handle());
     // Honor a Stop that landed during prep, before the task was registered.
-    if chats.take_pending_cancel(&session) {
+    if chats.take_pending_cancel(&session, turn) {
         handle.abort();
     }
     let joined = handle.await;
@@ -327,6 +376,26 @@ mod tests {
         assert!(!t.read_only);
         // Missing inputSchema is coerced to an empty object schema.
         assert_eq!(t.input_schema["type"], "object");
+    }
+
+    #[test]
+    fn dotted_registry_ids_alias_to_provider_safe_names_and_back() {
+        let mut aliases = std::collections::HashMap::new();
+        // Anthropic/OpenAI reject `.` in function names; the alias replaces it.
+        assert_eq!(assign_alias(&mut aliases, "k8s.listPods"), "k8s_listPods");
+        assert_eq!(aliases.get("k8s_listPods").map(String::as_str), Some("k8s.listPods"));
+        // Already-safe ids pass through and re-listing is stable.
+        assert_eq!(assign_alias(&mut aliases, "ping"), "ping");
+        assert_eq!(assign_alias(&mut aliases, "k8s.listPods"), "k8s_listPods");
+    }
+
+    #[test]
+    fn ids_that_sanitize_identically_get_distinct_aliases() {
+        let mut aliases = std::collections::HashMap::new();
+        assert_eq!(assign_alias(&mut aliases, "k8s.scale"), "k8s_scale");
+        let other = assign_alias(&mut aliases, "k8s_scale");
+        assert_ne!(other, "k8s_scale");
+        assert_eq!(aliases.get(&other).map(String::as_str), Some("k8s_scale"));
     }
 
     #[test]

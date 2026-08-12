@@ -56,6 +56,7 @@ fn content_for_turn(turn: &Turn) -> Value {
 /// `AgentEvent` correlation; the next request correlates results by name.
 #[derive(Default)]
 pub struct Stream {
+    round: u64,
     counter: u64,
     done: bool,
 }
@@ -63,6 +64,14 @@ pub struct Stream {
 impl Stream {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A parser stamped with the tool round it belongs to. Each round of a
+    /// user turn gets a fresh `Stream` (and so a reset `counter`), so the
+    /// round must be part of the synthesized id or the first call of every
+    /// round would collide as `gemini-call-0`.
+    pub fn for_round(round: u64) -> Self {
+        Self { round, ..Self::default() }
     }
 
     pub fn push(&mut self, data: &str) -> Vec<StreamItem> {
@@ -85,7 +94,7 @@ impl Stream {
                 if let Some(call) = part.get("functionCall") {
                     let name = call.get("name").and_then(Value::as_str).unwrap_or("").to_string();
                     let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
-                    let id = format!("gemini-call-{}", self.counter);
+                    let id = format!("gemini-call-{}-{}", self.round, self.counter);
                     self.counter += 1;
                     out.push(StreamItem::ToolCall(ToolCall { id, name, arguments }));
                 } else if let Some(text) = part.get("text").and_then(Value::as_str) {
@@ -197,20 +206,36 @@ mod tests {
         assert_eq!(
             items,
             vec![StreamItem::ToolCall(ToolCall {
-                id: "gemini-call-0".into(),
+                id: "gemini-call-0-0".into(),
                 name: "k8s_scale".into(),
                 arguments: json!({ "replicas": 2 }),
             })]
         );
-        // A second call in the same turn gets a distinct id.
+        // A second call in the same round gets a distinct id.
         let more = s.push(
             r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"k8s_listPods","args":{}}}]}}]}"#,
         );
         assert_eq!(
             more,
             vec![StreamItem::ToolCall(ToolCall {
-                id: "gemini-call-1".into(),
+                id: "gemini-call-0-1".into(),
                 name: "k8s_listPods".into(),
+                arguments: json!({}),
+            })]
+        );
+    }
+
+    #[test]
+    fn a_later_round_synthesizes_ids_distinct_from_round_zero() {
+        let mut s = Stream::for_round(2);
+        let items = s.push(
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"k8s_scale","args":{}}}]}}]}"#,
+        );
+        assert_eq!(
+            items,
+            vec![StreamItem::ToolCall(ToolCall {
+                id: "gemini-call-2-0".into(),
+                name: "k8s_scale".into(),
                 arguments: json!({}),
             })]
         );

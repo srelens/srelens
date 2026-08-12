@@ -63,6 +63,12 @@ export function startChat(): Promise<string> {
  * an existing caller that hasn't been updated to pass an
  * agent's kind (e.g. `SkillsPanel`'s one-shot generation turn) keeps its prior
  * behavior rather than failing to compile or silently misrouting.
+ *
+ * `turn` is the caller's turn generation, matched against the `turn` of a
+ * `cancelChat` so the backend can honor a Stop that reaches it before this
+ * send does (the `subscribe` await below opens exactly that window) while
+ * dropping a stale Stop left over from an earlier turn. Callers that never
+ * cancel can omit it.
  */
 export async function sendChat(
   session: string,
@@ -71,18 +77,21 @@ export async function sendChat(
   onEvent: (e: AgentEvent) => void,
   images?: string[],
   agentKind: string = "claude",
+  turn: number = 0,
 ): Promise<void> {
   const unsub = await subscribe(`chat://${session}`, (payload: unknown) => {
     const e = parseAgentEvent(payload);
     if (e) onEvent(e);
   });
   try {
-    await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath, agentKind });
+    await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath, agentKind, turn });
   } finally {
     unsub();
   }
 }
 
-export function cancelChat(session: string): Promise<void> {
-  return invokeCommand("chat_cancel", { session });
+/** Stop the turn `turn` (the generation passed to its `sendChat`) — running,
+ * mid-preparation, or not yet arrived at the backend. */
+export function cancelChat(session: string, turn: number = 0): Promise<void> {
+  return invokeCommand("chat_cancel", { session, turn });
 }

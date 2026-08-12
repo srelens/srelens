@@ -764,9 +764,11 @@ export const AssistantConversation = forwardRef<
   const cancelRequestedRef = useRef(false);
   // Bumped each turn so tool-call state keys are unique per turn. Agents that
   // restart their tool-call ids every turn (Codex reuses `item_1`; the native
-  // Gemini path reuses `gemini-call-0`) would otherwise collide across turns —
-  // a later turn overwriting an earlier turn's tool card and corrupting the
-  // persisted transcript. Prefixing the id with this nonce keeps them distinct.
+  // Gemini path restarts at `gemini-call-0-0`) would otherwise collide across
+  // turns — a later turn overwriting an earlier turn's tool card and corrupting
+  // the persisted transcript. Prefixing the id with this nonce keeps them
+  // distinct. Also passed to `sendChat`/`cancelChat` as the turn generation, so
+  // the backend can tell a Stop aimed at this turn from a stale one.
   const turnNonceRef = useRef(0);
   // Set once per disk session, on its first save; cleared by New chat and
   // restored from the loaded value when reopening a session, so re-saving
@@ -807,7 +809,7 @@ export const AssistantConversation = forwardRef<
       // would otherwise keep running invisibly — burning quota and invoking MCP
       // tools with no one watching. Cancel the in-flight turn on the way out.
       if (sendingRef.current && sessionRef.current) {
-        void cancelChat(sessionRef.current);
+        void cancelChat(sessionRef.current, turnNonceRef.current);
       }
     };
   }, []);
@@ -1257,7 +1259,7 @@ export const AssistantConversation = forwardRef<
         return;
       }
       saveLastAgent(usedKind); // remember what was actually used for the next fresh chat
-      await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind);
+      await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current);
     } catch (e) {
       // A rejection here means the transport itself failed before any
       // `error` event could stream (e.g. `chat_send` rejects outright when
@@ -1278,10 +1280,12 @@ export const AssistantConversation = forwardRef<
   function handleStop() {
     // Set unconditionally: if Stop lands while `handleSend` is still preparing
     // (before a child exists, so the `cancelChat` below would be a no-op), this
-    // flag makes `handleSend` skip the launch entirely.
+    // flag makes `handleSend` skip the launch entirely. The turn nonce tells
+    // the backend which send this Stop is aimed at, so a cancel that beats
+    // `chat_send` to the backend is honored by that turn and no other.
     cancelRequestedRef.current = true;
     const session = sessionRef.current;
-    if (session) void cancelChat(session);
+    if (session) void cancelChat(session, turnNonceRef.current);
   }
 
   const agentPicker = agents.length > 0 && (

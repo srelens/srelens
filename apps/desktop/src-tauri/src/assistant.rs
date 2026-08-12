@@ -255,30 +255,28 @@ pub struct ChatManager {
     /// turn runs as a task whose `AbortHandle` is parked here so `chat_cancel`
     /// can stop it the same way it kills a CLI child.
     natives: std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
-    /// Sessions whose `chat_cancel` arrived while the turn was still preparing —
-    /// after `chat_send` began but before it registered anything cancellable
-    /// (spawning the child, writing config/image files). `chat_send` consumes
-    /// this once the child/task exists and stops it, so a Stop pressed during
-    /// prep is never silently dropped.
-    pending_cancels: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Sessions whose `chat_cancel` arrived while nothing cancellable was
+    /// registered — a Stop can reach the backend before `chat_send` even
+    /// starts (the frontend awaits channel subscription in between), or during
+    /// `chat_send`'s prep (spawning the child, writing config/image files).
+    /// The value is the turn generation the Stop was aimed at (the frontend's
+    /// turn nonce), so `chat_send` can consume a Stop meant for ITS turn while
+    /// dropping a stale one left over from a previous turn.
+    pending_cancels: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl ChatManager {
-    /// Clear any stale pending-cancel for a session at the start of a fresh
-    /// turn, so a cancel from a previous turn can't kill this one.
-    pub fn clear_pending_cancel(&self, session: &str) {
-        self.pending_cancels.lock().unwrap().remove(session);
+    /// Record that a cancel for the given turn generation arrived before
+    /// anything cancellable was registered.
+    pub fn arm_pending_cancel(&self, session: String, turn: u64) {
+        self.pending_cancels.lock().unwrap().insert(session, turn);
     }
 
-    /// Record that a cancel arrived before anything cancellable was registered.
-    pub fn arm_pending_cancel(&self, session: String) {
-        self.pending_cancels.lock().unwrap().insert(session);
-    }
-
-    /// Take (and clear) a session's pending-cancel flag — true if a Stop landed
-    /// during this turn's preparation.
-    pub fn take_pending_cancel(&self, session: &str) -> bool {
-        self.pending_cancels.lock().unwrap().remove(session)
+    /// Take a session's pending cancel — true only if one was armed for this
+    /// turn generation. A mismatched (stale) entry is dropped, not honored, so
+    /// a Stop that landed just after a previous turn ended can't kill this one.
+    pub fn take_pending_cancel(&self, session: &str, turn: u64) -> bool {
+        self.pending_cancels.lock().unwrap().remove(session) == Some(turn)
     }
 }
 
@@ -388,10 +386,15 @@ pub async fn chat_send(
     images: Vec<String>,
     agent_path: String,
     agent_kind: String,
+    turn: Option<u64>,
     app: tauri::AppHandle,
     mcp: tauri::State<'_, crate::mcp::McpHttpManager>,
     chats: tauri::State<'_, ChatManager>,
 ) -> Result<(), String> {
+    // The turn generation the frontend stamped this send with; a Stop for the
+    // same turn arms `pending_cancels` under this value. Optional so callers
+    // that never cancel (e.g. one-shot generation turns) can omit it.
+    let turn = turn.unwrap_or(0);
     use tauri::Manager;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
@@ -414,13 +417,17 @@ pub async fn chat_send(
     // the same consent/audit server the CLIs reach over HTTP. Handle it here so
     // the CLI machinery below only ever sees the three CLI kinds.
     if matches!(kind, AgentKind::Srelens) {
-        return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty()).await;
+        return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty(), turn).await;
     }
 
-    // Fresh turn: drop any pending-cancel left from a previous turn on this
-    // session so it can't kill this one. A Stop pressed during the prep below
-    // re-arms it, and it's consumed once the child is registered.
-    chats.clear_pending_cancel(&session);
+    // A Stop aimed at THIS turn can beat us here: the frontend awaits channel
+    // subscription between its own cancel check and invoking `chat_send`, and
+    // a `chat_cancel` in that window finds nothing registered and arms a
+    // pending cancel. Honor it — don't launch. A stale entry from a previous
+    // turn has a different generation and is dropped by the same take.
+    if chats.take_pending_cancel(&session, turn) {
+        return Ok(());
+    }
 
     let token = mcp
         .session_token()
@@ -645,7 +652,7 @@ pub async fn chat_send(
     // registered, so `chat_cancel` armed a pending flag instead of killing
     // anything): now that the child exists, kill it. The stream loop below then
     // reads EOF and `finish_turn` emits the closing `TurnDone`.
-    if chats.take_pending_cancel(&session) {
+    if chats.take_pending_cancel(&session, turn) {
         if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
             let _ = child.start_kill();
         }
@@ -679,9 +686,15 @@ pub async fn chat_send(
     Ok(())
 }
 
-/// Kill a running turn's agent process, if any.
+/// Kill a running turn's agent process, if any. `turn` is the frontend's turn
+/// generation for the send being stopped, so a cancel that lands before that
+/// send reaches the backend is honored by it — and only by it.
 #[tauri::command]
-pub async fn chat_cancel(session: String, chats: tauri::State<'_, ChatManager>) -> Result<(), String> {
+pub async fn chat_cancel(
+    session: String,
+    turn: Option<u64>,
+    chats: tauri::State<'_, ChatManager>,
+) -> Result<(), String> {
     let mut stopped = false;
     if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
         let _ = child.start_kill();
@@ -692,11 +705,12 @@ pub async fn chat_cancel(session: String, chats: tauri::State<'_, ChatManager>) 
         handle.abort();
         stopped = true;
     }
-    // Nothing running yet — the turn is mid-preparation. Arm a pending cancel so
-    // `chat_send` stops it the moment the child/task is registered, instead of
-    // this Stop being lost.
+    // Nothing running yet — the turn hasn't reached the backend or is mid-
+    // preparation. Arm a pending cancel under this turn's generation so
+    // `chat_send` for the same turn stops at entry or the moment the
+    // child/task is registered, instead of this Stop being lost.
     if !stopped {
-        chats.arm_pending_cancel(session);
+        chats.arm_pending_cancel(session, turn.unwrap_or(0));
     }
     Ok(())
 }
@@ -803,17 +817,18 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_cancel_is_armed_taken_once_and_clearable() {
+    fn a_pending_cancel_is_consumed_only_by_its_own_turn_generation() {
         let chats = ChatManager::default();
-        assert!(!chats.take_pending_cancel("s1"), "nothing armed yet");
-        // A Stop during prep arms it; chat_send consumes it exactly once.
-        chats.arm_pending_cancel("s1".into());
-        assert!(chats.take_pending_cancel("s1"));
-        assert!(!chats.take_pending_cancel("s1"), "consumed on first take");
-        // A fresh turn clears a stale one so it can't kill the new turn.
-        chats.arm_pending_cancel("s2".into());
-        chats.clear_pending_cancel("s2");
-        assert!(!chats.take_pending_cancel("s2"));
+        assert!(!chats.take_pending_cancel("s1", 1), "nothing armed yet");
+        // A Stop during turn 1's prep arms it; turn 1 consumes it exactly once.
+        chats.arm_pending_cancel("s1".into(), 1);
+        assert!(chats.take_pending_cancel("s1", 1));
+        assert!(!chats.take_pending_cancel("s1", 1), "consumed on first take");
+        // A stale Stop aimed at turn 1 (it landed after that turn had already
+        // finished) must not kill turn 2 — and taking it also drops it.
+        chats.arm_pending_cancel("s2".into(), 1);
+        assert!(!chats.take_pending_cancel("s2", 2));
+        assert!(!chats.take_pending_cancel("s2", 1), "mismatch drops the entry");
     }
 
     #[test]
