@@ -434,6 +434,36 @@ describe("AssistantConversation session persistence", () => {
     expect(screen.queryByText("Old chat")).toBeFalsy();
   });
 
+  it("delete waits for an in-flight transcript save before touching the disk", async () => {
+    vi.mocked(chatHistory.listSessions).mockResolvedValue([
+      { id: "s1", title: "Old chat", createdAt: 1, updatedAt: 2 },
+    ]);
+    // Hold the auto-save open: the turn settles (Send returns) while the
+    // session file is still being written.
+    let resolveSave: () => void = () => {};
+    vi.mocked(chatHistory.saveSession).mockImplementation(
+      () => new Promise<void>((resolve) => { resolveSave = () => resolve(); }),
+    );
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "ok" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
+
+    await openHistory();
+    fireEvent.click(await screen.findByLabelText("Delete Old chat"));
+    // The save hasn't landed yet — deleting now would let it recreate the
+    // file/index entry afterward, so the delete must hold until it settles.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(chatHistory.deleteSession).not.toHaveBeenCalled();
+
+    resolveSave();
+    await waitFor(() => expect(chatHistory.deleteSession).toHaveBeenCalledWith("s1"));
+  });
+
   it("renders the session list in the newest-first order listSessions returns", async () => {
     vi.mocked(chatHistory.listSessions).mockResolvedValue([
       { id: "newest", title: "Newest chat", createdAt: 1, updatedAt: 300 },
@@ -911,6 +941,9 @@ describe("AssistantConversation composer (Task 19)", () => {
     // Two selections in flight; the first (A) will resolve LAST.
     act(() => void ref.current!.selectSession("A"));
     act(() => void ref.current!.selectSession("B"));
+    // Loads sit behind the (empty) persist chain — flush the microtask so both
+    // `loadSession` calls have actually been issued before resolving them.
+    await act(async () => {});
 
     // Resolve the newest (B) first, then the stale A.
     await act(async () => resolvers["B"](sessionOf("B", "from session B")));

@@ -280,6 +280,17 @@ impl ChatManager {
     }
 }
 
+/// Kill a child that has been taken OUT of `ChatManager` and reap it in the
+/// background. `chat_send`'s cleanup only `wait()`s children still in the map,
+/// and tokio reaps a dropped `Child` on a best-effort basis only — so without
+/// this, every Stop could leave a zombie in the process table.
+fn kill_and_reap(mut child: tokio::process::Child) {
+    let _ = child.start_kill();
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+}
+
 impl ChatManager {
     /// Park a native turn's task handle so `chat_cancel` can abort it.
     pub fn register_native(&self, session: String, handle: tokio::task::AbortHandle) {
@@ -653,8 +664,8 @@ pub async fn chat_send(
     // anything): now that the child exists, kill it. The stream loop below then
     // reads EOF and `finish_turn` emits the closing `TurnDone`.
     if chats.take_pending_cancel(&session, turn) {
-        if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
-            let _ = child.start_kill();
+        if let Some(child) = chats.children.lock().unwrap().remove(&session) {
+            kill_and_reap(child);
         }
     }
 
@@ -696,8 +707,8 @@ pub async fn chat_cancel(
     chats: tauri::State<'_, ChatManager>,
 ) -> Result<(), String> {
     let mut stopped = false;
-    if let Some(mut child) = chats.children.lock().unwrap().remove(&session) {
-        let _ = child.start_kill();
+    if let Some(child) = chats.children.lock().unwrap().remove(&session) {
+        kill_and_reap(child);
         stopped = true;
     }
     // The native agent's turn is a task, not a child process.

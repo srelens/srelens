@@ -774,6 +774,11 @@ export const AssistantConversation = forwardRef<
   // restored from the loaded value when reopening a session, so re-saving
   // never stomps the original `createdAt`.
   const createdAtRef = useRef<number | null>(null);
+  // Chain of pending disk saves. `persistSession` enqueues onto it, and
+  // session actions that touch the same files (delete, load) await it first —
+  // otherwise a slow save still flushing after a turn settles could race
+  // `chat_history_delete` and recreate the just-deleted file or index entry.
+  const persistChainRef = useRef<Promise<void>>(Promise.resolve());
 
   function setMessagesTracked(updater: (msgs: ChatMessage[]) => ChatMessage[]) {
     const next = updater(messagesRef.current);
@@ -953,10 +958,18 @@ export const AssistantConversation = forwardRef<
 
   /** Serialize the current transcript and save it to disk. Best-effort: a
    * failed save is swallowed rather than surfaced, since it must never break
-   * the live chat the user is actually looking at. */
-  async function persistSession(msgs: ChatMessage[], calls: Record<string, ToolCallState>) {
+   * the live chat the user is actually looking at. Saves are queued on
+   * `persistChainRef` so at most one write is in flight and delete/load can
+   * wait for all queued writes to land (they never reject — see the catch). */
+  function persistSession(msgs: ChatMessage[], calls: Record<string, ToolCallState>): Promise<void> {
     const id = sessionRef.current;
-    if (!id) return; // nothing sent yet this conversation — no id to save under
+    if (!id) return Promise.resolve(); // nothing sent yet this conversation — no id to save under
+    const next = persistChainRef.current.then(() => persistSessionNow(id, msgs, calls));
+    persistChainRef.current = next;
+    return next;
+  }
+
+  async function persistSessionNow(id: string, msgs: ChatMessage[], calls: Record<string, ToolCallState>) {
     const now = Date.now();
     if (createdAtRef.current === null) createdAtRef.current = now;
     const session: Session = {
@@ -1029,6 +1042,9 @@ export const AssistantConversation = forwardRef<
     if (sendingRef.current) return;
     const seq = ++loadSeqRef.current;
     try {
+      // Read behind any queued save so a session reopened right after its
+      // turn finished gets the just-written transcript, not the prior one.
+      await persistChainRef.current;
       const session = await loadSession(id);
       // A newer session action fired while this read was in flight — discard
       // this now-stale result rather than overwriting the newer selection.
@@ -1063,6 +1079,13 @@ export const AssistantConversation = forwardRef<
   async function onDeleteSession(id: string) {
     // Don't delete mid-turn: if it's the open session, the running turn would
     // re-save it right after; if it isn't, blocking is the safe simple rule.
+    if (sendingRef.current) return;
+    // A save from the just-finished turn may still be flushing (the guard
+    // above only covers the turn itself) — let every queued write land before
+    // deleting, or the slow save would recreate the file we're removing.
+    await persistChainRef.current;
+    // A turn that started while we waited will re-save its session — bail out
+    // rather than deleting under it, same rule as the guard above.
     if (sendingRef.current) return;
     try {
       await deleteSessionCmd(id);
