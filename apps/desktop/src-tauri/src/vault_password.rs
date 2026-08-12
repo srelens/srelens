@@ -97,8 +97,13 @@ pub async fn vault_setup_password(
     if keep_recovery {
         vault::store_recovery_password(&password)?;
     } else {
+        // Opting out purges BOTH keychain accounts — a stale main or staged
+        // copy from a prior install must not survive an explicit opt-out.
         vault::delete_recovery_password();
     }
+    // A stale staged copy (prior install, interrupted change) never belongs
+    // to a fresh setup either way.
+    vault::delete_staged_recovery();
     // Two-phase transition (crash-recoverable): stage the new meta as
     // `.next`, re-key, then promote — the transition lock is already held
     // from the top of this command. A crash before the re-key leaves the
@@ -150,6 +155,13 @@ pub async fn vault_recover_password(
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<String, String> {
     let dir = vault_biometric::vault_dir(&app)?;
+    // The filesystem opt-in marker is authoritative: an opted-out vault
+    // never consults EITHER keychain account — a stale credential from a
+    // prior install must not be revealed (or promoted) against the user's
+    // explicit choice.
+    if !vault::recovery_marker_path(&dir).exists() {
+        return Err("no recovery copy was stored for this vault".into());
+    }
     // The main copy pairs with the current password; a STAGED copy (left by
     // a password change that crashed before its final promote) pairs with
     // the staged/promoted meta. Try main first, then the stage — whichever
@@ -206,27 +218,18 @@ pub async fn vault_change_password(
     }
     // The recovery copy's fate must be KNOWN before anything changes: an
     // unreachable keychain fails the change up front, never leaving a stale
-    // copy that a later "Forgot password?" would trust. Opted-out vaults
-    // (per the filesystem marker) skip the probe entirely — a keychain-less
-    // host has nothing to refresh and must still be able to change the
-    // password. Pre-marker vaults probe best-effort: a reachable copy is
-    // adopted (marker written); an unreachable keychain is treated as
-    // opted-out rather than blocking forever.
-    let marker = vault::recovery_marker_path(&dir);
-    let recovery_enabled = if marker.exists() {
+    // copy that a later "Forgot password?" would trust. The filesystem
+    // opt-in marker is authoritative: opted-out vaults never consult the
+    // keychain at all — a keychain-less host has nothing to refresh and must
+    // still be able to change the password.
+    let recovery_enabled = if vault::recovery_marker_path(&dir).exists() {
         vault::recovery_password_state()
             .map_err(|e| {
                 format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
             })?
             .is_some()
     } else {
-        match vault::recovery_password_state() {
-            Ok(Some(_)) => {
-                let _ = std::fs::write(&marker, b"");
-                true
-            }
-            Ok(None) | Err(_) => false,
-        }
+        false
     };
     if recovery_enabled {
         // STAGE the new copy — the main entry (which pairs with the current

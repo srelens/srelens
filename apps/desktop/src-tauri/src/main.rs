@@ -146,11 +146,17 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
     // master password from the environment (never argv — it would show in
     // `ps`). Without it, `SRELENS_MCP_TOKEN` still works, and a store-token
     // path that needs to mint exits below with guidance naming both.
+    // Capture the master password and immediately SCRUB it from the process
+    // environment: subprocesses spawned while serving (helm, kubectl exec
+    // credential plugins) inherit our environment and must never receive the
+    // vault password.
+    let master_password = std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty());
+    std::env::remove_var("SRELENS_MASTER_PASSWORD");
     // Both password-derived locked sources unlock with the master password:
     // `biometric-locked` only means the GUI would normally skip the password
     // via Touch ID / Hello — the password (and vault.json) still exist.
     if matches!(vault.key_source(), "password-locked" | "biometric-locked") {
-        match std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty()) {
+        match master_password {
             Some(password) => {
                 if let Err(e) =
                     srelens_desktop_lib::vault::unlock_with_master_password(&vault, &mcp_dir(), &password)
