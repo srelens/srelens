@@ -248,7 +248,8 @@ pub async fn run_native_agent(
         }
     };
     let settings = crate::llm_config::load_settings(&dir.join("settings.json"));
-    let cfg = match crate::llm_config::provider_config(&dir, &settings, settings.default_provider) {
+    let vault = app.state::<std::sync::Arc<crate::vault::Vault>>();
+    let cfg = match crate::llm_config::provider_config(&vault, &settings, settings.default_provider) {
         Some(c) if !c.model.is_empty() => c,
         Some(_) => {
             emit(AgentEvent::Error {
@@ -340,25 +341,27 @@ pub async fn llm_set_settings(app: tauri::AppHandle, settings: LlmSettings) -> R
     crate::llm_config::save_settings(&settings_path(&app)?, &settings)
 }
 
-/// Store an API key for `provider` in the keychain (0600-file fallback).
+/// Store an API key for `provider` in the encrypted secrets vault.
 #[tauri::command]
 pub async fn llm_set_key(app: tauri::AppHandle, provider: ProviderKind, key: String) -> Result<(), String> {
-    crate::llm_config::set_key(&llm_dir(&app)?, provider, key.trim())
+    let vault = app.state::<std::sync::Arc<crate::vault::Vault>>();
+    crate::llm_config::set_key(&vault, &llm_dir(&app)?, provider, key.trim())
 }
 
 #[tauri::command]
 pub async fn llm_clear_key(app: tauri::AppHandle, provider: ProviderKind) -> Result<(), String> {
-    crate::llm_config::clear_key(&llm_dir(&app)?, provider)
+    let vault = app.state::<std::sync::Arc<crate::vault::Vault>>();
+    crate::llm_config::clear_key(&vault, &llm_dir(&app)?, provider)
 }
 
 /// Which providers currently have a key configured — so Settings can show a
 /// "key set" state without ever returning the secret itself.
 #[tauri::command]
 pub async fn llm_key_status(app: tauri::AppHandle) -> Result<Vec<ProviderKind>, String> {
-    let dir = llm_dir(&app)?;
+    let vault = app.state::<std::sync::Arc<crate::vault::Vault>>();
     Ok(crate::llm_config::all_providers()
         .into_iter()
-        .filter(|k| crate::llm_config::has_key(&dir, *k))
+        .filter(|k| crate::llm_config::has_key(&vault, *k))
         .collect())
 }
 
@@ -371,9 +374,9 @@ pub async fn llm_list_models(
     provider: ProviderKind,
     base_url: Option<String>,
 ) -> Result<Vec<ModelInfo>, String> {
-    let dir = llm_dir(&app)?;
+    let vault = app.state::<std::sync::Arc<crate::vault::Vault>>();
     let settings = crate::llm_config::load_settings(&settings_path(&app)?);
-    let mut cfg = crate::llm_config::provider_config(&dir, &settings, provider)
+    let mut cfg = crate::llm_config::provider_config(&vault, &settings, provider)
         .ok_or("Add an API key for this provider first.")?;
     if let Some(url) = base_url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
         cfg.base_url = url;

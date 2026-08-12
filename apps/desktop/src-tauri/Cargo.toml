@@ -52,6 +52,10 @@ srelens-registry = { path = "../../../crates/registry" }
 # Each backend's transitive deps are already gated to their own target by the
 # keyring crate itself, so enabling all four is safe cross-platform.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# The secrets vault (issue #206): one XChaCha20-Poly1305-encrypted file keyed
+# by a single keychain-held master key, replacing per-secret keychain entries.
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"

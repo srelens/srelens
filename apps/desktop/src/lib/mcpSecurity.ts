@@ -33,9 +33,9 @@ export async function revokeMcpToken(): Promise<void> {
   await invoke("mcp_token_revoke");
 }
 
-/** Where the token actually lives right now: the OS keychain, or (when none
- * is available) the 0600 fallback file — so Settings can say plainly when
- * it's on disk unencrypted rather than implying it's always protected. */
+/** Where the secrets vault's MASTER KEY lives: the OS keychain, or (when none
+ * is available) a 0600 fallback file — so Settings can say plainly when the
+ * vault is effectively unprotected rather than implying it's always encrypted. */
 export async function getMcpTokenStorage(): Promise<"keychain" | "file"> {
   return await invoke<"keychain" | "file">("mcp_token_storage");
 }

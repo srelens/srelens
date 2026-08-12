@@ -21,7 +21,7 @@ pub mod mcp_watch;
 mod settings;
 mod sink;
 mod terminal;
-pub mod token_store;
+pub mod vault;
 mod toolbox;
 mod updater;
 mod watch;
@@ -336,23 +336,26 @@ pub fn run() {
             // audit commands simply error until the app is restarted somewhere
             // that dir resolution succeeds, rather than aborting startup.
             //
-            // The token store itself prefers the OS keychain, falling back to
-            // a 0600 file (same path `main.rs`'s headless CLI resolves) the
-            // first time a keychain operation genuinely fails — see
-            // `token_store::keychain_or_file`. Managed both as the concrete
-            // `Arc<ResilientTokenStore>` (so `mcp_token_storage` can read the
-            // live backend flag) and, via unsized coercion, as the
-            // `Arc<dyn TokenStore>` the other MCP commands take.
+            // Secrets live in the encrypted vault (`vault.rs`): one
+            // `secrets.enc` under the MCP config dir, keyed by ONE keychain
+            // entry resolved right here — the process's only keychain touch,
+            // so dev builds prompt at most once per launch instead of once
+            // per secret. Managed both as the concrete `Arc<Vault>` (so
+            // `mcp_token_storage` can report where the master key lives, and
+            // the llm key commands can reach it) and, via `VaultTokenStore`,
+            // as the `Arc<dyn TokenStore>` the MCP commands take. Same dir
+            // `main.rs`'s headless CLI resolves, so a token provisioned in
+            // one is usable from the other.
             match app.path().app_config_dir().map(|d| d.join("mcp")) {
                 Ok(dir) => {
                     if let Err(e) = std::fs::create_dir_all(&dir) {
                         log::warn!("could not create MCP config dir {}: {e}", dir.display());
                     }
-                    let resilient_store = token_store::keychain_or_file(dir.join("token"));
+                    let vault = std::sync::Arc::new(vault::Vault::open(&dir));
                     let token_store: std::sync::Arc<dyn srelens_mcp::auth::TokenStore> =
-                        resilient_store.clone();
+                        std::sync::Arc::new(vault::VaultTokenStore(vault.clone()));
                     app.manage(token_store);
-                    app.manage(resilient_store);
+                    app.manage(vault);
                     app.manage(McpAuditPath(dir.join("audit.jsonl")));
 
                     let prompts_dir = dir.join("prompts");

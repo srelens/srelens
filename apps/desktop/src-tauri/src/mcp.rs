@@ -314,15 +314,13 @@ pub async fn mcp_token_rotate(
 
 /// Where the MCP bearer token is actually stored right now: `"keychain"` when
 /// the OS keychain is serving, `"file"` once it has fallen back to the 0600
-/// file. Reads the live flag off the store (flipped the first time a keychain
-/// operation genuinely failed) rather than a value guessed at startup, so
-/// Settings reports observed reality even if the keychain looked available
-/// when the app launched but failed on first use.
+/// Where the vault's MASTER KEY lives — `"keychain"`, or `"file"` when the
+/// keychain genuinely failed at startup and the 0600 fallback took over.
+/// Settings shows the file case so the reduced trust model (the vault is
+/// then only obfuscation) is never silent.
 #[tauri::command]
-pub fn mcp_token_storage(
-    store: State<'_, Arc<crate::token_store::ResilientTokenStore>>,
-) -> &'static str {
-    store.current_backend()
+pub fn mcp_token_storage(vault: State<'_, Arc<crate::vault::Vault>>) -> &'static str {
+    vault.key_source()
 }
 
 /// Revoke the MCP bearer token and stop the HTTP transport — it must never

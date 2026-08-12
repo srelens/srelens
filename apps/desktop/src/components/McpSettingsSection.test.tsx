@@ -122,16 +122,16 @@ describe("McpSettingsSection", () => {
     expect(screen.queryByText(token)).toBeNull();
   });
 
-  it("warns when the token fell back to the plain file, and stays quiet for the keychain", async () => {
+  it("warns when the vault master key fell back to the plain file, and stays quiet for the keychain", async () => {
     mcpSecurity.getMcpTokenStorage.mockResolvedValue("file");
     render(<McpSettingsSection />);
-    expect(await screen.findByText(/stored in a plain file on disk/)).toBeDefined();
+    expect(await screen.findByText(/key that encrypts srelens's secrets is stored/)).toBeDefined();
   });
 
-  it("shows no fallback warning when the token is in the OS keychain", async () => {
+  it("shows no fallback warning when the master key is in the OS keychain", async () => {
     mcpSecurity.getMcpTokenStorage.mockResolvedValue("keychain");
     render(<McpSettingsSection />);
     await waitFor(() => expect(mcpSecurity.getMcpTokenStorage).toHaveBeenCalled());
-    expect(screen.queryByText(/stored in a plain file on disk/)).toBeNull();
+    expect(screen.queryByText(/key that encrypts srelens's secrets/)).toBeNull();
   });
 });

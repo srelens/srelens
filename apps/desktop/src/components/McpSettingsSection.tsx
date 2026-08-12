@@ -311,8 +311,9 @@ export function McpSettingsSection() {
         )}
         {tokenStorage === "file" && (
           <p className="text-sm text-amber-600 dark:text-amber-500">
-            No OS keychain is available here, so this token is stored in a plain file on disk
-            (readable only by your user account) rather than the OS keychain.
+            No OS keychain is available here, so the key that encrypts srelens's secrets is stored
+            in a plain file on disk (readable only by your user account) rather than the OS
+            keychain — the encrypted secrets file is then only obfuscation.
           </p>
         )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}

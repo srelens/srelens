@@ -64,10 +64,12 @@ pub async fn agent_list(app: tauri::AppHandle) -> Result<Vec<AgentInfo>, String>
 /// once the default provider has an API key, otherwise it's shown but not
 /// selectable (the composer points the user to Settings → Assistant).
 fn native_agent_info(app: &tauri::AppHandle) -> AgentInfo {
+    use tauri::Manager;
+    let vault = app.state::<std::sync::Arc<crate::vault::Vault>>();
     let available = crate::llm_agent::llm_dir(app)
         .map(|dir| {
             let settings = crate::llm_config::load_settings(&dir.join("settings.json"));
-            crate::llm_config::has_key(&dir, settings.default_provider)
+            crate::llm_config::has_key(&vault, settings.default_provider)
         })
         .unwrap_or(false);
     AgentInfo {
