@@ -622,6 +622,24 @@ describe("AssistantConversation image attachments", () => {
     expect(await screen.findByAltText(/pending image 1/i)).toBeTruthy();
   });
 
+  it("Send is held while an attachment is still being read, then includes it", async () => {
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "look at this" } });
+    fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
+    // Immediately after selecting: the FileReader hasn't resolved yet — this
+    // click must not send without (and thereby orphan) the attachment.
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    expect(chat.sendChat).not.toHaveBeenCalled();
+
+    await screen.findByAltText(/pending image 1/i);
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(chat.sendChat).mock.calls[0][4]).toEqual(["AAAA"]);
+  });
+
   it("removing a pending image chip clears it, and it isn't sent", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
@@ -991,6 +1009,45 @@ describe("AssistantConversation composer (Task 19)", () => {
     expect(await screen.findByText("from session B")).toBeTruthy();
     expect(screen.queryByText("from session A")).toBeFalsy();
   });
+
+  it("a send invalidates a still-pending session load so it can't swap the transcript mid-turn", async () => {
+    const resolvers: Record<string, (v: unknown) => void> = {};
+    vi.mocked(chatHistory.loadSession).mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          resolvers[id] = resolve as (v: unknown) => void;
+        }),
+    );
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "fresh reply" });
+      onEvent({ type: "turnDone" });
+    });
+    const ref = createRef<AssistantConversationHandle>();
+    render(<AssistantConversation ref={ref} />);
+    act(() => void ref.current!.selectSession("A"));
+    await act(async () => {}); // the load is now issued and pending
+
+    // The user sends from the still-visible old conversation before A loads.
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await screen.findByText("fresh reply");
+
+    // The stale load resolving now must be discarded, not replace the turn.
+    await act(async () =>
+      resolvers["A"]({
+        id: "A",
+        title: "A",
+        createdAt: 1,
+        updatedAt: 2,
+        contexts: [],
+        skills: [],
+        cliSessionId: null,
+        messages: [{ id: 0, role: "user", text: "from session A" }],
+      }),
+    );
+    expect(screen.queryByText("from session A")).toBeFalsy();
+    expect(screen.getByText("fresh reply")).toBeTruthy();
+  });
 });
 
 describe("AssistantConversation slash menu (Task 21)", () => {
@@ -1236,6 +1293,28 @@ describe("AssistantConversation answer layout", () => {
     expect(screen.queryByText("k8s.listPods")).toBeFalsy();
     fireEvent.click(screen.getByRole("button", { name: /tools \(1\)/i }));
     expect(screen.getByText("k8s.listPods")).toBeTruthy();
+  });
+
+  it("a turn ending with an unresolved tool call settles it instead of leaving a spinner", async () => {
+    // Stop (or a crash) ends the turn before the toolResult ever arrives.
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "pods?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy());
+
+    // The group shows a settled failure, not a forever-running spinner.
+    fireEvent.click(screen.getByRole("button", { name: /tools \(1\)/i }));
+    expect(screen.queryByLabelText(/running/i)).toBeFalsy();
+    // And the persisted transcript carries the settled status too.
+    await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalled());
+    const saved = vi.mocked(chatHistory.saveSession).mock.calls.at(-1)![0];
+    const messages = saved.messages as Array<{ role: string; toolCalls?: Array<{ status: string | null }> }>;
+    const assistant = messages.find((m) => m.role === "assistant" && m.toolCalls);
+    expect(assistant?.toolCalls?.[0].status).toBe("error");
   });
 
   it("copies the assistant answer to the clipboard", async () => {

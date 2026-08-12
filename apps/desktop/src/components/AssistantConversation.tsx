@@ -731,6 +731,11 @@ export const AssistantConversation = forwardRef<
   // cleared on send (after being copied onto the outgoing user `ChatMessage`
   // and, base64-stripped, into `sendChat`'s `images` arg).
   const [pendingImages, setPendingImages] = useState<string[]>([]);
+  // How many attached files are still being read into data URIs. Send is
+  // disabled while > 0: pressing it mid-read would snapshot the previous
+  // `pendingImages`, send without the new attachment, and leave the image
+  // queued for the NEXT turn once the read resolves.
+  const [pendingImageReads, setPendingImageReads] = useState(0);
   // The single source of truth for the saved-session list — rendered here via
   // `HistoryPopover` unless `hideSessionControls` is set, in which case the
   // host (the full-tab `HistoryRail`) mirrors it through `onSessionsChanged`
@@ -908,7 +913,7 @@ export const AssistantConversation = forwardRef<
   // In multi-context mode a tool call always needs a context, so Send stays
   // disabled until at least one is picked; the drawer (single resource
   // `context`, no `availableContexts`) is never gated on this.
-  const canSend = agentReady && (!multiContextMode || selectedContexts.length > 0);
+  const canSend = agentReady && (!multiContextMode || selectedContexts.length > 0) && pendingImageReads === 0;
 
   // The slash menu is open exactly when the composer holds "/" or a
   // `/`-prefixed token with no whitespace (still mid-typing a prompt name),
@@ -1140,13 +1145,19 @@ export const AssistantConversation = forwardRef<
    * resolves — a non-image or unreadable file is silently skipped, since
    * there's nothing useful to attach for it. */
   async function addImageFiles(files: File[]) {
-    for (const file of files) {
-      if (!file.type.startsWith("image/")) continue;
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    // Counted up-front and down per file, so Send stays disabled until every
+    // selected/pasted file has either attached or been skipped.
+    setPendingImageReads((n) => n + images.length);
+    for (const file of images) {
       try {
         const dataUri = await readImageFile(file);
         setPendingImages((imgs) => [...imgs, dataUri]);
       } catch {
         // Unreadable file — nothing to attach, silently skipped.
+      } finally {
+        setPendingImageReads((n) => n - 1);
       }
     }
   }
@@ -1257,6 +1268,18 @@ export const AssistantConversation = forwardRef<
         break;
       case "turnDone":
         endThinking();
+        // A Stop (or an agent crash) can end the turn while calls are still
+        // awaiting their toolResult. Left `null`, they'd render — and be
+        // persisted, and re-render after reload — as running forever. They
+        // didn't complete: settle them as errored before the terminal save.
+        // `setToolCallsTracked` updates `toolCallsRef` synchronously, so the
+        // persist below sees the settled statuses.
+        setToolCallsTracked((tc) => {
+          if (!Object.values(tc).some((c) => c.status === null)) return tc;
+          return Object.fromEntries(
+            Object.entries(tc).map(([k, c]) => [k, c.status === null ? { ...c, status: "error" as const } : c]),
+          );
+        });
         void persistSession(messagesRef.current, toolCallsRef.current);
         break;
     }
@@ -1265,6 +1288,11 @@ export const AssistantConversation = forwardRef<
   async function handleSend() {
     const prompt = input.trim();
     if (!prompt || sending || !canSend) return;
+    // A session load may still be in flight (the old conversation stays
+    // visible while `loadSession` reads). Invalidate it: resolving mid-turn
+    // would swap the transcript and `sessionRef` under this send, and the
+    // turn's events would append to — and persist under — the wrong session.
+    loadSeqRef.current++;
     // The context/multi-context preface, still ending in a blank line when
     // non-empty — the skills guidance block (fetched below, once the turn is
     // actually committed to sending) slots in after it and before `prompt`,
