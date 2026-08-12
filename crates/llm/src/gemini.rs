@@ -107,10 +107,14 @@ impl Stream {
             }
         }
         // Gemini has no distinct tool-use stop reason; the loop keys off whether
-        // any tool call was emitted, so a plain EndTurn is correct here.
-        if candidate.get("finishReason").and_then(Value::as_str).is_some() && !self.done {
-            self.done = true;
-            out.push(StreamItem::Done(StopReason::EndTurn));
+        // any tool call was emitted, so EndTurn is correct for a normal finish —
+        // but a token-limit cutoff must be surfaced as the truncation it is.
+        if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+            if !self.done {
+                self.done = true;
+                let stop = if reason == "MAX_TOKENS" { StopReason::MaxTokens } else { StopReason::EndTurn };
+                out.push(StreamItem::Done(stop));
+            }
         }
         out
     }
@@ -250,6 +254,15 @@ mod tests {
         );
         // A trailing empty candidate with another finishReason doesn't re-emit Done.
         assert!(s.push(r#"{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}"#).is_empty());
+    }
+
+    #[test]
+    fn a_max_tokens_finish_reports_truncation() {
+        let mut s = Stream::new();
+        assert_eq!(
+            s.push(r#"{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}]}"#),
+            vec![StreamItem::Text("partial".into()), StreamItem::Done(StopReason::MaxTokens)]
+        );
     }
 
     #[test]

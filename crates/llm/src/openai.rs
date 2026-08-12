@@ -179,6 +179,7 @@ impl Stream {
 fn map_finish_reason(reason: &str) -> StopReason {
     match reason {
         "tool_calls" => StopReason::ToolUse,
+        "length" => StopReason::MaxTokens,
         _ => StopReason::EndTurn,
     }
 }
@@ -316,6 +317,13 @@ mod tests {
         );
         // A trailing [DONE] after finish is a no-op, not a second Done.
         assert!(s.push("[DONE]").is_empty());
+
+        // `length` (the token-limit cutoff) is truncation, not a normal finish.
+        let mut s2 = Stream::new();
+        assert_eq!(
+            s2.push(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#),
+            vec![StreamItem::Done(StopReason::MaxTokens)]
+        );
     }
 
     #[test]

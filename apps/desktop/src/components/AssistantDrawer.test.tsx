@@ -6,7 +6,9 @@ import * as chat from "../lib/chat";
 import * as chatHistory from "../lib/chatHistory";
 
 const respondToConfirm = vi.fn();
-let emitConfirm: (payload: unknown) => void = () => {};
+const eventHandlers: Record<string, (e: { payload: unknown }) => void> = {};
+const emitConfirm = (payload: unknown) => eventHandlers["mcp://confirm-request"]({ payload });
+const emitConfirmResolved = (id: string) => eventHandlers["mcp://confirm-resolved"]({ payload: { id } });
 
 vi.mock("../lib/chat");
 vi.mock("../lib/chatHistory");
@@ -14,8 +16,8 @@ vi.mock("../lib/mcpSecurity", () => ({
   respondToConfirm: (...a: unknown[]) => respondToConfirm(...a),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: (_name: string, cb: (e: { payload: unknown }) => void) => {
-    emitConfirm = (payload) => cb({ payload });
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+    eventHandlers[name] = cb;
     return Promise.resolve(() => {});
   },
 }));
@@ -240,6 +242,21 @@ describe("AssistantDrawer", () => {
     await userEvent.click(screen.getByRole("button", { name: /approve/i }));
     await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("c1", true));
     expect(screen.queryByText("k8s.deletePod")).toBeFalsy();
+  });
+
+  it("removes the inline confirm card when the request is resolved elsewhere", async () => {
+    render(<AssistantDrawer open onClose={() => {}} />);
+    await screen.findByPlaceholderText(/ask/i);
+
+    emitConfirm({ id: "c2", tool: "k8s.deletePod", args: { name: "web-1" } });
+    await screen.findByText("k8s.deletePod");
+
+    // Answered through the app-wide modal (or timed out server-side) — the
+    // backend broadcasts the resolution, and the card must not linger as a
+    // stale prompt in the transcript.
+    emitConfirmResolved("c2");
+    await waitFor(() => expect(screen.queryByText("k8s.deletePod")).toBeFalsy());
+    expect(respondToConfirm).not.toHaveBeenCalled();
   });
 
   it("shows the compact history popover (Task 19), not the full-tab rail", async () => {

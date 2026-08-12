@@ -3,17 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const respondToConfirm = vi.fn();
-let emit: (payload: unknown) => void = () => {};
+const handlers: Record<string, (e: { payload: unknown }) => void> = {};
 
 vi.mock("../lib/mcpSecurity", () => ({
   respondToConfirm: (...a: unknown[]) => respondToConfirm(...a),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: (_name: string, cb: (e: { payload: unknown }) => void) => {
-    emit = (payload) => cb({ payload });
+  listen: (name: string, cb: (e: { payload: unknown }) => void) => {
+    handlers[name] = cb;
     return Promise.resolve(() => {});
   },
 }));
+const emit = (payload: unknown) => handlers["mcp://confirm-request"]({ payload });
+const emitResolved = (id: string) => handlers["mcp://confirm-resolved"]({ payload: { id } });
 const { notify } = vi.hoisted(() => ({
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
@@ -71,5 +73,20 @@ describe("McpConfirmDialog", () => {
     // request is still dropped from the queue (nothing left to retry), but
     // the failure is surfaced rather than silent.
     expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
+  });
+
+  it("drops a request resolved elsewhere (inline card or timeout) instead of lingering", async () => {
+    render(<McpConfirmDialog />);
+    emit({ id: "a", tool: "toolA", args: {} });
+    emit({ id: "b", tool: "toolB", args: {} });
+    await screen.findByText(/toolA/);
+    // The head request gets answered on the assistant's inline card — the
+    // backend broadcasts the resolution and the modal must move on without
+    // a click here (and without answering anything itself).
+    emitResolved("a");
+    await screen.findByText(/toolB/);
+    emitResolved("b");
+    await waitFor(() => expect(screen.queryByText(/toolB/)).toBeNull());
+    expect(respondToConfirm).not.toHaveBeenCalled();
   });
 });

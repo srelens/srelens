@@ -131,11 +131,16 @@ pub async fn handle_request(
                         error: Some(reason.clone()),
                     });
                     // A result, not a transport error, so the agent can adapt.
+                    // `_meta` (reserved by MCP for exactly this) marks the
+                    // refusal so the in-process native agent can report "the
+                    // user declined" rather than a failed execution; CLI
+                    // clients simply ignore it.
                     return Some(ok(
                         id?,
                         json!({
                             "content": [{ "type": "text", "text": reason }],
-                            "isError": true
+                            "isError": true,
+                            "_meta": { "srelens/denied": true }
                         }),
                     ));
                 }
@@ -705,6 +710,9 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(resp["result"]["isError"], json!(true));
+        // The refusal marker that lets the native agent report "user declined"
+        // instead of a failed execution.
+        assert_eq!(resp["result"]["_meta"]["srelens/denied"], json!(true));
     }
 
     /// The pair of assertions here is the point: the tool must never see

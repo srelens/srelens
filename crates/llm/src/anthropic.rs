@@ -183,6 +183,7 @@ impl Stream {
 fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
         _ => StopReason::EndTurn,
     }
 }
@@ -331,6 +332,11 @@ mod tests {
         let mut s2 = Stream::new();
         s2.push(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#);
         assert_eq!(s2.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::EndTurn)]);
+
+        // A token-limit cutoff is truncation, not a normal finish.
+        let mut s3 = Stream::new();
+        s3.push(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#);
+        assert_eq!(s3.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::MaxTokens)]);
     }
 
     #[test]

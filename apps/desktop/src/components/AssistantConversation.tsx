@@ -341,9 +341,9 @@ function ThoughtsGroup({ text, secs }: { text: string; secs?: number }) {
  * The same `mcp://confirm-request` the modal (`McpConfirmDialog`) answers,
  * rendered inline in the transcript so the approval is visible next to the
  * turn that triggered it. Both views call `respondToConfirm` with the same
- * `id` — the backend resolves whichever answers first and errors harmlessly
- * on the second, which this view swallows since the modal already surfaces
- * that failure.
+ * `id` — the backend resolves whichever answers first and then broadcasts
+ * `mcp://confirm-resolved`, which removes the request from BOTH views, so
+ * neither a stale card nor a stale modal outlives the decision.
  */
 function ConfirmCard({
   request,
@@ -807,8 +807,15 @@ export const AssistantConversation = forwardRef<
     const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
       setPendingConfirms((q) => [...q, event.payload]);
     });
+    // Answered anywhere (this card, the app-wide modal) or timed out — the
+    // backend announces it and the inline card must go, or a stale approval
+    // prompt would sit in the transcript forever.
+    const unlistenResolved = listen<{ id: string }>("mcp://confirm-resolved", (event) => {
+      setPendingConfirms((q) => q.filter((r) => r.id !== event.payload.id));
+    });
     return () => {
       void unlisten.then((f) => f());
+      void unlistenResolved.then((f) => f());
       // If the conversation unmounts mid-turn (drawer/tab closed, or the user
       // switched to another tab), the backend turn and its event subscription
       // would otherwise keep running invisibly — burning quota and invoking MCP

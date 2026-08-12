@@ -21,16 +21,24 @@ export function McpConfirmDialog() {
     const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
       setQueue((q) => [...q, event.payload]);
     });
+    // The backend announces every resolution (answered here, answered on the
+    // assistant's inline card, or timed out) — drop the request however it
+    // settled, so this modal never lingers over an already-decided call.
+    const unlistenResolved = listen<{ id: string }>("mcp://confirm-resolved", (event) => {
+      setQueue((q) => q.filter((r) => r.id !== event.payload.id));
+    });
     return () => {
       void unlisten.then((f) => f());
+      void unlistenResolved.then((f) => f());
     };
   }, []);
 
   async function answer(approved: boolean) {
     if (!current) return;
+    const { id } = current;
     setBusy(true);
     try {
-      await respondToConfirm(current.id, approved);
+      await respondToConfirm(id, approved);
     } catch (e) {
       // The request already timed out or was answered elsewhere (e.g. it
       // timed out server-side while queued behind another dialog) — the
@@ -41,7 +49,10 @@ export function McpConfirmDialog() {
       notify.error("Could not respond to that confirmation", String(e));
     } finally {
       setBusy(false);
-      setQueue((q) => q.slice(1));
+      // Remove by id, not position: the `mcp://confirm-resolved` event may
+      // have already removed this entry, and slicing blindly would then drop
+      // the NEXT queued request instead.
+      setQueue((q) => q.filter((r) => r.id !== id));
     }
   }
 

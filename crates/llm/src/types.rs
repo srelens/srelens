@@ -74,6 +74,10 @@ pub enum StopReason {
     /// The model requested one or more tool calls; the loop must run them and
     /// send another request with their results.
     ToolUse,
+    /// The provider cut the reply off at its output-token limit — whatever
+    /// streamed is incomplete, and the loop must say so rather than present
+    /// the fragment as a finished answer.
+    MaxTokens,
 }
 
 /// One item a provider's streaming parser yields as SSE chunks arrive. The loop

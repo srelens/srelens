@@ -21,21 +21,39 @@ use crate::assistant::ChatManager;
 /// Bounds both memory and the tokens re-sent on every follow-up.
 const MAX_HISTORY_TURNS: usize = 40;
 
+/// How many sessions' histories to retain at once. Nothing ever deletes an
+/// in-memory history (New chat just mints a fresh session id, and deleting a
+/// saved session only removes the disk record), so without this cap every
+/// abandoned transcript — including large MCP results — would accumulate for
+/// the process lifetime.
+const MAX_HISTORY_SESSIONS: usize = 32;
+
 /// In-memory native-agent conversation history, keyed by chat session id, so
 /// follow-up messages in the same session carry the earlier exchange as context
 /// (the CLIs are stateless per turn; the native agent runs in-process, so it
 /// can hold this). Not persisted: reopening a saved session starts a fresh
 /// native context. A "New chat" mints a new session id, so its history is empty.
+///
+/// Stored as a write-ordered list (every turn rewrites its session's entry, so
+/// order == recency): beyond `MAX_HISTORY_SESSIONS` the least-recently-written
+/// session is evicted. Linear scans are fine at this size.
 #[derive(Default)]
-pub struct NativeHistory(std::sync::Mutex<std::collections::HashMap<String, Vec<srelens_llm::types::Turn>>>);
+pub struct NativeHistory(std::sync::Mutex<Vec<(String, Vec<srelens_llm::types::Turn>)>>);
 
 impl NativeHistory {
     fn get(&self, session: &str) -> Vec<srelens_llm::types::Turn> {
-        self.0.lock().unwrap().get(session).cloned().unwrap_or_default()
+        let entries = self.0.lock().unwrap();
+        entries.iter().find(|(id, _)| id == session).map(|(_, turns)| turns.clone()).unwrap_or_default()
     }
 
     fn set(&self, session: String, turns: Vec<srelens_llm::types::Turn>) {
-        self.0.lock().unwrap().insert(session, turns);
+        let mut entries = self.0.lock().unwrap();
+        entries.retain(|(id, _)| *id != session);
+        entries.push((session, turns));
+        if entries.len() > MAX_HISTORY_SESSIONS {
+            let excess = entries.len() - MAX_HISTORY_SESSIONS;
+            entries.drain(0..excess);
+        }
     }
 }
 
@@ -141,6 +159,14 @@ impl ToolInvoker for McpToolInvoker {
         }
         let result = resp.get("result");
         let is_error = result.and_then(|r| r.get("isError")).and_then(Value::as_bool).unwrap_or(false);
+        // A consent refusal is `isError: true` PLUS the `_meta` marker the
+        // server sets on that path — mapping it to `denied` lets the loop
+        // report "the user declined" instead of a failed execution.
+        let denied = result
+            .and_then(|r| r.get("_meta"))
+            .and_then(|m| m.get("srelens/denied"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         // MCP results carry `content: [{type:"text", text}]`; concatenate the
         // text parts (a denied destructive call comes back here as isError:true
         // with the reason text, which we feed straight to the model).
@@ -155,7 +181,7 @@ impl ToolInvoker for McpToolInvoker {
                     .join("\n")
             })
             .unwrap_or_default();
-        Ok(ToolCallResult { content, is_error, denied: false })
+        Ok(ToolCallResult { content, is_error, denied })
     }
 }
 
@@ -407,6 +433,23 @@ mod tests {
         assert_eq!(h.get("s1"), vec![Turn::User("hi".into())]);
         // Sessions are isolated.
         assert!(h.get("s2").is_empty());
+    }
+
+    #[test]
+    fn abandoned_session_histories_are_evicted_beyond_the_cap() {
+        use srelens_llm::types::Turn;
+        let h = NativeHistory::default();
+        for i in 0..=MAX_HISTORY_SESSIONS {
+            h.set(format!("s{i}"), vec![Turn::User(format!("q{i}"))]);
+        }
+        // One over the cap: the least-recently-written session is gone, the
+        // newest survives.
+        assert!(h.get("s0").is_empty(), "oldest session should have been evicted");
+        assert!(!h.get(&format!("s{MAX_HISTORY_SESSIONS}")).is_empty());
+        // Rewriting an old session refreshes its recency instead of duplicating.
+        h.set("s1".into(), vec![Turn::User("again".into())]);
+        h.set("extra".into(), vec![Turn::User("x".into())]);
+        assert_eq!(h.get("s1"), vec![Turn::User("again".into())]);
     }
 
     #[test]

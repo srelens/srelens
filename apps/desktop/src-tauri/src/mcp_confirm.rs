@@ -87,7 +87,7 @@ impl ConfirmPolicy for PromptUser {
             return Decision::Denied("srelens could not show a confirmation dialog".into());
         }
 
-        match tokio::time::timeout(self.timeout, rx).await {
+        let decision = match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(true)) => Decision::Approved,
             Ok(Ok(false)) => Decision::Denied(format!("user declined `{tool}`")),
             Ok(Err(_)) => Decision::Denied("confirmation channel closed".into()),
@@ -95,7 +95,14 @@ impl ConfirmPolicy for PromptUser {
                 self.pending.forget(&id);
                 Decision::Denied(format!("no response to the confirmation for `{tool}`"))
             }
-        }
+        };
+        // The same request is rendered in TWO places — the app-wide modal and
+        // the assistant transcript's inline card — and answering in one only
+        // clears that one's own queue. However this request resolved (either
+        // view answered, timeout, channel closed), tell every view to drop it
+        // so no stale prompt lingers anywhere.
+        let _ = self.app.emit("mcp://confirm-resolved", serde_json::json!({ "id": id }));
+        decision
     }
 }
 

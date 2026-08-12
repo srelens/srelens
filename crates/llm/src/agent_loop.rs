@@ -8,7 +8,7 @@ use srelens_agent::event::{AgentEvent, ToolStatus};
 
 use crate::error::LlmError;
 use crate::provider::{Provider, ToolInvoker};
-use crate::types::{StreamItem, ToolCall, ToolOutcome, Turn};
+use crate::types::{StopReason, StreamItem, ToolCall, ToolOutcome, Turn};
 
 /// Cap on tool-use round-trips per user turn, so a model that keeps calling
 /// tools without ever finishing can't run unbounded.
@@ -41,6 +41,7 @@ pub async fn run(
         let mut text = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut stream_error: Option<String> = None;
+        let mut truncated = false;
 
         {
             let mut on_item = |item: StreamItem| match item {
@@ -50,7 +51,7 @@ pub async fn run(
                 }
                 StreamItem::Thinking(t) => on_event(AgentEvent::Thinking { text: t }),
                 StreamItem::ToolCall(c) => calls.push(c),
-                StreamItem::Done(_) => {}
+                StreamItem::Done(reason) => truncated |= reason == StopReason::MaxTokens,
                 StreamItem::Error(e) => stream_error = Some(e),
             };
             provider.stream_turn(&turns, &tools, &mut on_item).await?;
@@ -67,6 +68,14 @@ pub async fn run(
         if calls.is_empty() {
             // Record the reply so a follow-up message sees it in context.
             turns.push(Turn::Assistant { text, tool_calls: Vec::new() });
+            // A token-limit cutoff means the reply above is a fragment — say
+            // so instead of presenting it as a finished answer. It's still
+            // recorded, so a follow-up "continue" has the fragment in context.
+            if truncated {
+                on_event(AgentEvent::Error {
+                    message: "the reply was cut off at the provider's output-token limit and may be incomplete".into(),
+                });
+            }
             on_event(AgentEvent::TurnDone);
             return Ok(turns);
         }
@@ -235,6 +244,27 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], Turn::User("status?".into()));
         assert_eq!(history[1], Turn::Assistant { text: "all healthy".into(), tool_calls: Vec::new() });
+    }
+
+    #[test]
+    fn a_max_tokens_cutoff_surfaces_a_truncation_error_but_keeps_the_fragment() {
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamItem::Text("the pods are".into()),
+            StreamItem::Done(StopReason::MaxTokens),
+        ]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            calls: Mutex::new(Vec::new()),
+        };
+        let (events, history) = drive_from(&provider, &invoker, Vec::new(), "status?");
+        // The fragment stays in history so a follow-up "continue" has it…
+        assert_eq!(history[1], Turn::Assistant { text: "the pods are".into(), tool_calls: Vec::new() });
+        // …but the user is told it was cut off, not shown a "complete" reply.
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            "expected a truncation error event, got {events:?}"
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
     }
 
     #[test]
