@@ -149,11 +149,29 @@ pub async fn vault_recover_password(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<String, String> {
-    let password = vault::read_recovery_password()?;
     let dir = vault_biometric::vault_dir(&app)?;
-    vault::unlock_with_master_password(&vault, &dir, &password)
-        .map_err(|_| "the recovery copy no longer matches this vault's password")?;
-    Ok(password)
+    // The main copy pairs with the current password; a STAGED copy (left by
+    // a password change that crashed before its final promote) pairs with
+    // the staged/promoted meta. Try main first, then the stage — whichever
+    // unlocks is the truth, and a working staged copy finishes its promote.
+    let main = vault::read_recovery_password();
+    if let Ok(password) = &main {
+        if vault::unlock_with_master_password(&vault, &dir, password).is_ok() {
+            return Ok(password.clone());
+        }
+    }
+    if let Some(staged) = vault::read_staged_recovery() {
+        if vault::unlock_with_master_password(&vault, &dir, &staged).is_ok() {
+            vault::promote_staged_recovery();
+            return Ok(staged);
+        }
+    }
+    match main {
+        // "No recovery copy was stored" beats the mismatch message when
+        // nothing was ever stored.
+        Err(e) => Err(e),
+        Ok(_) => Err("the recovery copy no longer matches this vault's password".into()),
+    }
 }
 
 /// Change the password: verify the current one, re-encrypt under the new
@@ -195,34 +213,33 @@ pub async fn vault_change_password(
     // adopted (marker written); an unreachable keychain is treated as
     // opted-out rather than blocking forever.
     let marker = vault::recovery_marker_path(&dir);
-    let previous_recovery = if marker.exists() {
-        vault::recovery_password_state().map_err(|e| {
-            format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
-        })?
+    let recovery_enabled = if marker.exists() {
+        vault::recovery_password_state()
+            .map_err(|e| {
+                format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
+            })?
+            .is_some()
     } else {
         match vault::recovery_password_state() {
-            Ok(Some(prev)) => {
+            Ok(Some(_)) => {
                 let _ = std::fs::write(&marker, b"");
-                Some(prev)
+                true
             }
-            Ok(None) | Err(_) => None,
+            Ok(None) | Err(_) => false,
         }
     };
-    if previous_recovery.is_some() {
-        // Refresh BEFORE the transition (recoverable step first). EVERY
-        // failure below, pre- or post-stage, restores the previous value —
-        // the copy must never point at a password the vault doesn't have.
-        vault::store_recovery_password(&new)?;
+    if recovery_enabled {
+        // STAGE the new copy — the main entry (which pairs with the current
+        // password) is untouched until after the meta promote, so no crash
+        // window leaves "Forgot password?" holding a value that unlocks
+        // nothing: main pairs with the old meta, the stage with the staged
+        // meta, and the recover flow tries both.
+        vault::store_staged_recovery(&new)?;
     }
-    let restore_recovery = || {
-        if let Some(prev) = &previous_recovery {
-            let _ = vault::store_recovery_password(prev);
-        }
-    };
     let (new_meta, new_key) = match vault::build_meta(&new) {
         Ok(built) => built,
         Err(e) => {
-            restore_recovery();
+            vault::delete_staged_recovery();
             return Err(e);
         }
     };
@@ -231,15 +248,20 @@ pub async fn vault_change_password(
     // in between is healed at the next unlock (unlock_with_master_password).
     let _ = std::fs::remove_file(vault::meta_next_path(&dir));
     if let Err(e) = vault::write_meta_next(&dir, &new_meta) {
-        restore_recovery();
+        vault::delete_staged_recovery();
         return Err(e);
     }
     if let Err(e) = vault.rekey_from_current(new_key, "password") {
         let _ = std::fs::remove_file(vault::meta_next_path(&dir));
-        restore_recovery();
+        vault::delete_staged_recovery();
         return Err(e.to_string());
     }
     vault::promote_meta_next(&dir)?;
+    if recovery_enabled {
+        // Best-effort: a crash before this promote is covered by the recover
+        // flow's staged-copy fallback, which finishes the promote itself.
+        vault::promote_staged_recovery();
+    }
     vault_biometric::refresh_stored_key(&app, &new_key);
     Ok(())
 }

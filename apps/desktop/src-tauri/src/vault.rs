@@ -145,11 +145,16 @@ impl Vault {
                     }
                     if meta_next_path(dir).exists() {
                         match (std::fs::read(&path), &resolved.0) {
-                            // No vault at all — nothing was ever re-keyed;
+                            // CONFIRMED no vault — nothing was ever re-keyed;
                             // the stage is stale regardless of key state.
-                            (Err(_), _) => {
+                            (Err(e), _) if e.kind() == std::io::ErrorKind::NotFound => {
                                 let _ = std::fs::remove_file(meta_next_path(dir));
                             }
+                            // Any other read error (transient PermissionDenied,
+                            // I/O): we can't tell whether the re-key ran, and
+                            // the stage may be the ONLY metadata deriving the
+                            // vault's key — leave it for later arbitration.
+                            (Err(_), _) => {}
                             // Machine key still decrypts the vault: the
                             // re-key never ran — drop the stage, continue in
                             // machine mode.
@@ -552,6 +557,39 @@ pub(crate) fn recovery_password_state() -> Result<Option<String>, String> {
 
 pub(crate) fn delete_recovery_password() {
     let _ = keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT).and_then(|e| e.delete_credential());
+}
+
+/// The STAGED half of a recovery update during a password change: the new
+/// password lands here first, and only after the meta promote is it copied
+/// over the main entry. A crash in any window then always leaves a working
+/// copy for "Forgot password?" — the main entry pairs with the old meta, the
+/// staged one with the staged/promoted meta (the recover flow tries both).
+const RECOVERY_NEXT_ACCOUNT: &str = "master-password-next";
+
+pub(crate) fn store_staged_recovery(password: &str) -> Result<(), String> {
+    keyring::Entry::new(SERVICE, RECOVERY_NEXT_ACCOUNT)
+        .and_then(|e| e.set_password(password))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn read_staged_recovery() -> Option<String> {
+    keyring::Entry::new(SERVICE, RECOVERY_NEXT_ACCOUNT)
+        .and_then(|e| e.get_password())
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+pub(crate) fn delete_staged_recovery() {
+    let _ = keyring::Entry::new(SERVICE, RECOVERY_NEXT_ACCOUNT).and_then(|e| e.delete_credential());
+}
+
+/// Commit a staged recovery copy over the main entry (then drop the stage).
+pub(crate) fn promote_staged_recovery() {
+    if let Some(password) = read_staged_recovery() {
+        if store_recovery_password(&password).is_ok() {
+            delete_staged_recovery();
+        }
+    }
 }
 
 /// Encrypt and atomically replace the vault file: exclusive-create a private
@@ -1271,6 +1309,37 @@ mod tests {
         // The re-keyed vault is untouched.
         let bytes = std::fs::read(dir.join("secrets.enc")).unwrap();
         assert_eq!(decrypt(&new_key, &bytes).unwrap().mcp_token.as_deref(), Some("dd".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_transient_vault_read_error_leaves_the_stage_for_later_arbitration() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("stageperm");
+        // A completed re-key whose promote was lost: the stage is the ONLY
+        // metadata deriving the vault's key.
+        let v = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        v.update(|s| s.mcp_token = Some("ab".repeat(32))).unwrap();
+        let machine_key_hex = to_hex(&v.current_key().unwrap());
+        let (staged, staged_key) = build_meta(&test_pw("perm")).unwrap();
+        write_meta_next(&dir, &staged).unwrap();
+        v.rekey_from_current(staged_key, "password").unwrap();
+
+        // The vault file is temporarily unreadable (not missing!) — the
+        // stage must survive, never be mistaken for a stale one.
+        let vault_file = dir.join("secrets.enc");
+        std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let during = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(machine_key_hex.clone())))));
+        assert!(meta_next_path(&dir).exists(), "stage must survive a read error");
+        drop(during);
+
+        // Access restored: normal arbitration promotes the stage.
+        std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let healed = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(machine_key_hex)))));
+        assert_eq!(healed.key_source(), "password-locked");
+        unlock_with_master_password(&healed, &dir, &test_pw("perm")).unwrap();
+        assert_eq!(healed.load().mcp_token.as_deref(), Some("ab".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
