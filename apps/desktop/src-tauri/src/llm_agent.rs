@@ -299,8 +299,10 @@ pub async fn run_native_agent(
     match joined {
         // Normal/handled finish: persist the continued conversation (trimmed).
         Ok(Ok(updated)) => history_state.set(session, trim_history(updated, MAX_HISTORY_TURNS)),
-        // Setup failure (e.g. tools couldn't be listed) — `run` emitted nothing,
-        // so surface it here and keep the prior history untouched.
+        // `run` failed — setup (tools couldn't be listed) or a transport error
+        // mid-stream (connection died before the provider's terminal marker).
+        // Surface it and keep the prior history untouched; any partial deltas
+        // already streamed stay visible but are not treated as a real turn.
         Ok(Err(e)) => {
             emit(AgentEvent::Error { message: e.to_string() });
             emit(AgentEvent::TurnDone);

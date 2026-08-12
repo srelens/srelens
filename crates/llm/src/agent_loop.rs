@@ -64,6 +64,20 @@ pub async fn run(
             return Ok(history);
         }
 
+        // A truncated round must never run its tool calls: the cutoff can land
+        // mid-arguments, and the parsers coerce partial JSON to `{}` — so the
+        // call (or the consent dialog shown for it) could carry arguments the
+        // model never finished writing. Discard the round instead.
+        if truncated && !calls.is_empty() {
+            on_event(AgentEvent::Error {
+                message: "the reply was cut off at the provider's output-token limit mid-tool-call; \
+                          stopping without running the incomplete call"
+                    .into(),
+            });
+            on_event(AgentEvent::TurnDone);
+            return Ok(history);
+        }
+
         // No tool calls → the model gave its final reply; the turn is done.
         if calls.is_empty() {
             // Record the reply so a follow-up message sees it in context.
@@ -265,6 +279,31 @@ mod tests {
             "expected a truncation error event, got {events:?}"
         );
         assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
+    }
+
+    #[test]
+    fn a_truncated_round_with_tool_calls_runs_nothing_and_discards_the_turn() {
+        // The cutoff can land mid-arguments (parsers coerce partial JSON to
+        // `{}`), so executing the call could act on arguments the model never
+        // finished. The whole round is discarded instead.
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}) }),
+            StreamItem::Done(StopReason::MaxTokens),
+        ]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult { content: "ok".into(), is_error: false, denied: false },
+            calls: Mutex::new(Vec::new()),
+        };
+        let prior = vec![Turn::User("earlier".into())];
+        let (events, history) = drive_from(&provider, &invoker, prior.clone(), "scale it");
+        assert!(invoker.calls.lock().unwrap().is_empty(), "no tool may run from a truncated round");
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            "expected a truncation error event, got {events:?}"
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
+        // The failed turn is discarded — the next request starts from the prior history.
+        assert_eq!(history, prior);
     }
 
     #[test]

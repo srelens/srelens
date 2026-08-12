@@ -120,13 +120,25 @@ impl Provider for HttpProvider {
 
         let mut decoder = SseDecoder::new();
         let mut stream = resp.bytes_stream();
+        // Every provider marks the end of a healthy stream (`message_stop`,
+        // `finish_reason`/`[DONE]`, Gemini's `finishReason`) or reports an
+        // error item. EOF without either means the connection died mid-reply —
+        // that must be an error, or the loop would persist the fragment as a
+        // normal completed turn and feed it to follow-ups as if it were whole.
+        let mut saw_terminal = false;
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
             for data in decoder.push(&bytes) {
                 for item in parser.push(&data) {
+                    saw_terminal |= matches!(item, StreamItem::Done(_) | StreamItem::Error(_));
                     on_item(item);
                 }
             }
+        }
+        if !saw_terminal {
+            return Err(LlmError::Api(
+                "the provider stream ended before signaling completion; the reply may be incomplete".into(),
+            ));
         }
         Ok(())
     }
