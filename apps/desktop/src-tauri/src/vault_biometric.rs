@@ -80,7 +80,13 @@ pub async fn vault_biometric_enable(
         })
         .map_err(|e| format!("could not store the key in the biometric store: {e}"))?;
     let dir = vault_dir(&app)?;
-    std::fs::write(vault::biometric_marker_path(&dir), b"").map_err(|e| e.to_string())?;
+    // A marker-write failure must take the just-stored item back out: the
+    // enable reports failure, so no valid key may linger in the biometric
+    // store as a usable-but-unacknowledged unlock method.
+    if let Err(e) = std::fs::write(vault::biometric_marker_path(&dir), b"") {
+        let _ = app.biometry().remove_data(data_options());
+        return Err(e.to_string());
+    }
     vault::delete_master_key_from_keychain();
     vault.set_key_source("biometric");
     Ok(())
@@ -178,6 +184,13 @@ pub async fn vault_biometric_unlock(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<(), String> {
+    // The marker is the enrollment: without it, a leftover item in the
+    // biometric store (e.g. from a failed enable) is not a sanctioned
+    // unlock method and must not be consultable via a direct invocation.
+    let dir = vault_dir(&app)?;
+    if !vault::biometric_marker_path(&dir).exists() {
+        return Err("biometric unlock is not enabled for this vault".into());
+    }
     let resp = app
         .biometry()
         .get_data(GetDataOptions {
