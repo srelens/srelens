@@ -252,7 +252,15 @@ impl Vault {
                     "the vault was re-keyed by another srelens process (or the file is corrupt) — restart srelens and unlock again",
                 )
             })?,
-            Err(_) => Secrets::default(),
+            // Same NotFound-only rule as `update`: a transient read error must
+            // abort the rekey, never re-key Secrets::default() over an intact
+            // but momentarily unreadable vault.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Secrets::default(),
+            Err(e) => {
+                return Err(std::io::Error::other(format!(
+                    "the vault file could not be read ({e}); refusing to re-key over it"
+                )))
+            }
         };
         write_sealed(&new_key, &self.path, &secrets)?;
         *self.key.write().unwrap() = Some(new_key);
@@ -302,7 +310,16 @@ impl Vault {
                     "the vault was re-keyed by another srelens process (or the file is corrupt) — restart srelens and unlock again",
                 )
             })?,
-            Err(_) => Secrets::default(),
+            // Only CONFIRMED absence starts from empty; any other read error
+            // (transient PermissionDenied, I/O) aborts — the rename through a
+            // still-writable directory could otherwise replace an intact but
+            // momentarily unreadable vault with an empty one.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Secrets::default(),
+            Err(e) => {
+                return Err(std::io::Error::other(format!(
+                    "the vault file could not be read ({e}); refusing to overwrite it"
+                )))
+            }
         };
         mutate(&mut secrets);
         write_sealed(&key, &self.path, &secrets)
@@ -1309,6 +1326,30 @@ mod tests {
         // The re-keyed vault is untouched.
         let bytes = std::fs::read(dir.join("secrets.enc")).unwrap();
         assert_eq!(decrypt(&new_key, &bytes).unwrap().mcp_token.as_deref(), Some("dd".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_transient_vault_read_error_aborts_writes_and_rekeys_instead_of_emptying() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("permwrite");
+        let v = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        v.update(|s| s.mcp_token = Some("cd".repeat(32))).unwrap();
+        let vault_file = dir.join("secrets.enc");
+        let before = std::fs::read(&vault_file).unwrap();
+
+        // The vault file is momentarily unreadable while its directory stays
+        // writable — both write paths must ABORT, not re-create it empty.
+        std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let update_err = v.update(|s| s.mcp_token = None).unwrap_err();
+        assert!(update_err.to_string().contains("could not be read"), "got: {update_err}");
+        let rekey_err = v.rekey_from_current(generate_key(), "password").unwrap_err();
+        assert!(rekey_err.to_string().contains("could not be read"), "got: {rekey_err}");
+
+        std::fs::set_permissions(&vault_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&vault_file).unwrap(), before, "vault bytes untouched");
+        assert_eq!(v.load().mcp_token.as_deref(), Some("cd".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
