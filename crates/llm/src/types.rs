@@ -99,9 +99,26 @@ pub enum StreamItem {
 /// A model offered by a provider, as returned by its models endpoint and shown
 /// in the Settings picker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     /// A human label when the provider gives one; otherwise the adapter falls
-    /// back to `id`.
+    /// back to `id`. Serialized as `displayName` — this crosses the tauri IPC
+    /// boundary into the Settings UI's `ModelInfo` type.
     pub display_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Settings UI reads `displayName` over IPC — a snake_case
+    /// serialization renders every model option with a blank label.
+    #[test]
+    fn model_info_crosses_the_ipc_boundary_in_camel_case() {
+        let m = ModelInfo { id: "deepseek-chat".into(), display_name: "DeepSeek Chat".into() };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["id"], "deepseek-chat");
+        assert_eq!(v["displayName"], "DeepSeek Chat");
+    }
 }
