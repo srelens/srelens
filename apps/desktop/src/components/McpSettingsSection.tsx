@@ -318,9 +318,10 @@ export function McpSettingsSection() {
         )}
         {tokenStorage === "locked" && (
           <p className="text-sm text-destructive">
-            The OS keychain holding the key that encrypts srelens's secrets couldn't be reached
-            when srelens started, so stored secrets can't be read or changed right now. They are
-            untouched — restart srelens once the keychain is available again.
+            srelens couldn't load the key that encrypts its secrets when it started — the OS
+            keychain was unreachable, or the key file couldn't be created. Stored secrets can't be
+            read or changed right now; they are untouched. Restart srelens once the keychain is
+            available again.
           </p>
         )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}

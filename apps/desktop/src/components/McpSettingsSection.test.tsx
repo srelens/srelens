@@ -131,8 +131,8 @@ describe("McpSettingsSection", () => {
   it("explains a locked vault (keychain unreachable) without implying data loss", async () => {
     mcpSecurity.getMcpTokenStorage.mockResolvedValue("locked");
     render(<McpSettingsSection />);
-    expect(await screen.findByText(/couldn't be reached when srelens started/)).toBeDefined();
-    expect(screen.getByText(/They are untouched/)).toBeDefined();
+    expect(await screen.findByText(/couldn't load the key that encrypts its secrets/)).toBeDefined();
+    expect(screen.getByText(/they are untouched/)).toBeDefined();
   });
 
   it("shows no fallback warning when the master key is in the OS keychain", async () => {
