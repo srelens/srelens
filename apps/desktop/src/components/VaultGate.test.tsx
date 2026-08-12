@@ -32,6 +32,17 @@ const status = (over: Partial<Parameters<typeof mcpSecurity.vaultStatus>[0]> & R
 });
 
 describe("VaultGate", () => {
+  it("stays closed with a retry when the status command itself fails", async () => {
+    mcpSecurity.vaultStatus.mockRejectedValue(new Error("vault state unavailable"));
+    render(<VaultGate onReady={() => { throw new Error("onReady must not fire on failure"); }} />);
+    expect(await screen.findByText(/secrets unavailable/i)).toBeTruthy();
+
+    // Retry succeeds → the gate proceeds normally (locked form).
+    mcpSecurity.vaultStatus.mockResolvedValue(status({}));
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(await screen.findByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+  });
+
   it("renders nothing once the vault is unlocked", async () => {
     mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
     const { container } = render(<VaultGate />);

@@ -18,10 +18,10 @@
 //! per-secret fallback files had, and Settings says so plainly.
 //!
 //! A vault that can't be decrypted (wrong key, tampered or truncated file)
-//! reads as EMPTY rather than erroring: secrets here are all re-obtainable
-//! (the MCP token regenerates; API keys are re-pasted), and a later save
-//! simply overwrites. That is deliberate — never brick the app over a
-//! corrupt secrets file.
+//! READS as empty rather than erroring — never brick the app's display over
+//! a corrupt secrets file. WRITES over such a vault are refused: the usual
+//! cause is another process having re-keyed it (a password change in a
+//! second instance), and overwriting would destroy the real secrets.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -122,20 +122,34 @@ impl Vault {
             // the re-key completed and only the promote was lost — commit the
             // stage and open password-locked.
             if meta_next_path(dir).exists() {
-                let machine_key_fits = match (&resolved.0, std::fs::read(&path)) {
-                    (Some(key), Ok(bytes)) => decrypt(key, &bytes).is_some(),
-                    (_, Err(_)) => true, // no vault yet — nothing was re-keyed
-                    (None, _) => false,
-                };
-                if machine_key_fits {
-                    let _ = std::fs::remove_file(meta_next_path(dir));
-                } else if promote_meta_next(dir).is_ok() {
-                    return Vault {
-                        path,
-                        key: std::sync::RwLock::new(None),
-                        key_source: std::sync::RwLock::new("password-locked"),
-                        lock: Mutex::new(()),
-                    };
+                match (std::fs::read(&path), &resolved.0) {
+                    // No vault at all — nothing was ever re-keyed; the stage
+                    // is stale regardless of key availability.
+                    (Err(_), _) => {
+                        let _ = std::fs::remove_file(meta_next_path(dir));
+                    }
+                    // Machine key still decrypts the vault: the re-key never
+                    // ran — drop the stage, continue in machine mode.
+                    (Ok(bytes), Some(key)) if decrypt(key, &bytes).is_some() => {
+                        let _ = std::fs::remove_file(meta_next_path(dir));
+                    }
+                    // Machine key present but doesn't fit: the re-key
+                    // completed and only the promote was lost — commit it.
+                    (Ok(_), Some(_)) => {
+                        if promote_meta_next(dir).is_ok() {
+                            return Vault {
+                                path,
+                                key: std::sync::RwLock::new(None),
+                                key_source: std::sync::RwLock::new("password-locked"),
+                                lock: Mutex::new(()),
+                            };
+                        }
+                    }
+                    // Machine key UNAVAILABLE (keychain outage): we cannot
+                    // tell whether the re-key ran. Leave the stage untouched
+                    // — a later launch with keychain access arbitrates; the
+                    // vault opens locked either way, so nothing is at risk.
+                    (Ok(_), None) => {}
                 }
             }
             resolved
@@ -199,8 +213,14 @@ impl Vault {
         }
         let lock_file = std::fs::File::create(self.path.with_extension("enc.lock"))?;
         lock_file.lock()?;
+        // Same fail-closed rule as `update`: never re-key over an existing
+        // vault the current key can't actually read.
         let secrets = match std::fs::read(&self.path) {
-            Ok(bytes) => decrypt(&old_key, &bytes).unwrap_or_default(),
+            Ok(bytes) => decrypt(&old_key, &bytes).ok_or_else(|| {
+                std::io::Error::other(
+                    "the vault was re-keyed by another srelens process (or the file is corrupt) — restart srelens and unlock again",
+                )
+            })?,
             Err(_) => Secrets::default(),
         };
         write_sealed(&new_key, &self.path, &secrets)?;
@@ -240,7 +260,19 @@ impl Vault {
         }
         let lock_file = std::fs::File::create(self.path.with_extension("enc.lock"))?;
         lock_file.lock()?;
-        let mut secrets = self.read_secrets();
+        // Fail-closed read for the WRITE path: an existing vault this key
+        // can't decrypt means another process re-keyed it (a password change
+        // in a second instance) — proceeding would overwrite real secrets
+        // with an empty map under a key the promoted metadata no longer
+        // matches. Reads stay empty-on-mismatch for display; writes refuse.
+        let mut secrets = match std::fs::read(&self.path) {
+            Ok(bytes) => decrypt(&key, &bytes).ok_or_else(|| {
+                std::io::Error::other(
+                    "the vault was re-keyed by another srelens process (or the file is corrupt) — restart srelens and unlock again",
+                )
+            })?,
+            Err(_) => Secrets::default(),
+        };
         mutate(&mut secrets);
         write_sealed(&key, &self.path, &secrets)
         // `lock_file` drops here, releasing the inter-process lock.
@@ -1166,6 +1198,49 @@ mod tests {
         let unlocked_key = unlock_key_for(&read_meta(&dir).unwrap(), &test_pw("setup")).unwrap();
         reopened.unlock_with(unlocked_key, "password").unwrap();
         assert_eq!(reopened.load().mcp_token.as_deref(), Some("fe".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_writer_holding_a_pre_rekey_key_is_rejected_instead_of_destroying_the_vault() {
+        let dir = temp_dir("stalekey");
+        // Instance A: unlocked with the (file) key, has written a secret.
+        let a = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        a.update(|s| s.mcp_token = Some("dd".repeat(32))).unwrap();
+        // Another instance re-keys the vault (a password change).
+        let rekeyed_secrets = a.load();
+        let new_key = generate_key();
+        write_sealed(&new_key, &dir.join("secrets.enc"), &rekeyed_secrets).unwrap();
+        // A's cached key no longer fits: its write must be REJECTED, not
+        // replace the vault with an empty map under the stale key.
+        let err = a
+            .update(|s| {
+                s.llm_keys.insert("openai".into(), "k".into());
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("re-keyed"), "got: {err}");
+        // The re-keyed vault is untouched.
+        let bytes = std::fs::read(dir.join("secrets.enc")).unwrap();
+        assert_eq!(decrypt(&new_key, &bytes).unwrap().mcp_token.as_deref(), Some("dd".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unavailable_machine_key_leaves_a_staged_setup_unresolved() {
+        let dir = temp_dir("stagehold");
+        // A machine-key vault exists…
+        let v = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        v.update(|s| s.mcp_token = Some("ee".repeat(32))).unwrap();
+        // …with a staged setup whose re-key may or may not have run.
+        let (staged, _) = build_meta(&test_pw("staged")).unwrap();
+        write_meta_next(&dir, &staged).unwrap();
+        // The next launch can't reach the keychain: it must NOT guess — the
+        // stage stays for a later launch to arbitrate, and the vault opens
+        // locked with its bytes untouched.
+        let outage = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        assert_eq!(outage.key_source(), "locked");
+        assert!(meta_next_path(&dir).exists(), "the stage must survive the outage");
+        assert!(!meta_path(&dir).exists(), "nothing was promoted blind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

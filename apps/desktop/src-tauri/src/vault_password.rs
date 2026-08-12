@@ -170,24 +170,37 @@ pub async fn vault_change_password(
     // The recovery copy's fate must be KNOWN before anything changes: an
     // unreachable keychain fails the change up front, never leaving a stale
     // copy that a later "Forgot password?" would trust.
-    let had_recovery = vault::recovery_password_state()
-        .map_err(|e| format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})"))?
-        .is_some();
-    if had_recovery {
-        // Refresh BEFORE the transition (recoverable step first); rolled
-        // back below if the re-key fails.
+    let previous_recovery = vault::recovery_password_state().map_err(|e| {
+        format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
+    })?;
+    if previous_recovery.is_some() {
+        // Refresh BEFORE the transition (recoverable step first). EVERY
+        // failure below, pre- or post-stage, restores the previous value —
+        // the copy must never point at a password the vault doesn't have.
         vault::store_recovery_password(&new)?;
     }
-    let (new_meta, new_key) = vault::build_meta(&new)?;
+    let restore_recovery = || {
+        if let Some(prev) = &previous_recovery {
+            let _ = vault::store_recovery_password(prev);
+        }
+    };
+    let (new_meta, new_key) = match vault::build_meta(&new) {
+        Ok(built) => built,
+        Err(e) => {
+            restore_recovery();
+            return Err(e);
+        }
+    };
     // Same two-phase transition as setup: stage, re-key, promote — a crash
     // in between is healed at the next unlock (see unlock_with_master_password).
     let _ = std::fs::remove_file(vault::meta_next_path(&dir));
-    vault::write_meta_next(&dir, &new_meta)?;
+    if let Err(e) = vault::write_meta_next(&dir, &new_meta) {
+        restore_recovery();
+        return Err(e);
+    }
     if let Err(e) = vault.rekey_from_current(new_key, "password") {
         let _ = std::fs::remove_file(vault::meta_next_path(&dir));
-        if had_recovery {
-            let _ = vault::store_recovery_password(&current);
-        }
+        restore_recovery();
         return Err(e.to_string());
     }
     vault::promote_meta_next(&dir)?;

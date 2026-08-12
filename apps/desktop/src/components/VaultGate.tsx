@@ -28,6 +28,8 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recovered, setRecovered] = useState<string | null>(null);
+  // The status command itself failed (desktop-only) — blocking error state.
+  const [statusFailed, setStatusFailed] = useState(false);
   // The biometric prompt must fire once per launch, not once per render.
   const autoPrompted = useRef(false);
   // `onReady` fires exactly once, when the vault becomes usable — consumers
@@ -45,13 +47,17 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
     try {
       const s = await vaultStatus();
       setStatus(s);
+      setStatusFailed(false);
       if (s.mode === "unlocked") notifyReady();
       return s;
     } catch {
-      // Not a Tauri window (web mode) or command unavailable: no gate —
-      // and nothing for consumers to wait on.
+      // Only reachable in a Tauri window (the mount effect never calls this
+      // in web mode): the backend genuinely failed — e.g. the config dir
+      // didn't resolve and the vault state was never managed. The gate must
+      // STAY CLOSED with a retry, never quietly wave the app through the
+      // mandatory setup/unlock.
       setStatus(null);
-      notifyReady();
+      setStatusFailed(true);
       return null;
     }
   }
@@ -69,6 +75,24 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
       }
     });
   }, []);
+
+  if (statusFailed) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-background">
+        <div className="flex w-96 flex-col gap-4 rounded-xl border border-border bg-card p-6 shadow-lg">
+          <div className="flex items-center gap-2">
+            <Lock className="size-5 text-muted-foreground" aria-hidden="true" />
+            <h1 className="text-lg font-semibold">Secrets unavailable</h1>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            srelens couldn't reach its secrets vault. Stored secrets stay locked until this
+            resolves — retry, or restart srelens.
+          </p>
+          <Button onClick={() => void refresh()}>Retry</Button>
+        </div>
+      </div>
+    );
+  }
 
   // Stay mounted while the recovered password is on screen even though the
   // recovery flow already unlocked the vault — Continue dismisses it.
