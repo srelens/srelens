@@ -5,7 +5,21 @@ use std::sync::Arc;
 
 use srelens_mcp::auth::TokenStore as _;
 
+/// `SRELENS_MASTER_PASSWORD`, captured once at startup and immediately
+/// scrubbed from the process environment — EVERY run mode (GUI, `--serve`,
+/// `--mcp-stdio`, `--mcp-http`) can spawn Helm binaries and kubectl exec
+/// credential plugins, and none of them may inherit the vault password.
+static MASTER_PASSWORD_ENV: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn take_master_password_env() -> Option<String> {
+    MASTER_PASSWORD_ENV.get().cloned().flatten()
+}
+
 fn main() {
+    // Capture-and-scrub FIRST, before any run-mode dispatch or subprocess.
+    let _ = MASTER_PASSWORD_ENV
+        .set(std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty()));
+    std::env::remove_var("SRELENS_MASTER_PASSWORD");
     // GUI launches (Finder/Dock) inherit launchd's minimal PATH, not the
     // user's shell PATH — kubeconfig exec plugins (kubectl, kubectl-oidc_login,
     // cloud CLIs) then fail to spawn with "No such file or directory". Resolve
@@ -146,12 +160,9 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
     // master password from the environment (never argv — it would show in
     // `ps`). Without it, `SRELENS_MCP_TOKEN` still works, and a store-token
     // path that needs to mint exits below with guidance naming both.
-    // Capture the master password and immediately SCRUB it from the process
-    // environment: subprocesses spawned while serving (helm, kubectl exec
-    // credential plugins) inherit our environment and must never receive the
-    // vault password.
-    let master_password = std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty());
-    std::env::remove_var("SRELENS_MASTER_PASSWORD");
+    // Captured (and scrubbed from the environment) at the very top of
+    // `main`, before any run-mode dispatch — see MASTER_PASSWORD_ENV.
+    let master_password = take_master_password_env();
     // Both password-derived locked sources unlock with the master password:
     // `biometric-locked` only means the GUI would normally skip the password
     // via Touch ID / Hello — the password (and vault.json) still exist.

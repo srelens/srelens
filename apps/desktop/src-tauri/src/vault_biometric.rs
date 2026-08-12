@@ -96,20 +96,38 @@ pub async fn vault_biometric_disable(
         .current_key()
         .ok_or("the vault is locked — pass the biometric unlock before disabling the gate")?;
     let dir = vault_dir(&app)?;
-    // In master-password mode the key derives from the password — there is
-    // no keychain home to restore; unlocks simply go back to the password
-    // gate. Only the legacy machine-key mode restores the plain entry (and
-    // it must land FIRST — the key must never be homeless).
-    let password_mode = vault::read_meta(&dir).is_some();
+    // Mode is decided by vault.json's EXISTENCE (the fail-closed rule used
+    // everywhere): a present-but-unreadable meta is password mode with the
+    // password path broken — disabling then would remove the ONLY working
+    // unlock, so refuse until the metadata is readable again.
+    let password_mode = vault::meta_path(&dir).exists();
+    if password_mode && vault::read_meta(&dir).is_none() {
+        return Err(
+            "the vault's password metadata is unreadable — biometric unlock is currently the only \
+             working unlock and can't be disabled"
+                .into(),
+        );
+    }
+    // Legacy machine-key mode restores the plain entry FIRST — the key must
+    // never be homeless.
     if !password_mode {
         vault::store_master_key_in_keychain(&key)?;
+    }
+    // Remove the biometric ITEM before committing the marker change: if the
+    // store is unavailable the disable must fail with the marker intact —
+    // reporting success while a valid key stays in the biometric store would
+    // leave a supposedly disabled unlock method alive.
+    if app.biometry().remove_data(data_options()).is_err() {
+        let still_present = app.biometry().has_data(data_options()).unwrap_or(true);
+        if still_present {
+            return Err("the biometric store is unavailable — try disabling again later".into());
+        }
     }
     match std::fs::remove_file(vault::biometric_marker_path(&dir)) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.to_string()),
     }
-    let _ = app.biometry().remove_data(data_options());
     vault.set_key_source(if password_mode { "password" } else { "keychain" });
     Ok(())
 }
