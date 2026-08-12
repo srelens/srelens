@@ -310,7 +310,27 @@ describe("AssistantConversation session persistence", () => {
     await waitFor(() => expect(chatHistory.saveSession).toHaveBeenCalledTimes(1));
     const saved = vi.mocked(chatHistory.saveSession).mock.calls[0][0];
     expect(saved.messages).toHaveLength(3);
-    expect(saved.messages[2]).toEqual({ id: 2, role: "error", text: "boom" });
+    // The error slots in BEFORE the untouched assistant placeholder (which
+    // stays last as the stream target — see the advisory-error test below).
+    expect(saved.messages[1]).toEqual({ id: 2, role: "error", text: "boom" });
+  });
+
+  it("an advisory error mid-turn doesn't swallow the reply that streams after it", async () => {
+    // The real backend's unsupported-attachment shape: an `error` first, then
+    // the turn proceeds text-only. The error must not orphan the assistant
+    // placeholder (textDelta targets the LAST message) or the whole reply
+    // would be silently discarded while the provider call still ran.
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "error", message: "image attachments aren't supported by the srelens agent yet" });
+      onEvent({ type: "textDelta", text: "here is the text-only answer" });
+      onEvent({ type: "turnDone" });
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(screen.getByText("here is the text-only answer")).toBeTruthy());
+    expect(screen.getByText(/attachments aren't supported/)).toBeTruthy();
   });
 
   it("New chat clears the transcript, and the next send mints a fresh session id", async () => {

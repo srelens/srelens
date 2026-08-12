@@ -116,14 +116,18 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
    * already in the editor untouched — never a partial overwrite.
    */
   async function generate() {
-    if (!editing || !generateAgent?.path || !need.trim() || generating) return;
+    // No `.path` requirement: the native srelens agent runs in-process and
+    // lists with `path: null` — `chat_send` never touches the path for it.
+    // Requiring one here would silently no-op the enabled Generate button
+    // whenever the native agent sorts first.
+    if (!editing || !generateAgent || !need.trim() || generating) return;
     setGenerateError("");
     setGenerating(true);
     let accumulated = "";
     let errored = false;
     try {
       const session = await startChat();
-      await sendChat(session, buildMetaPrompt(need), generateAgent.path, (e: AgentEvent) => {
+      await sendChat(session, buildMetaPrompt(need), generateAgent.path ?? "", (e: AgentEvent) => {
         switch (e.type) {
           case "textDelta":
             accumulated += e.text;

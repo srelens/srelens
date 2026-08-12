@@ -237,6 +237,28 @@ describe("SkillsPanel — Generate with AI", () => {
     );
   });
 
+  it("generates through the pathless native agent (path: null) instead of silently no-oping", async () => {
+    chatLibMock.listAgents.mockResolvedValue([
+      { kind: "srelens", label: "srelens agent", available: true, path: null, version: null, installUrl: "", gated: false },
+    ]);
+    chatLibMock.sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) => {
+      onEvent({ type: "textDelta", text: "generated body" });
+      onEvent({ type: "turnDone" });
+    });
+    await openNewSkillEditor();
+
+    fireEvent.change(await screen.findByLabelText("Skill need"), { target: { value: "some need" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+
+    await waitFor(() => expect(chatLibMock.sendChat).toHaveBeenCalledTimes(1));
+    const [, , agentPath, , , agentKind] = chatLibMock.sendChat.mock.calls[0];
+    expect(agentPath).toBe("");
+    expect(agentKind).toBe("srelens");
+    await waitFor(() => {
+      expect((screen.getByLabelText("Skill body") as HTMLTextAreaElement).value).toBe("generated body");
+    });
+  });
+
   it("the streamed markdown lands in the body field once the turn completes", async () => {
     chatLibMock.sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: AgentEvent) => void) => {
       onEvent({ type: "textDelta", text: "Step 1: check the exit code.\n" });

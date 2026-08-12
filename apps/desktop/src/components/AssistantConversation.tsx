@@ -1225,7 +1225,20 @@ export const AssistantConversation = forwardRef<
         // with a terminal `turnDone` on the same channel once it's live
         // (crash-recovery in `finish_turn`, and the bad-image-attachment
         // path both do this) — saving on both would double-save the turn.
-        setMessagesTracked((msgs) => [...msgs, { id: nextId.current++, role: "error", text: e.message }]);
+        setMessagesTracked((msgs) => {
+          const error = { id: nextId.current++, role: "error" as const, text: e.message };
+          const last = msgs[msgs.length - 1];
+          // An ADVISORY error (e.g. "attachments aren't supported") arrives
+          // before any streaming and the turn then proceeds. Appending it
+          // after the untouched assistant placeholder would orphan the
+          // placeholder — every later `textDelta` targets the LAST message —
+          // and silently discard the whole reply. Slot the error in front of
+          // a still-pristine placeholder so the stream keeps its target; a
+          // terminal error (placeholder already streamed into) appends.
+          const pristine =
+            last && last.role === "assistant" && last.text === "" && !last.toolCallIds && !last.thoughts;
+          return pristine ? [...msgs.slice(0, -1), error, last] : [...msgs, error];
+        });
         break;
       case "turnDone":
         endThinking();
