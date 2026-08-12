@@ -145,9 +145,9 @@ export function McpSettingsSection() {
     }
     setPwBusy(true);
     try {
-      // Keeps whatever recovery choice was made at setup: the backend
-      // refreshes the recovery copy when one exists.
-      await vaultChangePassword(pwCurrent, pwNew, true);
+      // The backend refreshes the keychain recovery copy only if one exists,
+      // preserving the opt-in/opt-out made at setup.
+      await vaultChangePassword(pwCurrent, pwNew);
       notify.success("Master password changed");
       setPwCurrent("");
       setPwNew("");

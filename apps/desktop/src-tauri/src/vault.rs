@@ -160,18 +160,27 @@ impl Vault {
         *self.key_source.write().unwrap() = source;
     }
 
-    /// Swap the vault onto a NEW key, re-encrypting `secrets` under it — the
-    /// heart of password setup and password change. Runs under both write
-    /// locks so no concurrent update interleaves between key swap and rewrite.
-    pub(crate) fn rekey(&self, key: [u8; KEY_LEN], secrets: &Secrets, source: &'static str) -> std::io::Result<()> {
+    /// Swap the vault onto a NEW key — the heart of password setup and
+    /// password change. The current contents are READ INSIDE the same
+    /// process + inter-process critical section that rewrites them, so a
+    /// concurrent update (another command, or the standalone CLI) can never
+    /// slip in between a snapshot and the re-encryption and be lost.
+    pub(crate) fn rekey_from_current(&self, new_key: [u8; KEY_LEN], source: &'static str) -> std::io::Result<()> {
         let _guard = self.lock.lock().unwrap();
+        let Some(old_key) = *self.key.read().unwrap() else {
+            return Err(std::io::Error::other("the vault is locked; it cannot be re-keyed"));
+        };
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let lock_file = std::fs::File::create(self.path.with_extension("enc.lock"))?;
         lock_file.lock()?;
-        write_sealed(&key, &self.path, secrets)?;
-        *self.key.write().unwrap() = Some(key);
+        let secrets = match std::fs::read(&self.path) {
+            Ok(bytes) => decrypt(&old_key, &bytes).unwrap_or_default(),
+            Err(_) => Secrets::default(),
+        };
+        write_sealed(&new_key, &self.path, &secrets)?;
+        *self.key.write().unwrap() = Some(new_key);
         *self.key_source.write().unwrap() = source;
         Ok(())
     }
@@ -1027,10 +1036,10 @@ mod tests {
         let legacy = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
         legacy.update(|s| s.mcp_token = Some("fe".repeat(32))).unwrap();
 
-        // Setup: derive from the password, re-encrypt the existing secrets.
+        // Setup: derive from the password, re-encrypt the existing secrets —
+        // the snapshot is taken INSIDE the rekey critical section.
         let (meta, key) = build_meta("hunter22").unwrap();
-        let secrets = legacy.load();
-        legacy.rekey(key, &secrets, "password").unwrap();
+        legacy.rekey_from_current(key, "password").unwrap();
         write_meta(&dir, &meta).unwrap();
         assert_eq!(legacy.key_source(), "password");
         assert_eq!(legacy.load().mcp_token.as_deref(), Some("fe".repeat(32).as_str()));

@@ -159,11 +159,13 @@ pub async fn vault_biometric_unlock(
     let key = vault::key_from_hex(&resp.data)
         .ok_or("the stored biometric key is malformed")
         .map_err(|e| {
-            let _ = app.biometry().remove_data(data_options());
+            // Purge marker AND item: leaving the marker would keep every
+            // later launch auto-raising a prompt for an item that's gone.
+            purge(&app);
             e.to_string()
         })?;
     vault.unlock_with(key, "biometric").map_err(|e| {
-        let _ = app.biometry().remove_data(data_options());
-        format!("{e} — the stale biometric item was removed; the vault stays locked")
+        purge(&app);
+        format!("{e} — the stale biometric item was removed; later launches fall back to the password")
     })
 }

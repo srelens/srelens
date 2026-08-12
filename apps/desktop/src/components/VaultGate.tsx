@@ -20,7 +20,7 @@ import {
  *
  * Renders nothing outside a Tauri window (web mode has no vault commands).
  */
-export function VaultGate() {
+export function VaultGate({ onReady }: { onReady?: () => void }) {
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -30,15 +30,28 @@ export function VaultGate() {
   const [recovered, setRecovered] = useState<string | null>(null);
   // The biometric prompt must fire once per launch, not once per render.
   const autoPrompted = useRef(false);
+  // `onReady` fires exactly once, when the vault becomes usable — consumers
+  // (the MCP auto-start) must not run against a locked vault.
+  const readyNotified = useRef(false);
+
+  function notifyReady() {
+    if (!readyNotified.current) {
+      readyNotified.current = true;
+      onReady?.();
+    }
+  }
 
   async function refresh(): Promise<VaultStatus | null> {
     try {
       const s = await vaultStatus();
       setStatus(s);
+      if (s.mode === "unlocked") notifyReady();
       return s;
     } catch {
-      // Not a Tauri window (web mode) or command unavailable: no gate.
+      // Not a Tauri window (web mode) or command unavailable: no gate —
+      // and nothing for consumers to wait on.
       setStatus(null);
+      notifyReady();
       return null;
     }
   }

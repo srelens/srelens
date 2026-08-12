@@ -102,12 +102,10 @@ export async function vaultRecoverPassword(): Promise<string> {
   return await invoke<string>("vault_recover_password");
 }
 
-export async function vaultChangePassword(
-  current: string,
-  next: string,
-  keepRecovery: boolean,
-): Promise<void> {
-  await invoke("vault_change_password", { current, new: next, keepRecovery });
+/** The backend refreshes the keychain recovery copy only if one exists —
+ * setup's opt-in/opt-out choice is preserved, never silently reversed. */
+export async function vaultChangePassword(current: string, next: string): Promise<void> {
+  await invoke("vault_change_password", { current, new: next });
 }
 
 /** Newest first. Returns [] rather than throwing: a missing log is not an error. */

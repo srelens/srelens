@@ -35,7 +35,10 @@ pub async fn vault_status(
 ) -> Result<VaultStatus, String> {
     use tauri_plugin_biometry::BiometryExt;
     let dir = vault_biometric::vault_dir(&app)?;
-    let has_meta = vault::read_meta(&dir).is_some();
+    // EXISTENCE of vault.json decides the mode, not its readability: a
+    // truncated/corrupt meta must present as locked (fail closed), never as
+    // setup-required — setup would rekey the still-encrypted vault away.
+    let has_meta = vault::meta_path(&dir).exists();
     let key_source = vault.key_source();
     let mode = if !has_meta {
         // Fresh install or an upgrade from the machine-key era: the gate
@@ -69,25 +72,36 @@ pub async fn vault_setup_password(
         return Err(format!("the master password must be at least {MIN_PASSWORD_LEN} characters"));
     }
     let dir = vault_biometric::vault_dir(&app)?;
-    if vault::read_meta(&dir).is_some() {
+    // EXISTENCE check, matching `vault_status`: a corrupt-but-present
+    // vault.json is a fail-closed locked state, never a setup invitation.
+    if vault::meta_path(&dir).exists() {
         return Err("a master password is already set".into());
     }
-    // Migrate the current contents. A LOCKED legacy vault (keychain outage)
-    // must not be silently abandoned under a new key — its secrets would be
-    // destroyed. Empty-and-unlocked (fresh install) migrates an empty map.
-    if vault.current_key().is_none() && vault.load() == vault::Secrets::default() {
-        // A locked legacy vault reads as empty; distinguish via key state.
-        if vault.key_source() == "locked" {
-            return Err("the vault is locked (keychain unreachable) — restart srelens and try again".into());
-        }
+    // Setup requires a USABLE current key (fresh machine key, or the legacy
+    // one being migrated). Any locked state — keychain outage, corrupt meta,
+    // stray biometric marker — must fail closed: rekeying a vault we cannot
+    // read would silently destroy its secrets.
+    if vault.current_key().is_none() {
+        return Err(
+            "the vault is locked and cannot be re-keyed — restart srelens and try again".into(),
+        );
     }
-    let secrets = vault.load();
     let (meta, key) = vault::build_meta(&password)?;
-    // Meta first, then rekey; a rekey failure rolls the meta back so the
-    // vault never claims password mode while still encrypted otherwise.
+    // Order matters: the RECOVERABLE step (keychain recovery copy) lands
+    // first, before the irreversible transition — if it fails, nothing has
+    // changed and setup can simply be retried. A rekey failure afterwards
+    // rolls both the meta and the recovery copy back.
+    if keep_recovery {
+        vault::store_recovery_password(&password)?;
+    } else {
+        vault::delete_recovery_password();
+    }
     vault::write_meta(&dir, &meta)?;
-    if let Err(e) = vault.rekey(key, &secrets, "password") {
+    if let Err(e) = vault.rekey_from_current(key, "password") {
         let _ = std::fs::remove_file(vault::meta_path(&dir));
+        if keep_recovery {
+            vault::delete_recovery_password();
+        }
         return Err(e.to_string());
     }
     // Retire the machine-key homes: the password is the key's origin now.
@@ -96,11 +110,6 @@ pub async fn vault_setup_password(
     // Any machine-key-era biometric enrollment held the OLD key — purge it;
     // the user re-enables the skip afterwards (it then stores the new key).
     vault_biometric::purge(&app);
-    if keep_recovery {
-        vault::store_recovery_password(&password)?;
-    } else {
-        vault::delete_recovery_password();
-    }
     Ok(())
 }
 
@@ -135,12 +144,13 @@ pub async fn vault_recover_password(
 }
 
 /// Change the password: verify the current one, re-encrypt under the new
-/// derivation, refresh the recovery copy and (if enrolled) the biometric item.
+/// derivation, refresh the biometric item (if enrolled) and the recovery
+/// copy — but ONLY if one exists: the recovery choice was made at setup, and
+/// a change must never silently reverse an explicit opt-out.
 #[tauri::command]
 pub async fn vault_change_password(
     current: String,
     new: String,
-    keep_recovery: bool,
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<(), String> {
@@ -152,21 +162,18 @@ pub async fn vault_change_password(
     let current_key = vault::unlock_key_for(&old_meta, &current)?;
     // The vault may still be locked (changing straight from the gate's
     // "forgot my password → recovered → change it" path): unlock with the
-    // just-verified current key so `load` sees the real secrets.
+    // just-verified current key first.
     if vault.current_key().is_none() {
         vault.unlock_with(current_key, "password")?;
     }
-    let secrets = vault.load();
     let (new_meta, new_key) = vault::build_meta(&new)?;
     vault::write_meta(&dir, &new_meta)?;
-    if let Err(e) = vault.rekey(new_key, &secrets, "password") {
+    if let Err(e) = vault.rekey_from_current(new_key, "password") {
         let _ = vault::write_meta(&dir, &old_meta);
         return Err(e.to_string());
     }
-    if keep_recovery {
+    if vault::has_recovery_password() {
         vault::store_recovery_password(&new)?;
-    } else {
-        vault::delete_recovery_password();
     }
     vault_biometric::refresh_stored_key(&app, &new_key);
     Ok(())

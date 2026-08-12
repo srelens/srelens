@@ -405,13 +405,19 @@ export function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Start the in-app MCP HTTP server on launch if the user left it enabled, so
-  // agents can connect without opening Settings first.
+  // The MCP server needs the vault's token, so its auto-start must wait for
+  // the VaultGate to report the vault usable (set up + unlocked). Flipped by
+  // the gate's onReady exactly once per launch; starting while locked would
+  // fail to persist a token and silently never retry.
+  const [vaultReady, setVaultReady] = useState(false);
+
+  // Start the in-app MCP HTTP server once the vault is ready if the user left
+  // it enabled, so agents can connect without opening Settings first.
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !vaultReady) return;
     const mcp = loadMcpSettings();
     if (mcp.enabled) void startMcpHttp(mcp.port).catch(() => {});
-  }, []);
+  }, [vaultReady]);
 
   /** Open a resource's kind view and deep-link to its detail (from search). */
   function openResource(kind: ResourceKind, namespace: string | null, name: string) {
@@ -800,7 +806,7 @@ export function App() {
       />
       <Toaster position="top-right" richColors closeButton />
       <McpConfirmDialog />
-      <VaultGate />
+      <VaultGate onReady={() => setVaultReady(true)} />
     </div>
   );
 }
