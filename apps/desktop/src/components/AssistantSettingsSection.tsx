@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronDown, RefreshCw, Trash2 } from "lucide-react";
 import { Button, TextInput } from "../ui";
 import { notify } from "../lib/notify";
 import { listAgents, type AgentInfo } from "../lib/chat";
@@ -37,11 +37,21 @@ export function AssistantSettingsSection() {
   const [models, setModels] = useState<Record<string, ModelInfo[]>>({});
   const [clis, setClis] = useState<AgentInfo[]>([]);
   const [busy, setBusy] = useState<string>("");
+  // Which provider row is open for editing — one at a time; the rest collapse
+  // to their one-line status. Starts on the default provider, since that's
+  // the one the agent actually uses.
+  const [expanded, setExpanded] = useState<ProviderKind | null>(null);
 
   useEffect(() => {
     llmGetSettings()
-      .then((s) => setSettings({ ...DEFAULT_SETTINGS, ...s }))
-      .catch(() => setSettings(DEFAULT_SETTINGS));
+      .then((s) => {
+        setSettings({ ...DEFAULT_SETTINGS, ...s });
+        setExpanded(s.defaultProvider ?? DEFAULT_SETTINGS.defaultProvider);
+      })
+      .catch(() => {
+        setSettings(DEFAULT_SETTINGS);
+        setExpanded(DEFAULT_SETTINGS.defaultProvider);
+      });
     refreshKeyStatus();
     // The vendor CLIs are detected on PATH; show their install status here too,
     // so this one screen covers every agent. Only installed CLIs are selectable
@@ -126,108 +136,142 @@ export function AssistantSettingsSection() {
         </p>
       </div>
 
-      <label className="flex max-w-md flex-col gap-1 text-sm">
-        <span className="font-medium">Default provider</span>
-        <select
-          className="h-9 rounded-md border border-border bg-background px-2"
-          value={settings.defaultProvider}
-          onChange={(e) => setSettings((s) => ({ ...s, defaultProvider: e.target.value as ProviderKind }))}
-        >
-          {PROVIDERS.map((p) => (
-            <option key={p.kind} value={p.kind}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <span className="text-xs text-muted-foreground">Used when you pick the srelens agent in chat.</span>
-      </label>
-
-      {PROVIDERS.map((p) => {
-        const slug = providerSlug(p.kind);
-        const hasKey = keyed.includes(p.kind);
-        const list = models[p.kind] ?? [];
-        return (
-          <div key={p.kind} className="flex flex-col gap-3 rounded-lg border border-border p-4">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">{p.label}</span>
-              {hasKey && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-xs text-green-600 dark:text-green-400">
-                  <Check className="size-3" aria-hidden="true" /> key set
-                </span>
-              )}
-            </div>
-
-            <div className="flex items-end gap-2">
-              <label className="flex flex-1 flex-col gap-1 text-sm">
-                <span className="text-xs text-muted-foreground">API key</span>
-                <TextInput
-                  type="password"
-                  placeholder={hasKey ? "•••• (stored) — enter a new key to replace" : "Paste API key"}
-                  value={keyDrafts[p.kind] ?? ""}
-                  onValueChange={(v) => setKeyDrafts((d) => ({ ...d, [p.kind]: v }))}
-                />
-              </label>
-              <Button onClick={() => saveKey(p.kind)} disabled={!keyDrafts[p.kind]?.trim()}>
-                Save key
-              </Button>
-              {hasKey && (
-                <Button variant="ghost" onClick={() => clearKey(p.kind)} aria-label={`Remove ${p.label} key`}>
-                  <Trash2 className="size-4" aria-hidden="true" />
-                </Button>
-              )}
-            </div>
-
-            {p.needsBaseUrl && (
-              <label className="flex flex-col gap-1 text-sm">
-                <span className="text-xs text-muted-foreground">Base URL</span>
-                <TextInput
-                  placeholder="https://openrouter.ai/api/v1"
-                  value={settings.baseUrls[slug] ?? ""}
-                  onValueChange={(v) => setBaseUrl(p.kind, v)}
-                />
-              </label>
-            )}
-
-            <div className="flex items-end gap-2">
-              <label className="flex flex-1 flex-col gap-1 text-sm">
-                <span className="text-xs text-muted-foreground">Model</span>
-                {list.length > 0 ? (
-                  <select
-                    className="h-9 rounded-md border border-border bg-background px-2"
-                    value={settings.models[slug] ?? ""}
-                    onChange={(e) => setModel(p.kind, e.target.value)}
-                  >
-                    <option value="">Choose a model…</option>
-                    {list.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.displayName}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <TextInput
-                    placeholder="Model id (or fetch the list)"
-                    value={settings.models[slug] ?? ""}
-                    onValueChange={(v) => setModel(p.kind, v)}
+      <div className="flex flex-col gap-2">
+        <p className="text-xs text-muted-foreground">
+          The selected provider is the one the srelens agent uses in chat. Click a row to configure
+          it.
+        </p>
+        <div className="divide-y divide-border rounded-lg border border-border">
+          {PROVIDERS.map((p) => {
+            const slug = providerSlug(p.kind);
+            const hasKey = keyed.includes(p.kind);
+            const list = models[p.kind] ?? [];
+            const model = settings.models[slug] ?? "";
+            const isDefault = settings.defaultProvider === p.kind;
+            const isOpen = expanded === p.kind;
+            // The one-line truth about this provider: what (if anything) still
+            // blocks the agent from using it.
+            const status = !hasKey
+              ? { text: "no key", tone: "text-muted-foreground" }
+              : model
+                ? { text: `key set · ${model}`, tone: "text-muted-foreground" }
+                : { text: "key set — choose a model", tone: "text-amber-600 dark:text-amber-500" };
+            return (
+              <div key={p.kind}>
+                <div className="flex items-center gap-3 px-4 py-3">
+                  <input
+                    type="radio"
+                    name="default-provider"
+                    className="accent-primary"
+                    checked={isDefault}
+                    onChange={() => setSettings((s) => ({ ...s, defaultProvider: p.kind }))}
+                    aria-label={`Use ${p.label} as the default provider`}
                   />
+                  <button
+                    type="button"
+                    aria-expanded={isOpen}
+                    onClick={() => setExpanded(isOpen ? null : p.kind)}
+                    className="flex flex-1 items-center justify-between gap-3 text-left"
+                  >
+                    <span className="text-sm font-medium">
+                      {p.label}
+                      {isDefault && (
+                        <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-normal text-primary">
+                          default
+                        </span>
+                      )}
+                    </span>
+                    <span className={`flex items-center gap-2 text-xs ${status.tone}`}>
+                      <span className="truncate font-mono">{status.text}</span>
+                      <ChevronDown
+                        className={`size-4 shrink-0 text-muted-foreground transition-transform${isOpen ? " rotate-180" : ""}`}
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </button>
+                </div>
+
+                {isOpen && (
+                  <div className="flex flex-col gap-3 border-t border-border bg-muted/20 px-4 py-4">
+                    {p.needsBaseUrl && (
+                      <label className="flex flex-col gap-1 text-sm">
+                        <span className="text-xs text-muted-foreground">Base URL</span>
+                        <TextInput
+                          placeholder="https://openrouter.ai/api/v1"
+                          value={settings.baseUrls[slug] ?? ""}
+                          onValueChange={(v) => setBaseUrl(p.kind, v)}
+                        />
+                      </label>
+                    )}
+
+                    <div className="flex items-end gap-2">
+                      <label className="flex flex-1 flex-col gap-1 text-sm">
+                        <span className="text-xs text-muted-foreground">API key</span>
+                        <TextInput
+                          type="password"
+                          placeholder={hasKey ? "•••• (stored) — enter a new key to replace" : "Paste API key"}
+                          value={keyDrafts[p.kind] ?? ""}
+                          onValueChange={(v) => setKeyDrafts((d) => ({ ...d, [p.kind]: v }))}
+                        />
+                      </label>
+                      <Button onClick={() => saveKey(p.kind)} disabled={!keyDrafts[p.kind]?.trim()}>
+                        Save key
+                      </Button>
+                      {hasKey && (
+                        <Button
+                          variant="ghost"
+                          onClick={() => clearKey(p.kind)}
+                          aria-label={`Remove ${p.label} key`}
+                        >
+                          <Trash2 className="size-4" aria-hidden="true" />
+                        </Button>
+                      )}
+                    </div>
+
+                    <div className="flex items-end gap-2">
+                      <label className="flex flex-1 flex-col gap-1 text-sm">
+                        <span className="text-xs text-muted-foreground">Model</span>
+                        {list.length > 0 ? (
+                          <select
+                            className="h-9 rounded-md border border-border bg-background px-2"
+                            value={model}
+                            onChange={(e) => setModel(p.kind, e.target.value)}
+                          >
+                            <option value="">Choose a model…</option>
+                            {list.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.displayName}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <TextInput
+                            placeholder="Model id (or fetch the list)"
+                            value={model}
+                            onValueChange={(v) => setModel(p.kind, v)}
+                          />
+                        )}
+                      </label>
+                      <Button
+                        variant="ghost"
+                        onClick={() => fetchModels(p.kind)}
+                        disabled={!hasKey || busy === `models:${p.kind}`}
+                        title={hasKey ? "Fetch available models" : "Add a key first"}
+                      >
+                        <RefreshCw
+                          className={`size-4${busy === `models:${p.kind}` ? " animate-spin" : ""}`}
+                          aria-hidden="true"
+                        />
+                        <span className="ml-1">Fetch models</span>
+                      </Button>
+                    </div>
+                  </div>
                 )}
-              </label>
-              <Button
-                variant="ghost"
-                onClick={() => fetchModels(p.kind)}
-                disabled={!hasKey || busy === `models:${p.kind}`}
-                title={hasKey ? "Fetch available models" : "Add a key first"}
-              >
-                <RefreshCw
-                  className={`size-4${busy === `models:${p.kind}` ? " animate-spin" : ""}`}
-                  aria-hidden="true"
-                />
-                <span className="ml-1">Fetch models</span>
-              </Button>
-            </div>
-          </div>
-        );
-      })}
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       <div>
         <Button onClick={saveSettings} disabled={busy === "settings"}>
