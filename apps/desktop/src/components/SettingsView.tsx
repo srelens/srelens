@@ -22,6 +22,7 @@ import {
   ClipboardPaste,
   Plug,
   Bot,
+  Shield,
   ScrollText,
   Trash2,
 } from "lucide-react";
@@ -64,6 +65,7 @@ import { updateRequestTimeout } from "../lib/requestTimeout";
 import { ContextAvatar, CONTEXT_LOGO_OPTIONS } from "./ContextAvatar";
 import { McpSettingsSection } from "./McpSettingsSection";
 import { AssistantSettingsSection } from "./AssistantSettingsSection";
+import { SecuritySettingsSection } from "./SecuritySettingsSection";
 import { AppLogView } from "./AppLogView";
 import { pickKubeconfigFiles, savePastedKubeconfig } from "../lib/files";
 import { checkForUpdate, installUpdate, type UpdateMeta } from "../lib/updater";
@@ -87,6 +89,7 @@ export type SettingsSection =
   | "contexts"
   | "mcp"
   | "assistant"
+  | "security"
   | "logs"
   | "updates";
 
@@ -116,6 +119,7 @@ const SETTINGS_SECTIONS: Array<{
   { id: "contexts", label: "Contexts", description: "Names, logos and colors", icon: Boxes },
   { id: "mcp", label: "MCP", description: "Agent access and client config", icon: Plug },
   { id: "assistant", label: "Assistant", description: "srelens agent API keys and model", icon: Bot },
+  { id: "security", label: "Security", description: "Master password and biometric unlock", icon: Shield },
   { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
@@ -923,6 +927,15 @@ export function SettingsView({
               description="Configure srelens's own agent: an API key per provider, the default provider, and the model."
             >
               <AssistantSettingsSection />
+            </SectionPanel>
+          )}
+
+          {section === "security" && isTauri() && (
+            <SectionPanel
+              title="Security"
+              description="The master password and biometric unlock protecting srelens's stored secrets."
+            >
+              <SecuritySettingsSection />
             </SectionPanel>
           )}
 

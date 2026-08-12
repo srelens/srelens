@@ -131,47 +131,5 @@ describe("McpSettingsSection", () => {
     expect(screen.queryByText(token)).toBeNull();
   });
 
-  it("warns when the vault master key fell back to the plain file, and stays quiet for the keychain", async () => {
-    mcpSecurity.getMcpTokenStorage.mockResolvedValue("file");
-    render(<McpSettingsSection />);
-    expect(await screen.findByText(/key that encrypts srelens's secrets is stored/)).toBeDefined();
-  });
 
-  it("explains a locked vault (keychain unreachable) without implying data loss", async () => {
-    mcpSecurity.getMcpTokenStorage.mockResolvedValue("locked");
-    render(<McpSettingsSection />);
-    expect(await screen.findByText(/couldn't load the key that encrypts its secrets/)).toBeDefined();
-    expect(screen.getByText(/they are untouched/)).toBeDefined();
-  });
-
-  it("offers the biometric toggle only when a sensor exists, and enabling calls through", async () => {
-    mcpSecurity.vaultBiometricStatus.mockResolvedValue({ available: true, enabled: false, unlocked: true });
-    render(<McpSettingsSection />);
-    const toggle = (await screen.findByRole("checkbox", {
-      name: /unlock with touch id instead of the master password/i,
-    })) as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
-
-    mcpSecurity.vaultBiometricStatus.mockResolvedValue({ available: true, enabled: true, unlocked: true });
-    fireEvent.click(toggle);
-    await waitFor(() => expect(mcpSecurity.vaultBiometricEnable).toHaveBeenCalled());
-  });
-
-  it("shows the unlock control while biometric-locked and unlocks on click", async () => {
-    mcpSecurity.getMcpTokenStorage.mockResolvedValue("biometric-locked");
-    mcpSecurity.vaultBiometricStatus.mockResolvedValue({ available: true, enabled: true, unlocked: false });
-    render(<McpSettingsSection />);
-    expect(await screen.findByText(/locked behind touch id for this session/i)).toBeDefined();
-
-    mcpSecurity.getMcpTokenStorage.mockResolvedValue("biometric");
-    fireEvent.click(screen.getByRole("button", { name: /unlock with touch id/i }));
-    await waitFor(() => expect(mcpSecurity.vaultBiometricUnlock).toHaveBeenCalled());
-  });
-
-  it("shows no fallback warning when the master key is in the OS keychain", async () => {
-    mcpSecurity.getMcpTokenStorage.mockResolvedValue("keychain");
-    render(<McpSettingsSection />);
-    await waitFor(() => expect(mcpSecurity.getMcpTokenStorage).toHaveBeenCalled());
-    expect(screen.queryByText(/key that encrypts srelens's secrets/)).toBeNull();
-  });
 });

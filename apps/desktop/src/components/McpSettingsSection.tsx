@@ -15,19 +15,7 @@ import {
   srelensCliStatus,
   type CliStatus,
 } from "../lib/mcp";
-import {
-  getMcpToken,
-  getMcpTokenStorage,
-  revokeMcpToken,
-  rotateMcpToken,
-  vaultBiometricDisable,
-  vaultBiometricEnable,
-  vaultBiometricStatus,
-  vaultBiometricUnlock,
-  vaultChangePassword,
-  type VaultBiometricStatus,
-  type VaultKeySource,
-} from "../lib/mcpSecurity";
+import { getMcpToken, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "../lib/mcpClients";
 import { McpAuditList } from "./McpAuditList";
 import { McpPromptIssues } from "./McpPromptIssues";
@@ -71,13 +59,6 @@ export function McpSettingsSection() {
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState("");
   const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
-  const [tokenStorage, setTokenStorage] = useState<VaultKeySource | null>(null);
-  const [biometric, setBiometric] = useState<VaultBiometricStatus | null>(null);
-  const [biometricBusy, setBiometricBusy] = useState(false);
-  const [pwCurrent, setPwCurrent] = useState("");
-  const [pwNew, setPwNew] = useState("");
-  const [pwConfirm, setPwConfirm] = useState("");
-  const [pwBusy, setPwBusy] = useState(false);
   // Bumped by McpAuditList's own Refresh button so the prompt-issues panel
   // re-reads too: a user who fixes their prompt file should see that
   // reflected without restarting srelens, and without a second Refresh
@@ -98,8 +79,6 @@ export function McpSettingsSection() {
     void mcpHttpStatus().then(setRunningUrl).catch(() => {});
     void srelensCliStatus().then(setCli).catch(() => {});
     void refreshToken();
-    void getMcpTokenStorage().then(setTokenStorage).catch(() => {});
-    void vaultBiometricStatus().then(setBiometric).catch(() => {});
   }, []);
 
   function persist(next: McpSettings) {
@@ -107,70 +86,6 @@ export function McpSettingsSection() {
     saveMcpSettings(next);
   }
 
-  // What the OS calls its biometric unlock — the plugin backs onto Touch ID
-  // on macOS and Windows Hello on Windows (Linux has no backend, so the
-  // control never renders there and this label is moot).
-  const bioLabel = navigator.userAgent.includes("Windows") ? "Windows Hello" : "Touch ID";
-
-  /** Re-read both vault facts the biometric controls render from. */
-  async function refreshVaultState() {
-    await Promise.all([
-      getMcpTokenStorage().then(setTokenStorage).catch(() => {}),
-      vaultBiometricStatus().then(setBiometric).catch(() => {}),
-    ]);
-  }
-
-  async function toggleBiometric(on: boolean) {
-    setBiometricBusy(true);
-    try {
-      if (on) {
-        await vaultBiometricEnable();
-        notify.success(`${bioLabel} required to unlock secrets from the next launch`);
-      } else {
-        await vaultBiometricDisable();
-        notify.success(`${bioLabel} requirement removed`);
-      }
-    } catch (e) {
-      notify.error(String(e));
-    } finally {
-      setBiometricBusy(false);
-      await refreshVaultState();
-    }
-  }
-
-  async function changePassword() {
-    if (pwNew !== pwConfirm) {
-      notify.error("The new passwords don't match");
-      return;
-    }
-    setPwBusy(true);
-    try {
-      // The backend refreshes the keychain recovery copy only if one exists,
-      // preserving the opt-in/opt-out made at setup.
-      await vaultChangePassword(pwCurrent, pwNew);
-      notify.success("Master password changed");
-      setPwCurrent("");
-      setPwNew("");
-      setPwConfirm("");
-    } catch (e) {
-      notify.error(String(e));
-    } finally {
-      setPwBusy(false);
-    }
-  }
-
-  async function unlockBiometric() {
-    setBiometricBusy(true);
-    try {
-      await vaultBiometricUnlock();
-      notify.success("Secrets unlocked");
-    } catch (e) {
-      notify.error(String(e));
-    } finally {
-      setBiometricBusy(false);
-      await refreshVaultState();
-    }
-  }
 
   async function toggleServer(enabled: boolean) {
     setServerError("");
@@ -392,80 +307,6 @@ export function McpSettingsSection() {
             No token has been generated yet. Generate one to connect over HTTP — stdio connections
             don't need it.
           </p>
-        )}
-        {tokenStorage === "file" && (
-          <p className="text-sm text-amber-600 dark:text-amber-500">
-            No OS keychain is available here, so the key that encrypts srelens's secrets is stored
-            in a plain file on disk (readable only by your user account) rather than the OS
-            keychain — the encrypted secrets file is then only obfuscation.
-          </p>
-        )}
-        {tokenStorage === "locked" && (
-          <p className="text-sm text-destructive">
-            srelens couldn't load the key that encrypts its secrets when it started — the OS
-            keychain was unreachable, or the key file couldn't be created. Stored secrets can't be
-            read or changed right now; they are untouched. Restart srelens once the keychain is
-            available again.
-          </p>
-        )}
-        {tokenStorage === "biometric-locked" && (
-          <div className="flex items-center gap-3">
-            <p className="text-sm text-amber-600 dark:text-amber-500">
-              Secrets are locked behind {bioLabel} for this session.
-            </p>
-            <Button size="sm" disabled={biometricBusy} onClick={() => void unlockBiometric()}>
-              Unlock with {bioLabel}
-            </Button>
-          </div>
-        )}
-        {biometric?.available && tokenStorage !== "locked" && (
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="accent-primary"
-              checked={biometric.enabled}
-              disabled={biometricBusy || (!biometric.unlocked && !biometric.enabled)}
-              onChange={(e) => void toggleBiometric(e.target.checked)}
-            />
-            <span>Unlock with {bioLabel} instead of the master password</span>
-            <span className="text-xs text-muted-foreground">
-              — asks once each time srelens starts
-            </span>
-          </label>
-        )}
-
-        {(tokenStorage === "password" || tokenStorage === "biometric") && (
-          <div className="flex flex-col gap-2 border-t border-border pt-3">
-            <h4 className="text-sm font-medium">Change master password</h4>
-            <div className="flex max-w-md flex-col gap-2">
-              <TextInput
-                type="password"
-                placeholder="Current password"
-                value={pwCurrent}
-                onValueChange={setPwCurrent}
-              />
-              <TextInput
-                type="password"
-                placeholder="New password (at least 8 characters)"
-                value={pwNew}
-                onValueChange={setPwNew}
-              />
-              <TextInput
-                type="password"
-                placeholder="Confirm new password"
-                value={pwConfirm}
-                onValueChange={setPwConfirm}
-              />
-              <div>
-                <Button
-                  disabled={pwBusy || !pwCurrent || pwNew.length < 8}
-                  onClick={() => void changePassword()}
-                >
-                  Change password
-                </Button>
-              </div>
-            </div>
-          </div>
         )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}
       </section>
