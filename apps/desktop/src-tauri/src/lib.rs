@@ -23,6 +23,7 @@ mod sink;
 mod terminal;
 pub mod vault;
 mod vault_biometric;
+mod vault_password;
 mod toolbox;
 mod updater;
 mod watch;
@@ -437,6 +438,11 @@ pub fn run() {
             vault_biometric::vault_biometric_enable,
             vault_biometric::vault_biometric_disable,
             vault_biometric::vault_biometric_unlock,
+            vault_password::vault_status,
+            vault_password::vault_setup_password,
+            vault_password::vault_unlock_password,
+            vault_password::vault_recover_password,
+            vault_password::vault_change_password,
             mcp_audit_tail,
             mcp_prompt_issues,
             install_srelens_cli,

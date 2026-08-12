@@ -43,7 +43,7 @@ fn data_options() -> DataOptions {
     DataOptions { domain: BIO_DOMAIN.to_string(), name: BIO_NAME.to_string() }
 }
 
-fn vault_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn vault_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
     Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("mcp"))
 }
@@ -57,7 +57,7 @@ pub async fn vault_biometric_status(
 ) -> Result<VaultBiometricStatus, String> {
     let available = app.biometry().status().map(|s| s.is_available).unwrap_or(false);
     let enabled = vault_dir(&app).map(|d| vault::biometric_marker_path(&d).exists()).unwrap_or(false);
-    Ok(VaultBiometricStatus { available, enabled, unlocked: vault.key_source() != "locked" && vault.key_source() != "biometric-locked" })
+    Ok(VaultBiometricStatus { available, enabled, unlocked: vault.current_key().is_some() })
 }
 
 /// Turn the gate ON: move the cached master key into the biometric store.
@@ -95,17 +95,47 @@ pub async fn vault_biometric_disable(
     let key = vault
         .current_key()
         .ok_or("the vault is locked — pass the biometric unlock before disabling the gate")?;
-    // Restore the plain entry FIRST — the key must never be homeless.
-    vault::store_master_key_in_keychain(&key)?;
     let dir = vault_dir(&app)?;
+    // In master-password mode the key derives from the password — there is
+    // no keychain home to restore; unlocks simply go back to the password
+    // gate. Only the legacy machine-key mode restores the plain entry (and
+    // it must land FIRST — the key must never be homeless).
+    let password_mode = vault::read_meta(&dir).is_some();
+    if !password_mode {
+        vault::store_master_key_in_keychain(&key)?;
+    }
     match std::fs::remove_file(vault::biometric_marker_path(&dir)) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.to_string()),
     }
     let _ = app.biometry().remove_data(data_options());
-    vault.set_key_source("keychain");
+    vault.set_key_source(if password_mode { "password" } else { "keychain" });
     Ok(())
+}
+
+/// Re-store a (new) key in the biometric item if the gate is on — used by
+/// password change so the enrolled skip keeps working. Best-effort.
+pub(crate) fn refresh_stored_key(app: &tauri::AppHandle, key: &[u8; 32]) {
+    let enrolled = vault_dir(app)
+        .map(|d| vault::biometric_marker_path(&d).exists())
+        .unwrap_or(false);
+    if enrolled {
+        let _ = app.biometry().set_data(SetDataOptions {
+            domain: BIO_DOMAIN.to_string(),
+            name: BIO_NAME.to_string(),
+            data: vault::to_hex(key),
+        });
+    }
+}
+
+/// Drop the biometric item + marker outright — used by password setup, which
+/// mints a NEW key the old item could never match. Best-effort.
+pub(crate) fn purge(app: &tauri::AppHandle) {
+    if let Ok(dir) = vault_dir(app) {
+        let _ = std::fs::remove_file(vault::biometric_marker_path(&dir));
+    }
+    let _ = app.biometry().remove_data(data_options());
 }
 
 /// Pass the gate: prompt (Touch ID sheet), verify the returned key against

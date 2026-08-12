@@ -148,7 +148,7 @@ describe("McpSettingsSection", () => {
     mcpSecurity.vaultBiometricStatus.mockResolvedValue({ available: true, enabled: false, unlocked: true });
     render(<McpSettingsSection />);
     const toggle = (await screen.findByRole("checkbox", {
-      name: /require touch id to unlock secrets/i,
+      name: /unlock with touch id instead of the master password/i,
     })) as HTMLInputElement;
     expect(toggle.checked).toBe(false);
 

@@ -24,6 +24,7 @@ import {
   vaultBiometricEnable,
   vaultBiometricStatus,
   vaultBiometricUnlock,
+  vaultChangePassword,
   type VaultBiometricStatus,
   type VaultKeySource,
 } from "../lib/mcpSecurity";
@@ -73,6 +74,10 @@ export function McpSettingsSection() {
   const [tokenStorage, setTokenStorage] = useState<VaultKeySource | null>(null);
   const [biometric, setBiometric] = useState<VaultBiometricStatus | null>(null);
   const [biometricBusy, setBiometricBusy] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
   // Bumped by McpAuditList's own Refresh button so the prompt-issues panel
   // re-reads too: a user who fixes their prompt file should see that
   // reflected without restarting srelens, and without a second Refresh
@@ -130,6 +135,27 @@ export function McpSettingsSection() {
     } finally {
       setBiometricBusy(false);
       await refreshVaultState();
+    }
+  }
+
+  async function changePassword() {
+    if (pwNew !== pwConfirm) {
+      notify.error("The new passwords don't match");
+      return;
+    }
+    setPwBusy(true);
+    try {
+      // Keeps whatever recovery choice was made at setup: the backend
+      // refreshes the recovery copy when one exists.
+      await vaultChangePassword(pwCurrent, pwNew, true);
+      notify.success("Master password changed");
+      setPwCurrent("");
+      setPwNew("");
+      setPwConfirm("");
+    } catch (e) {
+      notify.error(String(e));
+    } finally {
+      setPwBusy(false);
     }
   }
 
@@ -401,11 +427,45 @@ export function McpSettingsSection() {
               disabled={biometricBusy || (!biometric.unlocked && !biometric.enabled)}
               onChange={(e) => void toggleBiometric(e.target.checked)}
             />
-            <span>Require {bioLabel} to unlock secrets</span>
+            <span>Unlock with {bioLabel} instead of the master password</span>
             <span className="text-xs text-muted-foreground">
               — asks once each time srelens starts
             </span>
           </label>
+        )}
+
+        {(tokenStorage === "password" || tokenStorage === "biometric") && (
+          <div className="flex flex-col gap-2 border-t border-border pt-3">
+            <h4 className="text-sm font-medium">Change master password</h4>
+            <div className="flex max-w-md flex-col gap-2">
+              <TextInput
+                type="password"
+                placeholder="Current password"
+                value={pwCurrent}
+                onValueChange={setPwCurrent}
+              />
+              <TextInput
+                type="password"
+                placeholder="New password (at least 8 characters)"
+                value={pwNew}
+                onValueChange={setPwNew}
+              />
+              <TextInput
+                type="password"
+                placeholder="Confirm new password"
+                value={pwConfirm}
+                onValueChange={setPwConfirm}
+              />
+              <div>
+                <Button
+                  disabled={pwBusy || !pwCurrent || pwNew.length < 8}
+                  onClick={() => void changePassword()}
+                >
+                  Change password
+                </Button>
+              </div>
+            </div>
+          </div>
         )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}
       </section>

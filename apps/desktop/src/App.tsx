@@ -21,6 +21,7 @@ import { ToolboxView } from "./components/ToolboxView";
 import { AssistantTab } from "./components/AssistantTab";
 import { CommandPalette } from "./components/CommandPalette";
 import { McpConfirmDialog } from "./components/McpConfirmDialog";
+import { VaultGate } from "./components/VaultGate";
 import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
@@ -149,24 +150,9 @@ export function App() {
     };
   }, []);
 
-  // Touch ID gate (issue #208): when the secrets vault opened biometric-locked,
-  // raise the unlock prompt once at launch — this is the deliberate
-  // once-per-launch authentication the gate trades silent starts for. A
-  // cancelled prompt is fine: the vault stays locked and Settings → MCP
-  // offers a retry; everything except stored secrets keeps working.
-  useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    void (async () => {
-      try {
-        const { getMcpTokenStorage, vaultBiometricUnlock } = await import("./lib/mcpSecurity");
-        if ((await getMcpTokenStorage()) === "biometric-locked") {
-          await vaultBiometricUnlock();
-        }
-      } catch {
-        // Cancelled or unavailable — Settings surfaces the locked state.
-      }
-    })();
-  }, []);
+  // The master-password gate (issue #208) mounts as a blocking overlay via
+  // <VaultGate /> below — setup at first launch, unlock (password or the
+  // enrolled biometric skip) on later ones.
 
   const handleDeleteContext = async (name: string) => {
     try {
@@ -814,6 +800,7 @@ export function App() {
       />
       <Toaster position="top-right" richColors closeButton />
       <McpConfirmDialog />
+      <VaultGate />
     </div>
   );
 }

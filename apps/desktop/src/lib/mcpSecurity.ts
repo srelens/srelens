@@ -39,7 +39,14 @@ export async function revokeMcpToken(): Promise<void> {
  * launch while a vault exists, so secrets are frozen rather than destroyed by
  * a re-key; "biometric" — the Touch ID gate is on and passed; or
  * "biometric-locked" — the gate hasn't been passed yet this launch. */
-export type VaultKeySource = "keychain" | "file" | "locked" | "biometric" | "biometric-locked";
+export type VaultKeySource =
+  | "keychain"
+  | "file"
+  | "locked"
+  | "biometric"
+  | "biometric-locked"
+  | "password"
+  | "password-locked";
 
 export async function getMcpTokenStorage(): Promise<VaultKeySource> {
   return await invoke<VaultKeySource>("mcp_token_storage");
@@ -67,6 +74,40 @@ export async function vaultBiometricDisable(): Promise<void> {
 /** Raises the Touch ID sheet; resolves once the vault is unlocked. */
 export async function vaultBiometricUnlock(): Promise<void> {
   await invoke("vault_biometric_unlock");
+}
+
+/** What the mandatory VaultGate renders from. */
+export interface VaultStatus {
+  mode: "setup-required" | "locked" | "unlocked";
+  keySource: VaultKeySource;
+  biometricAvailable: boolean;
+  biometricEnrolled: boolean;
+}
+
+export async function vaultStatus(): Promise<VaultStatus> {
+  return await invoke<VaultStatus>("vault_status");
+}
+
+export async function vaultSetupPassword(password: string, keepRecovery: boolean): Promise<void> {
+  await invoke("vault_setup_password", { password, keepRecovery });
+}
+
+export async function vaultUnlockPassword(password: string): Promise<void> {
+  await invoke("vault_unlock_password", { password });
+}
+
+/** The explicit "Forgot password?" flow: returns the recovered password for
+ * one-time display (the vault is unlocked as a side effect). */
+export async function vaultRecoverPassword(): Promise<string> {
+  return await invoke<string>("vault_recover_password");
+}
+
+export async function vaultChangePassword(
+  current: string,
+  next: string,
+  keepRecovery: boolean,
+): Promise<void> {
+  await invoke("vault_change_password", { current, new: next, keepRecovery });
 }
 
 /** Newest first. Returns [] rather than throwing: a missing log is not an error. */

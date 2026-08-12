@@ -97,12 +97,21 @@ impl Vault {
 
     fn with_backend(dir: &Path, backend: Box<dyn KeychainBackend>) -> Vault {
         let path = dir.join("secrets.enc");
-        // Touch ID mode (issue #208): the marker means the master key's ONLY
-        // home is the OS biometric store — the plain keychain entry was
-        // deliberately deleted when the gate was enabled. Never resolve via
-        // the keyring here; the vault opens biometric-locked and
-        // `vault_biometric_unlock` supplies the key after the prompt.
-        let (key, key_source) = if biometric_marker_path(dir).exists() {
+        // Master-password mode: `vault.json` existing means the key derives
+        // from the user's password — nothing to resolve at open; the vault
+        // starts locked until the gate is passed (biometric skip when the
+        // marker is present, password otherwise). Legacy machine-key
+        // resolution runs only while no password has been set up.
+        let (key, key_source) = if meta_path(dir).exists() {
+            if biometric_marker_path(dir).exists() {
+                (None, "biometric-locked")
+            } else {
+                (None, "password-locked")
+            }
+        } else if biometric_marker_path(dir).exists() {
+            // Pre-password biometric gate (transitional state from the
+            // machine-key era of this branch): key lives in the biometric
+            // store only.
             (None, "biometric-locked")
         } else {
             resolve_master_key(backend.as_ref(), &dir.join("master.key"), &path)
@@ -151,6 +160,22 @@ impl Vault {
         *self.key_source.write().unwrap() = source;
     }
 
+    /// Swap the vault onto a NEW key, re-encrypting `secrets` under it — the
+    /// heart of password setup and password change. Runs under both write
+    /// locks so no concurrent update interleaves between key swap and rewrite.
+    pub(crate) fn rekey(&self, key: [u8; KEY_LEN], secrets: &Secrets, source: &'static str) -> std::io::Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock_file = std::fs::File::create(self.path.with_extension("enc.lock"))?;
+        lock_file.lock()?;
+        write_sealed(&key, &self.path, secrets)?;
+        *self.key.write().unwrap() = Some(key);
+        *self.key_source.write().unwrap() = source;
+        Ok(())
+    }
+
     /// Read the current secrets. Missing, tampered, or wrong-key vaults read
     /// as empty (see the module docs for why that's deliberate).
     pub fn load(&self) -> Secrets {
@@ -170,10 +195,10 @@ impl Vault {
     pub fn update(&self, mutate: impl FnOnce(&mut Secrets)) -> std::io::Result<()> {
         let _guard = self.lock.lock().unwrap();
         let Some(key) = *self.key.read().unwrap() else {
-            let message = if self.key_source() == "biometric-locked" {
-                "the secrets vault is locked behind biometric unlock: unlock it in Settings → MCP"
-            } else {
-                "the secrets vault is locked: the OS keychain holding its master key is unreachable"
+            let message = match self.key_source() {
+                "biometric-locked" => "the secrets vault is locked behind biometric unlock — unlock it in srelens",
+                "password-locked" => "the secrets vault is locked — unlock it with your master password in srelens",
+                _ => "the secrets vault is locked: the OS keychain holding its master key is unreachable",
             };
             return Err(std::io::Error::other(message));
         };
@@ -203,6 +228,106 @@ pub(crate) fn biometric_marker_path(dir: &Path) -> PathBuf {
     dir.join("vault-biometric")
 }
 
+// --- Master-password mode (issue #208 follow-up, mqlens's model) ---
+
+/// Known plaintext sealed under a derived key inside `vault.json`, so a wrong
+/// password is detected without ever touching the real secrets.
+const VERIFIER: &[u8] = b"srelens-vault-verifier-v1";
+
+/// Unencrypted KDF metadata (`vault.json`). Its EXISTENCE is what switches
+/// the vault into master-password mode: the key is then derived from the
+/// user's password (argon2id), never machine-generated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultMeta {
+    pub version: u32,
+    pub kdf_alg: String,
+    pub kdf_m_kib: u32,
+    pub kdf_t: u32,
+    pub kdf_p: u32,
+    /// Hex of the 16-byte salt.
+    pub salt: String,
+    /// Hex of `[version][nonce][ct]` of [`VERIFIER`] under the derived key.
+    pub verifier: String,
+}
+
+pub(crate) fn meta_path(dir: &Path) -> PathBuf {
+    dir.join("vault.json")
+}
+
+pub(crate) fn read_meta(dir: &Path) -> Option<VaultMeta> {
+    serde_json::from_str(&std::fs::read_to_string(meta_path(dir)).ok()?).ok()
+}
+
+pub(crate) fn write_meta(dir: &Path, meta: &VaultMeta) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+    write_exclusive_private(&meta_path(dir), &json).map_err(|e| e.to_string())
+}
+
+fn derive_key(password: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result<[u8; KEY_LEN], String> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let params = Params::new(m_kib, t, p, Some(KEY_LEN)).map_err(|e| e.to_string())?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; KEY_LEN];
+    argon
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| e.to_string())?;
+    Ok(key)
+}
+
+/// Fresh metadata (new salt, current default argon2id params) plus the key the
+/// password derives — used at setup and password change.
+pub(crate) fn build_meta(password: &str) -> Result<(VaultMeta, [u8; KEY_LEN]), String> {
+    // OWASP-recommended argon2id defaults (the `argon2` crate's own).
+    let (m_kib, t, p) = (19456, 2, 1);
+    let mut salt = [0u8; 16];
+    getrandom::getrandom(&mut salt).map_err(|e| e.to_string())?;
+    let key = derive_key(password, &salt, m_kib, t, p)?;
+    let verifier = seal_bytes(&key, VERIFIER).map_err(|e| e.to_string())?;
+    Ok((
+        VaultMeta {
+            version: 1,
+            kdf_alg: "argon2id".into(),
+            kdf_m_kib: m_kib,
+            kdf_t: t,
+            kdf_p: p,
+            salt: to_hex(&salt),
+            verifier: to_hex(&verifier),
+        },
+        key,
+    ))
+}
+
+/// Derive the key for `password` against existing metadata and check it
+/// against the verifier. `Err` means the password is wrong (or the meta is
+/// corrupt) — stated as the former, since that's overwhelmingly the cause.
+pub(crate) fn unlock_key_for(meta: &VaultMeta, password: &str) -> Result<[u8; KEY_LEN], String> {
+    let salt = bytes_from_hex(&meta.salt).ok_or("corrupt vault metadata (salt)")?;
+    let key = derive_key(password, &salt, meta.kdf_m_kib, meta.kdf_t, meta.kdf_p)?;
+    let verifier = bytes_from_hex(&meta.verifier).ok_or("corrupt vault metadata (verifier)")?;
+    match open_bytes(&key, &verifier) {
+        Some(plain) if plain == VERIFIER => Ok(key),
+        _ => Err("incorrect master password".into()),
+    }
+}
+
+/// Whether `key` is the one this vault's password derives — validates a
+/// biometric-restored key without needing the password.
+pub(crate) fn key_matches_meta(meta: &VaultMeta, key: &[u8; KEY_LEN]) -> bool {
+    let Some(verifier) = bytes_from_hex(&meta.verifier) else { return false };
+    matches!(open_bytes(key, &verifier), Some(plain) if plain == VERIFIER)
+}
+
+fn bytes_from_hex(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    s.as_bytes()
+        .chunks(2)
+        .map(|c| u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
+        .collect()
+}
+
 /// Keychain operations the biometric module needs when moving the key between
 /// homes — kept here so the service/account coordinates stay in one place.
 pub(crate) fn store_master_key_in_keychain(key: &[u8; KEY_LEN]) -> Result<(), String> {
@@ -213,6 +338,34 @@ pub(crate) fn store_master_key_in_keychain(key: &[u8; KEY_LEN]) -> Result<(), St
 
 pub(crate) fn delete_master_key_from_keychain() {
     let _ = keyring::Entry::new(SERVICE, MASTER_KEY_ACCOUNT).and_then(|e| e.delete_credential());
+}
+
+/// The opt-in recovery copy of the master PASSWORD (issue #208 follow-up):
+/// one keychain entry, read only by the explicit "Forgot password?" flow —
+/// never for silent unlocks, or the password would be theater.
+const RECOVERY_ACCOUNT: &str = "master-password";
+
+pub(crate) fn store_recovery_password(password: &str) -> Result<(), String> {
+    keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT)
+        .and_then(|e| e.set_password(password))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn read_recovery_password() -> Result<String, String> {
+    keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT)
+        .and_then(|e| e.get_password())
+        .map_err(|e| match e {
+            keyring::Error::NoEntry => "no recovery copy was stored for this vault".into(),
+            other => other.to_string(),
+        })
+}
+
+pub(crate) fn has_recovery_password() -> bool {
+    matches!(keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT).and_then(|e| e.get_password()), Ok(p) if !p.is_empty())
+}
+
+pub(crate) fn delete_recovery_password() {
+    let _ = keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT).and_then(|e| e.delete_credential());
 }
 
 /// Encrypt and atomically replace the vault file: exclusive-create a private
@@ -228,13 +381,13 @@ fn write_sealed(key: &[u8; KEY_LEN], path: &Path, secrets: &Secrets) -> std::io:
     std::fs::rename(&tmp, path)
 }
 
-fn encrypt(key: &[u8; KEY_LEN], secrets: &Secrets) -> std::io::Result<Vec<u8>> {
-    let plaintext = serde_json::to_vec(secrets).map_err(std::io::Error::other)?;
+/// Seal arbitrary bytes as `[version][nonce][ciphertext]` under `key`.
+fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), plaintext.as_slice())
+        .encrypt(XNonce::from_slice(&nonce), plaintext)
         .map_err(|_| std::io::Error::other("vault encryption failed"))?;
     let mut out = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
     out.push(FORMAT_VERSION);
@@ -243,15 +396,23 @@ fn encrypt(key: &[u8; KEY_LEN], secrets: &Secrets) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn decrypt(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Secrets> {
+fn open_bytes(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Vec<u8>> {
     // The Poly1305 tag alone is 16 bytes, so anything shorter is garbage.
     if bytes.len() < 1 + NONCE_LEN + 16 || bytes[0] != FORMAT_VERSION {
         return None;
     }
     let (nonce, ciphertext) = bytes[1..].split_at(NONCE_LEN);
     let cipher = XChaCha20Poly1305::new(key.into());
-    let plaintext = cipher.decrypt(XNonce::from_slice(nonce), ciphertext).ok()?;
-    serde_json::from_slice(&plaintext).ok()
+    cipher.decrypt(XNonce::from_slice(nonce), ciphertext).ok()
+}
+
+fn encrypt(key: &[u8; KEY_LEN], secrets: &Secrets) -> std::io::Result<Vec<u8>> {
+    let plaintext = serde_json::to_vec(secrets).map_err(std::io::Error::other)?;
+    seal_bytes(key, &plaintext)
+}
+
+fn decrypt(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Secrets> {
+    serde_json::from_slice(&open_bytes(key, bytes)?).ok()
 }
 
 /// Resolve the master key. This is the process's ONE keychain touch — and it
@@ -838,6 +999,60 @@ mod tests {
         let s = a.load();
         assert_eq!(s.llm_keys.get("anthropic").map(String::as_str), Some("a49"));
         assert_eq!(s.llm_keys.get("openai").map(String::as_str), Some("b49"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_password_derives_a_stable_key_and_the_verifier_rejects_wrong_passwords() {
+        let (meta, key) = build_meta("correct horse battery").unwrap();
+        assert_eq!(meta.kdf_alg, "argon2id");
+        // Same password against the stored meta re-derives the same key…
+        assert_eq!(unlock_key_for(&meta, "correct horse battery").unwrap(), key);
+        assert!(key_matches_meta(&meta, &key));
+        // …a wrong one is rejected by the verifier, never by guesswork.
+        let err = unlock_key_for(&meta, "wrong password").unwrap_err();
+        assert!(err.contains("incorrect master password"), "got: {err}");
+        assert!(!key_matches_meta(&meta, &generate_key()));
+        // Meta round-trips through vault.json.
+        let dir = temp_dir("meta");
+        write_meta(&dir, &meta).unwrap();
+        assert_eq!(read_meta(&dir).unwrap(), meta);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setting_a_password_rekeys_the_vault_and_locks_future_opens_behind_it() {
+        let dir = temp_dir("pwsetup");
+        // Legacy machine-key vault with a secret in it.
+        let legacy = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        legacy.update(|s| s.mcp_token = Some("fe".repeat(32))).unwrap();
+
+        // Setup: derive from the password, re-encrypt the existing secrets.
+        let (meta, key) = build_meta("hunter22").unwrap();
+        let secrets = legacy.load();
+        legacy.rekey(key, &secrets, "password").unwrap();
+        write_meta(&dir, &meta).unwrap();
+        assert_eq!(legacy.key_source(), "password");
+        assert_eq!(legacy.load().mcp_token.as_deref(), Some("fe".repeat(32).as_str()));
+
+        // The next open sees vault.json and starts password-locked — no
+        // keyring resolution, no silent key.
+        struct MustNotTouch;
+        impl KeychainBackend for MustNotTouch {
+            fn get_password(&self) -> Result<String, keyring::Error> {
+                panic!("keyring touched in password mode")
+            }
+            fn set_password(&self, _v: &str) -> Result<(), keyring::Error> {
+                panic!("keyring touched in password mode")
+            }
+        }
+        let reopened = Vault::with_backend(&dir, Box::new(MustNotTouch));
+        assert_eq!(reopened.key_source(), "password-locked");
+        assert!(reopened.load().mcp_token.is_none());
+        // The password unlocks it via the meta-derived key.
+        let unlocked_key = unlock_key_for(&read_meta(&dir).unwrap(), "hunter22").unwrap();
+        reopened.unlock_with(unlocked_key, "password").unwrap();
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("fe".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
