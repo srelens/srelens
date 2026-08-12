@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Button, ConfirmDialog, Field, TextInput } from "../ui";
 import { notify } from "../lib/notify";
 import { listSkills, loadSkill, saveSkill, deleteSkill, type Skill, type SkillMeta } from "../lib/skills";
-import { listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "../lib/chat";
+import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "../lib/chat";
 
 const BLANK: Skill = { name: "", description: "", body: "" };
 
@@ -64,6 +64,20 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [need, setNeed] = useState("");
   const [generating, setGenerating] = useState(false);
+  // The in-flight generation's chat session, so closing the panel mid-turn
+  // can stop the backend turn (CLI process or native provider task) instead
+  // of leaving it running invisibly with no Stop control left anywhere.
+  const genSessionRef = useRef<string | null>(null);
+  // Set by unmount; `generate` re-checks it after its async prep so a
+  // `startChat` that resolves after the panel closed never launches the turn.
+  const genCancelledRef = useRef(false);
+  useEffect(
+    () => () => {
+      genCancelledRef.current = true;
+      if (genSessionRef.current) void cancelChat(genSessionRef.current);
+    },
+    [],
+  );
   const [generateError, setGenerateError] = useState("");
 
   async function refresh() {
@@ -127,6 +141,9 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
     let errored = false;
     try {
       const session = await startChat();
+      genSessionRef.current = session;
+      // The panel closed while `startChat` was in flight — don't launch.
+      if (genCancelledRef.current) return;
       await sendChat(session, buildMetaPrompt(need), generateAgent.path ?? "", (e: AgentEvent) => {
         switch (e.type) {
           case "textDelta":
@@ -156,6 +173,7 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
     } catch (e) {
       setGenerateError(e instanceof Error ? e.message : String(e));
     } finally {
+      genSessionRef.current = null;
       setGenerating(false);
     }
   }

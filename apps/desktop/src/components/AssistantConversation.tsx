@@ -820,8 +820,14 @@ export const AssistantConversation = forwardRef<
       // switched to another tab), the backend turn and its event subscription
       // would otherwise keep running invisibly — burning quota and invoking MCP
       // tools with no one watching. Cancel the in-flight turn on the way out.
-      if (sendingRef.current && sessionRef.current) {
-        void cancelChat(sessionRef.current, turnNonceRef.current);
+      if (sendingRef.current) {
+        // Unmount can land while `startChat()` is still pending — no session
+        // id exists yet, so there's nothing to cancel on the backend. Set the
+        // cancel flag unconditionally: `handleSend` re-checks it right before
+        // launching, so the prep resolving after unmount doesn't start an
+        // invisible turn. When a session does exist, also stop the backend.
+        cancelRequestedRef.current = true;
+        if (sessionRef.current) void cancelChat(sessionRef.current, turnNonceRef.current);
       }
     };
   }, []);

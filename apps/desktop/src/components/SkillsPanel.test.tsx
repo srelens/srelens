@@ -15,6 +15,7 @@ const chatLibMock = vi.hoisted(() => ({
   listAgents: vi.fn(),
   startChat: vi.fn(),
   sendChat: vi.fn(),
+  cancelChat: vi.fn(),
 }));
 vi.mock("../lib/chat", () => chatLibMock);
 
@@ -48,6 +49,7 @@ describe("SkillsPanel", () => {
     chatLibMock.listAgents.mockReset().mockResolvedValue([AVAILABLE_AGENT]);
     chatLibMock.startChat.mockReset().mockResolvedValue("gen-session-1");
     chatLibMock.sendChat.mockReset().mockResolvedValue(undefined);
+    chatLibMock.cancelChat.mockReset().mockResolvedValue(undefined);
   });
 
   it("lists skills by name and description", async () => {
@@ -204,6 +206,7 @@ describe("SkillsPanel — Generate with AI", () => {
     chatLibMock.listAgents.mockReset().mockResolvedValue([AVAILABLE_AGENT]);
     chatLibMock.startChat.mockReset().mockResolvedValue("gen-session-1");
     chatLibMock.sendChat.mockReset().mockResolvedValue(undefined);
+    chatLibMock.cancelChat.mockReset().mockResolvedValue(undefined);
   });
 
   async function openNewSkillEditor() {
@@ -235,6 +238,25 @@ describe("SkillsPanel — Generate with AI", () => {
     expect(prompt).toBe(
       "Write a srelens assistant skill as markdown with name/description front-matter for the following need: triage a pod that keeps restarting. Output only the markdown.",
     );
+  });
+
+  it("closing the panel mid-generation cancels the backend turn", async () => {
+    // Hold the turn open: sendChat never settles until we let it.
+    let resolveSend: () => void = () => {};
+    chatLibMock.sendChat.mockImplementation(() => new Promise<void>((r) => { resolveSend = () => r(); }));
+    const { unmount } = render(<SkillsPanel onClose={vi.fn()} />);
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByRole("button", { name: "New skill" }));
+    await screen.findByLabelText("Skill name");
+    fireEvent.change(await screen.findByLabelText("Skill need"), { target: { value: "some need" } });
+    fireEvent.click(screen.getByRole("button", { name: /generate with ai/i }));
+    await waitFor(() => expect(chatLibMock.sendChat).toHaveBeenCalledTimes(1));
+
+    // Closing the dialog must stop the backend turn — there is no Stop
+    // control left anywhere once the panel is gone.
+    unmount();
+    expect(chatLibMock.cancelChat).toHaveBeenCalledWith("gen-session-1");
+    resolveSend();
   });
 
   it("generates through the pathless native agent (path: null) instead of silently no-oping", async () => {

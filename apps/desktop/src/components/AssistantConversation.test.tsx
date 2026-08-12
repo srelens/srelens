@@ -937,6 +937,24 @@ describe("AssistantConversation composer (Task 19)", () => {
     expect(chat.sendChat).not.toHaveBeenCalled();
   });
 
+  it("unmounting while startChat is still pending prevents the agent launch", async () => {
+    vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
+    // Hold the first send in prep: no session id exists yet, so the unmount
+    // cleanup has nothing to cancel on the backend — it must still flag the
+    // cancel so the resolved prep doesn't launch an invisible turn.
+    let resolveStart: (id: string) => void = () => {};
+    vi.mocked(chat.startChat).mockImplementation(
+      () => new Promise((resolve) => { resolveStart = (id) => resolve(id); }),
+    );
+    const { unmount } = render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "do a thing" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+
+    unmount();
+    await act(async () => resolveStart("s1"));
+    expect(chat.sendChat).not.toHaveBeenCalled();
+  });
+
   it("a slow session load can't clobber a newer selection", async () => {
     const resolvers: Record<string, (v: unknown) => void> = {};
     vi.mocked(chatHistory.loadSession).mockImplementation(

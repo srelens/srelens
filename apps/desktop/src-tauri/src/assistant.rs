@@ -337,6 +337,35 @@ impl Drop for TempDir {
     }
 }
 
+/// Create a fresh private directory under `base` — the directory analogue of
+/// `write_private_file`. The shared system temp dir is world-writable on a
+/// multi-user Unix host, and a predictable name could be pre-created by
+/// another account (as a symlink or an attacker-writable directory) to read
+/// or replace what a turn writes inside — e.g. swapping Cursor's
+/// `cli-config.json` deny-list, or seeding Codex's supposedly-empty `-C`
+/// workspace. So: a randomized suffix (unguessable), `DirBuilder::create`
+/// rather than `create_dir_all` (anything pre-existing — including a planted
+/// symlink — is an error, never accepted), and `0700` at creation on Unix.
+fn create_private_dir(base: &std::path::Path, prefix: &str) -> Result<std::path::PathBuf, String> {
+    for _ in 0..8 {
+        let path = base.join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&path) {
+            Ok(()) => return Ok(path),
+            // A uuid collision is practically impossible; treat it as the
+            // race it would be and try a fresh name.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("could not create a private temp directory".into())
+}
+
 /// Write a per-turn scratch file with owner-only permissions (`0600` on Unix),
 /// so another local account can't read it out of the world-readable shared temp
 /// dir while a turn runs. Used for everything sensitive we drop there: the MCP
@@ -457,8 +486,7 @@ pub async fn chat_send(
     // workspace (see `codex_command`): genuinely empty, per-turn, and torn
     // down here — that emptiness is the whole box, so this guard must never
     // be pointed at anything else.
-    let cwd_path = dir.join(format!("srelens-agent-cwd-{session}"));
-    std::fs::create_dir_all(&cwd_path).map_err(|e| e.to_string())?;
+    let cwd_path = create_private_dir(&dir, &format!("srelens-agent-cwd-{session}"))?;
     let _cwd_guard = TempDir(cwd_path.clone());
 
     // Decode each attached image to its own temp file under the same dir,
@@ -566,8 +594,7 @@ pub async fn chat_send(
             // an mcp.json in CURSOR_CONFIG_DIR is silently ignored, so the
             // server never connects). So the deny-list goes in the config dir
             // and the MCP server goes in `<workspace>/.cursor/mcp.json`.
-            let cursor_cfg_dir = dir.join(format!("srelens-cursor-cfg-{session}"));
-            std::fs::create_dir_all(&cursor_cfg_dir).map_err(|e| e.to_string())?;
+            let cursor_cfg_dir = create_private_dir(&dir, &format!("srelens-cursor-cfg-{session}"))?;
             _cursor_cfg_dir_guard = Some(TempDir(cursor_cfg_dir.clone()));
             std::fs::write(
                 cursor_cfg_dir.join("cli-config.json"),
@@ -825,6 +852,24 @@ mod tests {
         std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(which_on_path("claude", dir.to_str().unwrap()).as_deref(), plain.to_str());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_dirs_are_freshly_created_owner_only_and_never_reused() {
+        let base = std::env::temp_dir().join(format!("srelens-test-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let a = create_private_dir(&base, "cfg-s1").unwrap();
+        let b = create_private_dir(&base, "cfg-s1").unwrap();
+        // Same prefix, distinct directories — the randomized suffix is what
+        // makes pre-creation by another local account impossible.
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
