@@ -132,7 +132,21 @@ impl Stream {
             }
         }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            out.extend(self.finish(map_finish_reason(reason)));
+            // Only genuinely successful finishes map to clean stop reasons.
+            // `content_filter` and anything else abnormal must surface as an
+            // error, or a filtered/partial reply would persist as a normal
+            // completed turn with no explanation.
+            match reason {
+                "stop" => out.extend(self.finish(StopReason::EndTurn)),
+                "tool_calls" => out.extend(self.finish(StopReason::ToolUse)),
+                "length" => out.extend(self.finish(StopReason::MaxTokens)),
+                other => {
+                    if !self.done {
+                        self.done = true;
+                        out.push(StreamItem::Error(format!("the provider stopped generating: {other}")));
+                    }
+                }
+            }
         }
         out
     }
@@ -164,10 +178,23 @@ impl Stream {
         self.done = true;
         let mut out = Vec::new();
         for (_, call) in std::mem::take(&mut self.calls) {
+            // Empty argument stream is a legitimate no-arg call. Non-empty but
+            // unparseable is NOT: coercing it to `{}` would run the tool with
+            // arguments materially different from what the model was writing,
+            // so surface it as an error (which discards the turn) instead.
             let arguments = if call.args.trim().is_empty() {
                 json!({})
             } else {
-                serde_json::from_str(&call.args).unwrap_or_else(|_| json!({}))
+                match serde_json::from_str(&call.args) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        out.push(StreamItem::Error(format!(
+                            "the model produced malformed arguments for tool `{}`; not running it",
+                            call.name
+                        )));
+                        continue;
+                    }
+                }
             };
             out.push(StreamItem::ToolCall(ToolCall {
                 id: call.id,
@@ -178,14 +205,6 @@ impl Stream {
         }
         out.push(StreamItem::Done(reason));
         out
-    }
-}
-
-fn map_finish_reason(reason: &str) -> StopReason {
-    match reason {
-        "tool_calls" => StopReason::ToolUse,
-        "length" => StopReason::MaxTokens,
-        _ => StopReason::EndTurn,
     }
 }
 
@@ -289,6 +308,26 @@ mod tests {
     }
 
     #[test]
+    fn malformed_streamed_arguments_become_an_error_not_an_empty_call() {
+        let mut s = Stream::new();
+        // The stream dies mid-arguments in a way that still finishes with
+        // tool_calls — the truncated JSON must not coerce to `{}` and run.
+        assert!(s
+            .push(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"k8s_scale","arguments":"{\"replicas\": oops"}}]}}]}"#)
+            .is_empty());
+        let items = s.push(r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#);
+        assert_eq!(
+            items,
+            vec![
+                StreamItem::Error(
+                    "the model produced malformed arguments for tool `k8s_scale`; not running it".into()
+                ),
+                StreamItem::Done(StopReason::ToolUse),
+            ]
+        );
+    }
+
+    #[test]
     fn streamed_tool_call_fragments_assemble_and_flush_on_finish() {
         let mut s = Stream::new();
         assert!(s
@@ -327,6 +366,15 @@ mod tests {
             s2.push(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#),
             vec![StreamItem::Done(StopReason::MaxTokens)]
         );
+
+        // `content_filter` (or anything else abnormal) is an error, not a
+        // clean end — and the trailing [DONE] must not add a Done after it.
+        let mut s3 = Stream::new();
+        assert_eq!(
+            s3.push(r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#),
+            vec![StreamItem::Error("the provider stopped generating: content_filter".into())]
+        );
+        assert!(s3.push("[DONE]").is_empty());
     }
 
     #[test]

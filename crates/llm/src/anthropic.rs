@@ -85,7 +85,14 @@ enum BlockKind {
 #[derive(Default)]
 pub struct Stream {
     blocks: HashMap<u64, Block>,
-    stop_reason: Option<StopReason>,
+    stop_reason: Option<PendingStop>,
+}
+
+/// A `stop_reason` from `message_delta`, held until `message_stop` decides
+/// whether the turn ended cleanly or abnormally (e.g. `refusal`).
+enum PendingStop {
+    Clean(StopReason),
+    Abnormal(String),
 }
 
 impl Stream {
@@ -114,9 +121,15 @@ impl Stream {
                 }
                 Vec::new()
             }
-            Some("message_stop") => {
-                vec![StreamItem::Done(self.stop_reason.unwrap_or(StopReason::EndTurn))]
-            }
+            Some("message_stop") => match self.stop_reason.take() {
+                // A refusal or unknown stop reason is not a normal finish —
+                // surface it rather than persisting a partial/empty reply.
+                Some(PendingStop::Abnormal(reason)) => {
+                    vec![StreamItem::Error(format!("the provider stopped generating: {reason}"))]
+                }
+                Some(PendingStop::Clean(reason)) => vec![StreamItem::Done(reason)],
+                None => vec![StreamItem::Done(StopReason::EndTurn)],
+            },
             Some("error") => {
                 let msg = v
                     .get("error")
@@ -171,10 +184,20 @@ impl Stream {
             return Vec::new();
         }
         // Empty argument stream means a no-arg tool call — default to `{}`.
+        // Non-empty but unparseable is different: coercing it to `{}` would
+        // run the tool with arguments the model never wrote — error instead.
         let arguments = if block.json_buf.trim().is_empty() {
             json!({})
         } else {
-            serde_json::from_str(&block.json_buf).unwrap_or_else(|_| json!({}))
+            match serde_json::from_str(&block.json_buf) {
+                Ok(v) => v,
+                Err(_) => {
+                    return vec![StreamItem::Error(format!(
+                        "the model produced malformed arguments for tool `{}`; not running it",
+                        block.tool_name
+                    ))]
+                }
+            }
         };
         vec![StreamItem::ToolCall(ToolCall {
             id: block.tool_id,
@@ -185,11 +208,13 @@ impl Stream {
     }
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+fn map_stop_reason(reason: &str) -> PendingStop {
     match reason {
-        "tool_use" => StopReason::ToolUse,
-        "max_tokens" => StopReason::MaxTokens,
-        _ => StopReason::EndTurn,
+        "end_turn" | "stop_sequence" => PendingStop::Clean(StopReason::EndTurn),
+        "tool_use" => PendingStop::Clean(StopReason::ToolUse),
+        "max_tokens" => PendingStop::Clean(StopReason::MaxTokens),
+        // `refusal`, `pause_turn`, or anything future: not a normal finish.
+        other => PendingStop::Abnormal(other.to_string()),
     }
 }
 
@@ -340,6 +365,27 @@ mod tests {
         let mut s3 = Stream::new();
         s3.push(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#);
         assert_eq!(s3.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::MaxTokens)]);
+
+        // A refusal is not a normal finish — it surfaces as an error.
+        let mut s4 = Stream::new();
+        s4.push(r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#);
+        assert_eq!(
+            s4.push(r#"{"type":"message_stop"}"#),
+            vec![StreamItem::Error("the provider stopped generating: refusal".into())]
+        );
+    }
+
+    #[test]
+    fn malformed_tool_arguments_become_an_error_not_an_empty_call() {
+        let mut s = Stream::new();
+        s.push(r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"k8s_scale"}}"#);
+        s.push(r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"replicas\": oops"}}"#);
+        assert_eq!(
+            s.push(r#"{"type":"content_block_stop","index":0}"#),
+            vec![StreamItem::Error(
+                "the model produced malformed arguments for tool `k8s_scale`; not running it".into()
+            )]
+        );
     }
 
     #[test]

@@ -973,16 +973,17 @@ export const AssistantConversation = forwardRef<
    * failed save is swallowed rather than surfaced, since it must never break
    * the live chat the user is actually looking at. Saves are queued on
    * `persistChainRef` so at most one write is in flight and delete/load can
-   * wait for all queued writes to land (they never reject — see the catch). */
+   * wait for all queued writes to land (they never reject — see the catch).
+   *
+   * The COMPLETE session — metadata included — is built synchronously here,
+   * at enqueue time. A queued callback that read `createdAtRef`, contexts,
+   * skills, or the agent pick when it eventually ran could pick up the NEXT
+   * conversation's state (New chat is allowed the moment sending ends and
+   * doesn't await this chain), stamping the old session with the new one's
+   * metadata — or seeding the new conversation with the old `createdAt`. */
   function persistSession(msgs: ChatMessage[], calls: Record<string, ToolCallState>): Promise<void> {
     const id = sessionRef.current;
     if (!id) return Promise.resolve(); // nothing sent yet this conversation — no id to save under
-    const next = persistChainRef.current.then(() => persistSessionNow(id, msgs, calls));
-    persistChainRef.current = next;
-    return next;
-  }
-
-  async function persistSessionNow(id: string, msgs: ChatMessage[], calls: Record<string, ToolCallState>) {
     const now = Date.now();
     if (createdAtRef.current === null) createdAtRef.current = now;
     const session: Session = {
@@ -1006,11 +1007,19 @@ export const AssistantConversation = forwardRef<
       cliSessionId: null,
       messages: toStoredMessages(msgs, calls),
     };
+    const next = persistChainRef.current.then(() => persistSessionNow(session));
+    persistChainRef.current = next;
+    return next;
+  }
+
+  /** The queued IO half: writes an already-snapshotted session and refreshes
+   * the picker's metadata list. Reads no component state — see above. */
+  async function persistSessionNow(session: Session) {
     try {
       await saveSession(session);
       setSessions((prev) => {
         const meta: SessionMeta = { id: session.id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt };
-        return [meta, ...prev.filter((s) => s.id !== id)].sort((a, b) => b.updatedAt - a.updatedAt);
+        return [meta, ...prev.filter((s) => s.id !== session.id)].sort((a, b) => b.updatedAt - a.updatedAt);
       });
     } catch {
       // Disk persistence is a convenience, not the primary function — the
