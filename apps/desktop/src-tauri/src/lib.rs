@@ -22,6 +22,7 @@ mod settings;
 mod sink;
 mod terminal;
 pub mod vault;
+mod vault_biometric;
 mod toolbox;
 mod updater;
 mod watch;
@@ -244,6 +245,7 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_biometry::init())
         .plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder
@@ -431,6 +433,10 @@ pub fn run() {
             mcp_token_rotate,
             mcp_token_revoke,
             mcp_token_storage,
+            vault_biometric::vault_biometric_status,
+            vault_biometric::vault_biometric_enable,
+            vault_biometric::vault_biometric_disable,
+            vault_biometric::vault_biometric_unlock,
             mcp_audit_tail,
             mcp_prompt_issues,
             install_srelens_cli,

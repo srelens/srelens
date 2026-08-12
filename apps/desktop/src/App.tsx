@@ -149,6 +149,25 @@ export function App() {
     };
   }, []);
 
+  // Touch ID gate (issue #208): when the secrets vault opened biometric-locked,
+  // raise the unlock prompt once at launch — this is the deliberate
+  // once-per-launch authentication the gate trades silent starts for. A
+  // cancelled prompt is fine: the vault stays locked and Settings → MCP
+  // offers a retry; everything except stored secrets keeps working.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void (async () => {
+      try {
+        const { getMcpTokenStorage, vaultBiometricUnlock } = await import("./lib/mcpSecurity");
+        if ((await getMcpTokenStorage()) === "biometric-locked") {
+          await vaultBiometricUnlock();
+        }
+      } catch {
+        // Cancelled or unavailable — Settings surfaces the locked state.
+      }
+    })();
+  }, []);
+
   const handleDeleteContext = async (name: string) => {
     try {
       await deleteContext(name);

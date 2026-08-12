@@ -75,13 +75,15 @@ impl KeychainBackend for RealKeychain {
 /// read-modify-write so two commands can't lose each other's field.
 pub struct Vault {
     path: PathBuf,
-    /// `None` means LOCKED: a vault exists whose key lives in a keychain that
-    /// couldn't be reached this launch, and no fallback key file exists.
-    /// Minting a replacement key would let the next save silently destroy
-    /// every stored secret — so instead reads are empty and writes fail
-    /// loudly until a launch with a reachable keychain heals things.
-    key: Option<[u8; KEY_LEN]>,
-    key_source: &'static str,
+    /// `None` means LOCKED: either the keychain holding the key couldn't be
+    /// reached (source `"locked"`), or the key sits behind a biometric gate
+    /// that hasn't been passed yet this launch (source `"biometric-locked"`,
+    /// issue #208). Minting a replacement key would let the next save
+    /// silently destroy every stored secret — so instead reads are empty and
+    /// writes fail loudly until the vault is unlocked. Behind an `RwLock`
+    /// because a biometric unlock arrives AFTER construction.
+    key: std::sync::RwLock<Option<[u8; KEY_LEN]>>,
+    key_source: std::sync::RwLock<&'static str>,
     lock: Mutex<()>,
 }
 
@@ -95,17 +97,58 @@ impl Vault {
 
     fn with_backend(dir: &Path, backend: Box<dyn KeychainBackend>) -> Vault {
         let path = dir.join("secrets.enc");
-        let (key, key_source) = resolve_master_key(backend.as_ref(), &dir.join("master.key"), &path);
-        Vault { path, key, key_source, lock: Mutex::new(()) }
+        // Touch ID mode (issue #208): the marker means the master key's ONLY
+        // home is the OS biometric store — the plain keychain entry was
+        // deliberately deleted when the gate was enabled. Never resolve via
+        // the keyring here; the vault opens biometric-locked and
+        // `vault_biometric_unlock` supplies the key after the prompt.
+        let (key, key_source) = if biometric_marker_path(dir).exists() {
+            (None, "biometric-locked")
+        } else {
+            resolve_master_key(backend.as_ref(), &dir.join("master.key"), &path)
+        };
+        Vault {
+            path,
+            key: std::sync::RwLock::new(key),
+            key_source: std::sync::RwLock::new(key_source),
+            lock: Mutex::new(()),
+        }
     }
 
     /// Where the master key lives: `"keychain"`; `"file"` when the keychain
-    /// genuinely failed and the 0600 fallback is in use; or `"locked"` when
-    /// an existing vault's key is in an unreachable keychain and writes are
-    /// refused this launch. Shown in Settings so neither reduced trust model
-    /// is ever silent.
+    /// genuinely failed and the 0600 fallback is in use; `"locked"` when an
+    /// existing vault's key is in an unreachable keychain and writes are
+    /// refused this launch; `"biometric"` when the Touch ID gate is enabled
+    /// and passed; or `"biometric-locked"` when the gate hasn't been passed
+    /// yet. Shown in Settings so no reduced/locked state is ever silent.
     pub fn key_source(&self) -> &'static str {
-        self.key_source
+        *self.key_source.read().unwrap()
+    }
+
+    /// The live key, for the biometric module to move between key homes.
+    /// `None` while locked.
+    pub(crate) fn current_key(&self) -> Option<[u8; KEY_LEN]> {
+        *self.key.read().unwrap()
+    }
+
+    /// Install `key` after a passed biometric prompt — but only if it can
+    /// actually read the existing vault (a stale biometric item must not be
+    /// accepted; the caller purges it on this error).
+    pub(crate) fn unlock_with(&self, key: [u8; KEY_LEN], source: &'static str) -> Result<(), String> {
+        if let Ok(bytes) = std::fs::read(&self.path) {
+            if decrypt(&key, &bytes).is_none() {
+                return Err("the stored biometric key does not match this vault".into());
+            }
+        }
+        *self.key.write().unwrap() = Some(key);
+        *self.key_source.write().unwrap() = source;
+        Ok(())
+    }
+
+    /// Re-label where the (unchanged) key lives after the biometric gate is
+    /// toggled — the key itself stays cached in memory.
+    pub(crate) fn set_key_source(&self, source: &'static str) {
+        *self.key_source.write().unwrap() = source;
     }
 
     /// Read the current secrets. Missing, tampered, or wrong-key vaults read
@@ -126,10 +169,13 @@ impl Vault {
     /// load sees either the old vault or the new one, never a torn write.
     pub fn update(&self, mutate: impl FnOnce(&mut Secrets)) -> std::io::Result<()> {
         let _guard = self.lock.lock().unwrap();
-        let Some(key) = self.key else {
-            return Err(std::io::Error::other(
-                "the secrets vault is locked: the OS keychain holding its master key is unreachable",
-            ));
+        let Some(key) = *self.key.read().unwrap() else {
+            let message = if self.key_source() == "biometric-locked" {
+                "the secrets vault is locked behind biometric unlock: unlock it in Settings → MCP"
+            } else {
+                "the secrets vault is locked: the OS keychain holding its master key is unreachable"
+            };
+            return Err(std::io::Error::other(message));
         };
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -143,10 +189,30 @@ impl Vault {
     }
 
     fn read_secrets(&self) -> Secrets {
-        let Some(key) = &self.key else { return Secrets::default() };
+        let Some(key) = *self.key.read().unwrap() else { return Secrets::default() };
         let Ok(bytes) = std::fs::read(&self.path) else { return Secrets::default() };
-        decrypt(key, &bytes).unwrap_or_default()
+        decrypt(&key, &bytes).unwrap_or_default()
     }
+}
+
+/// The marker recording that the Touch ID gate is on (issue #208): non-secret
+/// by design — resolution must know how to fetch the key BEFORE any secret is
+/// readable. Its presence means the plain keychain entry was deleted and the
+/// key's only home is the OS biometric store.
+pub(crate) fn biometric_marker_path(dir: &Path) -> PathBuf {
+    dir.join("vault-biometric")
+}
+
+/// Keychain operations the biometric module needs when moving the key between
+/// homes — kept here so the service/account coordinates stay in one place.
+pub(crate) fn store_master_key_in_keychain(key: &[u8; KEY_LEN]) -> Result<(), String> {
+    keyring::Entry::new(SERVICE, MASTER_KEY_ACCOUNT)
+        .and_then(|e| e.set_password(&to_hex(key)))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn delete_master_key_from_keychain() {
+    let _ = keyring::Entry::new(SERVICE, MASTER_KEY_ACCOUNT).and_then(|e| e.delete_credential());
 }
 
 /// Encrypt and atomically replace the vault file: exclusive-create a private
@@ -354,11 +420,11 @@ fn generate_key() -> [u8; KEY_LEN] {
     key
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn key_from_hex(s: &str) -> Option<[u8; KEY_LEN]> {
+pub(crate) fn key_from_hex(s: &str) -> Option<[u8; KEY_LEN]> {
     let s = s.trim();
     if s.len() != KEY_LEN * 2 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -475,7 +541,7 @@ mod tests {
         .unwrap();
         assert_eq!(a.key_source(), "keychain");
         // Reopen "next launch": a keychain already holding the key `a` minted.
-        let b = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(to_hex(&a.key.unwrap()))))));
+        let b = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(to_hex(&a.current_key().unwrap()))))));
         let s = b.load();
         assert_eq!(s.mcp_token.as_deref(), Some("ab".repeat(32).as_str()));
         assert_eq!(s.llm_keys.get("anthropic").map(String::as_str), Some("sk-ant-123"));
@@ -646,7 +712,7 @@ mod tests {
 
         // The next healthy launch reads everything as before.
         let healed = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(to_hex(
-            &healthy.key.unwrap(),
+            &healthy.current_key().unwrap(),
         ))))));
         assert_eq!(healed.load().mcp_token.as_deref(), Some("dc".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -681,7 +747,7 @@ mod tests {
             })
             .collect();
         let vaults: Vec<Vault> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert_eq!(vaults[0].key.unwrap(), vaults[1].key.unwrap(), "both openers hold the same key");
+        assert_eq!(vaults[0].current_key().unwrap(), vaults[1].current_key().unwrap(), "both openers hold the same key");
         vaults[0].update(|s| s.mcp_token = Some("aa".repeat(32))).unwrap();
         assert_eq!(vaults[1].load().mcp_token.as_deref(), Some("aa".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -728,7 +794,7 @@ mod tests {
             })
             .collect();
         let vaults: Vec<Vault> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert_eq!(vaults[0].key.unwrap(), vaults[1].key.unwrap(), "both openers hold the same key");
+        assert_eq!(vaults[0].current_key().unwrap(), vaults[1].current_key().unwrap(), "both openers hold the same key");
         // And a write through one is readable through the other.
         vaults[0].update(|s| s.mcp_token = Some("ee".repeat(32))).unwrap();
         assert_eq!(vaults[1].load().mcp_token.as_deref(), Some("ee".repeat(32).as_str()));
@@ -772,6 +838,40 @@ mod tests {
         let s = a.load();
         assert_eq!(s.llm_keys.get("anthropic").map(String::as_str), Some("a49"));
         assert_eq!(s.llm_keys.get("openai").map(String::as_str), Some("b49"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_biometric_marker_opens_the_vault_locked_without_touching_the_keyring() {
+        let dir = temp_dir("bio");
+        // Seed a vault under a known key via a working keychain.
+        let healthy = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        healthy.update(|s| s.mcp_token = Some("ad".repeat(32))).unwrap();
+        let key = healthy.current_key().unwrap();
+
+        // Gate on: the marker is present, so resolution must not consult the
+        // keyring at all — a backend that panics if touched proves it.
+        std::fs::write(biometric_marker_path(&dir), b"").unwrap();
+        struct MustNotTouch;
+        impl KeychainBackend for MustNotTouch {
+            fn get_password(&self) -> Result<String, keyring::Error> {
+                panic!("keyring touched in biometric mode")
+            }
+            fn set_password(&self, _v: &str) -> Result<(), keyring::Error> {
+                panic!("keyring touched in biometric mode")
+            }
+        }
+        let gated = Vault::with_backend(&dir, Box::new(MustNotTouch));
+        assert_eq!(gated.key_source(), "biometric-locked");
+        assert!(gated.load().mcp_token.is_none(), "locked reads are empty");
+        assert!(gated.update(|s| s.mcp_token = None).is_err(), "locked writes fail loudly");
+
+        // A stale/wrong biometric key is rejected…
+        assert!(gated.unlock_with(generate_key(), "biometric").is_err());
+        // …the right one unlocks for the rest of the run.
+        gated.unlock_with(key, "biometric").unwrap();
+        assert_eq!(gated.key_source(), "biometric");
+        assert_eq!(gated.load().mcp_token.as_deref(), Some("ad".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

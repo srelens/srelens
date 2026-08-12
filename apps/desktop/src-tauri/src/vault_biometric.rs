@@ -1,0 +1,139 @@
+//! The Touch ID gate for the vault master key (issue #208), following the
+//! mqlens pattern: the key is stored in the OS biometric store
+//! (`tauri-plugin-biometry` — macOS Touch ID keychain / Windows Hello), and
+//! reading it back (`get_data`) raises the biometric prompt. While the gate
+//! is on, the plain keychain entry is DELETED — the biometric item is the
+//! key's only home — and a non-secret marker file tells vault resolution to
+//! open `biometric-locked` instead of consulting the keyring (see
+//! `vault::biometric_marker_path`).
+//!
+//! Lifecycle:
+//! - enable: requires an unlocked vault; stores the cached key behind
+//!   biometrics FIRST, then deletes the plain keychain entry and writes the
+//!   marker — ordered so a failure never leaves the key homeless.
+//! - unlock: prompts, verifies the returned key actually decrypts the vault
+//!   (a stale item is purged and reported rather than accepted), and
+//!   installs it for the rest of the run.
+//! - disable: requires an unlocked vault; restores the plain keychain entry
+//!   FIRST, then removes the biometric item and marker.
+
+use std::sync::Arc;
+
+use tauri_plugin_biometry::{BiometryExt, DataOptions, GetDataOptions, SetDataOptions};
+
+use crate::vault::{self, Vault};
+
+/// Biometric-store coordinates for the master key.
+const BIO_DOMAIN: &str = "app.srelens.desktop.vault";
+const BIO_NAME: &str = "master-key";
+
+/// What Settings needs to render the Touch ID control.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultBiometricStatus {
+    /// A usable biometric sensor exists on this machine.
+    pub available: bool,
+    /// The gate is on (the marker exists — the key lives behind biometrics).
+    pub enabled: bool,
+    /// The vault currently holds a usable key (whatever its source).
+    pub unlocked: bool,
+}
+
+fn data_options() -> DataOptions {
+    DataOptions { domain: BIO_DOMAIN.to_string(), name: BIO_NAME.to_string() }
+}
+
+fn vault_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("mcp"))
+}
+
+/// Sensor availability + gate state. Never hard-fails: a plugin/platform
+/// error reads as unavailable so Settings simply hides the control.
+#[tauri::command]
+pub async fn vault_biometric_status(
+    app: tauri::AppHandle,
+    vault: tauri::State<'_, Arc<Vault>>,
+) -> Result<VaultBiometricStatus, String> {
+    let available = app.biometry().status().map(|s| s.is_available).unwrap_or(false);
+    let enabled = vault_dir(&app).map(|d| vault::biometric_marker_path(&d).exists()).unwrap_or(false);
+    Ok(VaultBiometricStatus { available, enabled, unlocked: vault.key_source() != "locked" && vault.key_source() != "biometric-locked" })
+}
+
+/// Turn the gate ON: move the cached master key into the biometric store.
+#[tauri::command]
+pub async fn vault_biometric_enable(
+    app: tauri::AppHandle,
+    vault: tauri::State<'_, Arc<Vault>>,
+) -> Result<(), String> {
+    let key = vault
+        .current_key()
+        .ok_or("the vault is locked — unlock it before enabling biometric unlock")?;
+    // Store behind biometrics FIRST; only then remove the plain entry and
+    // write the marker. A failure at any step leaves the previous (working)
+    // configuration in place.
+    app.biometry()
+        .set_data(SetDataOptions {
+            domain: BIO_DOMAIN.to_string(),
+            name: BIO_NAME.to_string(),
+            data: vault::to_hex(&key),
+        })
+        .map_err(|e| format!("could not store the key in the biometric store: {e}"))?;
+    let dir = vault_dir(&app)?;
+    std::fs::write(vault::biometric_marker_path(&dir), b"").map_err(|e| e.to_string())?;
+    vault::delete_master_key_from_keychain();
+    vault.set_key_source("biometric");
+    Ok(())
+}
+
+/// Turn the gate OFF: restore the plain keychain entry as the key's home.
+#[tauri::command]
+pub async fn vault_biometric_disable(
+    app: tauri::AppHandle,
+    vault: tauri::State<'_, Arc<Vault>>,
+) -> Result<(), String> {
+    let key = vault
+        .current_key()
+        .ok_or("the vault is locked — pass the biometric unlock before disabling the gate")?;
+    // Restore the plain entry FIRST — the key must never be homeless.
+    vault::store_master_key_in_keychain(&key)?;
+    let dir = vault_dir(&app)?;
+    match std::fs::remove_file(vault::biometric_marker_path(&dir)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let _ = app.biometry().remove_data(data_options());
+    vault.set_key_source("keychain");
+    Ok(())
+}
+
+/// Pass the gate: prompt (Touch ID sheet), verify the returned key against
+/// the vault, and install it for the rest of the run. A stale item — one
+/// that no longer decrypts the vault — is purged so the user isn't stuck in
+/// a prompt loop that can never succeed.
+#[tauri::command]
+pub async fn vault_biometric_unlock(
+    app: tauri::AppHandle,
+    vault: tauri::State<'_, Arc<Vault>>,
+) -> Result<(), String> {
+    let resp = app
+        .biometry()
+        .get_data(GetDataOptions {
+            domain: BIO_DOMAIN.to_string(),
+            name: BIO_NAME.to_string(),
+            reason: "Unlock srelens's secrets".to_string(),
+            cancel_title: Some("Cancel".to_string()),
+        })
+        .map_err(|e| format!("biometric unlock failed: {e}"))?;
+    let key = vault::key_from_hex(&resp.data)
+        .ok_or("the stored biometric key is malformed")
+        .map_err(|e| {
+            let _ = app.biometry().remove_data(data_options());
+            e.to_string()
+        })?;
+    vault.unlock_with(key, "biometric").map_err(|e| {
+        let _ = app.biometry().remove_data(data_options());
+        format!("{e} — the stale biometric item was removed; the vault stays locked")
+    })
+}

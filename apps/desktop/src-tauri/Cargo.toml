@@ -56,6 +56,10 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # by a single keychain-held master key, replacing per-secret keychain entries.
 chacha20poly1305 = "0.10"
 getrandom = "0.2"
+# Touch ID / Windows Hello gate for the vault master key (issue #208): the
+# plugin owns the SecAccessControl / Hello plumbing; get_data raises the
+# biometric prompt.
+tauri-plugin-biometry = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"

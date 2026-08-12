@@ -15,7 +15,18 @@ import {
   srelensCliStatus,
   type CliStatus,
 } from "../lib/mcp";
-import { getMcpToken, getMcpTokenStorage, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
+import {
+  getMcpToken,
+  getMcpTokenStorage,
+  revokeMcpToken,
+  rotateMcpToken,
+  vaultBiometricDisable,
+  vaultBiometricEnable,
+  vaultBiometricStatus,
+  vaultBiometricUnlock,
+  type VaultBiometricStatus,
+  type VaultKeySource,
+} from "../lib/mcpSecurity";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "../lib/mcpClients";
 import { McpAuditList } from "./McpAuditList";
 import { McpPromptIssues } from "./McpPromptIssues";
@@ -59,7 +70,9 @@ export function McpSettingsSection() {
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState("");
   const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
-  const [tokenStorage, setTokenStorage] = useState<"keychain" | "file" | "locked" | null>(null);
+  const [tokenStorage, setTokenStorage] = useState<VaultKeySource | null>(null);
+  const [biometric, setBiometric] = useState<VaultBiometricStatus | null>(null);
+  const [biometricBusy, setBiometricBusy] = useState(false);
   // Bumped by McpAuditList's own Refresh button so the prompt-issues panel
   // re-reads too: a user who fixes their prompt file should see that
   // reflected without restarting srelens, and without a second Refresh
@@ -81,11 +94,56 @@ export function McpSettingsSection() {
     void srelensCliStatus().then(setCli).catch(() => {});
     void refreshToken();
     void getMcpTokenStorage().then(setTokenStorage).catch(() => {});
+    void vaultBiometricStatus().then(setBiometric).catch(() => {});
   }, []);
 
   function persist(next: McpSettings) {
     setSettings(next);
     saveMcpSettings(next);
+  }
+
+  // What the OS calls its biometric unlock — the plugin backs onto Touch ID
+  // on macOS and Windows Hello on Windows (Linux has no backend, so the
+  // control never renders there and this label is moot).
+  const bioLabel = navigator.userAgent.includes("Windows") ? "Windows Hello" : "Touch ID";
+
+  /** Re-read both vault facts the biometric controls render from. */
+  async function refreshVaultState() {
+    await Promise.all([
+      getMcpTokenStorage().then(setTokenStorage).catch(() => {}),
+      vaultBiometricStatus().then(setBiometric).catch(() => {}),
+    ]);
+  }
+
+  async function toggleBiometric(on: boolean) {
+    setBiometricBusy(true);
+    try {
+      if (on) {
+        await vaultBiometricEnable();
+        notify.success(`${bioLabel} required to unlock secrets from the next launch`);
+      } else {
+        await vaultBiometricDisable();
+        notify.success(`${bioLabel} requirement removed`);
+      }
+    } catch (e) {
+      notify.error(String(e));
+    } finally {
+      setBiometricBusy(false);
+      await refreshVaultState();
+    }
+  }
+
+  async function unlockBiometric() {
+    setBiometricBusy(true);
+    try {
+      await vaultBiometricUnlock();
+      notify.success("Secrets unlocked");
+    } catch (e) {
+      notify.error(String(e));
+    } finally {
+      setBiometricBusy(false);
+      await refreshVaultState();
+    }
   }
 
   async function toggleServer(enabled: boolean) {
@@ -323,6 +381,31 @@ export function McpSettingsSection() {
             read or changed right now; they are untouched. Restart srelens once the keychain is
             available again.
           </p>
+        )}
+        {tokenStorage === "biometric-locked" && (
+          <div className="flex items-center gap-3">
+            <p className="text-sm text-amber-600 dark:text-amber-500">
+              Secrets are locked behind {bioLabel} for this session.
+            </p>
+            <Button size="sm" disabled={biometricBusy} onClick={() => void unlockBiometric()}>
+              Unlock with {bioLabel}
+            </Button>
+          </div>
+        )}
+        {biometric?.available && tokenStorage !== "locked" && (
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="accent-primary"
+              checked={biometric.enabled}
+              disabled={biometricBusy || (!biometric.unlocked && !biometric.enabled)}
+              onChange={(e) => void toggleBiometric(e.target.checked)}
+            />
+            <span>Require {bioLabel} to unlock secrets</span>
+            <span className="text-xs text-muted-foreground">
+              — asks once each time srelens starts
+            </span>
+          </label>
         )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}
       </section>

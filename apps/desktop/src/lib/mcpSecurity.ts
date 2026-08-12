@@ -35,11 +35,38 @@ export async function revokeMcpToken(): Promise<void> {
 
 /** Where the secrets vault's MASTER KEY lives: the OS keychain; a 0600
  * fallback file (Settings says plainly the vault is then effectively
- * unprotected); or "locked" — the keychain holding the key was unreachable
- * this launch while a vault exists, so secrets are frozen rather than
- * destroyed by a re-key. */
-export async function getMcpTokenStorage(): Promise<"keychain" | "file" | "locked"> {
-  return await invoke<"keychain" | "file" | "locked">("mcp_token_storage");
+ * unprotected); "locked" — the keychain holding the key was unreachable this
+ * launch while a vault exists, so secrets are frozen rather than destroyed by
+ * a re-key; "biometric" — the Touch ID gate is on and passed; or
+ * "biometric-locked" — the gate hasn't been passed yet this launch. */
+export type VaultKeySource = "keychain" | "file" | "locked" | "biometric" | "biometric-locked";
+
+export async function getMcpTokenStorage(): Promise<VaultKeySource> {
+  return await invoke<VaultKeySource>("mcp_token_storage");
+}
+
+/** What Settings needs to render the Touch ID control. */
+export interface VaultBiometricStatus {
+  available: boolean;
+  enabled: boolean;
+  unlocked: boolean;
+}
+
+export async function vaultBiometricStatus(): Promise<VaultBiometricStatus> {
+  return await invoke<VaultBiometricStatus>("vault_biometric_status");
+}
+
+export async function vaultBiometricEnable(): Promise<void> {
+  await invoke("vault_biometric_enable");
+}
+
+export async function vaultBiometricDisable(): Promise<void> {
+  await invoke("vault_biometric_disable");
+}
+
+/** Raises the Touch ID sheet; resolves once the vault is unlocked. */
+export async function vaultBiometricUnlock(): Promise<void> {
+  await invoke("vault_biometric_unlock");
 }
 
 /** Newest first. Returns [] rather than throwing: a missing log is not an error. */
