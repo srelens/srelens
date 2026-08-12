@@ -214,7 +214,12 @@ fn parse_models(kind: ProviderKind, body: &Value) -> Vec<ModelInfo> {
 /// `data:` for each complete line, and ignores `event:`/comment/blank lines.
 #[derive(Default)]
 pub struct SseDecoder {
-    buf: String,
+    /// Raw bytes, NOT a String: a chunk boundary can fall in the middle of a
+    /// multibyte UTF-8 character, and decoding each chunk independently would
+    /// mangle both halves into U+FFFD before they ever reached the buffer —
+    /// corrupting non-ASCII text and potentially the JSON event around it.
+    /// Only complete lines (which always contain whole characters) are decoded.
+    buf: Vec<u8>,
 }
 
 impl SseDecoder {
@@ -224,11 +229,12 @@ impl SseDecoder {
 
     /// Feed one received byte chunk; returns any newly-complete `data:` payloads.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
-        self.buf.push_str(&String::from_utf8_lossy(bytes));
+        self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
         // Only consume up to the last newline; keep any trailing partial line.
-        while let Some(nl) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=nl).collect();
+        while let Some(nl) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line);
             let line = line.trim_end_matches(['\r', '\n']);
             if let Some(data) = line.strip_prefix("data:") {
                 out.push(data.trim_start().to_string());
@@ -263,6 +269,18 @@ mod tests {
         assert!(d.push(b"data: {\"par").is_empty());
         assert!(d.push(b"tial\":true}").is_empty()); // still no newline
         assert_eq!(d.push(b"\n"), vec!["{\"partial\":true}".to_string()]);
+    }
+
+    #[test]
+    fn a_multibyte_character_split_across_chunks_survives_intact() {
+        let mut d = SseDecoder::new();
+        let payload = "data: {\"text\":\"héllo\"}\n".as_bytes();
+        // Split INSIDE the two-byte 'é' (0xC3 0xA9) — the boundary a real
+        // HTTP chunking can produce.
+        let split = payload.iter().position(|&b| b == 0xC3).unwrap() + 1;
+        let (a, b) = payload.split_at(split);
+        assert!(d.push(a).is_empty());
+        assert_eq!(d.push(b), vec!["{\"text\":\"héllo\"}".to_string()]);
     }
 
     #[test]
