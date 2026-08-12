@@ -103,9 +103,11 @@ export async function vaultRecoverPassword(): Promise<string> {
 }
 
 /** The backend refreshes the keychain recovery copy only if one exists —
- * setup's opt-in/opt-out choice is preserved, never silently reversed. */
-export async function vaultChangePassword(current: string, next: string): Promise<void> {
-  await invoke("vault_change_password", { current, new: next });
+ * setup's opt-in/opt-out choice is preserved, never silently reversed.
+ * Resolves to a warning string when the change succeeded but the biometric
+ * enrollment had to be turned off (its store couldn't be updated). */
+export async function vaultChangePassword(current: string, next: string): Promise<string | null> {
+  return await invoke<string | null>("vault_change_password", { current, new: next });
 }
 
 /** Newest first. Returns [] rather than throwing: a missing log is not an error. */

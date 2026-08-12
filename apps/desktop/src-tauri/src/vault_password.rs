@@ -119,7 +119,15 @@ pub async fn vault_setup_password(
     // machine-key vault intact (the stale stage is dropped at next open); a
     // crash after it is healed by the open-time promote — `vault.json`
     // never claims a key the vault doesn't have.
-    vault::write_meta_next(&dir, &meta)?;
+    // Staging failure must roll back the recovery artifacts too — they were
+    // persisted just above, and a failed setup must leave NOTHING behind.
+    if let Err(e) = vault::write_meta_next(&dir, &meta) {
+        if keep_recovery {
+            vault::delete_recovery_password();
+            let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
+        }
+        return Err(e);
+    }
     if let Err(e) = vault.rekey_from_current(key, "password") {
         let _ = std::fs::remove_file(vault::meta_next_path(&dir));
         if keep_recovery {
@@ -194,12 +202,14 @@ pub async fn vault_recover_password(
 /// copy — but ONLY if one exists: the recovery choice was made at setup, and
 /// a change must never silently reverse an explicit opt-out.
 #[tauri::command]
+/// Returns an optional WARNING on success: a biometric-store refresh failure
+/// is reconciled (the enrollment is purged) but must be surfaced, not silent.
 pub async fn vault_change_password(
     current: String,
     new: String,
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if new.len() < MIN_PASSWORD_LEN {
         return Err(format!("the new password must be at least {MIN_PASSWORD_LEN} characters"));
     }
@@ -268,6 +278,7 @@ pub async fn vault_change_password(
         // flow's staged-copy fallback, which finishes the promote itself.
         vault::promote_staged_recovery();
     }
-    vault_biometric::refresh_stored_key(&app, &new_key);
-    Ok(())
+    // A refresh failure has already reconciled (purged) the enrollment —
+    // pass its note along as a warning on an otherwise-successful change.
+    Ok(vault_biometric::refresh_stored_key(&app, &new_key).err())
 }

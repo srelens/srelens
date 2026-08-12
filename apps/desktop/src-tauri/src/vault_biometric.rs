@@ -115,17 +115,30 @@ pub async fn vault_biometric_disable(
 }
 
 /// Re-store a (new) key in the biometric item if the gate is on — used by
-/// password change so the enrolled skip keeps working. Best-effort.
-pub(crate) fn refresh_stored_key(app: &tauri::AppHandle, key: &[u8; 32]) {
+/// password change so the enrolled skip keeps working. `Ok` when nothing is
+/// enrolled or the refresh landed. On failure the enrollment is PURGED
+/// (item + marker) and `Err` carries a user-facing note: silently keeping
+/// the stale old-key item would just fail the next launch's auto prompt and
+/// purge then, with no explanation of why the feature vanished.
+pub(crate) fn refresh_stored_key(app: &tauri::AppHandle, key: &[u8; 32]) -> Result<(), String> {
     let enrolled = vault_dir(app)
         .map(|d| vault::biometric_marker_path(&d).exists())
         .unwrap_or(false);
-    if enrolled {
-        let _ = app.biometry().set_data(SetDataOptions {
-            domain: BIO_DOMAIN.to_string(),
-            name: BIO_NAME.to_string(),
-            data: vault::to_hex(key),
-        });
+    if !enrolled {
+        return Ok(());
+    }
+    match app.biometry().set_data(SetDataOptions {
+        domain: BIO_DOMAIN.to_string(),
+        name: BIO_NAME.to_string(),
+        data: vault::to_hex(key),
+    }) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            purge(app);
+            Err(format!(
+                "biometric unlock was turned off — its store could not be updated ({e}); re-enable it in Settings → Security"
+            ))
+        }
     }
 }
 

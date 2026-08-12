@@ -83,9 +83,15 @@ export function SecuritySettingsSection() {
     setPwBusy(true);
     try {
       // The backend refreshes the keychain recovery copy only if one exists,
-      // preserving the opt-in/opt-out made at setup.
-      await vaultChangePassword(pwCurrent, pwNew);
-      notify.success("Master password changed");
+      // preserving the opt-in/opt-out made at setup. A warning means the
+      // change landed but the biometric enrollment had to be turned off.
+      const warning = await vaultChangePassword(pwCurrent, pwNew);
+      if (warning) {
+        notify.info(`Master password changed — ${warning}`);
+        await refreshVaultState();
+      } else {
+        notify.success("Master password changed");
+      }
       setPwCurrent("");
       setPwNew("");
       setPwConfirm("");
