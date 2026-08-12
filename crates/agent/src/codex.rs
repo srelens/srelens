@@ -54,7 +54,16 @@ fn item_completed(item: &serde_json::Value) -> Vec<AgentEvent> {
         Some("mcp_tool_call") => {
             let has_error = item.get("error").map(|e| !e.is_null()).unwrap_or(false);
             let completed = item.get("status").and_then(|s| s.as_str()) == Some("completed");
-            let status = if has_error || !completed { ToolStatus::Error } else { ToolStatus::Ok };
+            let status = if !has_error && completed {
+                ToolStatus::Ok
+            } else if crate::event::is_denial_text(&item.get("error").map(|e| e.to_string()).unwrap_or_default())
+            {
+                // A consent refusal from the srelens MCP server, not a tool
+                // failure (see `DENIED_PREFIX`).
+                ToolStatus::Denied
+            } else {
+                ToolStatus::Error
+            };
             vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status }]
         }
         Some("command_execution") => {
@@ -132,6 +141,14 @@ mod tests {
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":null,"error":{"message":"boom"},"status":"completed"}}"#,
         );
         assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+    }
+
+    #[test]
+    fn an_mcp_tool_call_refused_by_consent_is_denied_not_error() {
+        let out = parse_line(
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"srelens","tool":"k8s_deletePod","arguments":{},"result":null,"error":{"message":"consent denied: user declined `k8s.deletePod`"},"status":"completed"}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied }]);
     }
 
     #[test]

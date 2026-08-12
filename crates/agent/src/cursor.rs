@@ -118,7 +118,15 @@ fn completion_status(inner: &serde_json::Value) -> ToolStatus {
     let has_error = ["error", "isError", "is_error"]
         .iter()
         .any(|key| candidate.get(*key).map(is_truthy).unwrap_or(false));
-    if has_error { ToolStatus::Error } else { ToolStatus::Ok }
+    if !has_error {
+        return ToolStatus::Ok;
+    }
+    // An MCP-side consent refusal travels as an errored result whose text
+    // carries `DENIED_PREFIX` — the user's "no", not a failed execution.
+    if crate::event::is_denial_text(&candidate.to_string()) {
+        return ToolStatus::Denied;
+    }
+    ToolStatus::Error
 }
 
 fn is_truthy(v: &serde_json::Value) -> bool {
@@ -256,6 +264,16 @@ mod tests {
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"readToolCall":{"result":{"error":{"errorMessage":"Permission denied"}}}}}"#,
         );
         assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error }]);
+    }
+
+    #[test]
+    fn an_mcp_consent_refusal_is_denied_not_error() {
+        // The srelens MCP server's refusal text (see `DENIED_PREFIX`) rides in
+        // the errored result — the user's "no", not a failed execution.
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"c2","tool_call":{"mcpToolCall":{"result":{"isError":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied }]);
     }
 
     #[test]

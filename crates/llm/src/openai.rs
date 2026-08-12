@@ -169,7 +169,12 @@ impl Stream {
             } else {
                 serde_json::from_str(&call.args).unwrap_or_else(|_| json!({}))
             };
-            out.push(StreamItem::ToolCall(ToolCall { id: call.id, name: call.name, arguments }));
+            out.push(StreamItem::ToolCall(ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments,
+                thought_signature: None,
+            }));
         }
         out.push(StreamItem::Done(reason));
         out
@@ -226,8 +231,7 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }),
-                }],
+                    arguments: json!({ "replicas": 3 }), thought_signature: None }],
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "call_1".into(),
@@ -300,8 +304,7 @@ mod tests {
                 StreamItem::ToolCall(ToolCall {
                     id: "call_1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 2 }),
-                }),
+                    arguments: json!({ "replicas": 2 }), thought_signature: None }),
                 StreamItem::Done(StopReason::ToolUse),
             ]
         );

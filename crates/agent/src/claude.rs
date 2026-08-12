@@ -84,10 +84,33 @@ fn tool_result(block: &serde_json::Value) -> Option<AgentEvent> {
         return None;
     }
     let is_error = block.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+    let status = if !is_error {
+        ToolStatus::Ok
+    } else if crate::event::is_denial_text(&result_text(block)) {
+        // The user declining the consent dialog, not the tool failing —
+        // show it as such (see `DENIED_PREFIX`).
+        ToolStatus::Denied
+    } else {
+        ToolStatus::Error
+    };
     Some(AgentEvent::ToolResult {
         id: block.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-        status: if is_error { ToolStatus::Error } else { ToolStatus::Ok },
+        status,
     })
+}
+
+/// A `tool_result`'s `content` is either a bare string or an array of
+/// `{type:"text", text}` blocks; flatten to the concatenated text.
+fn result_text(block: &serde_json::Value) -> String {
+    match block.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +192,20 @@ mod tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true}]}}"#,
         );
         assert_eq!(err, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Error }]);
+    }
+
+    #[test]
+    fn a_consent_refusal_maps_to_denied_not_error() {
+        // Both content shapes Claude Code uses: an array of text blocks…
+        let blocks = parse_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}]}}"#,
+        );
+        assert_eq!(blocks, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Denied }]);
+        // …and a bare string.
+        let bare = parse_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"consent denied: user declined `k8s.scale`"}]}}"#,
+        );
+        assert_eq!(bare, vec![AgentEvent::ToolResult { id: "t2".into(), status: ToolStatus::Denied }]);
     }
 
     #[test]

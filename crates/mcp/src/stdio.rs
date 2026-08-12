@@ -10,6 +10,13 @@ use crate::{McpServer, Transport};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Stable prefix on the text of a consent-denied tool result. CLI transports
+/// strip `_meta`, so this text is the only denial signal that survives the
+/// round trip through an agent CLI's transcript. `srelens_agent` defines the
+/// same constant for its parsers (neither crate depends on the other); the
+/// desktop crate has a test pinning the two equal.
+pub const DENIED_PREFIX: &str = "consent denied: ";
+
 fn ok(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
@@ -134,11 +141,13 @@ pub async fn handle_request(
                     // `_meta` (reserved by MCP for exactly this) marks the
                     // refusal so the in-process native agent can report "the
                     // user declined" rather than a failed execution; CLI
-                    // clients simply ignore it.
+                    // clients strip it, which is why the text also carries
+                    // `DENIED_PREFIX` — the only signal that survives a CLI's
+                    // transcript for the srelens_agent parsers to match on.
                     return Some(ok(
                         id?,
                         json!({
-                            "content": [{ "type": "text", "text": reason }],
+                            "content": [{ "type": "text", "text": format!("{DENIED_PREFIX}{reason}") }],
                             "isError": true,
                             "_meta": { "srelens/denied": true }
                         }),
@@ -713,6 +722,9 @@ mod tests {
         // The refusal marker that lets the native agent report "user declined"
         // instead of a failed execution.
         assert_eq!(resp["result"]["_meta"]["srelens/denied"], json!(true));
+        // And the text marker that survives CLI transports (which strip _meta).
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(DENIED_PREFIX), "got: {text}");
     }
 
     /// The pair of assertions here is the point: the tool must never see

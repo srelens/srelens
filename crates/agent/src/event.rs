@@ -11,6 +11,22 @@ pub enum ToolStatus {
     Denied,
 }
 
+/// Stable prefix the srelens MCP server puts on the text of a consent-denied
+/// tool result (`srelens_mcp::stdio::DENIED_PREFIX` — same value; neither
+/// crate depends on the other, and the desktop crate pins the two equal).
+/// CLI transports strip the MCP `_meta` denial marker, so this text is the
+/// only signal that survives an agent CLI's transcript.
+pub const DENIED_PREFIX: &str = "consent denied: ";
+
+/// Whether a failed tool result's text is a consent refusal rather than an
+/// execution error. `contains`, not `starts_with`: a CLI may wrap the tool
+/// text (e.g. "Error: …"), and result text only ever comes from our own MCP
+/// server, so a false positive would require the server itself to emit the
+/// marker mid-output.
+pub fn is_denial_text(text: &str) -> bool {
+    text.contains(DENIED_PREFIX)
+}
+
 /// One normalized event from any agent CLI. `#[serde(tag = "type")]` so the
 /// WebView switches on a single discriminant, camelCase to match the frontend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

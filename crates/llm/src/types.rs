@@ -32,12 +32,17 @@ pub struct ToolDef {
 
 /// A tool call the model requested, with fully-assembled arguments (adapters
 /// accumulate any streamed partial-JSON argument deltas before emitting this).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolCall {
     /// Correlates the call with its result across the wire and in `AgentEvent`s.
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Gemini thinking models attach an opaque `thoughtSignature` to a
+    /// `functionCall` part; it must be replayed verbatim with that call in
+    /// the next request or the follow-up is rejected. Gemini-only — the
+    /// other adapters leave it `None` and ignore it when serializing.
+    pub thought_signature: Option<String>,
 }
 
 /// The result of running a tool, fed back to the model on the next request.

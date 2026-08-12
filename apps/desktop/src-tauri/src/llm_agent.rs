@@ -406,6 +406,14 @@ mod tests {
         assert_eq!(t.input_schema["type"], "object");
     }
 
+    /// `srelens_mcp` writes the denial text marker and `srelens_agent` parses
+    /// it, but neither crate depends on the other — this is the one place both
+    /// are visible, so it pins the duplicated constants to the same value.
+    #[test]
+    fn the_denial_text_marker_matches_between_the_mcp_server_and_the_cli_parsers() {
+        assert_eq!(srelens_mcp::stdio::DENIED_PREFIX, srelens_agent::event::DENIED_PREFIX);
+    }
+
     #[test]
     fn dotted_registry_ids_alias_to_provider_safe_names_and_back() {
         let mut aliases = std::collections::HashMap::new();

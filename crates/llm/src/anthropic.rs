@@ -176,7 +176,12 @@ impl Stream {
         } else {
             serde_json::from_str(&block.json_buf).unwrap_or_else(|_| json!({}))
         };
-        vec![StreamItem::ToolCall(ToolCall { id: block.tool_id, name: block.tool_name, arguments })]
+        vec![StreamItem::ToolCall(ToolCall {
+            id: block.tool_id,
+            name: block.tool_name,
+            arguments,
+            thought_signature: None,
+        })]
     }
 }
 
@@ -230,8 +235,7 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }),
-                }],
+                    arguments: json!({ "replicas": 3 }), thought_signature: None }],
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "call_1".into(),
@@ -257,7 +261,7 @@ mod tests {
     fn an_assistant_turn_with_no_text_omits_the_text_block() {
         let turns = vec![Turn::Assistant {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: "c".into(), name: "t".into(), arguments: json!({}) }],
+            tool_calls: vec![ToolCall { id: "c".into(), name: "t".into(), arguments: json!({}), thought_signature: None }],
         }];
         let req = build_request("m", 1, "s", &turns, &[]);
         assert_eq!(req["messages"][0]["content"][0]["type"], "tool_use");
@@ -307,8 +311,7 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "call_9".into(),
                 name: "k8s_scale".into(),
-                arguments: json!({ "replicas": 3 }),
-            })]
+                arguments: json!({ "replicas": 3 }), thought_signature: None })]
         );
     }
 
@@ -319,7 +322,7 @@ mod tests {
         let items = s.push(r#"{"type":"content_block_stop","index":0}"#);
         assert_eq!(
             items,
-            vec![StreamItem::ToolCall(ToolCall { id: "c".into(), name: "ping".into(), arguments: json!({}) })]
+            vec![StreamItem::ToolCall(ToolCall { id: "c".into(), name: "ping".into(), arguments: json!({}), thought_signature: None })]
         );
     }
 

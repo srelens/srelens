@@ -35,7 +35,13 @@ fn content_for_turn(turn: &Turn) -> Value {
                 parts.push(json!({ "text": text }));
             }
             for call in tool_calls {
-                parts.push(json!({ "functionCall": { "name": call.name, "args": call.arguments } }));
+                let mut part = json!({ "functionCall": { "name": call.name, "args": call.arguments } });
+                // Replay the thinking signature on the part it arrived on —
+                // signature-requiring models reject the request without it.
+                if let Some(sig) = &call.thought_signature {
+                    part["thoughtSignature"] = json!(sig);
+                }
+                parts.push(part);
             }
             json!({ "role": "model", "parts": parts })
         }
@@ -96,7 +102,11 @@ impl Stream {
                     let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
                     let id = format!("gemini-call-{}-{}", self.round, self.counter);
                     self.counter += 1;
-                    out.push(StreamItem::ToolCall(ToolCall { id, name, arguments }));
+                    // Thinking models stamp the part with an opaque signature
+                    // that must be replayed with this call in the next request.
+                    let thought_signature =
+                        part.get("thoughtSignature").and_then(Value::as_str).map(str::to_string);
+                    out.push(StreamItem::ToolCall(ToolCall { id, name, arguments, thought_signature }));
                 } else if let Some(text) = part.get("text").and_then(Value::as_str) {
                     if part.get("thought").and_then(Value::as_bool) == Some(true) {
                         out.push(StreamItem::Thinking(text.to_string()));
@@ -107,13 +117,19 @@ impl Stream {
             }
         }
         // Gemini has no distinct tool-use stop reason; the loop keys off whether
-        // any tool call was emitted, so EndTurn is correct for a normal finish —
-        // but a token-limit cutoff must be surfaced as the truncation it is.
+        // any tool call was emitted, so EndTurn is correct for a normal STOP.
+        // Anything else is not a normal finish: MAX_TOKENS is the truncation it
+        // is, and the abnormal reasons (SAFETY, RECITATION, BLOCKLIST,
+        // MALFORMED_FUNCTION_CALL, …) surface as errors — otherwise a partial
+        // or empty reply would persist as a completed turn with no explanation.
         if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
             if !self.done {
                 self.done = true;
-                let stop = if reason == "MAX_TOKENS" { StopReason::MaxTokens } else { StopReason::EndTurn };
-                out.push(StreamItem::Done(stop));
+                out.push(match reason {
+                    "STOP" => StreamItem::Done(StopReason::EndTurn),
+                    "MAX_TOKENS" => StreamItem::Done(StopReason::MaxTokens),
+                    other => StreamItem::Error(format!("Gemini stopped generating: {other}")),
+                });
             }
         }
         out
@@ -157,8 +173,7 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "gemini-call-0".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }),
-                }],
+                    arguments: json!({ "replicas": 3 }), thought_signature: None }],
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "gemini-call-0".into(),
@@ -212,8 +227,7 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "gemini-call-0-0".into(),
                 name: "k8s_scale".into(),
-                arguments: json!({ "replicas": 2 }),
-            })]
+                arguments: json!({ "replicas": 2 }), thought_signature: None })]
         );
         // A second call in the same round gets a distinct id.
         let more = s.push(
@@ -224,8 +238,7 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "gemini-call-0-1".into(),
                 name: "k8s_listPods".into(),
-                arguments: json!({}),
-            })]
+                arguments: json!({}), thought_signature: None })]
         );
     }
 
@@ -240,8 +253,7 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "gemini-call-2-0".into(),
                 name: "k8s_scale".into(),
-                arguments: json!({}),
-            })]
+                arguments: json!({}), thought_signature: None })]
         );
     }
 
@@ -262,6 +274,40 @@ mod tests {
         assert_eq!(
             s.push(r#"{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}]}"#),
             vec![StreamItem::Text("partial".into()), StreamItem::Done(StopReason::MaxTokens)]
+        );
+    }
+
+    #[test]
+    fn a_thought_signature_is_captured_and_replayed_on_the_reconstructed_call() {
+        // Thinking models stamp `thoughtSignature` on the functionCall part;
+        // it must ride along on the next request or the follow-up is rejected.
+        let mut s = Stream::new();
+        let items = s.push(
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"k8s_scale","args":{}},"thoughtSignature":"sig-abc"}]}}]}"#,
+        );
+        let StreamItem::ToolCall(call) = &items[0] else { panic!("expected a tool call, got {items:?}") };
+        assert_eq!(call.thought_signature.as_deref(), Some("sig-abc"));
+
+        let turns = vec![Turn::Assistant { text: String::new(), tool_calls: vec![call.clone()] }];
+        let req = build_request("s", &turns, &[]);
+        assert_eq!(req["contents"][0]["parts"][0]["thoughtSignature"], "sig-abc");
+        // A signature-less call (every non-Gemini adapter) adds no field.
+        let bare = ToolCall { name: "k8s_scale".into(), ..Default::default() };
+        let req2 = build_request("s", &[Turn::Assistant { text: String::new(), tool_calls: vec![bare] }], &[]);
+        assert!(req2["contents"][0]["parts"][0].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn an_abnormal_finish_reason_surfaces_as_an_error_not_a_clean_end() {
+        let mut s = Stream::new();
+        assert_eq!(
+            s.push(r#"{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}"#),
+            vec![StreamItem::Error("Gemini stopped generating: SAFETY".into())]
+        );
+        let mut s2 = Stream::new();
+        assert_eq!(
+            s2.push(r#"{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}"#),
+            vec![StreamItem::Error("Gemini stopped generating: MALFORMED_FUNCTION_CALL".into())]
         );
     }
 

@@ -287,7 +287,7 @@ mod tests {
         // `{}`), so executing the call could act on arguments the model never
         // finished. The whole round is discarded instead.
         let provider = ScriptedProvider::new(vec![vec![
-            StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}) }),
+            StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}), thought_signature: None }),
             StreamItem::Done(StopReason::MaxTokens),
         ]]);
         let invoker = StubInvoker {
@@ -376,8 +376,7 @@ mod tests {
                 StreamItem::ToolCall(ToolCall {
                     id: "c1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }),
-                }),
+                    arguments: json!({ "replicas": 3 }), thought_signature: None }),
                 StreamItem::Done(StopReason::ToolUse),
             ],
             vec![StreamItem::Text("scaled to 3".into()), StreamItem::Done(StopReason::EndTurn)],
@@ -413,7 +412,7 @@ mod tests {
     fn a_denied_tool_call_reports_denied_and_feeds_that_back() {
         let provider = ScriptedProvider::new(vec![
             vec![
-                StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}) }),
+                StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}), thought_signature: None }),
                 StreamItem::Done(StopReason::ToolUse),
             ],
             vec![StreamItem::Text("ok, leaving it".into()), StreamItem::Done(StopReason::EndTurn)],
