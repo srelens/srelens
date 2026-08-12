@@ -169,7 +169,9 @@ export function SettingsView({
   // of leaving empty panes behind.
   const visibleSections = isTauri()
     ? SETTINGS_SECTIONS
-    : SETTINGS_SECTIONS.filter((s) => s.id !== "mcp" && s.id !== "assistant" && s.id !== "updates");
+    : SETTINGS_SECTIONS.filter(
+        (s) => s.id !== "mcp" && s.id !== "assistant" && s.id !== "security" && s.id !== "updates",
+      );
 
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [internalContexts, setInternalContexts] = useState<ClusterContext[] | null>(null);

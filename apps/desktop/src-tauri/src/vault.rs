@@ -122,34 +122,60 @@ impl Vault {
             // the re-key completed and only the promote was lost — commit the
             // stage and open password-locked.
             if meta_next_path(dir).exists() {
-                match (std::fs::read(&path), &resolved.0) {
-                    // No vault at all — nothing was ever re-keyed; the stage
-                    // is stale regardless of key availability.
-                    (Err(_), _) => {
-                        let _ = std::fs::remove_file(meta_next_path(dir));
+                // Arbitrate only a SETTLED stage: take the same transition
+                // lock setup/change hold across stage → re-key → promote, so
+                // a second process opening mid-transition blocks here instead
+                // of deleting a live stage. If the lock can't be taken at
+                // all, leave the stage alone — never touch it unserialized.
+                if let Ok(_transition) = transition_lock(dir) {
+                    // Re-check under the lock: the transition we waited on
+                    // may have promoted while we blocked.
+                    if meta_path(dir).exists() {
+                        let source = if biometric_marker_path(dir).exists() {
+                            "biometric-locked"
+                        } else {
+                            "password-locked"
+                        };
+                        return Vault {
+                            path,
+                            key: std::sync::RwLock::new(None),
+                            key_source: std::sync::RwLock::new(source),
+                            lock: Mutex::new(()),
+                        };
                     }
-                    // Machine key still decrypts the vault: the re-key never
-                    // ran — drop the stage, continue in machine mode.
-                    (Ok(bytes), Some(key)) if decrypt(key, &bytes).is_some() => {
-                        let _ = std::fs::remove_file(meta_next_path(dir));
-                    }
-                    // Machine key present but doesn't fit: the re-key
-                    // completed and only the promote was lost — commit it.
-                    (Ok(_), Some(_)) => {
-                        if promote_meta_next(dir).is_ok() {
-                            return Vault {
-                                path,
-                                key: std::sync::RwLock::new(None),
-                                key_source: std::sync::RwLock::new("password-locked"),
-                                lock: Mutex::new(()),
-                            };
+                    if meta_next_path(dir).exists() {
+                        match (std::fs::read(&path), &resolved.0) {
+                            // No vault at all — nothing was ever re-keyed;
+                            // the stage is stale regardless of key state.
+                            (Err(_), _) => {
+                                let _ = std::fs::remove_file(meta_next_path(dir));
+                            }
+                            // Machine key still decrypts the vault: the
+                            // re-key never ran — drop the stage, continue in
+                            // machine mode.
+                            (Ok(bytes), Some(key)) if decrypt(key, &bytes).is_some() => {
+                                let _ = std::fs::remove_file(meta_next_path(dir));
+                            }
+                            // Machine key present but doesn't fit: the
+                            // re-key completed and only the promote was lost
+                            // — commit it.
+                            (Ok(_), Some(_)) => {
+                                if promote_meta_next(dir).is_ok() {
+                                    return Vault {
+                                        path,
+                                        key: std::sync::RwLock::new(None),
+                                        key_source: std::sync::RwLock::new("password-locked"),
+                                        lock: Mutex::new(()),
+                                    };
+                                }
+                            }
+                            // Machine key UNAVAILABLE (keychain outage): we
+                            // cannot tell whether the re-key ran. Leave the
+                            // stage — a later launch with keychain access
+                            // arbitrates; the vault opens locked either way.
+                            (Ok(_), None) => {}
                         }
                     }
-                    // Machine key UNAVAILABLE (keychain outage): we cannot
-                    // tell whether the re-key ran. Leave the stage untouched
-                    // — a later launch with keychain access arbitrates; the
-                    // vault opens locked either way, so nothing is at risk.
-                    (Ok(_), None) => {}
                 }
             }
             resolved

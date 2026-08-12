@@ -72,6 +72,10 @@ pub async fn vault_setup_password(
         return Err(format!("the master password must be at least {MIN_PASSWORD_LEN} characters"));
     }
     let dir = vault_biometric::vault_dir(&app)?;
+    // The whole setup — existence check, recovery mutation, stage, re-key,
+    // promote — runs under the inter-process transition lock, so two
+    // concurrent setups serialize and the loser sees "already set".
+    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
     // EXISTENCE check, matching `vault_status`: a corrupt-but-present
     // vault.json is a fail-closed locked state, never a setup invitation.
     if vault::meta_path(&dir).exists() {
@@ -96,13 +100,11 @@ pub async fn vault_setup_password(
         vault::delete_recovery_password();
     }
     // Two-phase transition (crash-recoverable): stage the new meta as
-    // `.next`, re-key, then promote — all under the inter-process transition
-    // lock so a concurrent unlock can't clean the live stage mid-flight. A
-    // crash before the re-key leaves the machine-key vault intact (the stale
-    // stage is dropped at next open); a crash after it is healed by the
-    // open-time promote — `vault.json` never claims a key the vault doesn't
-    // have.
-    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
+    // `.next`, re-key, then promote — the transition lock is already held
+    // from the top of this command. A crash before the re-key leaves the
+    // machine-key vault intact (the stale stage is dropped at next open); a
+    // crash after it is healed by the open-time promote — `vault.json`
+    // never claims a key the vault doesn't have.
     vault::write_meta_next(&dir, &meta)?;
     if let Err(e) = vault.rekey_from_current(key, "password") {
         let _ = std::fs::remove_file(vault::meta_next_path(&dir));
@@ -169,13 +171,20 @@ pub async fn vault_change_password(
         return Err(format!("the new password must be at least {MIN_PASSWORD_LEN} characters"));
     }
     let dir = vault_biometric::vault_dir(&app)?;
+    // The WHOLE change — meta read, current-password verification, recovery
+    // mutation, stage, re-key, promote — runs under one inter-process
+    // transition lock. Two concurrent changes therefore serialize: the
+    // loser re-reads the winner's meta here and its (now old) current
+    // password is rejected cleanly, before it can touch the recovery copy.
+    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
     let old_meta = vault::read_meta(&dir).ok_or("no master password is set")?;
-    vault::unlock_key_for(&old_meta, &current)?;
+    let current_key = vault::unlock_key_for(&old_meta, &current)?;
     // The vault may still be locked (changing straight from the gate's
-    // "forgot my password → recovered → change it" path): unlock with the
-    // just-verified current password first.
+    // "forgot my password → recovered → change it" path): unlock inline with
+    // the just-verified key — NOT via unlock_with_master_password, which
+    // takes the transition lock we already hold.
     if vault.current_key().is_none() {
-        vault::unlock_with_master_password(&vault, &dir, &current)?;
+        vault.unlock_with(current_key, "password")?;
     }
     // The recovery copy's fate must be KNOWN before anything changes: an
     // unreachable keychain fails the change up front, never leaving a stale
@@ -217,10 +226,9 @@ pub async fn vault_change_password(
             return Err(e);
         }
     };
-    // Same two-phase transition as setup: stage, re-key, promote — under the
-    // inter-process transition lock, and a crash in between is healed at the
-    // next unlock (see unlock_with_master_password).
-    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
+    // Same two-phase transition as setup: stage, re-key, promote — the
+    // transition lock is already held from the top of this command; a crash
+    // in between is healed at the next unlock (unlock_with_master_password).
     let _ = std::fs::remove_file(vault::meta_next_path(&dir));
     if let Err(e) = vault::write_meta_next(&dir, &new_meta) {
         restore_recovery();
