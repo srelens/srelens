@@ -154,7 +154,14 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
             Some(t) => t,
             None => {
                 let t = srelens_mcp::auth::Token::generate();
-                store.save(&t).expect("could not persist the MCP token");
+                if let Err(e) = store.save(&t) {
+                    // Covers a locked vault (keychain unreachable while a
+                    // vault exists) and real write failures — either way the
+                    // HTTP transport must not serve with a token nobody can
+                    // reuse next run.
+                    eprintln!("srelens: could not persist the MCP token: {e}");
+                    std::process::exit(2);
+                }
                 // stderr, not stdout: stdout is the JSON-RPC channel on the
                 // stdio transport and must stay parseable. HTTP has no such
                 // constraint but stays consistent with stdio here.

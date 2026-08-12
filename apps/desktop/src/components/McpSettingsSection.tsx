@@ -59,7 +59,7 @@ export function McpSettingsSection() {
   const [tokenBusy, setTokenBusy] = useState(false);
   const [tokenError, setTokenError] = useState("");
   const [tokenConfirm, setTokenConfirm] = useState<"rotate" | "revoke" | null>(null);
-  const [tokenStorage, setTokenStorage] = useState<"keychain" | "file" | null>(null);
+  const [tokenStorage, setTokenStorage] = useState<"keychain" | "file" | "locked" | null>(null);
   // Bumped by McpAuditList's own Refresh button so the prompt-issues panel
   // re-reads too: a user who fixes their prompt file should see that
   // reflected without restarting srelens, and without a second Refresh
@@ -314,6 +314,13 @@ export function McpSettingsSection() {
             No OS keychain is available here, so the key that encrypts srelens's secrets is stored
             in a plain file on disk (readable only by your user account) rather than the OS
             keychain — the encrypted secrets file is then only obfuscation.
+          </p>
+        )}
+        {tokenStorage === "locked" && (
+          <p className="text-sm text-destructive">
+            The OS keychain holding the key that encrypts srelens's secrets couldn't be reached
+            when srelens started, so stored secrets can't be read or changed right now. They are
+            untouched — restart srelens once the keychain is available again.
           </p>
         )}
         {tokenError && <p className="text-sm text-destructive">Error: {tokenError}</p>}

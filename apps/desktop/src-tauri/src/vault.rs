@@ -75,7 +75,12 @@ impl KeychainBackend for RealKeychain {
 /// read-modify-write so two commands can't lose each other's field.
 pub struct Vault {
     path: PathBuf,
-    key: [u8; KEY_LEN],
+    /// `None` means LOCKED: a vault exists whose key lives in a keychain that
+    /// couldn't be reached this launch, and no fallback key file exists.
+    /// Minting a replacement key would let the next save silently destroy
+    /// every stored secret — so instead reads are empty and writes fail
+    /// loudly until a launch with a reachable keychain heals things.
+    key: Option<[u8; KEY_LEN]>,
     key_source: &'static str,
     lock: Mutex<()>,
 }
@@ -94,9 +99,11 @@ impl Vault {
         Vault { path, key, key_source, lock: Mutex::new(()) }
     }
 
-    /// Where the master key lives: `"keychain"`, or `"file"` when the
-    /// keychain genuinely failed and the 0600 fallback is in use. Shown in
-    /// Settings so the reduced trust model is never silent.
+    /// Where the master key lives: `"keychain"`; `"file"` when the keychain
+    /// genuinely failed and the 0600 fallback is in use; or `"locked"` when
+    /// an existing vault's key is in an unreachable keychain and writes are
+    /// refused this launch. Shown in Settings so neither reduced trust model
+    /// is ever silent.
     pub fn key_source(&self) -> &'static str {
         self.key_source
     }
@@ -119,6 +126,11 @@ impl Vault {
     /// load sees either the old vault or the new one, never a torn write.
     pub fn update(&self, mutate: impl FnOnce(&mut Secrets)) -> std::io::Result<()> {
         let _guard = self.lock.lock().unwrap();
+        let Some(key) = self.key else {
+            return Err(std::io::Error::other(
+                "the secrets vault is locked: the OS keychain holding its master key is unreachable",
+            ));
+        };
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -126,17 +138,18 @@ impl Vault {
         lock_file.lock()?;
         let mut secrets = self.read_secrets();
         mutate(&mut secrets);
-        self.write_secrets(&secrets)
+        self.write_secrets(&key, &secrets)
         // `lock_file` drops here, releasing the inter-process lock.
     }
 
     fn read_secrets(&self) -> Secrets {
+        let Some(key) = &self.key else { return Secrets::default() };
         let Ok(bytes) = std::fs::read(&self.path) else { return Secrets::default() };
-        decrypt(&self.key, &bytes).unwrap_or_default()
+        decrypt(key, &bytes).unwrap_or_default()
     }
 
-    fn write_secrets(&self, secrets: &Secrets) -> std::io::Result<()> {
-        let sealed = encrypt(&self.key, secrets)?;
+    fn write_secrets(&self, key: &[u8; KEY_LEN], secrets: &Secrets) -> std::io::Result<()> {
+        let sealed = encrypt(key, secrets)?;
         // Atomic replace: exclusive-create a private temp file next to the
         // vault (same directory, so the rename can't cross filesystems), then
         // rename over. A crash mid-write leaves the old vault intact. The
@@ -188,24 +201,32 @@ fn resolve_master_key(
     backend: &dyn KeychainBackend,
     key_file: &Path,
     vault_path: &Path,
-) -> ([u8; KEY_LEN], &'static str) {
+) -> (Option<[u8; KEY_LEN]>, &'static str) {
     let keychain_key = match backend.get_password() {
         // A malformed entry can't decrypt anything anyway — treat it like an
         // absent one (a fresh or imported key will overwrite it).
         Ok(hex) => key_from_hex(&hex),
         Err(keyring::Error::NoEntry) => None,
-        // Genuine keychain failure (no Secret Service, locked store): use the
-        // existing file key if there is one — NEVER mint a fresh key just
-        // because the keychain is temporarily unreachable, or a healthy later
-        // launch would find two diverged keys. (If both a keychain entry and
-        // a vault exist but no file key, this run reads the vault as empty
-        // and a save re-keys it under the file key; the both-keys arbitration
-        // below heals that on the next healthy launch.)
-        Err(_) => return file_key(key_file),
+        // Genuine keychain failure (no Secret Service, locked store). Use the
+        // existing file key if there is one. Otherwise: if a vault already
+        // EXISTS, its key is almost certainly sitting in the keychain we just
+        // failed to reach — NEVER mint a replacement (a save under it would
+        // permanently destroy every stored secret); open locked instead.
+        // Only a first keychain-less run (no vault to lose) mints a file key.
+        Err(_) => {
+            if let Some(k) = read_key_file(key_file) {
+                return (Some(k), "file");
+            }
+            if vault_path.exists() {
+                return (None, "locked");
+            }
+            let (k, source) = file_key(key_file);
+            return (Some(k), source);
+        }
     };
-    let stored_file_key = std::fs::read_to_string(key_file).ok().and_then(|s| key_from_hex(&s));
+    let stored_file_key = read_key_file(key_file);
 
-    match (keychain_key, stored_file_key) {
+    let resolved = match (keychain_key, stored_file_key) {
         (Some(k), None) => (k, "keychain"),
         // The same key in both homes: the file copy is a redundant plaintext
         // liability — drop it.
@@ -240,7 +261,8 @@ fn resolve_master_key(
                 file_key(key_file)
             }
         }
-    }
+    };
+    (Some(resolved.0), resolved.1)
 }
 
 /// Promote an existing file key into the keychain; only once that write
@@ -259,22 +281,37 @@ fn adopt_file_key(
     }
 }
 
+fn read_key_file(key_file: &Path) -> Option<[u8; KEY_LEN]> {
+    std::fs::read_to_string(key_file).ok().and_then(|s| key_from_hex(&s))
+}
+
 /// Read the fallback key file, or create it (0600, exclusive) with a fresh
-/// key. If even that write fails the key is memory-only for this run — the
-/// vault still works, it just won't decrypt next launch, which the
-/// reads-as-empty rule absorbs.
+/// key. First-time creation is serialized across processes: the GUI and the
+/// standalone CLI can start together on a keychain-less host, and without the
+/// lock + re-check both would mint different keys — the loser's would either
+/// clobber the winner's file or live only in memory, splitting the vault.
+/// After writing, the key is read BACK from the file, so the returned key is
+/// always the persisted one (an exotic write failure leaves this run on an
+/// in-memory key, which at worst produces a vault the next launch re-keys —
+/// never a destroyed one, since a locked vault refuses writes).
 fn file_key(key_file: &Path) -> ([u8; KEY_LEN], &'static str) {
-    if let Ok(existing) = std::fs::read_to_string(key_file) {
-        if let Some(key) = key_from_hex(&existing) {
-            return (key, "file");
-        }
+    if let Some(key) = read_key_file(key_file) {
+        return (key, "file");
     }
-    let key = generate_key();
     if let Some(parent) = key_file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let lock = std::fs::File::create(key_file.with_extension("key.lock"));
+    if let Ok(lock) = &lock {
+        let _ = lock.lock();
+    }
+    // Re-check under the lock: the other starter may have won while we waited.
+    if let Some(key) = read_key_file(key_file) {
+        return (key, "file");
+    }
+    let key = generate_key();
     let _ = write_exclusive_private(key_file, to_hex(&key).as_bytes());
-    (key, "file")
+    (read_key_file(key_file).unwrap_or(key), "file")
 }
 
 fn generate_key() -> [u8; KEY_LEN] {
@@ -404,7 +441,7 @@ mod tests {
         .unwrap();
         assert_eq!(a.key_source(), "keychain");
         // Reopen "next launch": a keychain already holding the key `a` minted.
-        let b = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(to_hex(&a.key))))));
+        let b = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(to_hex(&a.key.unwrap()))))));
         let s = b.load();
         assert_eq!(s.mcp_token.as_deref(), Some("ab".repeat(32).as_str()));
         assert_eq!(s.llm_keys.get("anthropic").map(String::as_str), Some("sk-ant-123"));
@@ -551,6 +588,52 @@ mod tests {
         // mint a second one over it.
         let b = Vault::with_backend(&dir, Box::new(BrokenKeychain));
         assert_eq!(b.load().mcp_token.as_deref(), Some("ba".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreachable_keychain_with_an_existing_vault_locks_instead_of_rekeying() {
+        let dir = temp_dir("locked");
+        // The vault exists, keyed by a healthy keychain…
+        let healthy = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        healthy.update(|s| s.mcp_token = Some("dc".repeat(32))).unwrap();
+        let vault_before = std::fs::read(dir.join("secrets.enc")).unwrap();
+
+        // …and a later launch can't reach the keychain (locked store, dead
+        // D-Bus). No replacement key may be minted: reads are empty, writes
+        // fail loudly, and the vault bytes are untouched.
+        let outage = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        assert_eq!(outage.key_source(), "locked");
+        assert_eq!(outage.load(), Secrets::default());
+        let err = outage.update(|s| s.mcp_token = Some("ff".repeat(32))).unwrap_err();
+        assert!(err.to_string().contains("locked"), "got: {err}");
+        assert_eq!(std::fs::read(dir.join("secrets.enc")).unwrap(), vault_before);
+        assert!(!dir.join("master.key").exists(), "no replacement key was minted");
+
+        // The next healthy launch reads everything as before.
+        let healed = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(to_hex(
+            &healthy.key.unwrap(),
+        ))))));
+        assert_eq!(healed.load().mcp_token.as_deref(), Some("dc".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_first_time_openers_agree_on_one_file_key() {
+        // Two processes starting together on a keychain-less host must not
+        // mint different keys (the loser's writes would split the vault).
+        let dir = temp_dir("keyrace");
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let dir = dir.clone();
+                std::thread::spawn(move || Vault::with_backend(&dir, Box::new(BrokenKeychain)))
+            })
+            .collect();
+        let vaults: Vec<Vault> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(vaults[0].key.unwrap(), vaults[1].key.unwrap(), "both openers hold the same key");
+        // And a write through one is readable through the other.
+        vaults[0].update(|s| s.mcp_token = Some("ee".repeat(32))).unwrap();
+        assert_eq!(vaults[1].load().mcp_token.as_deref(), Some("ee".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

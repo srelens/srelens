@@ -33,11 +33,13 @@ export async function revokeMcpToken(): Promise<void> {
   await invoke("mcp_token_revoke");
 }
 
-/** Where the secrets vault's MASTER KEY lives: the OS keychain, or (when none
- * is available) a 0600 fallback file — so Settings can say plainly when the
- * vault is effectively unprotected rather than implying it's always encrypted. */
-export async function getMcpTokenStorage(): Promise<"keychain" | "file"> {
-  return await invoke<"keychain" | "file">("mcp_token_storage");
+/** Where the secrets vault's MASTER KEY lives: the OS keychain; a 0600
+ * fallback file (Settings says plainly the vault is then effectively
+ * unprotected); or "locked" — the keychain holding the key was unreachable
+ * this launch while a vault exists, so secrets are frozen rather than
+ * destroyed by a re-key. */
+export async function getMcpTokenStorage(): Promise<"keychain" | "file" | "locked"> {
+  return await invoke<"keychain" | "file" | "locked">("mcp_token_storage");
 }
 
 /** Newest first. Returns [] rather than throwing: a missing log is not an error. */
