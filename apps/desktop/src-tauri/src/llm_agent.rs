@@ -220,9 +220,12 @@ pub async fn run_native_agent(
 
     // A Stop aimed at this turn can arrive before we do (the frontend awaits
     // channel subscription before invoking `chat_send`); honor it instead of
-    // launching. A stale pending-cancel from a previous turn has a different
-    // generation and is dropped by the same take.
+    // launching — but still close the turn with a `TurnDone`, since the
+    // frontend only settles and persists on a terminal event. A stale
+    // pending-cancel from a previous turn has a different generation and is
+    // dropped by the same take.
     if chats.take_pending_cancel(&session, turn) {
+        emit(AgentEvent::TurnDone);
         return Ok(());
     }
 

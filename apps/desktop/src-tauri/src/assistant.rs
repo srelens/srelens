@@ -460,12 +460,19 @@ pub async fn chat_send(
         return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty(), turn).await;
     }
 
+    let channel = format!("chat://{session}");
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
+
     // A Stop aimed at THIS turn can beat us here: the frontend awaits channel
     // subscription between its own cancel check and invoking `chat_send`, and
     // a `chat_cancel` in that window finds nothing registered and arms a
-    // pending cancel. Honor it — don't launch. A stale entry from a previous
-    // turn has a different generation and is dropped by the same take.
+    // pending cancel. Honor it — don't launch — but still close the turn with
+    // a `TurnDone`: the frontend only settles (and persists) the turn on a
+    // terminal event, so a bare return would strand its empty placeholder. A
+    // stale entry from a previous turn has a different generation and is
+    // dropped by the same take.
     if chats.take_pending_cancel(&session, turn) {
+        sink.emit(&channel, serde_json::to_value(AgentEvent::TurnDone).unwrap());
         return Ok(());
     }
 
@@ -473,9 +480,6 @@ pub async fn chat_send(
         .session_token()
         .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
     let url = mcp.status_url().ok_or("MCP server URL unavailable")?;
-
-    let channel = format!("chat://{session}");
-    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
 
     let dir = app.path().temp_dir().map_err(|e| e.to_string())?;
 

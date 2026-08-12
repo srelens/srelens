@@ -46,10 +46,16 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        // Remove any existing file first, then `create_new` (O_CREAT|O_EXCL):
+        // `.mode(0o600)` only governs a FRESH inode — truncating an existing
+        // file (e.g. restored from a backup as 0644) would write the secret
+        // while keeping the loose mode. The exclusive open also refuses to
+        // follow anything (like a symlink) re-created at the path in between.
+        // Same pattern as `assistant::write_private_file`.
+        let _ = std::fs::remove_file(path);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(path)?;
         f.write_all(contents.as_bytes())
@@ -189,6 +195,22 @@ mod tests {
         let d = std::env::temp_dir().join(format!("srelens-llmcfg-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_a_key_over_a_loose_permission_file_restores_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp();
+        let path = dir.join("llm-key-anthropic");
+        // The file pre-exists with loose permissions (a backup restore, a
+        // manual chmod) — the rewrite must not inherit them.
+        std::fs::write(&path, "old-key").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, "new-key").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new-key");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
