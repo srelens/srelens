@@ -138,7 +138,7 @@ impl Vault {
         lock_file.lock()?;
         let mut secrets = self.read_secrets();
         mutate(&mut secrets);
-        self.write_secrets(&key, &secrets)
+        write_sealed(&key, &self.path, &secrets)
         // `lock_file` drops here, releasing the inter-process lock.
     }
 
@@ -147,18 +147,19 @@ impl Vault {
         let Ok(bytes) = std::fs::read(&self.path) else { return Secrets::default() };
         decrypt(key, &bytes).unwrap_or_default()
     }
+}
 
-    fn write_secrets(&self, key: &[u8; KEY_LEN], secrets: &Secrets) -> std::io::Result<()> {
-        let sealed = encrypt(key, secrets)?;
-        // Atomic replace: exclusive-create a private temp file next to the
-        // vault (same directory, so the rename can't cross filesystems), then
-        // rename over. A crash mid-write leaves the old vault intact. The
-        // temp name is writer-unique so a competing process (see `update`)
-        // can never remove or rename another writer's half-written file.
-        let tmp = self.path.with_extension(format!("enc.{}.tmp", uuid::Uuid::new_v4()));
-        write_exclusive_private(&tmp, &sealed)?;
-        std::fs::rename(&tmp, &self.path)
-    }
+/// Encrypt and atomically replace the vault file: exclusive-create a private
+/// temp file next to it (same directory, so the rename can't cross
+/// filesystems), then rename over. A crash mid-write leaves the old vault
+/// intact. The temp name is writer-unique so a competing process (see
+/// [`Vault::update`]) can never remove or rename another writer's
+/// half-written file.
+fn write_sealed(key: &[u8; KEY_LEN], path: &Path, secrets: &Secrets) -> std::io::Result<()> {
+    let sealed = encrypt(key, secrets)?;
+    let tmp = path.with_extension(format!("enc.{}.tmp", uuid::Uuid::new_v4()));
+    write_exclusive_private(&tmp, &sealed)?;
+    std::fs::rename(&tmp, path)
 }
 
 fn encrypt(key: &[u8; KEY_LEN], secrets: &Secrets) -> std::io::Result<Vec<u8>> {
@@ -217,6 +218,32 @@ fn resolve_master_key(
         let _ = lock.lock();
     }
 
+    let resolved = resolve_master_key_locked(backend, key_file, vault_path);
+
+    // Claim the directory BEFORE the resolution lock releases: if no vault
+    // exists yet, write an empty one under the resolved key. Without this, a
+    // keychain-capable first opener that hasn't saved anything leaves the
+    // directory bare, and a concurrently starting keychain-LESS opener would
+    // find neither vault nor key file and mint an unrelated fallback key —
+    // two live processes encrypting under different keys. With the marker,
+    // that second opener finds `secrets.enc` and takes the locked path.
+    // Best-effort: a failed marker write only leaves the pre-existing race
+    // window rather than failing startup.
+    if let (Some(key), _) = &resolved {
+        if !vault_path.exists() {
+            let _ = write_sealed(key, vault_path, &Secrets::default());
+        }
+    }
+    resolved
+}
+
+/// The resolution decision tree proper — runs under `resolve_master_key`'s
+/// inter-process lock.
+fn resolve_master_key_locked(
+    backend: &dyn KeychainBackend,
+    key_file: &Path,
+    vault_path: &Path,
+) -> (Option<[u8; KEY_LEN]>, &'static str) {
     let keychain_key = match backend.get_password() {
         // A malformed entry can't decrypt anything anyway — treat it like an
         // absent one (a fresh or imported key will overwrite it).
@@ -657,6 +684,23 @@ mod tests {
         assert_eq!(vaults[0].key.unwrap(), vaults[1].key.unwrap(), "both openers hold the same key");
         vaults[0].update(|s| s.mcp_token = Some("aa".repeat(32))).unwrap();
         assert_eq!(vaults[1].load().mcp_token.as_deref(), Some("aa".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_keychain_first_opener_claims_the_dir_so_a_keychainless_opener_locks() {
+        let dir = temp_dir("mixed");
+        // Opener A resolves via a working keychain and hasn't saved anything.
+        let a = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        // Opener B can't reach the keychain. The empty marker vault A wrote at
+        // resolution means B must LOCK — not mint an unrelated file key that
+        // would split the vault between two live processes.
+        let b = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        assert_eq!(b.key_source(), "locked");
+        assert!(!dir.join("master.key").exists(), "no divergent fallback key was minted");
+        // A remains fully functional and authoritative.
+        a.update(|s| s.mcp_token = Some("cc".repeat(32))).unwrap();
+        assert_eq!(a.load().mcp_token.as_deref(), Some("cc".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
