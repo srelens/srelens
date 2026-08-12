@@ -142,6 +142,25 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
     // on a real file-write failure, so `.expect` below can't panic just
     // because there's no D-Bus session on this host.
     let vault = Arc::new(srelens_desktop_lib::vault::Vault::open(&mcp_dir()));
+    // A password-protected vault has no GUI here to unlock it: accept the
+    // master password from the environment (never argv — it would show in
+    // `ps`). Without it, `SRELENS_MCP_TOKEN` still works, and a store-token
+    // path that needs to mint exits below with guidance naming both.
+    if vault.key_source() == "password-locked" {
+        match std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty()) {
+            Some(password) => {
+                if let Err(e) =
+                    srelens_desktop_lib::vault::unlock_with_master_password(&vault, &mcp_dir(), &password)
+                {
+                    eprintln!("srelens: SRELENS_MASTER_PASSWORD did not unlock the vault: {e}");
+                    std::process::exit(2);
+                }
+            }
+            None => eprintln!(
+                "srelens: the secrets vault is password-locked; set SRELENS_MASTER_PASSWORD to unlock it, or pass the token via {TOKEN_ENV}"
+            ),
+        }
+    }
     let store = srelens_desktop_lib::vault::VaultTokenStore(vault.clone());
     let token = match std::env::var(TOKEN_ENV).ok().filter(|v| !v.trim().is_empty()) {
         Some(hex) => srelens_mcp::auth::Token::from_hex(&hex).unwrap_or_else(|| {

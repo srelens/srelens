@@ -88,22 +88,27 @@ pub async fn vault_setup_password(
     }
     let (meta, key) = vault::build_meta(&password)?;
     // Order matters: the RECOVERABLE step (keychain recovery copy) lands
-    // first, before the irreversible transition — if it fails, nothing has
-    // changed and setup can simply be retried. A rekey failure afterwards
-    // rolls both the meta and the recovery copy back.
+    // first, before the transition — if it fails, nothing has changed and
+    // setup can simply be retried.
     if keep_recovery {
         vault::store_recovery_password(&password)?;
     } else {
         vault::delete_recovery_password();
     }
-    vault::write_meta(&dir, &meta)?;
+    // Two-phase transition (crash-recoverable): stage the new meta as
+    // `.next`, re-key, then promote. A crash before the re-key leaves the
+    // machine-key vault intact (the stale stage is dropped at next open); a
+    // crash after it is healed by the open-time promote — `vault.json` never
+    // claims a key the vault doesn't have.
+    vault::write_meta_next(&dir, &meta)?;
     if let Err(e) = vault.rekey_from_current(key, "password") {
-        let _ = std::fs::remove_file(vault::meta_path(&dir));
+        let _ = std::fs::remove_file(vault::meta_next_path(&dir));
         if keep_recovery {
             vault::delete_recovery_password();
         }
         return Err(e.to_string());
     }
+    vault::promote_meta_next(&dir)?;
     // Retire the machine-key homes: the password is the key's origin now.
     vault::delete_master_key_from_keychain();
     let _ = std::fs::remove_file(dir.join("master.key"));
@@ -120,9 +125,8 @@ pub async fn vault_unlock_password(
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<(), String> {
     let dir = vault_biometric::vault_dir(&app)?;
-    let meta = vault::read_meta(&dir).ok_or("no master password is set")?;
-    let key = vault::unlock_key_for(&meta, &password)?;
-    vault.unlock_with(key, "password")
+    // Also recovers an interrupted password transition (staged `.next` meta).
+    vault::unlock_with_master_password(&vault, &dir, &password)
 }
 
 /// The explicit "Forgot password?" flow: read the opt-in keychain recovery
@@ -135,11 +139,8 @@ pub async fn vault_recover_password(
 ) -> Result<String, String> {
     let password = vault::read_recovery_password()?;
     let dir = vault_biometric::vault_dir(&app)?;
-    if let Some(meta) = vault::read_meta(&dir) {
-        let key = vault::unlock_key_for(&meta, &password)
-            .map_err(|_| "the recovery copy no longer matches this vault's password")?;
-        vault.unlock_with(key, "password")?;
-    }
+    vault::unlock_with_master_password(&vault, &dir, &password)
+        .map_err(|_| "the recovery copy no longer matches this vault's password")?;
     Ok(password)
 }
 
@@ -159,22 +160,37 @@ pub async fn vault_change_password(
     }
     let dir = vault_biometric::vault_dir(&app)?;
     let old_meta = vault::read_meta(&dir).ok_or("no master password is set")?;
-    let current_key = vault::unlock_key_for(&old_meta, &current)?;
+    vault::unlock_key_for(&old_meta, &current)?;
     // The vault may still be locked (changing straight from the gate's
     // "forgot my password → recovered → change it" path): unlock with the
-    // just-verified current key first.
+    // just-verified current password first.
     if vault.current_key().is_none() {
-        vault.unlock_with(current_key, "password")?;
+        vault::unlock_with_master_password(&vault, &dir, &current)?;
     }
-    let (new_meta, new_key) = vault::build_meta(&new)?;
-    vault::write_meta(&dir, &new_meta)?;
-    if let Err(e) = vault.rekey_from_current(new_key, "password") {
-        let _ = vault::write_meta(&dir, &old_meta);
-        return Err(e.to_string());
-    }
-    if vault::has_recovery_password() {
+    // The recovery copy's fate must be KNOWN before anything changes: an
+    // unreachable keychain fails the change up front, never leaving a stale
+    // copy that a later "Forgot password?" would trust.
+    let had_recovery = vault::recovery_password_state()
+        .map_err(|e| format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})"))?
+        .is_some();
+    if had_recovery {
+        // Refresh BEFORE the transition (recoverable step first); rolled
+        // back below if the re-key fails.
         vault::store_recovery_password(&new)?;
     }
+    let (new_meta, new_key) = vault::build_meta(&new)?;
+    // Same two-phase transition as setup: stage, re-key, promote — a crash
+    // in between is healed at the next unlock (see unlock_with_master_password).
+    let _ = std::fs::remove_file(vault::meta_next_path(&dir));
+    vault::write_meta_next(&dir, &new_meta)?;
+    if let Err(e) = vault.rekey_from_current(new_key, "password") {
+        let _ = std::fs::remove_file(vault::meta_next_path(&dir));
+        if had_recovery {
+            let _ = vault::store_recovery_password(&current);
+        }
+        return Err(e.to_string());
+    }
+    vault::promote_meta_next(&dir)?;
     vault_biometric::refresh_stored_key(&app, &new_key);
     Ok(())
 }

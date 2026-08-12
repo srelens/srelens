@@ -114,7 +114,31 @@ impl Vault {
             // store only.
             (None, "biometric-locked")
         } else {
-            resolve_master_key(backend.as_ref(), &dir.join("master.key"), &path)
+            let resolved = resolve_master_key(backend.as_ref(), &dir.join("master.key"), &path);
+            // Aborted SETUP recovery: a staged `.next` with no committed meta.
+            // The machine key itself is the arbiter: if it still decrypts the
+            // vault, the re-key never ran — drop the stale stage and continue
+            // in machine mode (setup will show again). If it no longer does,
+            // the re-key completed and only the promote was lost — commit the
+            // stage and open password-locked.
+            if meta_next_path(dir).exists() {
+                let machine_key_fits = match (&resolved.0, std::fs::read(&path)) {
+                    (Some(key), Ok(bytes)) => decrypt(key, &bytes).is_some(),
+                    (_, Err(_)) => true, // no vault yet — nothing was re-keyed
+                    (None, _) => false,
+                };
+                if machine_key_fits {
+                    let _ = std::fs::remove_file(meta_next_path(dir));
+                } else if promote_meta_next(dir).is_ok() {
+                    return Vault {
+                        path,
+                        key: std::sync::RwLock::new(None),
+                        key_source: std::sync::RwLock::new("password-locked"),
+                        lock: Mutex::new(()),
+                    };
+                }
+            }
+            resolved
         };
         Vault {
             path,
@@ -263,13 +287,77 @@ pub(crate) fn meta_path(dir: &Path) -> PathBuf {
     dir.join("vault.json")
 }
 
+/// The staged HALF of a password transition (setup or change): the new meta
+/// lands here first, the vault is re-keyed, and only then is this promoted
+/// over `vault.json` — so a crash at any point leaves a deterministic pair of
+/// files to recover from instead of a stranded vault (see
+/// `unlock_with_master_password` and the aborted-transition check in
+/// `with_backend`).
+pub(crate) fn meta_next_path(dir: &Path) -> PathBuf {
+    dir.join("vault.json.next")
+}
+
 pub(crate) fn read_meta(dir: &Path) -> Option<VaultMeta> {
     serde_json::from_str(&std::fs::read_to_string(meta_path(dir)).ok()?).ok()
 }
 
-pub(crate) fn write_meta(dir: &Path, meta: &VaultMeta) -> Result<(), String> {
+pub(crate) fn read_meta_next(dir: &Path) -> Option<VaultMeta> {
+    serde_json::from_str(&std::fs::read_to_string(meta_next_path(dir)).ok()?).ok()
+}
+
+/// Atomically write meta to `path`: full temp file first, then rename — a
+/// failed write (full disk) must never leave the previous, still-needed meta
+/// deleted or truncated.
+fn write_meta_at(path: &Path, meta: &VaultMeta) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
-    write_exclusive_private(&meta_path(dir), &json).map_err(|e| e.to_string())
+    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    write_exclusive_private(&tmp, &json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+pub(crate) fn write_meta(dir: &Path, meta: &VaultMeta) -> Result<(), String> {
+    write_meta_at(&meta_path(dir), meta)
+}
+
+pub(crate) fn write_meta_next(dir: &Path, meta: &VaultMeta) -> Result<(), String> {
+    write_meta_at(&meta_next_path(dir), meta)
+}
+
+/// Commit a staged transition: the vault has been re-keyed to the `.next`
+/// meta's key, so promote it over `vault.json` (atomic rename).
+pub(crate) fn promote_meta_next(dir: &Path) -> Result<(), String> {
+    std::fs::rename(meta_next_path(dir), meta_path(dir)).map_err(|e| e.to_string())
+}
+
+/// Unlock the vault with a master password, recovering an interrupted
+/// password transition if one is staged: the CURRENT meta is tried first;
+/// when it doesn't line up (verifier or vault mismatch), a staged `.next`
+/// meta whose verifier AND vault both agree is promoted and used — that is
+/// exactly the crash-between-rekey-and-promote state. A stale `.next` left
+/// by a transition that never re-keyed is removed on a successful current
+/// unlock. Public: the headless CLI (`SRELENS_MASTER_PASSWORD`) uses it too.
+pub fn unlock_with_master_password(vault: &Vault, dir: &Path, password: &str) -> Result<(), String> {
+    let current = read_meta(dir);
+    let mut last_err: String = "no master password is set".into();
+    if let Some(meta) = &current {
+        match unlock_key_for(meta, password).and_then(|key| vault.unlock_with(key, "password")) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(meta_next_path(dir));
+                return Ok(());
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    if let Some(next) = read_meta_next(dir) {
+        if let Ok(key) = unlock_key_for(&next, password) {
+            if vault.unlock_with(key, "password").is_ok() {
+                // The re-key completed but the promote never ran — finish it.
+                promote_meta_next(dir)?;
+                return Ok(());
+            }
+        }
+    }
+    Err(last_err)
 }
 
 fn derive_key(password: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result<[u8; KEY_LEN], String> {
@@ -369,8 +457,16 @@ pub(crate) fn read_recovery_password() -> Result<String, String> {
         })
 }
 
-pub(crate) fn has_recovery_password() -> bool {
-    matches!(keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT).and_then(|e| e.get_password()), Ok(p) if !p.is_empty())
+/// The recovery entry's state, DISTINGUISHING confirmed absence (`Ok(None)`)
+/// from a keychain that couldn't be asked (`Err`) — collapsing the two let a
+/// temporarily locked keychain silently strand a stale recovery copy across
+/// a password change.
+pub(crate) fn recovery_password_state() -> Result<Option<String>, String> {
+    match keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT).and_then(|e| e.get_password()) {
+        Ok(p) if !p.is_empty() => Ok(Some(p)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub(crate) fn delete_recovery_password() {
@@ -1062,6 +1158,77 @@ mod tests {
         let unlocked_key = unlock_key_for(&read_meta(&dir).unwrap(), "hunter22").unwrap();
         reopened.unlock_with(unlocked_key, "password").unwrap();
         assert_eq!(reopened.load().mcp_token.as_deref(), Some("fe".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_interrupted_password_change_is_recovered_at_the_next_unlock() {
+        let dir = temp_dir("changecrash");
+        // A password vault with a secret in it.
+        let v = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        v.update(|s| s.mcp_token = Some("aa".repeat(32))).unwrap();
+        let (old_meta, _) = build_meta("old-password-1").unwrap();
+        // Align vault + meta to the old password.
+        let old_key = unlock_key_for(&old_meta, "old-password-1").unwrap();
+        v.rekey_from_current(old_key, "password").unwrap();
+        write_meta(&dir, &old_meta).unwrap();
+
+        // The change crashes AFTER the re-key but BEFORE the promote.
+        let (new_meta, new_key) = build_meta("new-password-1").unwrap();
+        write_meta_next(&dir, &new_meta).unwrap();
+        v.rekey_from_current(new_key, "password").unwrap();
+        // (no promote — process died here)
+
+        // Next launch: password-locked; the NEW password unlocks by
+        // promoting the staged meta, and the old one fails cleanly.
+        let reopened = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        assert_eq!(reopened.key_source(), "password-locked");
+        assert!(unlock_with_master_password(&reopened, &dir, "old-password-1").is_err());
+        unlock_with_master_password(&reopened, &dir, "new-password-1").unwrap();
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("aa".repeat(32).as_str()));
+        assert!(!meta_next_path(&dir).exists(), "the stage was promoted");
+        assert_eq!(read_meta(&dir).unwrap(), new_meta);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_aborted_setup_before_the_rekey_drops_the_stage_and_stays_in_machine_mode() {
+        let dir = temp_dir("setupcrash1");
+        let v = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        v.update(|s| s.mcp_token = Some("bb".repeat(32))).unwrap();
+        let machine_key_hex = to_hex(&v.current_key().unwrap());
+        // Setup crashed after staging the meta but before any re-key.
+        let (staged, _) = build_meta("never-used-pw").unwrap();
+        write_meta_next(&dir, &staged).unwrap();
+
+        let reopened =
+            Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(machine_key_hex)))));
+        // The machine key still decrypts the vault, so machine mode continues
+        // (setup will show again) and the stale stage is gone.
+        assert_eq!(reopened.key_source(), "keychain");
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("bb".repeat(32).as_str()));
+        assert!(!meta_next_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_aborted_setup_after_the_rekey_promotes_the_stage_and_locks() {
+        let dir = temp_dir("setupcrash2");
+        let v = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(None))));
+        v.update(|s| s.mcp_token = Some("cc".repeat(32))).unwrap();
+        let machine_key_hex = to_hex(&v.current_key().unwrap());
+        // Setup crashed after the re-key but before the promote.
+        let (staged, staged_key) = build_meta("chosen-password-1").unwrap();
+        write_meta_next(&dir, &staged).unwrap();
+        v.rekey_from_current(staged_key, "password").unwrap();
+
+        let reopened =
+            Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(machine_key_hex)))));
+        // The machine key no longer fits, so the stage is committed and the
+        // chosen password unlocks everything.
+        assert_eq!(reopened.key_source(), "password-locked");
+        unlock_with_master_password(&reopened, &dir, "chosen-password-1").unwrap();
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("cc".repeat(32).as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
