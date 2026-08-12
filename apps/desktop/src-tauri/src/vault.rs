@@ -89,8 +89,9 @@ impl Vault {
     }
 
     fn with_backend(dir: &Path, backend: Box<dyn KeychainBackend>) -> Vault {
-        let (key, key_source) = load_master_key(backend.as_ref(), &dir.join("master.key"));
-        Vault { path: dir.join("secrets.enc"), key, key_source, lock: Mutex::new(()) }
+        let path = dir.join("secrets.enc");
+        let (key, key_source) = resolve_master_key(backend.as_ref(), &dir.join("master.key"), &path);
+        Vault { path, key, key_source, lock: Mutex::new(()) }
     }
 
     /// Where the master key lives: `"keychain"`, or `"file"` when the
@@ -108,12 +109,25 @@ impl Vault {
     }
 
     /// Locked read-modify-write: apply `mutate` to the current secrets and
-    /// persist the result atomically.
+    /// persist the result atomically. Two locks, because two kinds of
+    /// concurrent writer exist: the process-local mutex for callers sharing
+    /// this `Vault`, and an EXCLUSIVE file lock for the other process — the
+    /// GUI and the standalone `--mcp-http` CLI deliberately open the same
+    /// vault, and without the file lock their read-modify-writes could each
+    /// read the old map and silently discard the other's mutation. Readers
+    /// need no lock: writes replace the file atomically via rename, so a
+    /// load sees either the old vault or the new one, never a torn write.
     pub fn update(&self, mutate: impl FnOnce(&mut Secrets)) -> std::io::Result<()> {
         let _guard = self.lock.lock().unwrap();
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock_file = std::fs::File::create(self.path.with_extension("enc.lock"))?;
+        lock_file.lock()?;
         let mut secrets = self.read_secrets();
         mutate(&mut secrets);
         self.write_secrets(&secrets)
+        // `lock_file` drops here, releasing the inter-process lock.
     }
 
     fn read_secrets(&self) -> Secrets {
@@ -122,14 +136,13 @@ impl Vault {
     }
 
     fn write_secrets(&self, secrets: &Secrets) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let sealed = encrypt(&self.key, secrets)?;
         // Atomic replace: exclusive-create a private temp file next to the
         // vault (same directory, so the rename can't cross filesystems), then
-        // rename over. A crash mid-write leaves the old vault intact.
-        let tmp = self.path.with_extension("enc.tmp");
+        // rename over. A crash mid-write leaves the old vault intact. The
+        // temp name is writer-unique so a competing process (see `update`)
+        // can never remove or rename another writer's half-written file.
+        let tmp = self.path.with_extension(format!("enc.{}.tmp", uuid::Uuid::new_v4()));
         write_exclusive_private(&tmp, &sealed)?;
         std::fs::rename(&tmp, &self.path)
     }
@@ -161,33 +174,88 @@ fn decrypt(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Secrets> {
     serde_json::from_slice(&plaintext).ok()
 }
 
-/// Resolve the master key, in order: a valid keychain entry; a fresh key
-/// stored to the keychain; the 0600 fallback file (read or created) when the
-/// keychain genuinely fails. This is the process's ONE keychain touch.
-fn load_master_key(backend: &dyn KeychainBackend, key_file: &Path) -> ([u8; KEY_LEN], &'static str) {
-    match backend.get_password() {
-        Ok(hex) => {
-            if let Some(key) = key_from_hex(&hex) {
-                return (key, "keychain");
-            }
-            // A malformed entry can't decrypt anything anyway — mint a fresh
-            // key over it (the unreadable-vault-reads-empty rule absorbs the
-            // consequence).
-            store_fresh_key(backend, key_file)
+/// Resolve the master key. This is the process's ONE keychain touch — and it
+/// must RECONCILE the two possible key homes, not just pick a branch: a
+/// headless launch (no keychain) leaves the key in `master.key`, and a later
+/// keychain-capable launch seeing `NoEntry` must import that file key rather
+/// than mint a fresh one — otherwise the existing vault silently reads as
+/// empty and the next save destroys every stored secret. When BOTH homes
+/// hold (different) keys — e.g. a transient keychain failure once minted a
+/// file key alongside a healthy keychain entry — the vault file itself is
+/// the arbiter: whichever key actually decrypts it wins, and is promoted
+/// into the keychain so the split heals instead of persisting.
+fn resolve_master_key(
+    backend: &dyn KeychainBackend,
+    key_file: &Path,
+    vault_path: &Path,
+) -> ([u8; KEY_LEN], &'static str) {
+    let keychain_key = match backend.get_password() {
+        // A malformed entry can't decrypt anything anyway — treat it like an
+        // absent one (a fresh or imported key will overwrite it).
+        Ok(hex) => key_from_hex(&hex),
+        Err(keyring::Error::NoEntry) => None,
+        // Genuine keychain failure (no Secret Service, locked store): use the
+        // existing file key if there is one — NEVER mint a fresh key just
+        // because the keychain is temporarily unreachable, or a healthy later
+        // launch would find two diverged keys. (If both a keychain entry and
+        // a vault exist but no file key, this run reads the vault as empty
+        // and a save re-keys it under the file key; the both-keys arbitration
+        // below heals that on the next healthy launch.)
+        Err(_) => return file_key(key_file),
+    };
+    let stored_file_key = std::fs::read_to_string(key_file).ok().and_then(|s| key_from_hex(&s));
+
+    match (keychain_key, stored_file_key) {
+        (Some(k), None) => (k, "keychain"),
+        // The same key in both homes: the file copy is a redundant plaintext
+        // liability — drop it.
+        (Some(k), Some(f)) if k == f => {
+            let _ = std::fs::remove_file(key_file);
+            (k, "keychain")
         }
-        Err(keyring::Error::NoEntry) => store_fresh_key(backend, key_file),
-        // Genuine keychain failure (no Secret Service, locked store): the key
-        // lives in a private file instead, and Settings says so.
-        Err(_) => file_key(key_file),
+        // Diverged keys: whichever decrypts the existing vault wins. The
+        // winner is promoted to the keychain (when it was the file key) and
+        // the file copy is dropped, healing the split.
+        (Some(k), Some(f)) => {
+            let vault_bytes = std::fs::read(vault_path).ok();
+            let file_key_decrypts = vault_bytes
+                .as_deref()
+                .map(|b| decrypt(&f, b).is_some() && decrypt(&k, b).is_none())
+                .unwrap_or(false);
+            if file_key_decrypts {
+                adopt_file_key(backend, key_file, f)
+            } else {
+                let _ = std::fs::remove_file(key_file);
+                (k, "keychain")
+            }
+        }
+        // No keychain entry but a file key exists (a previous launch ran
+        // keychain-less): import it instead of minting a divergent fresh key.
+        (None, Some(f)) => adopt_file_key(backend, key_file, f),
+        (None, None) => {
+            let key = generate_key();
+            if backend.set_password(&to_hex(&key)).is_ok() {
+                (key, "keychain")
+            } else {
+                file_key(key_file)
+            }
+        }
     }
 }
 
-fn store_fresh_key(backend: &dyn KeychainBackend, key_file: &Path) -> ([u8; KEY_LEN], &'static str) {
-    let key = generate_key();
+/// Promote an existing file key into the keychain; only once that write
+/// SUCCEEDS is the plaintext file copy dropped. If the keychain refuses, the
+/// file stays the (working) home.
+fn adopt_file_key(
+    backend: &dyn KeychainBackend,
+    key_file: &Path,
+    key: [u8; KEY_LEN],
+) -> ([u8; KEY_LEN], &'static str) {
     if backend.set_password(&to_hex(&key)).is_ok() {
+        let _ = std::fs::remove_file(key_file);
         (key, "keychain")
     } else {
-        file_key(key_file)
+        (key, "file")
     }
 }
 
@@ -437,6 +505,92 @@ mod tests {
         // And the vault is usable with the replacement key.
         v.update(|s| s.mcp_token = Some("45".repeat(32))).unwrap();
         assert_eq!(v.load().mcp_token.as_deref(), Some("45".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_key_from_a_keychainless_launch_is_imported_not_shadowed() {
+        let dir = temp_dir("import");
+        // Launch 1: no keychain — secrets land under a file key.
+        let headless = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        headless.update(|s| s.mcp_token = Some("67".repeat(32))).unwrap();
+
+        // Launch 2: keychain works but holds no entry. The file key must be
+        // imported (NOT a fresh key minted), so the vault still decrypts…
+        let mem = Mutex::new(None);
+        let gui = Vault::with_backend(&dir, Box::new(MemKeychain(mem)));
+        assert_eq!(gui.key_source(), "keychain");
+        assert_eq!(gui.load().mcp_token.as_deref(), Some("67".repeat(32).as_str()));
+        // …and the plaintext file copy is gone after a successful import.
+        assert!(!dir.join("master.key").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diverged_keys_are_arbitrated_by_whichever_decrypts_the_vault() {
+        let dir = temp_dir("diverge");
+        // The vault was written under a FILE key (a transient keychain outage)…
+        let outage = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        outage.update(|s| s.mcp_token = Some("89".repeat(32))).unwrap();
+        // …while the keychain still holds an older, unrelated key.
+        let stale_keychain_key = to_hex(&generate_key());
+        let healed = Vault::with_backend(&dir, Box::new(MemKeychain(Mutex::new(Some(stale_keychain_key)))));
+        // The file key decrypts the vault, so it wins and is promoted.
+        assert_eq!(healed.key_source(), "keychain");
+        assert_eq!(healed.load().mcp_token.as_deref(), Some("89".repeat(32).as_str()));
+        assert!(!dir.join("master.key").exists(), "promoted file key's plaintext copy removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_temporary_keychain_failure_reuses_the_existing_file_key() {
+        let dir = temp_dir("transient");
+        let a = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        a.update(|s| s.mcp_token = Some("ba".repeat(32))).unwrap();
+        // A later keychain-less launch must reuse the SAME file key, never
+        // mint a second one over it.
+        let b = Vault::with_backend(&dir, Box::new(BrokenKeychain));
+        assert_eq!(b.load().mcp_token.as_deref(), Some("ba".repeat(32).as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_from_separate_vault_instances_lose_no_fields() {
+        // Two `Vault` instances over the same directory model the GUI and the
+        // standalone CLI: the process-local mutex doesn't cover them, so this
+        // exercises the inter-process file lock end to end.
+        let dir = temp_dir("interproc");
+        let a = std::sync::Arc::new(Vault::with_backend(&dir, Box::new(BrokenKeychain)));
+        let b = std::sync::Arc::new(Vault::with_backend(&dir, Box::new(BrokenKeychain)));
+        let ta = {
+            let a = a.clone();
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    a.update(|s| {
+                        s.llm_keys.insert("anthropic".into(), format!("a{i}"));
+                    })
+                    .unwrap();
+                }
+            })
+        };
+        let tb = {
+            let b = b.clone();
+            std::thread::spawn(move || {
+                for i in 0..50 {
+                    b.update(|s| {
+                        s.llm_keys.insert("openai".into(), format!("b{i}"));
+                    })
+                    .unwrap();
+                }
+            })
+        };
+        ta.join().unwrap();
+        tb.join().unwrap();
+        // Interleaved read-modify-writes must not have discarded either
+        // writer's field — both final values survive.
+        let s = a.load();
+        assert_eq!(s.llm_keys.get("anthropic").map(String::as_str), Some("a49"));
+        assert_eq!(s.llm_keys.get("openai").map(String::as_str), Some("b49"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
