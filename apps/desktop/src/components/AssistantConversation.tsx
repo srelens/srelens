@@ -873,22 +873,30 @@ export const AssistantConversation = forwardRef<
   }, [context]);
 
   useEffect(() => {
-    listAgents()
-      .then((list) => {
-        setAgents(list);
-        agentsRef.current = list;
-        // Prefer the last-used agent (if it's still installed and selectable),
-        // otherwise the first available non-gated one.
-        const stored = loadLastAgent();
-        const lastUsed = list.find((a) => a.kind === stored && a.available && !a.gated);
-        const firstAvailable = list.find((a) => a.available && !a.gated) ?? list.find((a) => a.available) ?? list[0];
-        setSelectedKind((lastUsed ?? firstAvailable)?.kind ?? "");
-      })
-      .catch(() => {
-        setAgents([]);
-        agentsRef.current = [];
-        setSelectedKind("");
-      });
+    function refreshAgents() {
+      listAgents()
+        .then((list) => {
+          setAgents(list);
+          agentsRef.current = list;
+          // Prefer the last-used agent (if it's still installed and selectable),
+          // otherwise the first available non-gated one.
+          const stored = loadLastAgent();
+          const lastUsed = list.find((a) => a.kind === stored && a.available && !a.gated);
+          const firstAvailable = list.find((a) => a.available && !a.gated) ?? list.find((a) => a.available) ?? list[0];
+          setSelectedKind((lastUsed ?? firstAvailable)?.kind ?? "");
+        })
+        .catch(() => {
+          setAgents([]);
+          agentsRef.current = [];
+          setSelectedKind("");
+        });
+    }
+    refreshAgents();
+    // This view can mount UNDER the VaultGate (a restored Assistant tab):
+    // the first fetch then sees a locked vault — no API keys, native agent
+    // unavailable. Re-list when the gate reports the vault unlocked.
+    window.addEventListener("srelens:vault-unlocked", refreshAgents);
+    return () => window.removeEventListener("srelens:vault-unlocked", refreshAgents);
   }, []);
 
   // Load the saved-session picker once on mount — `listSessions` already

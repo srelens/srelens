@@ -43,11 +43,16 @@ describe("VaultGate", () => {
     expect(await screen.findByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
   });
 
-  it("renders nothing once the vault is unlocked", async () => {
+  it("renders nothing once the vault is unlocked, and broadcasts the unlock", async () => {
     mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    const unlocked = vi.fn();
+    window.addEventListener("srelens:vault-unlocked", unlocked);
     const { container } = render(<VaultGate />);
     await waitFor(() => expect(mcpSecurity.vaultStatus).toHaveBeenCalled());
     expect(container.textContent).toBe("");
+    // Vault-dependent views mounted under the gate rely on this broadcast.
+    await waitFor(() => expect(unlocked).toHaveBeenCalledTimes(1));
+    window.removeEventListener("srelens:vault-unlocked", unlocked);
   });
 
   it("first launch shows the mandatory setup and creates the password", async () => {

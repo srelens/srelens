@@ -361,14 +361,29 @@ pub(crate) fn promote_meta_next(dir: &Path) -> Result<(), String> {
     std::fs::rename(meta_next_path(dir), meta_path(dir)).map_err(|e| e.to_string())
 }
 
+/// The inter-process lock serializing password TRANSITIONS (setup/change:
+/// stage → re-key → promote) against anything that inspects or cleans the
+/// staged `.next` meta. Without it, an unlock in a second process could
+/// delete a live stage between another process's staging and re-key —
+/// leaving a re-keyed vault whose new salt/verifier exist nowhere.
+pub(crate) fn transition_lock(dir: &Path) -> std::io::Result<std::fs::File> {
+    let _ = std::fs::create_dir_all(dir);
+    let lock = std::fs::File::create(dir.join("vault.json.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
 /// Unlock the vault with a master password, recovering an interrupted
 /// password transition if one is staged: the CURRENT meta is tried first;
 /// when it doesn't line up (verifier or vault mismatch), a staged `.next`
 /// meta whose verifier AND vault both agree is promoted and used — that is
 /// exactly the crash-between-rekey-and-promote state. A stale `.next` left
 /// by a transition that never re-keyed is removed on a successful current
-/// unlock. Public: the headless CLI (`SRELENS_MASTER_PASSWORD`) uses it too.
+/// unlock. Runs under the transition lock, so a LIVE stage belonging to an
+/// in-flight change in another process is never touched mid-transaction.
+/// Public: the headless CLI (`SRELENS_MASTER_PASSWORD`) uses it too.
 pub fn unlock_with_master_password(vault: &Vault, dir: &Path, password: &str) -> Result<(), String> {
+    let _transition = transition_lock(dir).map_err(|e| e.to_string())?;
     let current = read_meta(dir);
     let mut last_err: String = "no master password is set".into();
     if let Some(meta) = &current {
@@ -390,6 +405,14 @@ pub fn unlock_with_master_password(vault: &Vault, dir: &Path, password: &str) ->
         }
     }
     Err(last_err)
+}
+
+/// The non-secret record of the recovery opt-in made at setup. Lives on the
+/// filesystem, NOT in the keychain — a keychain-less host (Linux without a
+/// Secret Service) must still know an opted-out user has nothing to refresh,
+/// or password changes would fail forever on the unreachable probe.
+pub(crate) fn recovery_marker_path(dir: &Path) -> PathBuf {
+    dir.join("recovery-enabled")
 }
 
 fn derive_key(password: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result<[u8; KEY_LEN], String> {

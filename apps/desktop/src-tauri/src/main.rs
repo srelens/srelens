@@ -146,7 +146,10 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
     // master password from the environment (never argv — it would show in
     // `ps`). Without it, `SRELENS_MCP_TOKEN` still works, and a store-token
     // path that needs to mint exits below with guidance naming both.
-    if vault.key_source() == "password-locked" {
+    // Both password-derived locked sources unlock with the master password:
+    // `biometric-locked` only means the GUI would normally skip the password
+    // via Touch ID / Hello — the password (and vault.json) still exist.
+    if matches!(vault.key_source(), "password-locked" | "biometric-locked") {
         match std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty()) {
             Some(password) => {
                 if let Err(e) =

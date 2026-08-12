@@ -955,6 +955,26 @@ describe("AssistantConversation composer (Task 19)", () => {
     expect(chat.sendChat).not.toHaveBeenCalled();
   });
 
+  it("re-lists agents when the vault gate reports the unlock", async () => {
+    // Mounted under the gate: the first listAgents sees a locked vault, so
+    // the native agent reads unavailable.
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      { kind: "srelens", label: "srelens agent", available: false, path: null, version: null, installUrl: "", gated: false },
+    ]);
+    render(<AssistantConversation />);
+    await waitFor(() => expect(chat.listAgents).toHaveBeenCalledTimes(1));
+
+    // The gate unlocks — the broadcast must trigger a fresh listing that now
+    // sees the key and enables the agent.
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      { kind: "srelens", label: "srelens agent", available: true, path: null, version: null, installUrl: "", gated: false },
+    ]);
+    act(() => {
+      window.dispatchEvent(new Event("srelens:vault-unlocked"));
+    });
+    await waitFor(() => expect(chat.listAgents).toHaveBeenCalledTimes(2));
+  });
+
   it("unmounting while startChat is still pending prevents the agent launch", async () => {
     vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
     // Hold the first send in prep: no session id exists yet, so the unmount

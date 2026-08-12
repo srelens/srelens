@@ -40,6 +40,10 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
     if (!readyNotified.current) {
       readyNotified.current = true;
       onReady?.();
+      // Vault-dependent views may already be mounted UNDER the gate (e.g. a
+      // restored Assistant tab, whose agent list was fetched while locked
+      // and saw no API keys). Broadcast so they re-read vault-backed state.
+      window.dispatchEvent(new Event("srelens:vault-unlocked"));
     }
   }
 

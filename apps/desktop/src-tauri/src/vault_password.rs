@@ -96,10 +96,13 @@ pub async fn vault_setup_password(
         vault::delete_recovery_password();
     }
     // Two-phase transition (crash-recoverable): stage the new meta as
-    // `.next`, re-key, then promote. A crash before the re-key leaves the
-    // machine-key vault intact (the stale stage is dropped at next open); a
-    // crash after it is healed by the open-time promote — `vault.json` never
-    // claims a key the vault doesn't have.
+    // `.next`, re-key, then promote — all under the inter-process transition
+    // lock so a concurrent unlock can't clean the live stage mid-flight. A
+    // crash before the re-key leaves the machine-key vault intact (the stale
+    // stage is dropped at next open); a crash after it is healed by the
+    // open-time promote — `vault.json` never claims a key the vault doesn't
+    // have.
+    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
     vault::write_meta_next(&dir, &meta)?;
     if let Err(e) = vault.rekey_from_current(key, "password") {
         let _ = std::fs::remove_file(vault::meta_next_path(&dir));
@@ -109,6 +112,13 @@ pub async fn vault_setup_password(
         return Err(e.to_string());
     }
     vault::promote_meta_next(&dir)?;
+    // Record the opt-in OUTSIDE the keychain, so keychain-less hosts still
+    // know whether later password changes have a copy to refresh.
+    if keep_recovery {
+        let _ = std::fs::write(vault::recovery_marker_path(&dir), b"");
+    } else {
+        let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
+    }
     // Retire the machine-key homes: the password is the key's origin now.
     vault::delete_master_key_from_keychain();
     let _ = std::fs::remove_file(dir.join("master.key"));
@@ -169,10 +179,26 @@ pub async fn vault_change_password(
     }
     // The recovery copy's fate must be KNOWN before anything changes: an
     // unreachable keychain fails the change up front, never leaving a stale
-    // copy that a later "Forgot password?" would trust.
-    let previous_recovery = vault::recovery_password_state().map_err(|e| {
-        format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
-    })?;
+    // copy that a later "Forgot password?" would trust. Opted-out vaults
+    // (per the filesystem marker) skip the probe entirely — a keychain-less
+    // host has nothing to refresh and must still be able to change the
+    // password. Pre-marker vaults probe best-effort: a reachable copy is
+    // adopted (marker written); an unreachable keychain is treated as
+    // opted-out rather than blocking forever.
+    let marker = vault::recovery_marker_path(&dir);
+    let previous_recovery = if marker.exists() {
+        vault::recovery_password_state().map_err(|e| {
+            format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
+        })?
+    } else {
+        match vault::recovery_password_state() {
+            Ok(Some(prev)) => {
+                let _ = std::fs::write(&marker, b"");
+                Some(prev)
+            }
+            Ok(None) | Err(_) => None,
+        }
+    };
     if previous_recovery.is_some() {
         // Refresh BEFORE the transition (recoverable step first). EVERY
         // failure below, pre- or post-stage, restores the previous value —
@@ -191,8 +217,10 @@ pub async fn vault_change_password(
             return Err(e);
         }
     };
-    // Same two-phase transition as setup: stage, re-key, promote — a crash
-    // in between is healed at the next unlock (see unlock_with_master_password).
+    // Same two-phase transition as setup: stage, re-key, promote — under the
+    // inter-process transition lock, and a crash in between is healed at the
+    // next unlock (see unlock_with_master_password).
+    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(vault::meta_next_path(&dir));
     if let Err(e) = vault::write_meta_next(&dir, &new_meta) {
         restore_recovery();
