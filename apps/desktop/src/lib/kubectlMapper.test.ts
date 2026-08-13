@@ -176,10 +176,23 @@ describe("kubectlMapper", () => {
       ).toBe("kubectl get pods web-0 --context '`id` cluster'");
     });
 
-    it("escapes an embedded single quote with the POSIX close-escape-reopen form", () => {
+    it("keeps a plain apostrophe (no expansion syntax) safely double-quoted", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "bob's cluster" }),
+      ).toBe('kubectl get pods web-0 --context "bob\'s cluster"');
+    });
+
+    it("apostrophe + expansion syntax becomes a placeholder — the POSIX '\\'' escape breaks out in PowerShell", () => {
+      // In pwsh, backslash is not a quote escape: 'a'\''$(whoami)'\''b'
+      // leaves $(whoami) outside any string and it executes. No single
+      // representation is inert in bash/zsh AND pwsh, so refuse to render
+      // the value, exactly like the Windows tier.
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "a'$(whoami)'b" }),
+      ).toBe('kubectl get pods web-0 --context "<enter context>"');
       expect(
         toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "bob's $HOME" }),
-      ).toBe("kubectl get pods web-0 --context 'bob'\\''s $HOME'");
+      ).toBe('kubectl get pods web-0 --context "<enter context>"');
     });
 
     it("windows: double quotes hold inert odd values — spaces and even & are literal inside them in cmd and PowerShell", () => {

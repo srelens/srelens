@@ -75,10 +75,17 @@ function shellQuote(value: string, what: string, windows: boolean): string {
   }
   // POSIX: odd but inert values (spaces, parens, unicode) keep double quotes;
   // anything carrying expansion syntax gets single quotes, inside which
-  // bash/zsh (and PowerShell) expand nothing. Embedded ' uses the POSIX
-  // '\'' close-escape-reopen dance.
+  // bash/zsh (and PowerShell) expand nothing.
   if (!POSIX_DOUBLE_QUOTE_UNSAFE.test(value)) return `"${value}"`;
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  // ...unless the value ALSO contains an apostrophe: the POSIX '\'' escape
+  // is bash-only — PowerShell (a real paste target on macOS/Linux too)
+  // doesn't treat backslash as a quote escape, so the text between two
+  // embedded apostrophes lands OUTSIDE any string there and $() would
+  // execute. Expansion syntax + apostrophe has no representation inert in
+  // bash/zsh AND pwsh at once → same placeholder refusal as the Windows
+  // tier.
+  if (value.includes("'")) return `"<enter ${what}>"`;
+  return `'${value}'`;
 }
 
 /**
