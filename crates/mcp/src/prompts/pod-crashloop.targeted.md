@@ -16,8 +16,10 @@ The evidence:
 - Call `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
   `namespace: {{namespace}}`, `name: {{pod}}`. The container statuses say
   which container is failing right now, and its terminated detail (exit code,
-  reason, message) says how it died — exit 137/`OOMKilled` is a memory limit,
-  exit 1 or 2 usually means the process failed and the logs say why.
+  reason, message) says how it died — exit 137 WITH reason `OOMKilled` is a
+  memory-limit kill (137 alone is just SIGKILL, which an external eviction or
+  forced deletion also produces); exit 1 or 2 usually means the process
+  failed and the logs say why.
 - Call `k8s.podLogs` with `context: {{context}}`, `namespace: {{namespace}}`,
   `pod: {{pod}}`, `container: <the crashing container>`, `previous: true`,
   `tail_lines: 200`. The PREVIOUS instance's output is where the crash reason
