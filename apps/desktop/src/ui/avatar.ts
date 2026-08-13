@@ -30,12 +30,14 @@ export function avatarColor(name: string): string {
 }
 
 /** A segment that carries no identity: a generated id (hex with at least one
- * digit, 6+ chars — `6bcb8b63`) or a bare number. Cluster names commonly end
- * in these, and their initial tells the user nothing. The digit requirement
- * keeps real words that happen to be hex-alphabet (`decade`, `facade`) out
- * of the noise class. */
+ * digit, 8+ chars — `6bcb8b63`) or a bare number. Cluster names commonly end
+ * in these, and their initial tells the user nothing. Deliberately narrow,
+ * since segments are user-defined: the digit requirement keeps hex-alphabet
+ * words (`decade`, `cafebabe`) as identity, and the 8-char floor keeps
+ * short leetspeak-style names (`c0ffee`, `babe42`) as identity too — real
+ * generated ids (k3d, EKS, the #209 set) are 8 hex chars or more. */
 function isNoiseSegment(segment: string): boolean {
-  return /^(?=.*\d)[0-9a-f]{6,}$/i.test(segment) || /^\d+$/.test(segment);
+  return /^(?=.*\d)[0-9a-f]{8,}$/i.test(segment) || /^\d+$/.test(segment);
 }
 
 /** Up-to-3-char initials from a cluster name (splits on - _ space /),

@@ -30,12 +30,16 @@ describe("avatarInitials", () => {
   it("keeps hex-alphabet words and digit-bearing short names as identity", () => {
     // Real words that happen to be hex letters are not ids...
     expect(avatarInitials("decade-cluster")).toBe("DC");
-    // ...and k3d/k8s-style segments have non-hex letters, so they count.
+    // ...k3d/k8s-style segments have non-hex letters, so they count...
     expect(avatarInitials("k3d-7f3a9b21")).toBe("K3");
+    // ...and hex-looking segments UNDER 8 chars are treated as chosen names,
+    // not ids (segments are user-defined — `c0ffee` is somebody's cluster).
+    expect(avatarInitials("prod-c0ffee")).toBe("PC");
+    expect(avatarInitials("prod-babe42")).toBe("PB");
   });
 
   it("falls back to raw segments when everything looks generated", () => {
     expect(avatarInitials("7f3a9b21")).toBe("7F");
-    expect(avatarInitials("123-456789a")).toBe("14");
+    expect(avatarInitials("123-456789ab")).toBe("14");
   });
 });
