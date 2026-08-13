@@ -48,7 +48,12 @@ pub(crate) fn summarise(slice: EndpointSlice) -> EndpointSliceSummary {
     let ready = slice
         .endpoints
         .iter()
-        .filter(|e| e.conditions.as_ref().and_then(|c| c.ready).unwrap_or(false))
+        // The EndpointSlice API treats an ABSENT `conditions.ready` as ready
+        // ("consumers should interpret this unknown state as ready" — the
+        // field is only meaningful when explicitly set). Absent conditions
+        // mostly appear on manually managed slices (selector-less Services);
+        // kube-controller-manager always sets `ready` on slices it owns.
+        .filter(|e| e.conditions.as_ref().and_then(|c| c.ready).unwrap_or(true))
         .count();
     let ports = slice
         .ports
@@ -158,5 +163,34 @@ mod tests {
         assert_eq!(s.endpoints, "2/3");
         assert_eq!(s.ports, "8080");
         assert_eq!(s.service, "web");
+    }
+
+    #[test]
+    fn an_absent_ready_condition_counts_as_ready_but_an_explicit_false_does_not() {
+        // API convention (issue #191): `conditions.ready` is only meaningful
+        // when set — absent conditions, or conditions without `ready`, mean
+        // ready. Only an explicit `Some(false)` is not-ready. Manually
+        // managed slices (selector-less Services) commonly omit conditions
+        // entirely and used to show as 0/N.
+        let no_conditions = Endpoint::default();
+        let empty_conditions = Endpoint {
+            conditions: Some(EndpointConditions::default()),
+            ..Default::default()
+        };
+        let explicitly_not_ready = Endpoint {
+            conditions: Some(EndpointConditions { ready: Some(false), ..Default::default() }),
+            ..Default::default()
+        };
+        let slice = EndpointSlice {
+            metadata: kube::core::ObjectMeta {
+                name: Some("manual-abc".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            address_type: "IPv4".into(),
+            endpoints: vec![no_conditions, empty_conditions, explicitly_not_ready],
+            ports: None,
+        };
+        assert_eq!(summarise(slice).endpoints, "2/3");
     }
 }

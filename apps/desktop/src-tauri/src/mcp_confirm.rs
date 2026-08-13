@@ -45,6 +45,26 @@ pub struct PromptUser {
     timeout: Duration,
 }
 
+/// Cleans up one confirmation however `confirm` ends — answered, timed out,
+/// or the future DROPPED mid-await (Stop aborts the native turn's task, and a
+/// killed CLI tears down the HTTP request task blocked here; neither reaches
+/// any code after the `.await`). Dropping this forgets the `Pending` entry
+/// and broadcasts `mcp://confirm-resolved`, so neither the app-wide modal nor
+/// the transcript's inline card can outlive the request they prompt for.
+struct ResolveOnDrop {
+    app: tauri::AppHandle,
+    pending: Arc<Pending>,
+    id: String,
+}
+
+impl Drop for ResolveOnDrop {
+    fn drop(&mut self) {
+        use tauri::Emitter;
+        self.pending.forget(&self.id);
+        let _ = self.app.emit("mcp://confirm-resolved", serde_json::json!({ "id": self.id }));
+    }
+}
+
 impl PromptUser {
     pub fn new(app: tauri::AppHandle, pending: Arc<Pending>, timeout: Duration) -> Self {
         Self { app, pending, timeout }
@@ -63,10 +83,16 @@ impl ConfirmPolicy for PromptUser {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.pending.register(id.clone(), tx);
+        // The same request is rendered in TWO places — the app-wide modal and
+        // the assistant transcript's inline card — and answering in one only
+        // clears that one's own queue. This guard broadcasts the resolution on
+        // EVERY exit from this function, including cancellation (see its doc),
+        // so no stale prompt lingers anywhere and no `Pending` entry leaks.
+        let _cleanup =
+            ResolveOnDrop { app: self.app.clone(), pending: self.pending.clone(), id: id.clone() };
 
         // A dialog behind another window is indistinguishable from a hang.
         let Some(win) = self.app.get_webview_window("main") else {
-            self.pending.forget(&id);
             return Decision::Denied(format!(
                 "no window available to confirm `{tool}`"
             ));
@@ -83,7 +109,6 @@ impl ConfirmPolicy for PromptUser {
             )
             .is_err()
         {
-            self.pending.forget(&id);
             return Decision::Denied("srelens could not show a confirmation dialog".into());
         }
 
@@ -91,10 +116,7 @@ impl ConfirmPolicy for PromptUser {
             Ok(Ok(true)) => Decision::Approved,
             Ok(Ok(false)) => Decision::Denied(format!("user declined `{tool}`")),
             Ok(Err(_)) => Decision::Denied("confirmation channel closed".into()),
-            Err(_) => {
-                self.pending.forget(&id);
-                Decision::Denied(format!("no response to the confirmation for `{tool}`"))
-            }
+            Err(_) => Decision::Denied(format!("no response to the confirmation for `{tool}`")),
         }
     }
 }

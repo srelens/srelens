@@ -3,23 +3,45 @@
 //! consent-gated in the shared request handler.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderName, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::stdio::handle_request;
 use crate::McpServer;
 
-async fn rpc(State(server): State<Arc<McpServer>>, Json(req): Json<Value>) -> Json<Value> {
+/// The `Mcp-Session-Id` header name, surfaced on every `/mcp` response.
+static MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
+
+/// A stable per-process MCP session id. Streamable-HTTP clients (e.g. Codex's
+/// `streamable_http` transport) establish a session on `initialize` and refuse
+/// to load tools unless the response carries this header — a minimal
+/// POST/JSON-RPC endpoint without it hangs their handshake (verified: Codex
+/// retries and reports "no tools"). srelens is stateless — the bearer token,
+/// not this id, is what authorizes each request — so the value only has to be
+/// present and stable across a server's lifetime, never validated on later
+/// requests. Claude Code's more lenient HTTP client works with or without it,
+/// so adding it is purely additive.
+fn session_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| format!("srelens-{}", std::process::id()))
+}
+
+async fn rpc(State(server): State<Arc<McpServer>>, Json(req): Json<Value>) -> Response {
     match handle_request(&server, &req, crate::Transport::Http).await {
-        Some(resp) => Json(resp),
-        None => Json(json!({})), // notification — no response body
+        // `Json` sets `content-type: application/json`; we add the session-id
+        // header the streamable-HTTP handshake needs.
+        Some(resp) => ([(MCP_SESSION_ID.clone(), session_id())], Json(resp)).into_response(),
+        // A JSON-RPC notification (no `id`) expects no body. Streamable-HTTP
+        // wants `202 Accepted` here, not `200` with a `{}` body — the latter
+        // is what stalled Codex's client.
+        None => StatusCode::ACCEPTED.into_response(),
     }
 }
 
@@ -180,6 +202,7 @@ mod tests {
     use crate::McpServer;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use serde_json::json;
     use srelens_capability::{Capability, Registry};
     use tower::ServiceExt; // oneshot
 
@@ -209,10 +232,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        // Streamable-HTTP clients (Codex) require a session id on the response.
+        assert!(
+            resp.headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|s| !s.is_empty()),
+            "an /mcp JSON-RPC response must carry a non-empty Mcp-Session-Id header"
+        );
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["result"]["isError"], false);
         assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("echo"));
+    }
+
+    #[tokio::test]
+    async fn a_notification_returns_202_accepted_with_no_body() {
+        // A JSON-RPC message with no `id` is a notification — streamable-HTTP
+        // expects 202 Accepted and an empty body, not 200 with `{}` (which
+        // stalled Codex's client).
+        let app = router(test_server());
+        let body = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert!(bytes.is_empty(), "a 202 notification response must have no body");
     }
 
     fn call_body() -> Body {

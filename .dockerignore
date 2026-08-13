@@ -8,3 +8,6 @@ apps/desktop/src-tauri/target
 docs
 packaging
 **/*.md
+# The MCP diagnostic prompts are embedded into the binary via include_str! —
+# they must stay in the build context despite the markdown exclusion above.
+!crates/mcp/src/prompts/*.md

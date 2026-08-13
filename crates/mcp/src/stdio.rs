@@ -10,6 +10,13 @@ use crate::{McpServer, Transport};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Stable prefix on the text of a consent-denied tool result. CLI transports
+/// strip `_meta`, so this text is the only denial signal that survives the
+/// round trip through an agent CLI's transcript. `srelens_agent` defines the
+/// same constant for its parsers (neither crate depends on the other); the
+/// desktop crate has a test pinning the two equal.
+pub const DENIED_PREFIX: &str = "consent denied: ";
+
 fn ok(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
@@ -72,7 +79,20 @@ pub async fn handle_request(
                     } else {
                         t.input_schema
                     };
-                    json!({ "name": t.name, "description": t.description, "inputSchema": schema })
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": schema,
+                        // MCP tool annotations. `readOnlyHint` lets a client
+                        // (Cursor) auto-approve read-only calls in headless
+                        // mode instead of rejecting them; destructive/consent-
+                        // gated tools are `false` and stay gated by srelens's
+                        // own confirm dialog.
+                        "annotations": {
+                            "readOnlyHint": t.read_only,
+                            "destructiveHint": t.destructive,
+                        },
+                    })
                 })
                 .collect();
             Some(ok(id?, json!({ "tools": tools })))
@@ -118,11 +138,18 @@ pub async fn handle_request(
                         error: Some(reason.clone()),
                     });
                     // A result, not a transport error, so the agent can adapt.
+                    // `_meta` (reserved by MCP for exactly this) marks the
+                    // refusal so the in-process native agent can report "the
+                    // user declined" rather than a failed execution; CLI
+                    // clients strip it, which is why the text also carries
+                    // `DENIED_PREFIX` — the only signal that survives a CLI's
+                    // transcript for the srelens_agent parsers to match on.
                     return Some(ok(
                         id?,
                         json!({
-                            "content": [{ "type": "text", "text": reason }],
-                            "isError": true
+                            "content": [{ "type": "text", "text": format!("{DENIED_PREFIX}{reason}") }],
+                            "isError": true,
+                            "_meta": { "srelens/denied": true }
                         }),
                     ));
                 }
@@ -245,9 +272,11 @@ pub async fn handle_request(
                 Err(message) => return Some(err(id?, -32602, &message)),
             };
 
-            // The catalog is assembled here rather than by invoking a
-            // capability: it describes this server, not the cluster.
-            let text = if read.capability == crate::resources::CATALOG_IN_PROCESS {
+            // `capability_id() == None` IS the in-process catalog (the enum
+            // makes that a type-level fact, not a sentinel-string
+            // comparison): it is assembled here rather than by invoking a
+            // capability, because it describes this server, not the cluster.
+            let text = if read.capability.capability_id().is_none() {
                 json!({
                     "tools": server.list_tools().into_iter().map(|t| t.name).collect::<Vec<_>>(),
                     "prompts": server.prompts().list().into_iter().map(|p| p.name).collect::<Vec<_>>(),
@@ -255,30 +284,31 @@ pub async fn handle_request(
                 })
                 .to_string()
             } else {
+                let capability_id =
+                    read.capability.capability_id().expect("the None arm returned above");
                 // `McpServer::call_tool` is a bare registry invocation with no
                 // gating or auditing of its own — that lives in the
                 // `tools/call` arm, wrapped around the same call. This arm
                 // reproduces both here so a resource read leaves the same
                 // audit trail as the identical read via `tools/call`.
-                if server.consent_kind(read.capability).is_some() {
-                    // Unreachable today: `plan_read` only ever names the four
-                    // hardcoded, unconditionally-read-only capabilities in
-                    // `MAPPED_CAPABILITIES`, none of which are consent-gated.
+                if server.consent_kind(capability_id).is_some() {
+                    // Unreachable today: `plan_read` only ever names the
+                    // unconditionally-read-only capabilities in the
+                    // compiler-known `MappedCapability` set, none of which are consent-gated.
                     // Guarded explicitly anyway, fail-closed, rather than
                     // assuming that stays true — clients auto-fetch
                     // resources, so raising a confirm dialog here (as
                     // `tools/call` does) would be exactly the consent-fatigue
                     // vector the design avoids.
                     let message = format!(
-                        "{} is consent-gated and must be called as a tool, not read as a resource",
-                        read.capability
+                        "{capability_id} is consent-gated and must be called as a tool, not read as a resource"
                     );
                     server.audit().record(crate::audit::AuditRecord {
                         transport,
-                        tool: read.capability.to_string(),
+                        tool: capability_id.to_string(),
                         args: crate::audit::redact(
                             &read.args,
-                            server.is_sensitive(read.capability),
+                            server.is_sensitive(capability_id),
                         ),
                         decision: "denied",
                         outcome: "error",
@@ -287,12 +317,12 @@ pub async fn handle_request(
                     return Some(err(id?, -32602, &message));
                 }
 
-                let sensitive = server.is_sensitive(read.capability);
+                let sensitive = server.is_sensitive(capability_id);
                 let redacted_args = crate::audit::redact(&read.args, sensitive);
-                let called = server.call_tool(read.capability, read.args.clone()).await;
+                let called = server.call_tool(capability_id, read.args.clone()).await;
                 server.audit().record(crate::audit::AuditRecord {
                     transport,
-                    tool: read.capability.to_string(),
+                    tool: capability_id.to_string(),
                     args: redacted_args,
                     decision: "auto",
                     outcome: if called.is_ok() { "ok" } else { "error" },
@@ -378,6 +408,10 @@ fn handle_subscription(
         return Some(err(id, -32602, &message));
     }
 
+    // Both callbacks below need the dirty set and wakeup sender; clone before
+    // the first closure takes ownership of its pair.
+    let (dead_dirty, dead_wake) = (dirty.clone(), wake.clone());
+
     // The callback is sync and owns only the dirty set and a wakeup sender,
     // so it needs no writer and no spawn. It never awaits, so the dirty
     // set's lock is only ever held for the insert itself — matching the
@@ -398,12 +432,75 @@ fn handle_subscription(
         let _ = wake.try_send(());
     });
 
-    let handle = match server.watcher().watch(&uri, on_change) {
+    // Terminal-failure path (#195): a watch that dies — unknown context,
+    // RBAC Forbidden, stream end — must not sit in the registry forever,
+    // holding a slot and letting the client mistake silence for "nothing
+    // changed". `on_dead` evicts the entry and, when one was actually
+    // registered, marks the URI dirty so the client's re-read discovers the
+    // terminal state through the existing notification channel.
+    //
+    // `on_dead` may fire at ANY point relative to this function — including
+    // before `subs.insert` below has run, in which case its `remove` finds
+    // nothing and the insert would park a dead handle. The shared `dead`
+    // slot closes that race: the post-insert check sees the reason whichever
+    // side wins, removes the entry, and turns the subscribe response itself
+    // into an error — strictly better than accepting a subscription known to
+    // be stillborn.
+    let dead: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    // This watch's registry generation, filled in right after `insert`. The
+    // callback evicts through `remove_if` with THIS token only — a client may
+    // re-subscribe the same URI while `on_dead` is in flight, and an
+    // unconditional remove would abort the replacement watch, leaving the
+    // client subscribed to nothing while believing otherwise. `None` means
+    // the death beat the insert; the post-insert check below owns that case.
+    let my_generation: std::sync::Arc<std::sync::Mutex<Option<u64>>> = Default::default();
+    let on_dead = {
+        let dead = dead.clone();
+        let my_generation = my_generation.clone();
+        let subs = subs.clone();
+        let dead_uri = canonical.clone();
+        Box::new(move |reason: String| {
+            eprintln!("srelens: mcp watch {dead_uri} evicted: {reason}");
+            *dead.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+            let generation = *my_generation.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(generation) = generation {
+                if subs.remove_if(&dead_uri, generation) {
+                    dead_dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(dead_uri.clone());
+                    let _ = dead_wake.try_send(());
+                }
+            }
+        })
+    };
+
+    let handle = match server.watcher().watch(&uri, on_change, on_dead) {
         Ok(h) => h,
         Err(message) => return Some(err(id, -32602, &message)),
     };
-    if let Err(message) = subs.insert(canonical, handle) {
-        return Some(err(id, -32602, &message));
+    // Death BEFORE commitment: check before `insert`, because on a
+    // re-subscribe `insert` replaces AND ABORTS the prior still-live watch —
+    // a replacement that was stillborn (the trait allows `on_dead` inside
+    // `watch()` itself) must cost the client an error response, not the
+    // working subscription they already had. The failed handle is aborted
+    // here since it never reaches the registry's ownership.
+    if let Some(reason) = dead.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        handle.abort();
+        return Some(err(id, -32603, &format!("the watch ended immediately: {reason}")));
+    }
+    let generation = match subs.insert(canonical.clone(), handle) {
+        Ok(generation) => generation,
+        Err(message) => return Some(err(id, -32602, &message)),
+    };
+    *my_generation.lock().unwrap_or_else(|e| e.into_inner()) = Some(generation);
+    if let Some(reason) = dead.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        // A death that lost the race with the check above and landed after
+        // the commit. Own generation only: a concurrent re-subscribe may
+        // already have replaced this entry, and that newer watch is not ours
+        // to evict. On a re-subscribe the prior watch is gone by now
+        // (replaced at commit) — that residual few-instruction window is the
+        // cost of `watch` being synchronous; the client still learns the
+        // truth from the error response.
+        subs.remove_if(&canonical, generation);
+        return Some(err(id, -32603, &format!("the watch ended immediately: {reason}")));
     }
     Some(ok(id, json!({})))
 }
@@ -602,6 +699,10 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "ping");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        // A read-only capability advertises `readOnlyHint: true` so MCP clients
+        // (Cursor) can auto-approve the call in non-interactive mode.
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[0]["annotations"]["destructiveHint"], false);
     }
 
     #[tokio::test]
@@ -689,6 +790,12 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(resp["result"]["isError"], json!(true));
+        // The refusal marker that lets the native agent report "user declined"
+        // instead of a failed execution.
+        assert_eq!(resp["result"]["_meta"]["srelens/denied"], json!(true));
+        // And the text marker that survives CLI transports (which strip _meta).
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(DENIED_PREFIX), "got: {text}");
     }
 
     /// The pair of assertions here is the point: the tool must never see
@@ -1135,6 +1242,7 @@ mod tests {
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 _on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
             }
@@ -1407,6 +1515,7 @@ mod tests {
             &self,
             _uri: &crate::resources::ResourceUri,
             mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
         ) -> Result<tokio::task::AbortHandle, String> {
             let fired = self.0.clone();
             Ok(tokio::spawn(async move {
@@ -1536,6 +1645,7 @@ mod tests {
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 on_change();
                 Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
@@ -1599,6 +1709,7 @@ mod tests {
             &self,
             _uri: &crate::resources::ResourceUri,
             mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
         ) -> Result<tokio::task::AbortHandle, String> {
             let fired = self.fired.clone();
             let times = self.times;
@@ -1611,6 +1722,222 @@ mod tests {
             })
             .abort_handle())
         }
+    }
+
+    /// The immediate-death half of eviction (#195): `on_dead` fires inside
+    /// `watch()` itself — before `handle_subscription` has inserted anything
+    /// — so the registry briefly parks a dead handle. The post-insert check
+    /// must catch it: the subscribe answers an ERROR (not a phantom `{}`)
+    /// and nothing stays registered.
+    #[tokio::test]
+    async fn a_watch_that_dies_immediately_errors_the_subscribe_and_leaves_no_entry() {
+        struct DeadOnArrival;
+        impl crate::resources::ObjectWatcher for DeadOnArrival {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                on_dead("the cluster is unreachable".to_string());
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let server = Arc::new(
+            server_with_ping()
+                .with_kind_resolver(Arc::new(Kinds))
+                .with_watcher(Arc::new(DeadOnArrival)),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+        let resp =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        let message = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("ended immediately"), "got: {resp}");
+        assert!(message.contains("unreachable"), "the reason must survive: {resp}");
+        // Nothing left holding a slot: an unsubscribe finds no entry.
+        assert!(!subs.remove("k8s://c/ns/Pod/web-0"));
+    }
+
+    /// The late-death half of eviction (#195): the subscribe succeeded and
+    /// the watch dies LATER (RBAC revoked, apiserver gone for good). The
+    /// entry must leave the registry — silence must not impersonate "nothing
+    /// changed" while holding one of the 32 slots — and the URI goes dirty
+    /// so the client's re-read discovers the terminal state.
+    #[tokio::test]
+    async fn a_watch_death_after_subscribe_evicts_the_entry_and_queues_a_notification() {
+        type OnDead = Box<dyn FnOnce(String) + Send>;
+        struct LateDeath(std::sync::Mutex<Option<OnDead>>);
+        impl crate::resources::ObjectWatcher for LateDeath {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                *self.0.lock().unwrap() = Some(on_dead);
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let watcher = Arc::new(LateDeath(std::sync::Mutex::new(None)));
+        let server = Arc::new(
+            server_with_ping()
+                .with_kind_resolver(Arc::new(Kinds))
+                .with_watcher(watcher.clone()),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+        let resp =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        assert!(resp.get("error").is_none(), "the live subscribe succeeds: {resp}");
+
+        // The watch dies later.
+        (watcher.0.lock().unwrap().take().unwrap())("forbidden: cannot watch pods".to_string());
+
+        assert!(!subs.remove("k8s://c/ns/Pod/web-0"), "the dead entry must be evicted");
+        assert!(
+            dirty.lock().unwrap().contains("k8s://c/ns/Pod/web-0"),
+            "the URI goes dirty so the client re-reads and discovers the death"
+        );
+        assert!(wake_rx.try_recv().is_ok(), "the serve loop must be woken to drain it");
+    }
+
+    /// A stillborn REPLACEMENT must not cost the client the working watch it
+    /// already had: the death check runs before `insert`, which is what
+    /// replaces (and aborts) the prior entry on a re-subscribe. The failed
+    /// attempt answers an error; the original subscription stays live.
+    #[tokio::test]
+    async fn a_replacement_that_dies_immediately_leaves_the_prior_watch_subscribed() {
+        struct DiesOnSecondWatch(std::sync::atomic::AtomicUsize);
+        impl crate::resources::ObjectWatcher for DiesOnSecondWatch {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                    on_dead("the cluster went away".to_string());
+                }
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let server = Arc::new(
+            server_with_ping()
+                .with_kind_resolver(Arc::new(Kinds))
+                .with_watcher(Arc::new(DiesOnSecondWatch(
+                    std::sync::atomic::AtomicUsize::new(0),
+                ))),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+
+        let first =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        assert!(first.get("error").is_none(), "the first subscribe succeeds: {first}");
+
+        // The re-subscribe's replacement watch is stillborn.
+        let second =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        assert!(
+            second["error"]["message"].as_str().unwrap_or_default().contains("ended immediately"),
+            "the failed re-subscribe answers an error: {second}"
+        );
+
+        assert!(
+            subs.remove("k8s://c/ns/Pod/web-0"),
+            "the ORIGINAL watch must still be subscribed — the failed replacement never touched it"
+        );
+    }
+
+    /// The re-subscribe race on eviction: the first watch dies, and BEFORE
+    /// its `on_dead` runs, the client re-subscribes the same URI. The late
+    /// callback must not evict the replacement — the client would be
+    /// subscribed to nothing while holding a success response for it.
+    #[tokio::test]
+    async fn a_late_death_does_not_evict_the_watch_that_replaced_it() {
+        type OnDead = Box<dyn FnOnce(String) + Send>;
+        struct CollectingWatcher(std::sync::Mutex<Vec<OnDead>>);
+        impl crate::resources::ObjectWatcher for CollectingWatcher {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                self.0.lock().unwrap().push(on_dead);
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let watcher = Arc::new(CollectingWatcher(std::sync::Mutex::new(Vec::new())));
+        let server = Arc::new(
+            server_with_ping()
+                .with_kind_resolver(Arc::new(Kinds))
+                .with_watcher(watcher.clone()),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+
+        // Subscribe twice: the second replaces the first in the registry.
+        for _ in 0..2 {
+            let resp =
+                handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                    .unwrap();
+            assert!(resp.get("error").is_none(), "subscribe succeeds: {resp}");
+        }
+
+        // The FIRST watch's death arrives late.
+        let first_on_dead = watcher.0.lock().unwrap().remove(0);
+        first_on_dead("forbidden".to_string());
+
+        assert!(
+            !dirty.lock().unwrap().contains("k8s://c/ns/Pod/web-0"),
+            "no notification for an eviction that must not happen"
+        );
+        assert!(
+            subs.remove("k8s://c/ns/Pod/web-0"),
+            "the replacement watch must still be subscribed"
+        );
     }
 
     /// The coalescing this closes: without it, 5 `on_change` calls to one
@@ -1688,6 +2015,7 @@ mod tests {
                 &self,
                 uri: &crate::resources::ResourceUri,
                 mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 let fired = if uri.to_string().contains("web-0") {
                     self.fired_a.clone()
@@ -1774,6 +2102,7 @@ mod tests {
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 _on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 let join = tokio::spawn(async { std::future::pending::<()>().await });
                 let abort = join.abort_handle();

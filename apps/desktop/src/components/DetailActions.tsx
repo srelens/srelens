@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   ArrowLeftRight,
+  Bot,
   LogOut,
   Logs,
   Pause,
@@ -28,8 +29,11 @@ import { ForwardDialog } from "./ForwardDialog";
 import { CopyAsKubectlButton } from "./CopyAsKubectlButton";
 import { toKubectl } from "../lib/kubectlMapper";
 import { copyKubectlCommand } from "../lib/copyKubectl";
+import type { AssistantContext } from "./AssistantDrawer";
 
 type Opener = (s: { context: string; namespace: string; pod: string; container?: string }) => void;
+/** Opens the assistant drawer with the current resource attached as context. */
+export type AskAssistant = (s: AssistantContext) => void;
 
 const SCALABLE = ["Deployment", "StatefulSet", "ReplicaSet"];
 const RESTARTABLE = ["Deployment", "StatefulSet", "DaemonSet"];
@@ -44,6 +48,7 @@ export function PodActions({
   onOpenTerminal,
   onOpenLogs,
   onEdit,
+  onAskAssistant,
 }: {
   context: string;
   pod: PodSummary;
@@ -51,6 +56,7 @@ export function PodActions({
   onOpenTerminal?: Opener;
   onOpenLogs?: Opener;
   onEdit?: () => void;
+  onAskAssistant?: AskAssistant;
 }) {
   const [dialog, setDialog] = useState<"delete" | "evict" | "forward" | "debug" | null>(null);
   const [busy, setBusy] = useState(false);
@@ -157,6 +163,14 @@ export function PodActions({
           setDialog("delete");
         }}
       />
+      {onAskAssistant && (
+        <IconButton
+          icon={Bot}
+          label="Ask assistant"
+          title="Ask the assistant about this pod"
+          onClick={() => onAskAssistant({ context, namespace: pod.namespace, kind: "Pod", name: pod.name })}
+        />
+      )}
       {dialog === "forward" && (
         <ForwardDialog
           context={context}
@@ -280,6 +294,7 @@ export function ResourceActions({
   onChanged,
   onOpenLogs,
   onEdit,
+  onAskAssistant,
 }: {
   context: string;
   kind: string;
@@ -292,6 +307,7 @@ export function ResourceActions({
   onChanged?: () => void;
   onOpenLogs?: (s: { context: string; namespace: string; kind: string; name: string }) => void;
   onEdit?: () => void;
+  onAskAssistant?: AskAssistant;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [restarting, setRestarting] = useState(false);
@@ -494,6 +510,14 @@ export function ResourceActions({
         title={deleteCheck ? denyReason(access, deleteCheck) : undefined}
         onClick={() => setConfirmDelete(true)}
       />
+      {onAskAssistant && (
+        <IconButton
+          icon={Bot}
+          label="Ask assistant"
+          title={`Ask the assistant about this ${kind}`}
+          onClick={() => onAskAssistant({ context, namespace: namespace ?? undefined, kind, name })}
+        />
+      )}
 
       {restarting && (
         <ConfirmDialog

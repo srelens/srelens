@@ -610,9 +610,29 @@ body {
   align-items: center;
   gap: var(--fl-space-sm);
   padding: var(--fl-space-md) 0;
-  overflow-y: auto;
+  /* The rail itself never scrolls — the fixed controls at the bottom
+     (toolbox, assistant, settings) must always stay visible. Only the
+     cluster list inside scrolls. */
+  overflow: hidden;
 }
-.fl-hotbar::-webkit-scrollbar { width: 0; }
+.fl-hotbar__clusters {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--fl-space-sm);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Keep the rail visually clean; the list still scrolls by wheel/trackpad. */
+  scrollbar-width: none;
+  width: 100%;
+}
+.fl-hotbar__clusters::-webkit-scrollbar { width: 0; }
+/* Flex children in a constrained column SHRINK before the container scrolls
+   — avatars would squish instead of scrolling without this. */
+.fl-hotbar__clusters > * {
+  flex-shrink: 0;
+}
 .fl-hotbar__theme {
   margin-top: auto;
   width: 36px;
@@ -3556,9 +3576,6 @@ body {
 }
 
 /* Enterprise navigation/list polish. */
-.fl-hotbar__spacer {
-  flex: 1 1 auto;
-}
 .fl-hotbar__theme {
   margin-top: 0;
 }

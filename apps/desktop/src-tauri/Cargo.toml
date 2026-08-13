@@ -1,6 +1,6 @@
 [package]
 name = "srelens-desktop"
-version = "0.4.1"
+version.workspace = true
 description = "srelens Kubernetes desktop workspace"
 edition = "2021"
 rust-version = "1.77.2"
@@ -31,6 +31,8 @@ tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+srelens-agent = { path = "../../../crates/agent" }
+srelens-llm = { path = "../../../crates/llm" }
 srelens-capability = { path = "../../../crates/capability" }
 srelens-mcp = { path = "../../../crates/mcp" }
 srelens-kube = { path = "../../../crates/kube" }
@@ -50,7 +52,17 @@ srelens-registry = { path = "../../../crates/registry" }
 # Each backend's transitive deps are already gated to their own target by the
 # keyring crate itself, so enabling all four is safe cross-platform.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
-tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros"] }
+# The secrets vault (issue #206): one XChaCha20-Poly1305-encrypted file keyed
+# by a single keychain-held master key, replacing per-secret keychain entries.
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+# Touch ID / Windows Hello gate for the vault master key (issue #208): the
+# plugin owns the SecAccessControl / Hello plumbing; get_data raises the
+# biometric prompt.
+tauri-plugin-biometry = "0.2"
+# Master-password key derivation for the vault (issue #208 follow-up).
+argon2 = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 # Blocking HTTP for Toolbox tool downloads (run inside spawn_blocking).
@@ -60,6 +72,9 @@ async-trait = "0.1"
 # provider. default-tls here pulls rustls-platform-verifier -> aws-lc-rs,
 # giving two providers and a runtime "could not determine CryptoProvider" panic.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+# Decodes base64 image attachments a chat turn carries (`chat_send`); also
+# used by `tests/e2e.rs` to decode a secret's value for assertions.
+base64 = "0.22"
 
 # Auto-update is desktop-only (mobile stores handle their own updates).
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
@@ -73,4 +88,3 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "process"] }
 futures = "0.3"
-base64 = "0.22"

@@ -6,6 +6,15 @@ use std::sync::Arc;
 use srelens_mcp::auth::TokenStore as _;
 
 fn main() {
+    // `SRELENS_MASTER_PASSWORD`: captured into a LOCAL and immediately
+    // scrubbed from the environment, FIRST, before any run-mode dispatch —
+    // every run mode (GUI, `--serve`, `--mcp-stdio`, `--mcp-http`) can spawn
+    // Helm binaries and kubectl exec credential plugins, and none of them
+    // may inherit the vault password. Only `--mcp-http` consumes the value
+    // (by move); every other mode drops it before running, so the plaintext
+    // does not sit in process memory for the whole session.
+    let master_password = std::env::var("SRELENS_MASTER_PASSWORD").ok().filter(|p| !p.is_empty());
+    std::env::remove_var("SRELENS_MASTER_PASSWORD");
     // GUI launches (Finder/Dock) inherit launchd's minimal PATH, not the
     // user's shell PATH — kubeconfig exec plugins (kubectl, kubectl-oidc_login,
     // cloud CLIs) then fail to spawn with "No such file or directory". Resolve
@@ -55,6 +64,7 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        drop(master_password);
         run_serve(addr.as_deref().unwrap_or("127.0.0.1:8080"), data.as_deref());
         return;
     }
@@ -69,6 +79,7 @@ fn main() {
     let allow_destructive = args.iter().any(|a| a == "--mcp-allow-destructive");
     let allow_sensitive_reads = args.iter().any(|a| a == "--mcp-allow-sensitive-reads");
     if args.iter().any(|a| a == "--mcp-stdio") {
+        drop(master_password);
         run_mcp_stdio(allow_destructive, allow_sensitive_reads);
         return;
     }
@@ -80,9 +91,10 @@ fn main() {
             .filter(|a| !a.starts_with("--"))
             .cloned()
             .unwrap_or_else(|| "127.0.0.1:8765".into());
-        run_mcp_http(&addr, allow_destructive, allow_sensitive_reads);
+        run_mcp_http(&addr, allow_destructive, allow_sensitive_reads, master_password);
         return;
     }
+    drop(master_password);
     srelens_desktop_lib::run();
 }
 
@@ -98,37 +110,28 @@ const TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 /// the app config dir. Headless mode never boots a Tauri `App`, so
 /// `app.path().app_config_dir()` (used in `lib.rs`'s setup) isn't callable
 /// here. This reproduces that resolver's formula — `dirs::config_dir()/<bundle
-/// identifier>` — directly, so the CLI and the GUI resolve to the same
-/// fallback file when the OS keychain isn't available, and to the same
-/// keychain entry (same service/account, see `token_store.rs`) when it is —
-/// either way, a token provisioned in one is usable from the other.
-fn mcp_token_path() -> std::path::PathBuf {
+/// identifier>` — directly, so the CLI and the GUI open the same secrets
+/// vault (`secrets.enc` under this dir, keyed by the same keychain-held
+/// master key — see `vault.rs`), and a token provisioned in one is usable
+/// from the other.
+fn mcp_dir() -> std::path::PathBuf {
     dirs::config_dir()
         .expect("could not resolve the platform config directory")
         .join("app.srelens.desktop") // tauri.conf.json "identifier"
         .join("mcp")
-        .join("token")
 }
 
 /// Where a headless run (`--mcp-stdio` / `--mcp-http`) writes its audit log —
-/// `audit.jsonl` next to the token file, in the same `mcp/` directory
-/// `mcp_token_path()` resolves. Derived from that path (not recomputed from
-/// the formula it documents) so the two can never drift apart.
+/// `audit.jsonl` in the same `mcp/` directory as the vault.
 fn mcp_audit_path() -> std::path::PathBuf {
-    mcp_token_path()
-        .parent()
-        .expect("mcp_token_path() always has a parent directory")
-        .join("audit.jsonl")
+    mcp_dir().join("audit.jsonl")
 }
 
 /// Where a headless run reads user prompt files — `prompts/` in the same `mcp/`
-/// directory `mcp_token_path()` resolves, so a prompt authored while the GUI is
-/// running is visible to `--mcp-stdio` and `--mcp-http` too.
+/// directory as the vault, so a prompt authored while the GUI is running is
+/// visible to `--mcp-stdio` and `--mcp-http` too.
 fn mcp_prompts_dir() -> std::path::PathBuf {
-    mcp_token_path()
-        .parent()
-        .expect("mcp_token_path() always has a parent directory")
-        .join("prompts")
+    mcp_dir().join("prompts")
 }
 
 /// Same rotation cap the desktop app's in-process MCP server uses (see
@@ -136,7 +139,12 @@ fn mcp_prompts_dir() -> std::path::PathBuf {
 /// identically.
 const MCP_AUDIT_CAP_BYTES: u64 = 5 * 1024 * 1024;
 
-fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool) {
+fn run_mcp_http(
+    addr: &str,
+    allow_destructive: bool,
+    allow_sensitive_reads: bool,
+    master_password: Option<String>,
+) {
     let addr: std::net::SocketAddr = addr.parse().expect("invalid --mcp-http address");
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(
         allow_destructive,
@@ -144,14 +152,36 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
     ));
 
     // The HTTP transport must never serve unauthenticated: resolve a token
-    // from the environment, then the store, then generate and persist one. Uses
-    // the same keychain-or-file resolution as the GUI (`token_store.rs`) so a
-    // token provisioned in one is usable from the other. The store itself
-    // absorbs a genuinely failed keychain call and falls back to the file
-    // rather than erroring — it only ever returns `Err` from `save` for a
-    // real file-write failure, so `.expect` below can't panic just because
-    // there's no D-Bus session on this host.
-    let store = srelens_desktop_lib::token_store::keychain_or_file(mcp_token_path());
+    // from the environment, then the vault, then generate and persist one.
+    // Same vault (and master key) as the GUI, so a token provisioned in one
+    // is usable from the other. The vault absorbs a genuinely failed keychain
+    // by holding its master key in a 0600 file instead — `save` only errors
+    // on a real file-write failure, so `.expect` below can't panic just
+    // because there's no D-Bus session on this host.
+    let vault = Arc::new(srelens_desktop_lib::vault::Vault::open(&mcp_dir()));
+    // A password-protected vault has no GUI here to unlock it: accept the
+    // master password from the environment (never argv — it would show in
+    // `ps`). Without it, `SRELENS_MCP_TOKEN` still works, and a store-token
+    // path that needs to mint exits below with guidance naming both.
+    // Both password-derived locked sources unlock with the master password:
+    // `biometric-locked` only means the GUI would normally skip the password
+    // via Touch ID / Hello — the password (and vault.json) still exist.
+    if matches!(vault.key_source(), "password-locked" | "biometric-locked") {
+        match master_password {
+            Some(password) => {
+                if let Err(e) =
+                    srelens_desktop_lib::vault::unlock_with_master_password(&vault, &mcp_dir(), &password)
+                {
+                    eprintln!("srelens: SRELENS_MASTER_PASSWORD did not unlock the vault: {e}");
+                    std::process::exit(2);
+                }
+            }
+            None => eprintln!(
+                "srelens: the secrets vault is password-locked; set SRELENS_MASTER_PASSWORD to unlock it, or pass the token via {TOKEN_ENV}"
+            ),
+        }
+    }
+    let store = srelens_desktop_lib::vault::VaultTokenStore(vault.clone());
     let token = match std::env::var(TOKEN_ENV).ok().filter(|v| !v.trim().is_empty()) {
         Some(hex) => srelens_mcp::auth::Token::from_hex(&hex).unwrap_or_else(|| {
             // The value itself is never echoed — that's the whole point of
@@ -163,7 +193,14 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
             Some(t) => t,
             None => {
                 let t = srelens_mcp::auth::Token::generate();
-                store.save(&t).expect("could not persist the MCP token");
+                if let Err(e) = store.save(&t) {
+                    // Covers a locked vault (keychain unreachable while a
+                    // vault exists) and real write failures — either way the
+                    // HTTP transport must not serve with a token nobody can
+                    // reuse next run.
+                    eprintln!("srelens: could not persist the MCP token: {e}");
+                    std::process::exit(2);
+                }
                 // stderr, not stdout: stdout is the JSON-RPC channel on the
                 // stdio transport and must stay parseable. HTTP has no such
                 // constraint but stays consistent with stdio here.
@@ -172,11 +209,8 @@ fn run_mcp_http(addr: &str, allow_destructive: bool, allow_sensitive_reads: bool
             }
         },
     };
-    // Checked after the load/save attempt above (not before): only then do
-    // we know whether the keychain actually served this call, rather than
-    // guessing from whether it merely looked reachable.
-    if store.current_backend() == "file" {
-        eprintln!("srelens: no OS keychain available, storing the MCP token in a 0600 file");
+    if vault.key_source() == "file" {
+        eprintln!("srelens: no OS keychain available, holding the vault master key in a 0600 file");
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

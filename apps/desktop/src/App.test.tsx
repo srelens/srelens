@@ -37,14 +37,24 @@ vi.mock("./components/ClusterHotbar", () => ({
   ClusterHotbar: ({
     onOpenContext,
     onOpenSettings,
+    onOpenAssistant,
   }: {
     onOpenContext: (c: string) => void;
     onOpenSettings: () => void;
+    onOpenAssistant?: () => void;
   }) => (
     <div>
       <button onClick={() => onOpenContext("kind-dev")}>open-kind-dev</button>
       <button onClick={() => onOpenContext("prod")}>open-prod</button>
       <button onClick={onOpenSettings}>open-settings</button>
+      <button onClick={onOpenAssistant}>open-assistant</button>
+    </div>
+  ),
+}));
+vi.mock("./components/AssistantTab", () => ({
+  AssistantTab: ({ cluster, namespace }: { cluster: string | null; namespace?: string }) => (
+    <div data-testid="assistant-tab">
+      {cluster ?? "none"}:{namespace ?? ""}
     </div>
   ),
 }));
@@ -63,8 +73,14 @@ vi.mock("./components/ClusterOverview", () => ({
   ),
 }));
 vi.mock("./components/ResourceBrowser", () => ({
-  RESOURCE_LABELS: { overview: "Overview", pods: "Pods", services: "Services", settings: "Settings" },
-  K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "" },
+  RESOURCE_LABELS: {
+    overview: "Overview",
+    pods: "Pods",
+    services: "Services",
+    settings: "Settings",
+    assistant: "Assistant",
+  },
+  K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "", assistant: "" },
   ResourceBrowser: ({
     context,
     kind,
@@ -198,6 +214,32 @@ describe("App", () => {
     expect(screen.getByTestId("settings").textContent).toBe("workspace settings");
     expect(screen.getByRole("tab", { name: /^Settings$/ })).toBeDefined();
     expect(screen.queryByText("nav-services")).toBeNull();
+  });
+
+  it("opens the assistant as a global workspace tab", () => {
+    // The assistant drives Tauri-only backend commands, so its entry point is
+    // gated behind `isTauri()` — give this test a desktop context.
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    render(<App />);
+    fireEvent.click(screen.getByText("open-assistant"));
+
+    expect(screen.getByTestId("assistant-tab").textContent).toBe("none:");
+    expect(screen.getByRole("tab", { name: /^Assistant$/ })).toBeDefined();
+
+    // Re-triggering focuses the same tab instead of duplicating it.
+    fireEvent.click(screen.getByText("open-settings"));
+    fireEvent.click(screen.getByText("open-assistant"));
+    expect(screen.getAllByRole("tab", { name: /^Assistant$/ })).toHaveLength(1);
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  it("hides the assistant entry point in a web build", () => {
+    // No Tauri context: the hotbar must not offer to open the assistant, since
+    // the web server has no agent/chat commands to back it.
+    render(<App />);
+    fireEvent.click(screen.getByText("open-assistant"));
+    expect(screen.queryByTestId("assistant-tab")).toBeNull();
+    expect(screen.queryByRole("tab", { name: /^Assistant$/ })).toBeNull();
   });
 
   it("close-active-tab (Cmd+W) closes the active tab, not the window", () => {

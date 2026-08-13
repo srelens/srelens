@@ -1,44 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-labelledby="title desc">
-  <title id="title">srelens app icon</title>
-  <desc id="desc">An original Kubernetes and SRE observability app icon with a cluster hexagon and magnifying lens.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
   <defs>
-    <linearGradient id="bg" x1="132" y1="80" x2="870" y2="944" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#F9FCFF"/>
-      <stop offset="1" stop-color="#EFF5FA"/>
+    <linearGradient id="lg" x1="8" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset=".55" stop-color="#e457c2"/>
+      <stop offset="1" stop-color="#fb923c"/>
     </linearGradient>
-    <linearGradient id="brand" x1="200" y1="160" x2="785" y2="838" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1769FF"/>
-      <stop offset="0.58" stop-color="#087AE8"/>
-      <stop offset="1" stop-color="#0AB5A1"/>
+    <linearGradient id="lg2" x1="12" y1="32" x2="52" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c4a7ff"/>
+      <stop offset="1" stop-color="#ff8de0"/>
     </linearGradient>
-    <linearGradient id="ring" x1="286" y1="306" x2="630" y2="715" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1769FF"/>
-      <stop offset="0.70" stop-color="#0B83E5"/>
-      <stop offset="1" stop-color="#08A99B"/>
-    </linearGradient>
-    <filter id="shadow" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="28" stdDeviation="34" flood-color="#203959" flood-opacity="0.17"/>
-    </filter>
+    <radialGradient id="glass" cx=".38" cy=".32" r=".9">
+      <stop offset="0" stop-color="#241a3d"/>
+      <stop offset="1" stop-color="#0b0816"/>
+    </radialGradient>
   </defs>
-  <rect x="76" y="76" width="872" height="872" rx="190" fill="url(#bg)" filter="url(#shadow)"/>
-  <rect x="76" y="76" width="872" height="872" rx="190" stroke="#FFFFFF" stroke-width="12"/>
-
-  <g transform="translate(166 154)">
-    <path d="M346 26 L630 190 L630 516 L346 680 L62 516 L62 190 Z" stroke="url(#brand)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="346" cy="26" r="38" fill="#1769FF" stroke="#fff" stroke-width="9"/>
-    <circle cx="62" cy="516" r="38" fill="#1769FF" stroke="#fff" stroke-width="9"/>
-    <circle cx="630" cy="516" r="38" fill="#35D28C" stroke="#fff" stroke-width="9"/>
-
-    <path d="M210 405 A148 148 0 0 1 265 236" stroke="url(#ring)" stroke-width="42" stroke-linecap="round"/>
-    <path d="M299 199 A148 148 0 0 1 415 201" stroke="url(#ring)" stroke-width="42" stroke-linecap="round"/>
-    <path d="M458 238 A148 148 0 0 1 491 392" stroke="url(#ring)" stroke-width="42" stroke-linecap="round"/>
-    <path d="M449 449 A148 148 0 0 1 336 499" stroke="url(#ring)" stroke-width="42" stroke-linecap="round"/>
-    <path d="M279 482 A148 148 0 0 1 210 430" stroke="url(#ring)" stroke-width="42" stroke-linecap="round"/>
-
-    <circle cx="352" cy="352" r="81" fill="#22324D"/>
-    <circle cx="352" cy="352" r="42" fill="#fff" opacity="0.10"/>
-    <path d="M409 409 L543 543" stroke="#26364F" stroke-width="68" stroke-linecap="round"/>
-    <path d="M410 410 L540 540" stroke="#344862" stroke-width="23" stroke-linecap="round" opacity="0.7"/>
-    <path d="M346 137 V190" stroke="#1769FF" stroke-width="32" stroke-linecap="round"/>
-  </g>
+  <!-- hexagon (kubernetes) -->
+  <path d="M32 3.5 56.5 17.6v28.3L32 60.5 7.5 45.9V17.6Z"
+        fill="url(#glass)" stroke="url(#lg)" stroke-width="3.2" stroke-linejoin="round"/>
+  <!-- lens ring -->
+  <circle cx="32" cy="32" r="15.5" stroke="url(#lg)" stroke-width="2.6" opacity=".95"/>
+  <circle cx="32" cy="32" r="15.5" stroke="#c4a7ff" stroke-width="2.6" opacity=".18" transform="translate(0 1)"/>
+  <!-- heartbeat pulse through the lens -->
+  <path d="M14 32h8.5l3-6.5 5 13.5 5.5-19 4.5 12h9.5"
+        stroke="url(#lg2)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- lens glint -->
+  <path d="M23.5 22.5a13 13 0 0 1 9-3.5" stroke="#e6d9ff" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+  <!-- signal dot -->
+  <circle cx="50" cy="32" r="2.6" fill="#ff8de0"/>
 </svg>

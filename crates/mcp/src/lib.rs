@@ -20,6 +20,14 @@ pub struct ToolDescriptor {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// MCP `annotations.readOnlyHint` — the tool doesn't mutate its
+    /// environment. Clients (e.g. Cursor) use it to auto-approve read-only
+    /// calls in non-interactive mode instead of rejecting them for lack of a
+    /// human approver.
+    pub read_only: bool,
+    /// MCP `annotations.destructiveHint` — the tool may perform destructive
+    /// updates (only meaningful when `read_only` is false).
+    pub destructive: bool,
 }
 
 /// Which transport a request arrived on. Recorded in the audit log and used to
@@ -135,6 +143,8 @@ impl McpServer {
                 name: cap.id.clone(),
                 description: cap.summary.clone(),
                 input_schema: cap.input_schema.clone(),
+                read_only: cap.annotations.read_only,
+                destructive: cap.annotations.destructive,
             })
             .collect()
     }

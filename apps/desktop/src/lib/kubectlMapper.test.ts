@@ -155,10 +155,65 @@ describe("kubectlMapper", () => {
       ).toBe('kubectl get pods web-0 -n "my ns" --context prod');
     });
 
-    it("escapes an embedded double quote in a quoted value", () => {
+    it("single-quotes a value with an embedded double quote (double-quoting can't hold it safely)", () => {
       expect(
         toKubectl({ action: "get", kind: "Pod", namespace: "default", name: "web-0", context: 'my "prod" cluster' }),
-      ).toBe('kubectl get pods web-0 -n default --context "my \\"prod\\" cluster"');
+      ).toBe("kubectl get pods web-0 -n default --context 'my \"prod\" cluster'");
+    });
+
+    it("single-quotes a context carrying command substitution so pasting can't execute it", () => {
+      // Inside double quotes, $( ) still EXECUTES in bash/zsh/PowerShell —
+      // only single quotes make it inert. Context names are user-chosen and
+      // not DNS-restricted, so this input is reachable.
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "$(touch /tmp/pwn)" }),
+      ).toBe("kubectl get pods web-0 --context '$(touch /tmp/pwn)'");
+    });
+
+    it("single-quotes backtick substitution the same way", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "`id` cluster" }),
+      ).toBe("kubectl get pods web-0 --context '`id` cluster'");
+    });
+
+    it("keeps a plain apostrophe (no expansion syntax) safely double-quoted", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "bob's cluster" }),
+      ).toBe('kubectl get pods web-0 --context "bob\'s cluster"');
+    });
+
+    it("apostrophe + expansion syntax becomes a placeholder — the POSIX '\\'' escape breaks out in PowerShell", () => {
+      // In pwsh, backslash is not a quote escape: 'a'\''$(whoami)'\''b'
+      // leaves $(whoami) outside any string and it executes. No single
+      // representation is inert in bash/zsh AND pwsh, so refuse to render
+      // the value, exactly like the Windows tier.
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "a'$(whoami)'b" }),
+      ).toBe('kubectl get pods web-0 --context "<enter context>"');
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "bob's $HOME" }),
+      ).toBe('kubectl get pods web-0 --context "<enter context>"');
+    });
+
+    it("windows: double quotes hold inert odd values — spaces and even & are literal inside them in cmd and PowerShell", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "my cluster" }, true),
+      ).toBe('kubectl get pods web-0 --context "my cluster"');
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "a & b" }, true),
+      ).toBe('kubectl get pods web-0 --context "a & b"');
+    });
+
+    it("windows: values with no cmd+PowerShell-safe representation become a fill-in placeholder", () => {
+      // Single quotes aren't quoting in cmd (& would chain a command through
+      // them) and double quotes leave $/` live in PowerShell and % live in
+      // cmd — so the hostile value must not be rendered at all.
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "x$&whoami>pwned&" }, true),
+      ).toBe('kubectl get pods web-0 --context "<enter context>"');
+      expect(
+        toKubectl({ action: "get", kind: "Pod", namespace: "%TEMP%", name: "web-0", context: "prod" }, true),
+      ).toBe('kubectl get pods web-0 -n "<enter namespace>" --context prod');
     });
 
     it("leaves plain resource names unquoted (DNS-1123 names are always in the safe set)", () => {

@@ -71,12 +71,11 @@ clusters. Open **Settings → MCP** to:
 - **Copy client config** for Claude Code, Claude Desktop, Cursor, Codex, Antigravity, and others.
 
 The HTTP server requires a bearer token, shown (and rotatable) from that same
-Settings page. Destructive tools prompt for confirmation in the app — an agent
-can't delete or drain anything without your approval. Headless CLI use needs
-`"_confirm": true` on the call plus a process-level opt-in:
+Settings page. Destructive tools prompt for confirmation in the app — an
+agent can't delete or drain anything without your approval. Headless CLI use
+needs `"_confirm": true` on the call plus a process-level opt-in:
 `--mcp-allow-destructive` to change anything, or `--mcp-allow-sensitive-reads`
-to read Secrets. See the [user guide](USAGE.md#mcp-server-for-ai-agents) for the
-full security model.
+to read Secrets. See [MCP.md](MCP.md) for the full security model.
 
 ## Updating
 

@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"019feb08-beab-73d0-885c-08465630668c"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll invoke the requested MCP echo tool and reproduce its return value exactly."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{"message":"srelens-mcp-probe"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{"message":"srelens-mcp-probe"},"result":{"content":[{"type":"text","text":"Echo: srelens-mcp-probe"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"{\"content\":[{\"type\":\"text\",\"text\":\"Echo: srelens-mcp-probe\"}]}"}}
+{"type":"turn.completed","usage":{"input_tokens":56723,"cached_input_tokens":34304,"output_tokens":185,"reasoning_output_tokens":43}}

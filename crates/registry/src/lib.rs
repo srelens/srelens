@@ -14,6 +14,14 @@ use srelens_kube::client_cache::ClientCache;
 mod catalog;
 pub use catalog::{catalog_of, CatalogEntry};
 
+// Test-only: every consumer of this module — `render_catalog` (regenerated via
+// `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
+// own unit tests — runs under `#[cfg(test)]`. Nothing in a normal build calls
+// it, so `pub` would be the only thing keeping it from looking dead; gating
+// the whole module here is more honest than papering over that with `pub`.
+#[cfg(test)]
+pub(crate) mod mcp_docs;
+
 /// Sorted id + annotation-flag projection of the live registry, emitted to a
 /// committed JSON so the frontend palette audit can cross-check it without
 /// linking Rust. See `capability_catalog_json_is_in_sync`.
@@ -444,5 +452,220 @@ mod tests {
         }
         let got = std::fs::read_to_string(path).unwrap_or_default();
         assert_eq!(got, want, "capability-catalog.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry");
+    }
+
+    /// The published catalog MUST equal what the live registry, prompt library
+    /// and resource templates render. Same convention as
+    /// `capability_catalog_json_is_in_sync` above — one regeneration knob.
+    #[test]
+    fn mcp_catalog_md_is_in_sync() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/mcp-catalog.md");
+        let want = crate::mcp_docs::render_catalog();
+        if std::env::var("UPDATE_CATALOG").is_ok() {
+            std::fs::write(path, &want).unwrap();
+            return;
+        }
+        let got = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            got, want,
+            "docs/mcp-catalog.md is stale — run `UPDATE_CATALOG=1 cargo test -p srelens-registry`"
+        );
+    }
+
+    fn doc(name: &str) -> String {
+        let path = format!("{}/../../docs/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// A renamed tool must not leave a plausible-looking dead example behind.
+    /// Scans MCP.md for capability-shaped identifiers and asserts each is real.
+    #[test]
+    fn every_tool_identifier_in_mcp_md_is_registered() {
+        let md = doc("MCP.md");
+        let reg = build_registry();
+        let ids: std::collections::BTreeSet<&str> = reg.ids().into_iter().collect();
+
+        let mut checked = 0usize;
+        // Identifiers appear in backticks, e.g. `k8s.listPods`.
+        for token in md.split('`').skip(1).step_by(2) {
+            if !(token.starts_with("k8s.") || token.starts_with("toolbox.")) {
+                continue;
+            }
+            // Skip URI-ish and prose-ish tokens that merely start with the prefix.
+            if token.contains(' ') || token.contains('/') || token.contains('{') {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                ids.contains(token),
+                "docs/MCP.md names `{token}`, which is not a registered capability"
+            );
+        }
+        assert!(checked >= 5, "expected the examples to name several real tools, saw {checked}");
+    }
+
+    /// Flags the docs mention *in order to say they do not exist*. Keeping this
+    /// list explicit is what lets the guard below stay strict without forcing a
+    /// true statement out of the documentation.
+    ///
+    /// `--mcp-token` is documented as deliberately absent: a token in argv is
+    /// visible to every account on the machine via `ps`, so it comes from
+    /// `SRELENS_MCP_TOKEN` instead. Deleting that sentence to satisfy a test
+    /// would make the docs less accurate, not more.
+    const DOCUMENTED_AS_ABSENT: [&str; 2] = ["--mcp-token", "--version"];
+
+    /// A renamed or removed CLI flag must fail here rather than silently
+    /// breaking the documented setup path. Also scans for backticked
+    /// `SRELENS_*` environment variable names, so a doc naming e.g.
+    /// `SRELENS_MCP_BEARER` for a variable main.rs never reads would fail
+    /// here too, not just the `TOKEN_ENV` constant the generated catalog
+    /// cross-checks.
+    /// Every `.rs` file under `crates/` and the desktop app, concatenated.
+    ///
+    /// Environment variables are read wherever they are needed — the desktop
+    /// binary, `crates/server`, capability crates — so a documented variable
+    /// has to be looked for across the workspace rather than in one file.
+    fn workspace_rust_sources() -> String {
+        fn walk(dir: &std::path::Path, out: &mut String) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    // Skip the catalog renderer. It defines the documented
+                    // names (`TOKEN_ENV = "SRELENS_MCP_TOKEN"`) in order to
+                    // *print* them, so finding a literal there is not evidence
+                    // that anything reads the variable — it would let this
+                    // guard pass even after the variable was renamed out of
+                    // production. The guard has to look at code that uses the
+                    // name, not code that documents it.
+                    if path.file_name().is_some_and(|n| n == "mcp_docs.rs") {
+                        continue;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        // Comment lines are dropped. A name mentioned in prose
+                        // — including the comment just above, and this test's
+                        // own doc comment — is not evidence that any code reads
+                        // it. Leaving them in let this guard be satisfied by its
+                        // own explanation of itself.
+                        for line in text.lines() {
+                            let trimmed = line.trim_start();
+                            if trimmed.starts_with("//") {
+                                continue;
+                            }
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let mut out = String::new();
+        walk(&root.join("crates"), &mut out);
+        walk(&root.join("apps/desktop/src-tauri/src"), &mut out);
+        assert!(!out.is_empty(), "found no Rust sources to scan");
+        out
+    }
+
+    #[test]
+    fn every_flag_named_in_the_docs_is_real_or_explicitly_absent() {
+        let main_rs = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src-tauri/src/main.rs"
+        ))
+        .expect("main.rs is readable");
+
+        // Every file that names a flag, not just the new ones — a stale flag is
+        // just as broken in INSTALL.md as in MCP.md.
+        for name in ["MCP.md", "mcp-catalog.md", "USAGE.md", "INSTALL.md", "DEVELOPMENT.md"] {
+            let md = doc(name);
+
+            // Any flag the docs show being passed to the binary — `srelens
+            // --foo` — not just `--mcp*` ones. A `srelens --version` suggestion
+            // slipped in here once: there is no version flag, and an
+            // unrecognised argument falls through and launches the GUI, so the
+            // suggested verification command would hang a terminal. Scoped to
+            // the `srelens ` prefix so cargo/kubectl flags in the same docs are
+            // not swept in.
+            for occurrence in md.split("srelens --").skip(1) {
+                let flag: String = std::iter::once('-')
+                    .chain(std::iter::once('-'))
+                    .chain(occurrence.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-'))
+                    .collect();
+                if DOCUMENTED_AS_ABSENT.contains(&flag.as_str()) {
+                    assert!(
+                        !main_rs.contains(&format!("\"{flag}\"")),
+                        "{flag} is on DOCUMENTED_AS_ABSENT but the CLI now accepts it — \
+                         the docs saying it does not exist are now wrong"
+                    );
+                    continue;
+                }
+                assert!(
+                    main_rs.contains(&format!("\"{flag}\"")),
+                    "docs/{name} shows `srelens {flag}`, which the CLI does not accept"
+                );
+            }
+            for token in md.split('`').skip(1).step_by(2) {
+                if token.starts_with("--mcp") {
+                    // `--mcp-allow-*` is prose shorthand for "whichever of the
+                    // family applies", not a claim that a flag literally named
+                    // with a `*` exists — a glob is self-evidently not a literal
+                    // flag name, so it doesn't constrain how the docs are written.
+                    if token.contains('*') {
+                        continue;
+                    }
+                    // `--mcp-http 127.0.0.1:8765` — compare the flag, not its argument.
+                    let flag = token.split_whitespace().next().unwrap_or(token);
+                    if DOCUMENTED_AS_ABSENT.contains(&flag) {
+                        assert!(
+                            !main_rs.contains(&format!("\"{flag}\"")),
+                            "{flag} is on DOCUMENTED_AS_ABSENT but the CLI now accepts it — \
+                             the docs saying it does not exist are now wrong"
+                        );
+                        continue;
+                    }
+                    assert!(
+                        main_rs.contains(&format!("\"{flag}\"")),
+                        "docs/{name} names {flag}, which the CLI does not accept"
+                    );
+                } else if token.starts_with("SRELENS_") {
+                    // A bare env var name (`SRELENS_MCP_TOKEN`) or one shown with
+                    // a shell assignment (`SRELENS_MCP_TOKEN=...`) — compare just
+                    // the name.
+                    let var = token
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or(token);
+                    // Searched across the whole workspace, NOT just the desktop
+                    // `main.rs` the flag check uses. CLI flags are all parsed in
+                    // one place, but environment variables are not: web-mode
+                    // documents `SRELENS_MASTER_KEY` and `SRELENS_DEV_LOGIN`,
+                    // which `crates/server` reads and `main.rs` never mentions.
+                    // Scoping this to `main.rs` made the test fail on accurate
+                    // prose — which is the test being wrong, not the docs.
+                    assert!(
+                        workspace_rust_sources().contains(&format!("\"{var}\"")),
+                        "docs/{name} names environment variable {var}, which no Rust source reads"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_json_block_in_the_docs_parses() {
+        for name in ["MCP.md", "mcp-catalog.md"] {
+            let md = doc(name);
+            for block in crate::mcp_docs::tests_support::json_blocks(&md) {
+                serde_json::from_str::<serde_json::Value>(&block).unwrap_or_else(|e| {
+                    panic!("docs/{name} has a json block that does not parse: {e}\n{block}")
+                });
+            }
+        }
     }
 }

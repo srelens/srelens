@@ -95,12 +95,20 @@ jobs:
           RANGE=""
           [ -n "$LAST_TAG" ] && RANGE="${LAST_TAG}..HEAD"
           SUBJECTS=$(git log --no-merges --pretty=%B ${RANGE})
+          # Each pattern also accepts a leading "* " so a SQUASH-merged
+          # dev→main promotion still releases: GitHub's default squash message
+          # lists the squashed commits as "* <subject>" bullets in the body,
+          # and without this the only commit in range would be the
+          # non-conventional "release: ..." subject itself — BUMP=none, and
+          # the entire release (desktop, docker, AUR) silently skips. The
+          # documented path is still a plain merge commit; this is the
+          # backstop for the wrong button.
           if echo "$SUBJECTS" | grep -qiE '(^|[[:space:]])BREAKING[ -]CHANGE' \
-             || echo "$SUBJECTS" | grep -qE '^[a-z]+(\([^)]*\))?!:'; then
+             || echo "$SUBJECTS" | grep -qE '^(\* )?[a-z]+(\([^)]*\))?!:'; then
             BUMP=major
-          elif echo "$SUBJECTS" | grep -qE '^feat(\([^)]*\))?:'; then
+          elif echo "$SUBJECTS" | grep -qE '^(\* )?feat(\([^)]*\))?:'; then
             BUMP=minor
-          elif echo "$SUBJECTS" | grep -qE '^(fix|perf)(\([^)]*\))?:'; then
+          elif echo "$SUBJECTS" | grep -qE '^(\* )?(fix|perf)(\([^)]*\))?:'; then
             BUMP=patch
           else
             BUMP=none
@@ -118,8 +126,12 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");const n=s.replace(re,to);if(n===s)throw new Error("no version match in "+p);fs.writeFileSync(p,n)};
             sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
-            sub("apps/desktop/src-tauri/Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-desktop"\r?\nversion = ")[^"]+(")/,`$1${v}$2`);
+            // Every crate inherits [workspace.package].version from the root
+            // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
+            // whole workspace — the server binary, the MCP serverInfo, all of
+            // it — and the lock updates every srelens-* member to match.
+            sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
+            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$NEW"
           # Grouped changelog for the release body. The Conventional Commit type
           # is dropped (the section heading already says Features / Fixes) but
@@ -129,8 +141,16 @@ jobs:
           # and smarter ranking" tells a user nothing that "**palette:** ..."
           # does. Line 1 handles scoped commits, line 2 unscoped ones.
           strip='s/^[a-z]+\(([^)]*)\)!?:[[:space:]]*/**\1:** /; s/^[a-z]+!?:[[:space:]]*//'
-          FEATS=$(git log --no-merges --pretty=%s ${RANGE} | grep -E '^feat' | sed -E "$strip" | sed 's/^/- /' || true)
-          FIXES=$(git log --no-merges --pretty=%s ${RANGE} | grep -E '^(fix|perf)' | sed -E "$strip" | sed 's/^/- /' || true)
+          # Subjects, plus "* <subject>" bullets from commit BODIES — the shape
+          # GitHub's squash merge records the squashed commits in. Without the
+          # bullets, a squash-merged promotion (whose only subject is the
+          # non-conventional "release: ..." title) would pass the bump gate
+          # above but publish a release with EMPTY notes. Plain body prose
+          # stays excluded: only "* "-bulleted, type-prefixed lines qualify.
+          SOURCES=$( { git log --no-merges --pretty=%s ${RANGE}; \
+                       git log --no-merges --pretty=%b ${RANGE} | sed -nE 's/^\* ([a-z]+(\([^)]*\))?!?:.*)$/\1/p'; } )
+          FEATS=$(echo "$SOURCES" | grep -E '^feat' | sed -E "$strip" | sed 's/^/- /' || true)
+          FIXES=$(echo "$SOURCES" | grep -E '^(fix|perf)' | sed -E "$strip" | sed 's/^/- /' || true)
           {
             echo "notes<<__NOTES_EOF__"
             [ -n "$FEATS" ] && printf '### Features\n%s\n\n' "$FEATS"
@@ -179,6 +199,23 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      # Stamp the release version into the workspace before the image builds:
+      # every crate inherits [workspace.package].version, and without this the
+      # server binary in the image reports the committed placeholder instead
+      # of the released version — on main this job checks out the pre-bump
+      # push sha (the version job's bump commit lands after), and on dev the
+      # pre-release version is never committed at all.
+      - name: Set build version
+        shell: bash
+        run: |
+          V="${{ needs.version.outputs.version }}"
+          node -e '
+            const fs=require("fs");const v=process.argv[1];
+            const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
+            sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
+            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+          ' "$V"
+          echo "Docker build version: $V"
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
@@ -391,8 +428,8 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
-            sub("apps/desktop/src-tauri/Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-desktop"\r?\nversion = ")[^"]+(")/,`$1${v}$2`);
+            sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
+            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Built version: $V"
 

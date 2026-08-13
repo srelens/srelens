@@ -2,6 +2,7 @@ import React from "react";
 import {
   ArrowLeftRight,
   BellRing,
+  Bot,
   Box,
   BriefcaseBusiness,
   Circle,
@@ -80,6 +81,7 @@ const RESOURCE_ICONS: Record<string, LucideIcon> = {
   helmreleases: ShipWheel,
   settings: Settings,
   toolbox: Wrench,
+  assistant: Bot,
   newresource: FilePlus2,
 };
 

@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/capability", "crates/mcp", "crates/kube", "crates/streams", "crates/server", "crates/registry", "apps/desktop/src-tauri"]
+members = ["crates/agent", "crates/capability", "crates/mcp", "crates/kube", "crates/streams", "crates/server", "crates/registry", "crates/llm", "apps/desktop/src-tauri"]
 
 [workspace.package]
 edition = "2021"
-version = "0.0.0"
+version = "0.5.0"
 license = "MIT"

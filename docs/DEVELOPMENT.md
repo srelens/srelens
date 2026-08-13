@@ -157,7 +157,7 @@ Beyond tools, the server implements:
 
 Every component fails closed: an `McpServer` whose host wires nothing denies every gated call, resolves no kinds, and refuses every subscription.
 
-See the [user guide](USAGE.md#mcp-server-for-ai-agents) for the full security model.
+See [MCP.md](MCP.md) for the full security model.
 
 ## Web mode
 

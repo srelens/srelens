@@ -1,44 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="42 30 408 408" fill="none" role="img" aria-labelledby="title desc">
-  <title id="title">srelens mark</title>
-  <desc id="desc">A Kubernetes and SRE observability brand mark with a cluster hexagon and a magnifying lens.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
   <defs>
-    <linearGradient id="brand" x1="84" y1="53" x2="370" y2="383" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1769FF"/>
-      <stop offset="0.58" stop-color="#087AE8"/>
-      <stop offset="1" stop-color="#0AB5A1"/>
+    <linearGradient id="lg" x1="8" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset=".55" stop-color="#e457c2"/>
+      <stop offset="1" stop-color="#fb923c"/>
     </linearGradient>
-    <linearGradient id="ring" x1="132" y1="120" x2="290" y2="330" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1769FF"/>
-      <stop offset="0.7" stop-color="#0B83E5"/>
-      <stop offset="1" stop-color="#08A99B"/>
+    <linearGradient id="lg2" x1="12" y1="32" x2="52" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c4a7ff"/>
+      <stop offset="1" stop-color="#ff8de0"/>
     </linearGradient>
+    <radialGradient id="glass" cx=".38" cy=".32" r=".9">
+      <stop offset="0" stop-color="#241a3d"/>
+      <stop offset="1" stop-color="#0b0816"/>
+    </radialGradient>
   </defs>
-
-  <g transform="translate(66 54)">
-    <!-- Cluster hexagon -->
-    <path d="M184 16 L330 100 L330 268 L184 352 L38 268 L38 100 Z" stroke="url(#brand)" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
-
-    <!-- Cluster nodes -->
-    <circle cx="184" cy="16" r="20" fill="#1769FF" stroke="#fff" stroke-width="5"/>
-    <circle cx="38" cy="268" r="20" fill="#1769FF" stroke="#fff" stroke-width="5"/>
-    <circle cx="330" cy="268" r="20" fill="#35D28C" stroke="#fff" stroke-width="5"/>
-
-    <!-- Lens outer orbit -->
-    <path d="M113 213 A77 77 0 0 1 142 125" stroke="url(#ring)" stroke-width="20" stroke-linecap="round"/>
-    <path d="M160 107 A77 77 0 0 1 221 109" stroke="url(#ring)" stroke-width="20" stroke-linecap="round"/>
-    <path d="M244 127 A77 77 0 0 1 260 207" stroke="url(#ring)" stroke-width="20" stroke-linecap="round"/>
-    <path d="M237 235 A77 77 0 0 1 177 261" stroke="url(#ring)" stroke-width="20" stroke-linecap="round"/>
-    <path d="M148 252 A77 77 0 0 1 113 226" stroke="url(#ring)" stroke-width="20" stroke-linecap="round"/>
-
-    <!-- Lens core -->
-    <circle cx="187" cy="184" r="42" fill="#22324D"/>
-    <circle cx="187" cy="184" r="22" fill="#fff" opacity="0.10"/>
-
-    <!-- Search handle -->
-    <path d="M216 214 L287 285" stroke="#26364F" stroke-width="33" stroke-linecap="round"/>
-    <path d="M217 215 L285 283" stroke="#344862" stroke-width="12" stroke-linecap="round" opacity="0.7"/>
-
-    <!-- Small SRE signal point -->
-    <path d="M184 72 V100" stroke="#1769FF" stroke-width="16" stroke-linecap="round"/>
-  </g>
+  <!-- hexagon (kubernetes) -->
+  <path d="M32 3.5 56.5 17.6v28.3L32 60.5 7.5 45.9V17.6Z"
+        fill="url(#glass)" stroke="url(#lg)" stroke-width="3.2" stroke-linejoin="round"/>
+  <!-- lens ring -->
+  <circle cx="32" cy="32" r="15.5" stroke="url(#lg)" stroke-width="2.6" opacity=".95"/>
+  <circle cx="32" cy="32" r="15.5" stroke="#c4a7ff" stroke-width="2.6" opacity=".18" transform="translate(0 1)"/>
+  <!-- heartbeat pulse through the lens -->
+  <path d="M14 32h8.5l3-6.5 5 13.5 5.5-19 4.5 12h9.5"
+        stroke="url(#lg2)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- lens glint -->
+  <path d="M23.5 22.5a13 13 0 0 1 9-3.5" stroke="#e6d9ff" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+  <!-- signal dot -->
+  <circle cx="50" cy="32" r="2.6" fill="#ff8de0"/>
 </svg>

@@ -1,0 +1,26 @@
+[package]
+name = "srelens-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Native in-process LLM agent: talks directly to provider APIs (Anthropic,
+# OpenAI, Gemini, OpenAI-compatible) with the user's own key, and drives
+# srelens's MCP tools through the same boundary the CLI agents use. Request
+# construction and SSE parsing are pure and unit-tested; only the thin client
+# wrappers touch the network.
+
+[dependencies]
+srelens-agent = { path = "../agent" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+thiserror = "1"
+async-trait = "0.1"
+# Async client with streaming SSE bodies. `rustls-no-provider` matches the
+# workspace's reqwest; the desktop process installs the crypto provider.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread"] }

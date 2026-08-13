@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Moon, Settings, Sun, Wrench } from "lucide-react";
+import { Bot, Moon, Settings, Sun, Wrench } from "lucide-react";
 import { listContexts, type ClusterContext } from "../lib/clusters";
 import {
   type Theme,
@@ -20,6 +20,7 @@ export function ClusterHotbar({
   onToggleTheme,
   onOpenSettings,
   onOpenToolbox,
+  onOpenAssistant,
   contextProfiles = {},
   kubeconfigFiles = EMPTY_LIST,
   contextOrder = EMPTY_LIST,
@@ -31,6 +32,7 @@ export function ClusterHotbar({
   onToggleTheme: () => void;
   onOpenSettings: () => void;
   onOpenToolbox?: () => void;
+  onOpenAssistant?: () => void;
   contextProfiles?: ContextProfiles;
   kubeconfigFiles?: string[];
   contextOrder?: string[];
@@ -76,12 +78,16 @@ export function ClusterHotbar({
 
   return (
     <div className="fl-hotbar">
-      {remoteContexts.map(renderItem)}
-      {remoteContexts.length > 0 && localContexts.length > 0 && (
-        <div className="fl-hotbar__divider" role="separator" aria-label="Local clusters" />
-      )}
-      {localContexts.map(renderItem)}
-      <div className="fl-hotbar__spacer" aria-hidden="true" />
+      {/* Only the cluster list scrolls — with many contexts it must never
+          push the fixed controls below (toolbox, assistant, settings) out
+          of the window. */}
+      <div className="fl-hotbar__clusters">
+        {remoteContexts.map(renderItem)}
+        {remoteContexts.length > 0 && localContexts.length > 0 && (
+          <div className="fl-hotbar__divider" role="separator" aria-label="Local clusters" />
+        )}
+        {localContexts.map(renderItem)}
+      </div>
       <button
         className="fl-hotbar__theme"
         aria-label={theme.mode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
@@ -98,6 +104,16 @@ export function ClusterHotbar({
           onClick={onOpenToolbox}
         >
           <Wrench aria-hidden="true" />
+        </button>
+      )}
+      {onOpenAssistant && (
+        <button
+          className="fl-hotbar__theme"
+          aria-label="Open assistant"
+          title="Open assistant"
+          onClick={onOpenAssistant}
+        >
+          <Bot aria-hidden="true" />
         </button>
       )}
       <button

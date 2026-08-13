@@ -22,10 +22,17 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
+  <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/srelens/srelens/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/srelens/srelens?display_name=release&label=release&color=22c55e"></a>
   <a href="https://github.com/srelens/srelens/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/srelens/srelens/total?label=downloads&color=3b82f6"></a>
+  <a href="https://aur.archlinux.org/packages/srelens-bin"><img alt="AUR version" src="https://img.shields.io/aur/version/srelens-bin?label=aur&logo=archlinux&logoColor=white&color=1793d1"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/srelens/srelens?color=675e80"></a>
-  <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/badge/reddit-r%2Fsrelens-FF4500?logo=reddit&logoColor=white"></a>
+  <a href="https://github.com/srelens/srelens/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/srelens/srelens/actions/workflows/ci.yml/badge.svg?branch=dev"></a>
 </p>
 
 <p align="center">
@@ -148,9 +155,9 @@ dialog to show, so they need `"_confirm": true` on the call *and* a
 process-level opt-in — `--mcp-allow-destructive` to change anything, or
 `--mcp-allow-sensitive-reads` to read Secrets. The two are independent, so
 reading a Secret never implies permission to drain a node, and neither flag
-alone authorizes anything without `_confirm`. There's no GUI toggle for stdio.
-See the [user guide](docs/USAGE.md#mcp-server-for-ai-agents) for the full
-security model, including the Host-header check, audit log, and token storage.
+alone authorizes anything without `_confirm`. There's no GUI toggle for
+stdio. See [docs/MCP.md](docs/MCP.md) for the full security model, including
+the Host-header check, audit log, and token storage.
 
 Example stdio configuration:
 
@@ -258,6 +265,7 @@ Contributions are welcome. Start with:
 
 - [Contribution guide](CONTRIBUTING.md)
 - [Developer guide](docs/DEVELOPMENT.md)
+- [MCP agent integration guide](docs/MCP.md)
 - [Open issues](https://github.com/srelens/srelens/issues)
 
 Please review the [Code of Conduct](.github/CODE_OF_CONDUCT.md) before

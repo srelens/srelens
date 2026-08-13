@@ -18,7 +18,18 @@ pub const MAX_SUBSCRIPTIONS: usize = 32;
 /// await.
 #[derive(Default)]
 pub struct SubscriptionRegistry {
-    live: Mutex<BTreeMap<String, AbortHandle>>,
+    live: Mutex<BTreeMap<String, Entry>>,
+    /// Monotonic id stamped onto each stored entry, so a watch's own
+    /// `on_dead` can prove the entry it is about to evict is still ITS watch
+    /// (see `remove_if`) — a re-subscribe may have replaced it in the
+    /// meantime, and evicting the replacement would silently unsubscribe a
+    /// live watch the client believes in.
+    next_generation: std::sync::atomic::AtomicU64,
+}
+
+struct Entry {
+    generation: u64,
+    handle: AbortHandle,
 }
 
 impl SubscriptionRegistry {
@@ -35,8 +46,18 @@ impl SubscriptionRegistry {
     /// before returning, since a rejected watch is useless by definition and
     /// the caller has no reference left to clean it up. Callers never need to
     /// abort on `Err`.
-    pub fn insert(&self, uri: String, handle: AbortHandle) -> Result<(), String> {
+    ///
+    /// Returns the stored entry's generation — the token `remove_if` needs.
+    pub fn insert(&self, uri: String, handle: AbortHandle) -> Result<u64, String> {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        if !live.contains_key(&uri) && live.len() >= MAX_SUBSCRIPTIONS {
+            // Before refusing, reap entries whose watch task already ended
+            // (#195): the honest eviction path is the watcher's `on_dead`
+            // callback, but a dead entry that slipped past it must not hold
+            // a slot against a legitimate subscription. `is_finished` is
+            // false for live watches, so this never evicts a working one.
+            live.retain(|_, e| !e.handle.is_finished());
+        }
         if !live.contains_key(&uri) && live.len() >= MAX_SUBSCRIPTIONS {
             handle.abort();
             return Err(format!(
@@ -44,21 +65,43 @@ impl SubscriptionRegistry {
                  unsubscribe from something first"
             ));
         }
-        if let Some(previous) = live.insert(uri, handle) {
-            previous.abort();
+        let generation = self
+            .next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(previous) = live.insert(uri, Entry { generation, handle }) {
+            previous.handle.abort();
         }
-        Ok(())
+        Ok(generation)
     }
 
     /// Abort and forget `uri`. Returns whether it was subscribed.
     pub fn remove(&self, uri: &str) -> bool {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         match live.remove(uri) {
-            Some(handle) => {
-                handle.abort();
+            Some(entry) => {
+                entry.handle.abort();
                 true
             }
             None => false,
+        }
+    }
+
+    /// Abort and forget `uri` ONLY if the stored entry still carries
+    /// `generation` — i.e. it is still the watch that obtained that token
+    /// from `insert`. The eviction path for a dead watch's `on_dead`
+    /// callback: a client may have re-subscribed the same URI while the
+    /// callback was in flight, and unconditional removal would abort the
+    /// replacement — leaving the client subscribed to nothing while
+    /// believing otherwise. Returns whether an entry was removed.
+    pub fn remove_if(&self, uri: &str, generation: u64) -> bool {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        match live.get(uri) {
+            Some(entry) if entry.generation == generation => {
+                let entry = live.remove(uri).expect("checked present under the same lock");
+                entry.handle.abort();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -74,8 +117,8 @@ impl SubscriptionRegistry {
     /// outlives the session.
     pub fn abort_all(&self) {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        for handle in live.values() {
-            handle.abort();
+        for entry in live.values() {
+            entry.handle.abort();
         }
         live.clear();
     }
@@ -167,6 +210,50 @@ mod tests {
         let e = r.insert("k8s://c/ns/Pod/one-too-many".into(), spawn_forever()).unwrap_err();
         assert!(e.contains(&MAX_SUBSCRIPTIONS.to_string()), "got: {e}");
         assert_eq!(r.len(), MAX_SUBSCRIPTIONS);
+    }
+
+    /// A dead watch's late `on_dead` must not evict the watch that REPLACED
+    /// it: `remove_if` only removes when the stored generation still matches
+    /// the caller's token.
+    #[tokio::test]
+    async fn remove_if_spares_a_replacement_watch() {
+        let r = SubscriptionRegistry::new();
+        let stale = r.insert("k8s://c/ns/Pod/a".into(), spawn_forever()).unwrap();
+        let (fresh_handle, fresh_join) = spawn_forever_joined();
+        let fresh = r.insert("k8s://c/ns/Pod/a".into(), fresh_handle).unwrap();
+
+        // The first watch died and its callback arrives late, carrying the
+        // stale token — the replacement must survive.
+        assert!(!r.remove_if("k8s://c/ns/Pod/a", stale));
+        assert_eq!(r.len(), 1, "the replacement watch stays subscribed");
+
+        // The replacement's own token still evicts it.
+        assert!(r.remove_if("k8s://c/ns/Pod/a", fresh));
+        assert_aborted(fresh_join).await;
+    }
+
+    /// The cheap half of #195: entries whose watch task already ended must
+    /// not hold slots against a legitimate subscription — the cap check
+    /// reaps them before refusing. (The honest path is the watcher's
+    /// `on_dead` eviction; this is the backstop for a watcher that never
+    /// reports.)
+    #[tokio::test]
+    async fn dead_entries_are_reaped_before_the_cap_refuses() {
+        let r = SubscriptionRegistry::new();
+        for i in 0..MAX_SUBSCRIPTIONS {
+            // A task that completes instantly, awaited to completion so
+            // `is_finished` is deterministically true by insert time.
+            let join = tokio::spawn(async {});
+            let handle = join.abort_handle();
+            join.await.unwrap();
+            r.insert(format!("k8s://c/ns/Pod/dead{i}"), handle).unwrap();
+        }
+        assert_eq!(r.len(), MAX_SUBSCRIPTIONS, "dead entries fill the registry");
+        // At the cap, but every occupant is dead — the new subscription must
+        // get a slot, not `too many subscriptions`.
+        r.insert("k8s://c/ns/Pod/alive".into(), spawn_forever())
+            .expect("reaping the dead entries makes room");
+        assert_eq!(r.len(), 1, "only the live subscription remains");
     }
 
     /// `insert` takes ownership of `handle`; on the cap-rejection branch it

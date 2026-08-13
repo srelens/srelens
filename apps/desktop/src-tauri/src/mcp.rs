@@ -17,6 +17,9 @@ struct Running {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
+    // Read via `McpHttpManager::session_token`, which the assistant's
+    // `chat_send` uses to authenticate the agent CLI against this server.
+    token: srelens_mcp::auth::Token,
 }
 
 /// Tauri-managed state owning the running MCP HTTP server (if any).
@@ -47,6 +50,51 @@ impl McpHttpManager {
     /// as a witness, so neither can be called without it being held.
     async fn lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.lifecycle.lock().await
+    }
+
+    /// The bearer token the running loopback MCP server accepts, as hex, or
+    /// `None` if no server is running. The assistant uses this to authenticate;
+    /// it grants only the loopback MCP surface, never cluster credentials.
+    pub fn session_token(&self) -> Option<String> {
+        let running = self.running.lock().unwrap();
+        running.as_ref().map(|r| r.token.as_str().to_string())
+    }
+
+    /// The running loopback MCP server's URL (already including the `/mcp`
+    /// path, per `url_for`), or `None` if it isn't running. The assistant's
+    /// `chat_send` passes this straight into the agent's MCP config.
+    pub fn status_url(&self) -> Option<String> {
+        let running = self.running.lock().unwrap();
+        running.as_ref().map(|r| url_for(r.addr))
+    }
+
+    /// Build an `McpServer` wired with the same registry, consent policy, audit,
+    /// prompts, and resources the HTTP transport uses. Both the loopback HTTP
+    /// server (for the CLI agents) and the in-process native agent build their
+    /// server this way, so all agents get identical tools, the same
+    /// destructive-tool confirm dialog, and the same audit log — the native
+    /// agent just calls `handle_request` directly instead of over the wire.
+    pub fn build_server(
+        &self,
+        app: &tauri::AppHandle,
+        pending: &Arc<crate::mcp_confirm::Pending>,
+        audit_path: &std::path::Path,
+        prompts_dir: &std::path::Path,
+    ) -> srelens_mcp::McpServer {
+        let registry = build_registry_with(self.cache.clone());
+        srelens_mcp::McpServer::new(Arc::new(registry))
+            .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
+                app.clone(),
+                pending.clone(),
+                std::time::Duration::from_secs(60),
+            )))
+            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+                audit_path.to_path_buf(),
+                5 * 1024 * 1024,
+            )))
+            .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))
+            .with_kind_resolver(srelens_registry::kind_resolver())
+            .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(self.cache.clone())))
     }
 }
 
@@ -113,24 +161,8 @@ async fn start_server(
         .await
         .map_err(|e| format!("Could not bind {addr}: {e}"))?;
 
-    let registry = build_registry_with(manager.cache.clone());
-    let server = srelens_mcp::McpServer::new(Arc::new(registry))
-        .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
-            app.clone(),
-            pending.clone(),
-            std::time::Duration::from_secs(60),
-        )))
-        .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-            audit_path.to_path_buf(),
-            5 * 1024 * 1024,
-        )))
-        .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
-            prompts_dir.to_path_buf(),
-        )))
-        .with_kind_resolver(srelens_registry::kind_resolver())
-        .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(
-            manager.cache.clone(),
-        )));
+    let server = manager.build_server(app, pending, audit_path, prompts_dir);
+    let running_token = token.clone();
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
         let _ = srelens_mcp::http::serve_http_with_shutdown(
@@ -148,6 +180,7 @@ async fn start_server(
         addr,
         shutdown: Some(tx),
         handle,
+        token: running_token,
     });
     Ok(url_for(addr))
 }
@@ -281,15 +314,13 @@ pub async fn mcp_token_rotate(
 
 /// Where the MCP bearer token is actually stored right now: `"keychain"` when
 /// the OS keychain is serving, `"file"` once it has fallen back to the 0600
-/// file. Reads the live flag off the store (flipped the first time a keychain
-/// operation genuinely failed) rather than a value guessed at startup, so
-/// Settings reports observed reality even if the keychain looked available
-/// when the app launched but failed on first use.
+/// Where the vault's MASTER KEY lives — `"keychain"`, or `"file"` when the
+/// keychain genuinely failed at startup and the 0600 fallback took over.
+/// Settings shows the file case so the reduced trust model (the vault is
+/// then only obfuscation) is never silent.
 #[tauri::command]
-pub fn mcp_token_storage(
-    store: State<'_, Arc<crate::token_store::ResilientTokenStore>>,
-) -> &'static str {
-    store.current_backend()
+pub fn mcp_token_storage(vault: State<'_, Arc<crate::vault::Vault>>) -> &'static str {
+    vault.key_source()
 }
 
 /// Revoke the MCP bearer token and stop the HTTP transport — it must never
@@ -464,6 +495,7 @@ mod tests {
             addr,
             shutdown: Some(tx),
             handle,
+            token: srelens_mcp::auth::Token::generate(),
         });
         Ok(())
     }
@@ -506,6 +538,7 @@ mod tests {
                 addr,
                 shutdown: Some(tx),
                 handle,
+                token: srelens_mcp::auth::Token::generate(),
             });
             addr
         };
@@ -545,6 +578,7 @@ mod tests {
                 addr: bound_addr,
                 shutdown: Some(tx),
                 handle,
+                token: srelens_mcp::auth::Token::generate(),
             });
 
             {
@@ -556,5 +590,36 @@ mod tests {
                 panic!("rebind attempt {i} on {bound_addr} failed: {e}")
             });
         }
+    }
+
+    #[tokio::test]
+    async fn session_token_is_none_when_the_server_is_stopped() {
+        let cache = srelens_kube::client_cache::ClientCache::new(std::path::PathBuf::from("/dev/null"));
+        let mgr = McpHttpManager::new(cache);
+        assert!(mgr.session_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn session_token_is_the_running_servers_token() {
+        let cache = srelens_kube::client_cache::ClientCache::new(std::path::PathBuf::from("/dev/null"));
+        let mgr = McpHttpManager::new(cache);
+
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0)); // OS-assigned port
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = rx.await;
+            drop(listener);
+        });
+        let t = srelens_mcp::auth::Token::generate();
+        *mgr.running.lock().unwrap() = Some(Running {
+            addr: bound_addr,
+            shutdown: Some(tx),
+            handle,
+            token: t.clone(),
+        });
+
+        assert_eq!(mgr.session_token(), Some(t.as_str().to_string()));
     }
 }
