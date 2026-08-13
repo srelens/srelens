@@ -1376,8 +1376,6 @@ export const AssistantConversation = forwardRef<
       // agent the stored id came from (see `cliSessionRef`).
       const resume = cliSessionRef.current?.kind === usedKind ? cliSessionRef.current.id : null;
       const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume);
-      // `null` means "nothing captured" (native agent, Codex, cancelled
-      // turn) — keep what we had rather than dropping continuity.
       const prev = cliSessionRef.current;
       if (cliId && (prev?.id !== cliId || prev?.kind !== usedKind)) {
         cliSessionRef.current = { kind: usedKind, id: cliId };
@@ -1385,6 +1383,16 @@ export const AssistantConversation = forwardRef<
         // streams — BEFORE `sendChat` resolves with this id — so that save
         // carried the previous turn's id. Queue one more so the transcript
         // on disk gets the id the next turn must resume.
+        void persistSession(messagesRef.current, toolCallsRef.current);
+      } else if (!cliId && prev && prev.kind !== usedKind) {
+        // A turn just ran on a DIFFERENT agent that returned no id (native,
+        // Codex): the stored CLI session no longer contains the whole visible
+        // conversation, so switching back and resuming it would answer from
+        // stale context that's missing these turns. Drop it — the original
+        // agent starts fresh, which at least matches what the CLI actually
+        // knows. (Same-kind `null` — a cancelled/failed turn — still keeps
+        // the id: nothing was added to the conversation the session lacks.)
+        cliSessionRef.current = null;
         void persistSession(messagesRef.current, toolCallsRef.current);
       }
     } catch (e) {

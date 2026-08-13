@@ -312,6 +312,45 @@ describe("AssistantConversation session persistence", () => {
     expect(vi.mocked(chat.sendChat).mock.calls[1][7]).toBe("cli-abc");
   });
 
+  it("drops the stored CLI id after a turn on a different agent, so switching back starts fresh", async () => {
+    // Turn 1 (Claude): captures an id. Turn 2 (Codex): returns null — but the
+    // conversation grew by turns the Claude session never saw, so resuming
+    // "cli-abc" later would answer from stale context. Turn 3 (back on
+    // Claude) must therefore resume nothing.
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "", gated: false },
+      { kind: "codex", label: "Codex", available: true, path: "/usr/bin/codex", version: null, installUrl: "", gated: false },
+    ]);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+      return "cli-abc";
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(1));
+    // Let the turn fully settle (Send replaces Stop) before touching the picker.
+    await screen.findByRole("button", { name: /^send$/i });
+
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+      return null;
+    });
+    fireEvent.click(screen.getByRole("combobox", { name: /agent/i }));
+    fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "second" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(2));
+    await screen.findByRole("button", { name: /^send$/i });
+
+    fireEvent.click(screen.getByRole("combobox", { name: /agent/i }));
+    fireEvent.click(await screen.findByRole("option", { name: /claude/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "third" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBeNull();
+  });
+
   it("auto-save records the attached context under `contexts`", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "ok" });
