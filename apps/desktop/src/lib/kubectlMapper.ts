@@ -32,12 +32,29 @@ export interface KubectlInput {
 // Resource names are DNS-1123 and always shell-safe in practice, but
 // kubeconfig context names are user-chosen and can contain spaces or other
 // shell-active characters. Quote anything outside the safe unquoted set
-// rather than assuming kubeconfig hygiene. Double quotes (not single) —
-// single quotes aren't a quoting character in cmd.exe, so a single-quoted
-// value would still split on spaces there (we ship Windows builds).
+// rather than assuming kubeconfig hygiene.
 const SAFE_UNQUOTED = /^[A-Za-z0-9._@:/-]+$/;
+
+// Characters that stay ACTIVE inside double quotes and so can execute code
+// when the copied command is pasted: `$` and backtick (command/variable
+// substitution in bash/zsh AND PowerShell), `!` (history expansion in
+// interactive bash/zsh), plus `"` and `\` (would terminate or re-arm the
+// quoting itself). A value containing any of these must not be double-quoted.
+const DOUBLE_QUOTE_UNSAFE = /[$`!"\\]/;
+
 function shellQuote(value: string): string {
-  return SAFE_UNQUOTED.test(value) ? value : `"${value.replace(/[\\"]/g, "\\$&")}"`;
+  if (SAFE_UNQUOTED.test(value)) return value;
+  // Odd but inert values (spaces, parens, unicode): double quotes are correct
+  // in bash/zsh/PowerShell AND cmd.exe — cmd has no single-quote syntax, so
+  // this tier keeps the common "name with a space" case working everywhere.
+  if (!DOUBLE_QUOTE_UNSAFE.test(value)) return `"${value}"`;
+  // Values carrying expansion syntax: only single quotes make them fully
+  // inert — POSIX shells and PowerShell expand nothing inside them. cmd.exe
+  // loses this tier (it doesn't treat ' as quoting), but cmd also never
+  // expands $() or backticks, so its worst case is a mis-split argument and
+  // a kubectl error — never execution. Embedded ' uses the POSIX '\''
+  // close-escape-reopen dance.
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**

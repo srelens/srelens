@@ -155,10 +155,31 @@ describe("kubectlMapper", () => {
       ).toBe('kubectl get pods web-0 -n "my ns" --context prod');
     });
 
-    it("escapes an embedded double quote in a quoted value", () => {
+    it("single-quotes a value with an embedded double quote (double-quoting can't hold it safely)", () => {
       expect(
         toKubectl({ action: "get", kind: "Pod", namespace: "default", name: "web-0", context: 'my "prod" cluster' }),
-      ).toBe('kubectl get pods web-0 -n default --context "my \\"prod\\" cluster"');
+      ).toBe("kubectl get pods web-0 -n default --context 'my \"prod\" cluster'");
+    });
+
+    it("single-quotes a context carrying command substitution so pasting can't execute it", () => {
+      // Inside double quotes, $( ) still EXECUTES in bash/zsh/PowerShell —
+      // only single quotes make it inert. Context names are user-chosen and
+      // not DNS-restricted, so this input is reachable.
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "$(touch /tmp/pwn)" }),
+      ).toBe("kubectl get pods web-0 --context '$(touch /tmp/pwn)'");
+    });
+
+    it("single-quotes backtick substitution the same way", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "`id` cluster" }),
+      ).toBe("kubectl get pods web-0 --context '`id` cluster'");
+    });
+
+    it("escapes an embedded single quote with the POSIX close-escape-reopen form", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "bob's $HOME" }),
+      ).toBe("kubectl get pods web-0 --context 'bob'\\''s $HOME'");
     });
 
     it("leaves plain resource names unquoted (DNS-1123 names are always in the safe set)", () => {
