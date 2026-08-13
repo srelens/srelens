@@ -95,12 +95,20 @@ jobs:
           RANGE=""
           [ -n "$LAST_TAG" ] && RANGE="${LAST_TAG}..HEAD"
           SUBJECTS=$(git log --no-merges --pretty=%B ${RANGE})
+          # Each pattern also accepts a leading "* " so a SQUASH-merged
+          # dev→main promotion still releases: GitHub's default squash message
+          # lists the squashed commits as "* <subject>" bullets in the body,
+          # and without this the only commit in range would be the
+          # non-conventional "release: ..." subject itself — BUMP=none, and
+          # the entire release (desktop, docker, AUR) silently skips. The
+          # documented path is still a plain merge commit; this is the
+          # backstop for the wrong button.
           if echo "$SUBJECTS" | grep -qiE '(^|[[:space:]])BREAKING[ -]CHANGE' \
-             || echo "$SUBJECTS" | grep -qE '^[a-z]+(\([^)]*\))?!:'; then
+             || echo "$SUBJECTS" | grep -qE '^(\* )?[a-z]+(\([^)]*\))?!:'; then
             BUMP=major
-          elif echo "$SUBJECTS" | grep -qE '^feat(\([^)]*\))?:'; then
+          elif echo "$SUBJECTS" | grep -qE '^(\* )?feat(\([^)]*\))?:'; then
             BUMP=minor
-          elif echo "$SUBJECTS" | grep -qE '^(fix|perf)(\([^)]*\))?:'; then
+          elif echo "$SUBJECTS" | grep -qE '^(\* )?(fix|perf)(\([^)]*\))?:'; then
             BUMP=patch
           else
             BUMP=none
