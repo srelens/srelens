@@ -424,10 +424,12 @@ fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
 ///
 /// `resume` is the agent CLI's OWN session id from a previous turn of this
 /// conversation (what this function returned last time), passed to the CLI's
-/// `--resume` so follow-up turns keep their context. Returns the id captured
-/// from this turn's stream — the caller persists it with the conversation
-/// and hands it back on the next send. `None` when the agent doesn't expose
-/// one (native, Codex) or the turn ended before the stream started.
+/// `--resume` so follow-up turns keep their context. Returns what the caller
+/// should now store as the conversation's id (see `next_resume_id`): the id
+/// captured from this turn's stream, the echoed `resume` when the turn ran
+/// clean or was cancelled without yielding one, or `None` — meaning CLEAR —
+/// for agents with no id (native, Codex) and for a crashed resume, so a
+/// dead session id can't wedge the conversation in a retry loop.
 #[tauri::command]
 pub async fn chat_send(
     session: String,
@@ -497,10 +499,11 @@ pub async fn chat_send(
     // dropped by the same take.
     if chats.take_pending_cancel(&session, turn) {
         sink.emit(&channel, serde_json::to_value(AgentEvent::TurnDone).unwrap());
-        // `None`, not the passed `resume`: the caller keeps its stored id
-        // whenever this returns nothing (see `sendChat`), so a cancelled turn
-        // doesn't lose the conversation's continuity.
-        return Ok(None);
+        // Echo the resume id back: nothing ran, the stored session is intact,
+        // and the caller stores exactly what's returned — a bare `None` here
+        // would read as "clear it" (the failed-resume signal from
+        // `next_resume_id`) and needlessly drop continuity on a cancel.
+        return Ok(resume);
     }
 
     let token = mcp
@@ -768,11 +771,28 @@ pub async fn chat_send(
 
     finish_turn(sink.as_ref(), &channel, saw_done, crashed, &stderr_tail);
 
-    // Fall back to the id we resumed FROM when the stream never yielded one
-    // (crash before the first line, unexpected shape): the caller overwrites
-    // its stored id only with a non-`None` return, so continuity degrades to
-    // "unchanged" rather than snapping back to fresh sessions.
-    Ok(agent_session.or(resume))
+    Ok(next_resume_id(agent_session, resume, crashed))
+}
+
+/// What the caller should store as the conversation's CLI session id after a
+/// turn: the id captured from the stream when there is one, else the id we
+/// resumed FROM (a clean-but-drifty stream, or a cancel — `chat_cancel`
+/// reaps the child, so a user-initiated stop never counts as `crashed`) —
+/// EXCEPT after a crash that yielded no id. That is the signature of the
+/// `--resume` itself failing (the CLI GC'd or never had the session), and
+/// echoing the id back would make every subsequent turn retry the same
+/// failing resume with no way out short of a new chat. `None` there tells
+/// the caller to clear its stored id so the next turn starts fresh.
+fn next_resume_id(
+    agent_session: Option<String>,
+    resume: Option<String>,
+    crashed: bool,
+) -> Option<String> {
+    match agent_session {
+        Some(id) => Some(id),
+        None if crashed => None,
+        None => resume,
+    }
 }
 
 /// Kill a running turn's agent process, if any. `turn` is the frontend's turn
@@ -807,6 +827,31 @@ pub async fn chat_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_captured_stream_id_always_wins() {
+        assert_eq!(
+            next_resume_id(Some("new".into()), Some("old".into()), true),
+            Some("new".into())
+        );
+        assert_eq!(next_resume_id(Some("new".into()), None, false), Some("new".into()));
+    }
+
+    #[test]
+    fn a_clean_turn_without_an_id_echoes_the_resume_back() {
+        // Shape drift or a cancel (never `crashed` — chat_cancel reaps the
+        // child): the stored session is intact, keep it.
+        assert_eq!(next_resume_id(None, Some("old".into()), false), Some("old".into()));
+        assert_eq!(next_resume_id(None, None, false), None);
+    }
+
+    #[test]
+    fn a_crash_without_an_id_clears_the_resume() {
+        // The signature of `--resume` itself failing (session GC'd/unknown):
+        // echoing "old" back would retry the same failing resume forever.
+        assert_eq!(next_resume_id(None, Some("old".into()), true), None);
+        assert_eq!(next_resume_id(None, None, true), None);
+    }
 
     #[test]
     fn a_found_binary_is_available_with_its_path() {

@@ -351,6 +351,36 @@ describe("AssistantConversation session persistence", () => {
     expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBeNull();
   });
 
+  it("clears the stored id when a resume crashes (null return), so the next turn starts fresh", async () => {
+    // Turn 1 captures an id; turn 2 resumes it but the backend reports a
+    // crashed resume by returning null (the CLI lost the session). Turn 3
+    // must NOT retry the dead id — that would fail identically forever.
+    vi.mocked(chat.sendChat)
+      .mockImplementationOnce(async (_s, _p, _a, onEvent) => {
+        onEvent({ type: "turnDone" });
+        return "cli-abc";
+      })
+      .mockImplementation(async (_s, _p, _a, onEvent) => {
+        onEvent({ type: "error", message: "No conversation found" });
+        onEvent({ type: "turnDone" });
+        return null;
+      });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "second" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(chat.sendChat).mock.calls[1][7]).toBe("cli-abc");
+
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "third" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBeNull();
+  });
+
   it("auto-save records the attached context under `contexts`", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "ok" });

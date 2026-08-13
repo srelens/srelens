@@ -1376,23 +1376,21 @@ export const AssistantConversation = forwardRef<
       // agent the stored id came from (see `cliSessionRef`).
       const resume = cliSessionRef.current?.kind === usedKind ? cliSessionRef.current.id : null;
       const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume);
+      // The return IS what to store now (see chat_send): a cancelled or
+      // drifty-but-clean turn echoes the resumed id back, so `null` with an
+      // id on hand always means CLEAR — either the turn ran on an agent
+      // with no id (native, Codex: the stored session is now missing turns
+      // the transcript visibly contains) or the resume itself crashed (the
+      // CLI lost the session; keeping the id would retry the same failing
+      // --resume forever). A transport rejection skips this entirely (the
+      // catch below) and keeps the stored id.
       const prev = cliSessionRef.current;
-      if (cliId && (prev?.id !== cliId || prev?.kind !== usedKind)) {
-        cliSessionRef.current = { kind: usedKind, id: cliId };
+      if (cliId ? prev?.id !== cliId || prev?.kind !== usedKind : prev !== null) {
+        cliSessionRef.current = cliId ? { kind: usedKind, id: cliId } : null;
         // The turnDone-triggered save snapshots at the moment the event
         // streams — BEFORE `sendChat` resolves with this id — so that save
         // carried the previous turn's id. Queue one more so the transcript
         // on disk gets the id the next turn must resume.
-        void persistSession(messagesRef.current, toolCallsRef.current);
-      } else if (!cliId && prev && prev.kind !== usedKind) {
-        // A turn just ran on a DIFFERENT agent that returned no id (native,
-        // Codex): the stored CLI session no longer contains the whole visible
-        // conversation, so switching back and resuming it would answer from
-        // stale context that's missing these turns. Drop it — the original
-        // agent starts fresh, which at least matches what the CLI actually
-        // knows. (Same-kind `null` — a cancelled/failed turn — still keeps
-        // the id: nothing was added to the conversation the session lacks.)
-        cliSessionRef.current = null;
         void persistSession(messagesRef.current, toolCallsRef.current);
       }
     } catch (e) {

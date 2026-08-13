@@ -72,10 +72,13 @@ export function startChat(): Promise<string> {
  *
  * `resume` is the agent CLI's own session id returned by a previous call for
  * this conversation; the backend passes it to the CLI's `--resume` so
- * follow-up turns keep their context. Resolves to the id captured from this
- * turn's stream (store it and pass it back next time), or `null` when the
- * agent has none (native srelens agent, Codex) — callers should treat `null`
- * as "keep what you had", since a cancelled/failed turn also returns it.
+ * follow-up turns keep their context. Resolves to what the caller should now
+ * store as the conversation's id: the id captured from this turn's stream, the
+ * echoed `resume` when the turn was cancelled or ran clean without yielding
+ * one, or `null` — meaning CLEAR — for agents with no id (native srelens
+ * agent, Codex) and for a crashed resume (the CLI lost the session; retrying
+ * the same id would fail forever). A REJECTION, by contrast, says nothing
+ * about the stored id — keep it.
  */
 export async function sendChat(
   session: string,
