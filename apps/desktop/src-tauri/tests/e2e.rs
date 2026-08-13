@@ -1982,6 +1982,7 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
         server.watcher().as_ref(),
         &uri,
         Box::new(move || *counter.lock().unwrap() += 1),
+        Box::new(|reason| eprintln!("e2e watch reported dead: {reason}")),
     )
     .expect("watch spawns");
 

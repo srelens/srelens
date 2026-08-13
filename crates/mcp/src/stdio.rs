@@ -404,6 +404,10 @@ fn handle_subscription(
         return Some(err(id, -32602, &message));
     }
 
+    // Both callbacks below need the dirty set and wakeup sender; clone before
+    // the first closure takes ownership of its pair.
+    let (dead_dirty, dead_wake) = (dirty.clone(), wake.clone());
+
     // The callback is sync and owns only the dirty set and a wakeup sender,
     // so it needs no writer and no spawn. It never awaits, so the dirty
     // set's lock is only ever held for the insert itself — matching the
@@ -424,12 +428,45 @@ fn handle_subscription(
         let _ = wake.try_send(());
     });
 
-    let handle = match server.watcher().watch(&uri, on_change) {
+    // Terminal-failure path (#195): a watch that dies — unknown context,
+    // RBAC Forbidden, stream end — must not sit in the registry forever,
+    // holding a slot and letting the client mistake silence for "nothing
+    // changed". `on_dead` evicts the entry and, when one was actually
+    // registered, marks the URI dirty so the client's re-read discovers the
+    // terminal state through the existing notification channel.
+    //
+    // `on_dead` may fire at ANY point relative to this function — including
+    // before `subs.insert` below has run, in which case its `remove` finds
+    // nothing and the insert would park a dead handle. The shared `dead`
+    // slot closes that race: the post-insert check sees the reason whichever
+    // side wins, removes the entry, and turns the subscribe response itself
+    // into an error — strictly better than accepting a subscription known to
+    // be stillborn.
+    let dead: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let on_dead = {
+        let dead = dead.clone();
+        let subs = subs.clone();
+        let dead_uri = canonical.clone();
+        Box::new(move |reason: String| {
+            eprintln!("srelens: mcp watch {dead_uri} evicted: {reason}");
+            *dead.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+            if subs.remove(&dead_uri) {
+                dead_dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(dead_uri.clone());
+                let _ = dead_wake.try_send(());
+            }
+        })
+    };
+
+    let handle = match server.watcher().watch(&uri, on_change, on_dead) {
         Ok(h) => h,
         Err(message) => return Some(err(id, -32602, &message)),
     };
-    if let Err(message) = subs.insert(canonical, handle) {
+    if let Err(message) = subs.insert(canonical.clone(), handle) {
         return Some(err(id, -32602, &message));
+    }
+    if let Some(reason) = dead.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        subs.remove(&canonical);
+        return Some(err(id, -32603, &format!("the watch ended immediately: {reason}")));
     }
     Some(ok(id, json!({})))
 }
@@ -1171,6 +1208,7 @@ mod tests {
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 _on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
             }
@@ -1441,6 +1479,7 @@ mod tests {
             &self,
             _uri: &crate::resources::ResourceUri,
             mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
         ) -> Result<tokio::task::AbortHandle, String> {
             let fired = self.0.clone();
             Ok(tokio::spawn(async move {
@@ -1570,6 +1609,7 @@ mod tests {
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 on_change();
                 Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
@@ -1633,6 +1673,7 @@ mod tests {
             &self,
             _uri: &crate::resources::ResourceUri,
             mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
         ) -> Result<tokio::task::AbortHandle, String> {
             let fired = self.fired.clone();
             let times = self.times;
@@ -1645,6 +1686,100 @@ mod tests {
             })
             .abort_handle())
         }
+    }
+
+    /// The immediate-death half of eviction (#195): `on_dead` fires inside
+    /// `watch()` itself — before `handle_subscription` has inserted anything
+    /// — so the registry briefly parks a dead handle. The post-insert check
+    /// must catch it: the subscribe answers an ERROR (not a phantom `{}`)
+    /// and nothing stays registered.
+    #[tokio::test]
+    async fn a_watch_that_dies_immediately_errors_the_subscribe_and_leaves_no_entry() {
+        struct DeadOnArrival;
+        impl crate::resources::ObjectWatcher for DeadOnArrival {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                on_dead("the cluster is unreachable".to_string());
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let server = Arc::new(
+            server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(Arc::new(DeadOnArrival)),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+        let resp =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        let message = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("ended immediately"), "got: {resp}");
+        assert!(message.contains("unreachable"), "the reason must survive: {resp}");
+        // Nothing left holding a slot: an unsubscribe finds no entry.
+        assert!(!subs.remove("k8s://c/ns/Pod/web-0"));
+    }
+
+    /// The late-death half of eviction (#195): the subscribe succeeded and
+    /// the watch dies LATER (RBAC revoked, apiserver gone for good). The
+    /// entry must leave the registry — silence must not impersonate "nothing
+    /// changed" while holding one of the 32 slots — and the URI goes dirty
+    /// so the client's re-read discovers the terminal state.
+    #[tokio::test]
+    async fn a_watch_death_after_subscribe_evicts_the_entry_and_queues_a_notification() {
+        type OnDead = Box<dyn FnOnce(String) + Send>;
+        struct LateDeath(std::sync::Mutex<Option<OnDead>>);
+        impl crate::resources::ObjectWatcher for LateDeath {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                *self.0.lock().unwrap() = Some(on_dead);
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let watcher = Arc::new(LateDeath(std::sync::Mutex::new(None)));
+        let server = Arc::new(
+            server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(watcher.clone()),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+        let resp =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        assert!(resp.get("error").is_none(), "the live subscribe succeeds: {resp}");
+
+        // The watch dies later.
+        (watcher.0.lock().unwrap().take().unwrap())("forbidden: cannot watch pods".to_string());
+
+        assert!(!subs.remove("k8s://c/ns/Pod/web-0"), "the dead entry must be evicted");
+        assert!(
+            dirty.lock().unwrap().contains("k8s://c/ns/Pod/web-0"),
+            "the URI goes dirty so the client re-reads and discovers the death"
+        );
+        assert!(wake_rx.try_recv().is_ok(), "the serve loop must be woken to drain it");
     }
 
     /// The coalescing this closes: without it, 5 `on_change` calls to one
@@ -1719,6 +1854,7 @@ mod tests {
                 &self,
                 uri: &crate::resources::ResourceUri,
                 mut on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 let fired = if uri.to_string().contains("web-0") {
                     self.fired_a.clone()
@@ -1802,6 +1938,7 @@ mod tests {
                 &self,
                 _uri: &crate::resources::ResourceUri,
                 _on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
             ) -> Result<tokio::task::AbortHandle, String> {
                 let join = tokio::spawn(async { std::future::pending::<()>().await });
                 let abort = join.abort_handle();

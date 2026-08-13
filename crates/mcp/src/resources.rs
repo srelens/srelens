@@ -163,11 +163,22 @@ impl KindResolver for NoKinds {
 /// A trait rather than a concrete type because the implementation needs kube,
 /// and `crates/mcp` must not depend on `crates/kube` — `crates/registry` wires
 /// the real one, exactly as it does for `KindResolver`.
+///
+/// `on_dead` reports terminal failure: it is called AT MOST ONCE, with a
+/// human-readable reason, when the watch ends for any cause other than the
+/// returned handle being aborted — unknown context, RBAC `Forbidden`, the
+/// stream ending. `watch` itself is synchronous and returns before the
+/// cluster is ever contacted, so this callback is the only way the caller
+/// learns a subscription it already accepted will never fire; the stdio loop
+/// uses it to evict the registry entry (#195). `on_dead` may fire at any
+/// point — including synchronously inside `watch`, or concurrently with the
+/// caller still processing `watch`'s return.
 pub trait ObjectWatcher: Send + Sync {
     fn watch(
         &self,
         uri: &ResourceUri,
         on_change: Box<dyn FnMut() + Send>,
+        on_dead: Box<dyn FnOnce(String) + Send>,
     ) -> Result<tokio::task::AbortHandle, String>;
 }
 
@@ -180,6 +191,7 @@ impl ObjectWatcher for NoWatcher {
         &self,
         _uri: &ResourceUri,
         _on_change: Box<dyn FnMut() + Send>,
+        _on_dead: Box<dyn FnOnce(String) + Send>,
     ) -> Result<tokio::task::AbortHandle, String> {
         Err("this server has no cluster watcher wired, so resources cannot be subscribed to"
             .to_string())
@@ -456,7 +468,7 @@ mod tests {
     #[test]
     fn the_default_watcher_refuses_every_subscription() {
         let uri = ResourceUri::parse("k8s://c/ns/Pod/web-0").unwrap();
-        let err = NoWatcher.watch(&uri, Box::new(|| {})).unwrap_err();
+        let err = NoWatcher.watch(&uri, Box::new(|| {}), Box::new(|_| {})).unwrap_err();
         assert!(err.contains("no cluster watcher"), "got: {err}");
     }
 

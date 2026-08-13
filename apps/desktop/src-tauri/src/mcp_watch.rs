@@ -28,6 +28,7 @@ impl ObjectWatcher for CacheWatcher {
         &self,
         uri: &ResourceUri,
         on_change: Box<dyn FnMut() + Send>,
+        on_dead: Box<dyn FnOnce(String) + Send>,
     ) -> Result<tokio::task::AbortHandle, String> {
         let ResourceUri::Object { context, namespace, kind, name, .. } = uri else {
             return Err("only object URIs can be watched".to_string());
@@ -77,19 +78,16 @@ impl ObjectWatcher for CacheWatcher {
         let cache = self.cache.clone();
         let (context, namespace, name) = (context.clone(), namespace.clone(), name.clone());
         // `watch` is synchronous and returns before the client is ever
-        // resolved, so it cannot validate the subscription up front — the
-        // best it can do is surface what happens once the task runs. stderr
-        // is free even on the stdio transport (stdout is the JSON-RPC
-        // channel there — see the precedent in `main.rs`), so a dead watch at
-        // least leaves a diagnostic instead of failing silently.
-        //
-        // NOTE: a failed watch (unknown context, or a namespace the identity
-        // cannot `watch`) still stays registered in the `SubscriptionRegistry`
-        // until the client unsubscribes or the session ends — it occupies one
-        // of the 32 slots without ever firing. Evicting it would mean
-        // plumbing the registry (owned by `crates/mcp`) into this watcher
-        // (owned by the desktop app), which crosses a layer boundary; that is
-        // being filed as a follow-up rather than done here.
+        // resolved, so it cannot validate the subscription up front. What it
+        // CAN do is report the death once the task runs: `watch_object`
+        // returns only when the watch is genuinely over — client resolution
+        // failed (unknown context), a permanent watch error (RBAC
+        // `Forbidden`), or the stream ending; transient errors reconnect
+        // internally and never return. Any return therefore feeds `on_dead`,
+        // which the stdio loop uses to evict the registry entry (#195). An
+        // abort cancels the task at an await point, so `on_dead` never fires
+        // for a deliberate unsubscribe. Status transitions still go to
+        // stderr (stdout is the JSON-RPC channel on stdio — see `main.rs`).
         let watch_uri = uri.to_string();
         let task = tokio::spawn(async move {
             let result = srelens_kube::watch::watch_object(
@@ -104,9 +102,11 @@ impl ObjectWatcher for CacheWatcher {
                 },
             )
             .await;
-            if let Err(e) = result {
-                eprintln!("srelens: mcp watch {watch_uri} ended with an error: {e}");
-            }
+            let reason = match result {
+                Ok(()) => "the watch stream ended".to_string(),
+                Err(e) => e,
+            };
+            on_dead(reason);
         });
         Ok(task.abort_handle())
     }
@@ -129,9 +129,37 @@ mod tests {
         let w = CacheWatcher::new(cache);
         for uri in ["k8s://c/ns/Pod/web-0", "k8s://c/-/Node/node-1"] {
             let parsed = ResourceUri::parse(uri).unwrap();
-            let handle = w.watch(&parsed, Box::new(|| {})).expect("spawns");
+            let handle = w.watch(&parsed, Box::new(|| {}), Box::new(|_| {})).expect("spawns");
             handle.abort();
         }
+    }
+
+    /// The #195 contract: a watch that can never run (here: the kubeconfig
+    /// doesn't exist, so client resolution fails) must report through
+    /// `on_dead` with the underlying reason — that callback is how the stdio
+    /// loop evicts the registry entry.
+    #[tokio::test]
+    async fn reports_death_for_an_unresolvable_context() {
+        let cache = srelens_kube::client_cache::ClientCache::new(
+            std::path::PathBuf::from("/nonexistent/kubeconfig"),
+        );
+        let w = CacheWatcher::new(cache);
+        let parsed = ResourceUri::parse("k8s://c/ns/Pod/web-0").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let _handle = w
+            .watch(
+                &parsed,
+                Box::new(|| {}),
+                Box::new(move |reason| {
+                    let _ = tx.send(reason);
+                }),
+            )
+            .expect("spawns");
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("on_dead fires")
+            .expect("reason arrives");
+        assert!(!reason.is_empty(), "the death carries its reason");
     }
 
     #[tokio::test]
@@ -141,7 +169,7 @@ mod tests {
         );
         let w = CacheWatcher::new(cache);
         let parsed = ResourceUri::parse("k8s://c/ns/Nonsense/x").unwrap();
-        assert!(w.watch(&parsed, Box::new(|| {})).is_err());
+        assert!(w.watch(&parsed, Box::new(|| {}), Box::new(|_| {})).is_err());
     }
 
     /// `ResourceUri::parse` maps the `-` sentinel to `None`, so a namespaced
@@ -155,7 +183,7 @@ mod tests {
         );
         let w = CacheWatcher::new(cache);
         let parsed = ResourceUri::parse("k8s://c/-/Pod/web-0").unwrap();
-        let err = w.watch(&parsed, Box::new(|| {})).unwrap_err();
+        let err = w.watch(&parsed, Box::new(|| {}), Box::new(|_| {})).unwrap_err();
         assert!(err.contains("namespaced"), "got: {err}");
     }
 
@@ -168,7 +196,7 @@ mod tests {
         );
         let w = CacheWatcher::new(cache);
         let parsed = ResourceUri::parse("k8s://c/ns/Node/node-1").unwrap();
-        let err = w.watch(&parsed, Box::new(|| {})).unwrap_err();
+        let err = w.watch(&parsed, Box::new(|| {}), Box::new(|_| {})).unwrap_err();
         assert!(err.contains("cluster-scoped"), "got: {err}");
     }
 
@@ -185,7 +213,7 @@ mod tests {
         );
         let w = CacheWatcher::new(cache);
         let parsed = ResourceUri::parse("k8s://c/ns/Secret/db-creds").unwrap();
-        let err = w.watch(&parsed, Box::new(|| {})).unwrap_err();
+        let err = w.watch(&parsed, Box::new(|| {}), Box::new(|_| {})).unwrap_err();
         assert!(err.contains("Secret") && err.contains("not addressable"), "got: {err}");
     }
 }

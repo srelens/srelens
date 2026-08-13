@@ -38,6 +38,14 @@ impl SubscriptionRegistry {
     pub fn insert(&self, uri: String, handle: AbortHandle) -> Result<(), String> {
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if !live.contains_key(&uri) && live.len() >= MAX_SUBSCRIPTIONS {
+            // Before refusing, reap entries whose watch task already ended
+            // (#195): the honest eviction path is the watcher's `on_dead`
+            // callback, but a dead entry that slipped past it must not hold
+            // a slot against a legitimate subscription. `is_finished` is
+            // false for live watches, so this never evicts a working one.
+            live.retain(|_, h| !h.is_finished());
+        }
+        if !live.contains_key(&uri) && live.len() >= MAX_SUBSCRIPTIONS {
             handle.abort();
             return Err(format!(
                 "too many subscriptions: the limit is {MAX_SUBSCRIPTIONS}; \
@@ -167,6 +175,30 @@ mod tests {
         let e = r.insert("k8s://c/ns/Pod/one-too-many".into(), spawn_forever()).unwrap_err();
         assert!(e.contains(&MAX_SUBSCRIPTIONS.to_string()), "got: {e}");
         assert_eq!(r.len(), MAX_SUBSCRIPTIONS);
+    }
+
+    /// The cheap half of #195: entries whose watch task already ended must
+    /// not hold slots against a legitimate subscription — the cap check
+    /// reaps them before refusing. (The honest path is the watcher's
+    /// `on_dead` eviction; this is the backstop for a watcher that never
+    /// reports.)
+    #[tokio::test]
+    async fn dead_entries_are_reaped_before_the_cap_refuses() {
+        let r = SubscriptionRegistry::new();
+        for i in 0..MAX_SUBSCRIPTIONS {
+            // A task that completes instantly, awaited to completion so
+            // `is_finished` is deterministically true by insert time.
+            let join = tokio::spawn(async {});
+            let handle = join.abort_handle();
+            join.await.unwrap();
+            r.insert(format!("k8s://c/ns/Pod/dead{i}"), handle).unwrap();
+        }
+        assert_eq!(r.len(), MAX_SUBSCRIPTIONS, "dead entries fill the registry");
+        // At the cap, but every occupant is dead — the new subscription must
+        // get a slot, not `too many subscriptions`.
+        r.insert("k8s://c/ns/Pod/alive".into(), spawn_forever())
+            .expect("reaping the dead entries makes room");
+        assert_eq!(r.len(), 1, "only the live subscription remains");
     }
 
     /// `insert` takes ownership of `handle`; on the cap-rejection branch it
