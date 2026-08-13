@@ -137,8 +137,16 @@ jobs:
           # and smarter ranking" tells a user nothing that "**palette:** ..."
           # does. Line 1 handles scoped commits, line 2 unscoped ones.
           strip='s/^[a-z]+\(([^)]*)\)!?:[[:space:]]*/**\1:** /; s/^[a-z]+!?:[[:space:]]*//'
-          FEATS=$(git log --no-merges --pretty=%s ${RANGE} | grep -E '^feat' | sed -E "$strip" | sed 's/^/- /' || true)
-          FIXES=$(git log --no-merges --pretty=%s ${RANGE} | grep -E '^(fix|perf)' | sed -E "$strip" | sed 's/^/- /' || true)
+          # Subjects, plus "* <subject>" bullets from commit BODIES — the shape
+          # GitHub's squash merge records the squashed commits in. Without the
+          # bullets, a squash-merged promotion (whose only subject is the
+          # non-conventional "release: ..." title) would pass the bump gate
+          # above but publish a release with EMPTY notes. Plain body prose
+          # stays excluded: only "* "-bulleted, type-prefixed lines qualify.
+          SOURCES=$( { git log --no-merges --pretty=%s ${RANGE}; \
+                       git log --no-merges --pretty=%b ${RANGE} | sed -nE 's/^\* ([a-z]+(\([^)]*\))?!?:.*)$/\1/p'; } )
+          FEATS=$(echo "$SOURCES" | grep -E '^feat' | sed -E "$strip" | sed 's/^/- /' || true)
+          FIXES=$(echo "$SOURCES" | grep -E '^(fix|perf)' | sed -E "$strip" | sed 's/^/- /' || true)
           {
             echo "notes<<__NOTES_EOF__"
             [ -n "$FEATS" ] && printf '### Features\n%s\n\n' "$FEATS"

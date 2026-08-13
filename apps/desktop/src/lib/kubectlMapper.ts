@@ -35,25 +35,49 @@ export interface KubectlInput {
 // rather than assuming kubeconfig hygiene.
 const SAFE_UNQUOTED = /^[A-Za-z0-9._@:/-]+$/;
 
-// Characters that stay ACTIVE inside double quotes and so can execute code
-// when the copied command is pasted: `$` and backtick (command/variable
-// substitution in bash/zsh AND PowerShell), `!` (history expansion in
-// interactive bash/zsh), plus `"` and `\` (would terminate or re-arm the
-// quoting itself). A value containing any of these must not be double-quoted.
-const DOUBLE_QUOTE_UNSAFE = /[$`!"\\]/;
+// Characters that stay ACTIVE inside double quotes on POSIX platforms and so
+// can execute code when the copied command is pasted: `$` and backtick
+// (command/variable substitution in bash/zsh AND PowerShell), `!` (history
+// expansion in interactive bash/zsh), plus `"` and `\` (would terminate or
+// re-arm the quoting itself). Any of these forces the single-quote tier.
+const POSIX_DOUBLE_QUOTE_UNSAFE = /[$`!"\\]/;
 
-function shellQuote(value: string): string {
+// The Windows equivalent, covering BOTH shells a value pasted there can hit:
+// inside double quotes cmd.exe still expands `%VAR%`, treats `"` as the
+// closing quote, and un-escapes a trailing `\"`; PowerShell still expands `$`
+// and backtick; `!` expands under cmd's delayed expansion. A value carrying
+// any of these has NO representation that is inert in both shells — cmd has
+// no single-quote syntax at all (so `&` would chain commands right through
+// single quotes) — and gets the placeholder tier instead of a quoting
+// pretense.
+const WINDOWS_DOUBLE_QUOTE_UNSAFE = /[$`!"%\\]/;
+
+const IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+
+/**
+ * Quote one value for the platform's paste targets, or refuse: `what` names
+ * the value ("context", "namespace", "name") for the fill-in placeholder
+ * emitted when a hostile value cannot be represented safely on Windows.
+ */
+function shellQuote(value: string, what: string, windows: boolean): string {
   if (SAFE_UNQUOTED.test(value)) return value;
-  // Odd but inert values (spaces, parens, unicode): double quotes are correct
-  // in bash/zsh/PowerShell AND cmd.exe — cmd has no single-quote syntax, so
-  // this tier keeps the common "name with a space" case working everywhere.
-  if (!DOUBLE_QUOTE_UNSAFE.test(value)) return `"${value}"`;
-  // Values carrying expansion syntax: only single quotes make them fully
-  // inert — POSIX shells and PowerShell expand nothing inside them. cmd.exe
-  // loses this tier (it doesn't treat ' as quoting), but cmd also never
-  // expands $() or backticks, so its worst case is a mis-split argument and
-  // a kubectl error — never execution. Embedded ' uses the POSIX '\''
-  // close-escape-reopen dance.
+  if (windows) {
+    // Inside double quotes, cmd.exe treats & | < > ^ ( ) and spaces literally
+    // — and so do PowerShell and the POSIX shells — so this tier is inert in
+    // every shell a Windows user pastes into. The common "name with a space"
+    // case lands here and stays copy-paste-runnable.
+    if (!WINDOWS_DOUBLE_QUOTE_UNSAFE.test(value)) return `"${value}"`;
+    // No safe representation exists (see WINDOWS_DOUBLE_QUOTE_UNSAFE): emit
+    // a fill-in placeholder so the pasted command errors asking for the
+    // value rather than ever executing part of a hostile one. Angle brackets
+    // are redirection in cmd but sit inside double quotes here.
+    return `"<enter ${what}>"`;
+  }
+  // POSIX: odd but inert values (spaces, parens, unicode) keep double quotes;
+  // anything carrying expansion syntax gets single quotes, inside which
+  // bash/zsh (and PowerShell) expand nothing. Embedded ' uses the POSIX
+  // '\'' close-escape-reopen dance.
+  if (!POSIX_DOUBLE_QUOTE_UNSAFE.test(value)) return `"${value}"`;
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -65,7 +89,7 @@ function shellQuote(value: string): string {
  * from `action`. Callers show an explanatory note instead of a command (see
  * `KubectlPreview`'s `note` prop).
  */
-export function toKubectl(input: KubectlInput): string {
+export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): string {
   const { action, kind, name, context, namespace, output, replicas } = input;
   // Prefer the authoritative kind→resource table (mirrors the backend's own
   // GVR mapping) over a bare lowercase, which drifts for kinds whose plural
@@ -80,7 +104,7 @@ export function toKubectl(input: KubectlInput): string {
   // is a no-op for every real name today — quoting it anyway is cheap
   // defense-in-depth and matches "name" being one of the three values the
   // review called out, alongside namespace and context.
-  const qName = shellQuote(name);
+  const qName = shellQuote(name, "name", windows);
 
   switch (action) {
     case "get":
@@ -136,10 +160,10 @@ export function toKubectl(input: KubectlInput): string {
   }
 
   if (ns) {
-    parts.push("-n", shellQuote(ns));
+    parts.push("-n", shellQuote(ns, "namespace", windows));
   }
 
-  parts.push("--context", shellQuote(context));
+  parts.push("--context", shellQuote(context, "context", windows));
 
   if (output) {
     parts.push("-o", output);

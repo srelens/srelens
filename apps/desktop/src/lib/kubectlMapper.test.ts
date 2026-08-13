@@ -182,6 +182,27 @@ describe("kubectlMapper", () => {
       ).toBe("kubectl get pods web-0 --context 'bob'\\''s $HOME'");
     });
 
+    it("windows: double quotes hold inert odd values — spaces and even & are literal inside them in cmd and PowerShell", () => {
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "my cluster" }, true),
+      ).toBe('kubectl get pods web-0 --context "my cluster"');
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "a & b" }, true),
+      ).toBe('kubectl get pods web-0 --context "a & b"');
+    });
+
+    it("windows: values with no cmd+PowerShell-safe representation become a fill-in placeholder", () => {
+      // Single quotes aren't quoting in cmd (& would chain a command through
+      // them) and double quotes leave $/` live in PowerShell and % live in
+      // cmd — so the hostile value must not be rendered at all.
+      expect(
+        toKubectl({ action: "get", kind: "Pod", name: "web-0", context: "x$&whoami>pwned&" }, true),
+      ).toBe('kubectl get pods web-0 --context "<enter context>"');
+      expect(
+        toKubectl({ action: "get", kind: "Pod", namespace: "%TEMP%", name: "web-0", context: "prod" }, true),
+      ).toBe('kubectl get pods web-0 -n "<enter namespace>" --context prod');
+    });
+
     it("leaves plain resource names unquoted (DNS-1123 names are always in the safe set)", () => {
       expect(
         toKubectl({ action: "get", kind: "Pod", namespace: "default", name: "web-0", context: "prod" }),
