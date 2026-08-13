@@ -52,6 +52,7 @@ describe("AssistantDrawer", () => {
       onEvent({ type: "toolResult", id: "t1", status: "ok" });
       onEvent({ type: "textDelta", text: "3 pods running." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
@@ -70,6 +71,7 @@ describe("AssistantDrawer", () => {
       onEvent({ type: "toolResult", id: "t1", status: "ok" });
       onEvent({ type: "textDelta", text: "B." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
@@ -94,6 +96,7 @@ describe("AssistantDrawer", () => {
       // paragraphs instead of one continued line.
       onEvent({ type: "textDelta", text: "\nB." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
@@ -107,6 +110,7 @@ describe("AssistantDrawer", () => {
       onEvent({ type: "textDelta", text: "Hello " });
       onEvent({ type: "textDelta", text: "world" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
@@ -189,6 +193,7 @@ describe("AssistantDrawer", () => {
       onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.getSecret", args: { name: "db-creds", namespace: "prod" } });
       onEvent({ type: "toolResult", id: "t1", status: "ok" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });
@@ -206,6 +211,7 @@ describe("AssistantDrawer", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "error", message: "the agent crashed" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantDrawer open onClose={() => {}} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "why?" } });

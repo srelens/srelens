@@ -26,6 +26,7 @@ describe("sendChat", () => {
       agentPath: "/usr/bin/claude",
       agentKind: "claude",
       turn: 0,
+      resume: null,
     });
   });
 
@@ -39,6 +40,7 @@ describe("sendChat", () => {
       agentPath: "/usr/bin/codex",
       agentKind: "codex",
       turn: 3,
+      resume: null,
     });
   });
 

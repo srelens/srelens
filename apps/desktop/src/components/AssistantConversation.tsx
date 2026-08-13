@@ -779,6 +779,14 @@ export const AssistantConversation = forwardRef<
   // restored from the loaded value when reopening a session, so re-saving
   // never stomps the original `createdAt`.
   const createdAtRef = useRef<number | null>(null);
+  // The agent CLI's OWN session id for this conversation (what `sendChat`
+  // last returned), tagged with the agent kind it belongs to: a Claude id
+  // passed to Cursor's `--resume` (or vice versa) would error, so switching
+  // agents mid-conversation must start that CLI fresh rather than resume a
+  // foreign id. Persisted as `cliSessionId` and restored on reopen, so a
+  // reopened conversation continues with real context (the CLIs keep their
+  // session transcripts on disk across app restarts).
+  const cliSessionRef = useRef<{ kind: string; id: string } | null>(null);
   // Chain of pending disk saves. `persistSession` enqueues onto it, and
   // session actions that touch the same files (delete, load) await it first —
   // otherwise a slow save still flushing after a turn settles could race
@@ -1012,12 +1020,11 @@ export const AssistantConversation = forwardRef<
       // The agent this conversation ran on, so reopening it restores the same
       // pick in the composer.
       agentKind: selectedKind || null,
-      // Not wired yet — the `AgentEvent` stream doesn't carry the agent
-      // CLI's own session id, and threading it through needs a backend
-      // change. `null` here means a reopened session is continued
-      // best-effort (replayed transcript only, no CLI `--resume`), which
-      // the spec (§2) allows.
-      cliSessionId: null,
+      // The agent CLI's own session id (`sendChat`'s return), saved only
+      // when it belongs to the agent this conversation is stamped with —
+      // an id from a different CLI would make the restored conversation
+      // pass a foreign id to `--resume` and error its first turn.
+      cliSessionId: cliSessionRef.current?.kind === (selectedKind || null) ? cliSessionRef.current.id : null,
       messages: toStoredMessages(msgs, calls),
     };
     const next = persistChainRef.current.then(() => persistSessionNow(session));
@@ -1055,6 +1062,9 @@ export const AssistantConversation = forwardRef<
     setInput("");
     sessionRef.current = null;
     createdAtRef.current = null;
+    // A fresh conversation must start a fresh CLI session — carrying the old
+    // id would silently resume the previous conversation's context.
+    cliSessionRef.current = null;
     // Composer state is per-conversation, not global — without resetting
     // these, a "New chat" (or deleting the currently-open session, which
     // routes through here) would silently carry the old session's active
@@ -1070,7 +1080,8 @@ export const AssistantConversation = forwardRef<
   /** Load a saved session and replay it into state read-only — no event
    * stream involved, just the transcript as it was last saved. Continuing
    * to type and send afterward appends further turns onto the same disk
-   * session (see the deferred-`cliSessionId` note on `persistSession`). */
+   * session, resuming the CLI's own session via the restored
+   * `cliSessionId` (see `cliSessionRef`). */
   async function onSelectSession(id: string) {
     // See onNewChat: don't swap sessions while a turn is streaming, or its
     // events would land in (and be saved under) the newly loaded session.
@@ -1090,6 +1101,14 @@ export const AssistantConversation = forwardRef<
       nextId.current = msgs.reduce((max, m) => Math.max(max, m.id + 1), 0);
       sessionRef.current = session.id;
       createdAtRef.current = session.createdAt;
+      // Restore the CLI session id under the agent kind it was saved with so
+      // the next send `--resume`s it — the CLIs keep session transcripts on
+      // disk, so this works across app restarts too. Older saves (or native/
+      // Codex conversations) have `null` here and simply start fresh.
+      cliSessionRef.current =
+        session.cliSessionId && session.agentKind
+          ? { kind: session.agentKind, id: session.cliSessionId }
+          : null;
       // Restore the global tab's multi-select from what was persisted;
       // meaningless in drawer mode, where the resource `context` prop drives
       // `attachedContext` instead and this state is never read.
@@ -1353,7 +1372,21 @@ export const AssistantConversation = forwardRef<
         return;
       }
       saveLastAgent(usedKind); // remember what was actually used for the next fresh chat
-      await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current);
+      // Resume the CLI's own session only when this turn runs on the same
+      // agent the stored id came from (see `cliSessionRef`).
+      const resume = cliSessionRef.current?.kind === usedKind ? cliSessionRef.current.id : null;
+      const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume);
+      // `null` means "nothing captured" (native agent, Codex, cancelled
+      // turn) — keep what we had rather than dropping continuity.
+      const prev = cliSessionRef.current;
+      if (cliId && (prev?.id !== cliId || prev?.kind !== usedKind)) {
+        cliSessionRef.current = { kind: usedKind, id: cliId };
+        // The turnDone-triggered save snapshots at the moment the event
+        // streams — BEFORE `sendChat` resolves with this id — so that save
+        // carried the previous turn's id. Queue one more so the transcript
+        // on disk gets the id the next turn must resume.
+        void persistSession(messagesRef.current, toolCallsRef.current);
+      }
     } catch (e) {
       // A rejection here means the transport itself failed before any
       // `error` event could stream (e.g. `chat_send` rejects outright when

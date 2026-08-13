@@ -69,6 +69,13 @@ export function startChat(): Promise<string> {
  * send does (the `subscribe` await below opens exactly that window) while
  * dropping a stale Stop left over from an earlier turn. Callers that never
  * cancel can omit it.
+ *
+ * `resume` is the agent CLI's own session id returned by a previous call for
+ * this conversation; the backend passes it to the CLI's `--resume` so
+ * follow-up turns keep their context. Resolves to the id captured from this
+ * turn's stream (store it and pass it back next time), or `null` when the
+ * agent has none (native srelens agent, Codex) — callers should treat `null`
+ * as "keep what you had", since a cancelled/failed turn also returns it.
  */
 export async function sendChat(
   session: string,
@@ -78,13 +85,14 @@ export async function sendChat(
   images?: string[],
   agentKind: string = "claude",
   turn: number = 0,
-): Promise<void> {
+  resume: string | null = null,
+): Promise<string | null> {
   const unsub = await subscribe(`chat://${session}`, (payload: unknown) => {
     const e = parseAgentEvent(payload);
     if (e) onEvent(e);
   });
   try {
-    await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath, agentKind, turn });
+    return await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath, agentKind, turn, resume });
   } finally {
     unsub();
   }

@@ -86,6 +86,7 @@ describe("AssistantConversation", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "Hello from the global assistant." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "what's up?" } });
@@ -121,6 +122,7 @@ describe("AssistantConversation", () => {
     ]);
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     const trigger = await screen.findByRole("combobox", { name: /agent/i });
@@ -156,6 +158,7 @@ describe("AssistantConversation", () => {
     ]);
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     const trigger = await screen.findByRole("combobox", { name: /agent/i });
@@ -262,6 +265,7 @@ describe("AssistantConversation session persistence", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "Scaling now." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), {
@@ -281,10 +285,38 @@ describe("AssistantConversation session persistence", () => {
     expect(saved.messages[1]).toEqual({ id: 1, role: "assistant", text: "Scaling now." });
   });
 
+  it("resumes the CLI's own session on follow-up turns and persists the id", async () => {
+    // First turn: the backend captures the CLI's session id from the stream
+    // and returns it from sendChat.
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "textDelta", text: "hi" });
+      onEvent({ type: "turnDone" });
+      return "cli-abc";
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    // A first turn resumes nothing (9th arg), and once the id lands a
+    // follow-up save records it with the transcript.
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(chat.sendChat).mock.calls[0][7]).toBeNull();
+    await waitFor(() => {
+      const calls = vi.mocked(chatHistory.saveSession).mock.calls;
+      expect(calls[calls.length - 1][0].cliSessionId).toBe("cli-abc");
+    });
+
+    // Second turn: the captured id comes back as `resume`.
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "second" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(chat.sendChat).mock.calls[1][7]).toBe("cli-abc");
+  });
+
   it("auto-save records the attached context under `contexts`", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "ok" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation context={{ context: "prod-cluster", namespace: "payments" }} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
@@ -301,6 +333,7 @@ describe("AssistantConversation session persistence", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "error", message: "boom" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
@@ -324,6 +357,7 @@ describe("AssistantConversation session persistence", () => {
       onEvent({ type: "error", message: "image attachments aren't supported by the srelens agent yet" });
       onEvent({ type: "textDelta", text: "here is the text-only answer" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
@@ -337,6 +371,7 @@ describe("AssistantConversation session persistence", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "first reply" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "first question" } });
@@ -363,6 +398,7 @@ describe("AssistantConversation session persistence", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "reply" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
 
@@ -398,6 +434,7 @@ describe("AssistantConversation session persistence", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "still looking" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     await openHistory();
@@ -467,6 +504,7 @@ describe("AssistantConversation session persistence", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "ok" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
@@ -553,6 +591,7 @@ describe("AssistantConversation New chat resets composer state", () => {
     });
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation availableContexts={["prod", "staging"]} />);
     await openHistory();
@@ -625,6 +664,7 @@ describe("AssistantConversation image attachments", () => {
   it("Send is held while an attachment is still being read, then includes it", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "look at this" } });
@@ -643,6 +683,7 @@ describe("AssistantConversation image attachments", () => {
   it("removing a pending image chip clears it, and it isn't sent", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
@@ -665,6 +706,7 @@ describe("AssistantConversation image attachments", () => {
     // (as in the test above) that bug would still pass.
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile(), pngFile2()] } });
@@ -687,6 +729,7 @@ describe("AssistantConversation image attachments", () => {
   it("sending strips the data URI prefix, passing raw base64 as sendChat's 5th arg", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
@@ -703,6 +746,7 @@ describe("AssistantConversation image attachments", () => {
   it("renders the sent image inline in the user bubble, and clears the pending chip", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
@@ -719,6 +763,7 @@ describe("AssistantConversation image attachments", () => {
   it("auto-save persists the attached images on the stored user message", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByLabelText(/attach image/i), { target: { files: [pngFile()] } });
@@ -785,6 +830,7 @@ describe("AssistantConversation multi-context (global tab)", () => {
   it("selecting two contexts shows two removable chips and prefaces the outgoing prompt enumerating both", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
     fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
@@ -807,6 +853,7 @@ describe("AssistantConversation multi-context (global tab)", () => {
   it("removing a chip updates both the chip list and the preface (down to the single-context wording)", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
     fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
@@ -829,6 +876,7 @@ describe("AssistantConversation multi-context (global tab)", () => {
   it("persists selectedContexts under the session's contexts field in multi-context mode", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation availableContexts={["a", "b"]} />);
     fireEvent.click(await screen.findByRole("button", { name: /contexts \(0\)/i }));
@@ -885,7 +933,7 @@ describe("AssistantConversation composer (Task 19)", () => {
     vi.mocked(chat.sendChat).mockImplementation(
       () =>
         new Promise((resolve) => {
-          resolveSend = () => resolve(undefined);
+          resolveSend = () => resolve(null);
         }),
     );
     render(<AssistantConversation />);
@@ -908,7 +956,7 @@ describe("AssistantConversation composer (Task 19)", () => {
 
   it("Send is restored once the (cancelled) turn settles", async () => {
     vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
-    vi.mocked(chat.sendChat).mockResolvedValue(undefined);
+    vi.mocked(chat.sendChat).mockResolvedValue(null);
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "hi" } });
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
@@ -920,7 +968,7 @@ describe("AssistantConversation composer (Task 19)", () => {
     vi.mocked(chat.cancelChat).mockResolvedValue(undefined);
     let resolveSend: () => void = () => {};
     vi.mocked(chat.sendChat).mockImplementation(
-      () => new Promise((resolve) => { resolveSend = () => resolve(undefined); }),
+      () => new Promise((resolve) => { resolveSend = () => resolve(null); }),
     );
     const { unmount } = render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "keep going" } });
@@ -1041,6 +1089,7 @@ describe("AssistantConversation composer (Task 19)", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "fresh reply" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     const ref = createRef<AssistantConversationHandle>();
     render(<AssistantConversation ref={ref} />);
@@ -1198,6 +1247,7 @@ describe("AssistantConversation skills activation (Task 23)", () => {
     }));
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation context={{ context: "prod-cluster" }} />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
@@ -1231,6 +1281,7 @@ describe("AssistantConversation skills activation (Task 23)", () => {
     });
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
@@ -1272,6 +1323,7 @@ describe("AssistantConversation skills activation (Task 23)", () => {
     });
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "/" } });
@@ -1304,6 +1356,7 @@ describe("AssistantConversation answer layout", () => {
       onEvent({ type: "toolResult", id: "t1", status: "ok" });
       onEvent({ type: "textDelta", text: "Here are the pods." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "pods?" } });
@@ -1320,6 +1373,7 @@ describe("AssistantConversation answer layout", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "pods?" } });
@@ -1343,6 +1397,7 @@ describe("AssistantConversation answer layout", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "The answer." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "q" } });
@@ -1357,6 +1412,7 @@ describe("AssistantConversation answer layout", () => {
       onEvent({ type: "thinking", text: "Let me reason about this." });
       onEvent({ type: "textDelta", text: "The answer." });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "q" } });
@@ -1379,6 +1435,7 @@ describe("AssistantConversation agent persistence", () => {
     vi.mocked(chat.listAgents).mockResolvedValue(twoAgents);
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.click(await screen.findByRole("combobox", { name: /agent/i }));
@@ -1402,6 +1459,7 @@ describe("AssistantConversation agent persistence", () => {
     vi.mocked(chat.listAgents).mockResolvedValue(twoAgents);
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantConversation />);
     fireEvent.click(await screen.findByRole("combobox", { name: /agent/i }));

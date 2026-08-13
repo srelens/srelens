@@ -25,12 +25,11 @@ export interface Session extends SessionMeta {
   /** Active skill names (Task 23) — always empty for now. */
   skills: string[];
   /**
-   * The agent CLI's own session id (for `--resume`). The current
-   * `AgentEvent` stream doesn't carry it — wiring it through needs a
-   * backend change — so this is always `null` for now. Continuing a
-   * reopened session is therefore best-effort ("continue with memory of the
-   * transcript" rather than a true CLI `--resume`), which the spec (§2)
-   * allows.
+   * The agent CLI's own session id, captured from the stream by `chat_send`
+   * and passed back to the CLI's `--resume` on the conversation's next turn
+   * so follow-ups keep their context (Claude and Cursor; the native agent
+   * and Codex have no resumable id and store `null`). `null` also covers
+   * sessions saved before this was wired — those reopen fresh, best-effort.
    */
   cliSessionId: string | null;
   /** The agent CLI this conversation used ("claude"/"codex"), restored into

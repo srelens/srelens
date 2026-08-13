@@ -106,6 +106,7 @@ describe("AssistantTab", () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "textDelta", text: "reply" });
       onEvent({ type: "turnDone" });
+      return null;
     });
     render(<AssistantTab cluster={null} availableContexts={["a", "b"]} />);
 

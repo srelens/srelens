@@ -421,6 +421,13 @@ fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
 
 /// Send one user turn. Spawns the agent against our running MCP server and
 /// streams `AgentEvent`s on `chat://<session>`.
+///
+/// `resume` is the agent CLI's OWN session id from a previous turn of this
+/// conversation (what this function returned last time), passed to the CLI's
+/// `--resume` so follow-up turns keep their context. Returns the id captured
+/// from this turn's stream — the caller persists it with the conversation
+/// and hands it back on the next send. `None` when the agent doesn't expose
+/// one (native, Codex) or the turn ended before the stream started.
 #[tauri::command]
 pub async fn chat_send(
     session: String,
@@ -429,10 +436,11 @@ pub async fn chat_send(
     agent_path: String,
     agent_kind: String,
     turn: Option<u64>,
+    resume: Option<String>,
     app: tauri::AppHandle,
     mcp: tauri::State<'_, crate::mcp::McpHttpManager>,
     chats: tauri::State<'_, ChatManager>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     // The turn generation the frontend stamped this send with; a Stop for the
     // same turn arms `pending_cancels` under this value. Optional so callers
     // that never cancel (e.g. one-shot generation turns) can omit it.
@@ -453,13 +461,27 @@ pub async fn chat_send(
         return Err(format!("invalid session id {session:?}"));
     }
 
+    // The resume id lands in the agent's argv (`--resume <id>`). Real ids are
+    // CLI-minted uuids, but this one round-trips through the persisted
+    // session file on disk — validate it to the same bare charset as the
+    // session id above so a tampered store can't smuggle a flag-shaped or
+    // whitespace-carrying token into the command line. Invalid → dropped
+    // (fresh session), not an error: continuity is best-effort by design.
+    let resume = resume.filter(|id| {
+        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    });
+
     // The native agent takes an entirely different path from the CLI spawns
     // below: no process, no PATH binary, no loopback HTTP. It runs the loop
     // in-process against a provider API and drives MCP tools directly through
     // the same consent/audit server the CLIs reach over HTTP. Handle it here so
     // the CLI machinery below only ever sees the three CLI kinds.
     if matches!(kind, AgentKind::Srelens) {
-        return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty(), turn).await;
+        // The native agent carries its own conversation history in-process
+        // (see `llm_agent`), so it has no CLI session id to resume or return.
+        return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty(), turn)
+            .await
+            .map(|()| None);
     }
 
     let channel = format!("chat://{session}");
@@ -475,7 +497,10 @@ pub async fn chat_send(
     // dropped by the same take.
     if chats.take_pending_cancel(&session, turn) {
         sink.emit(&channel, serde_json::to_value(AgentEvent::TurnDone).unwrap());
-        return Ok(());
+        // `None`, not the passed `resume`: the caller keeps its stored id
+        // whenever this returns nothing (see `sendChat`), so a cancelled turn
+        // doesn't lose the conversation's continuity.
+        return Ok(None);
     }
 
     let token = mcp
@@ -581,9 +606,15 @@ pub async fn chat_send(
                 &agent_path,
                 &effective_prompt,
                 &cfg_path.to_string_lossy(),
-                None,
+                resume.as_deref(),
             )
         }
+        // Codex deliberately gets no `resume`: `codex exec resume` does not
+        // accept `-s read-only` or `-C <dir>` (verified live, codex-cli
+        // 0.144), and those two flags ARE the sandbox box `codex_command`
+        // documents — resuming without being able to re-assert them would
+        // trade context continuity for an unverified sandbox. Follow-ups
+        // start fresh until a verified resume path exists (#215).
         AgentKind::Codex => srelens_agent::adapter::codex_command(
             &agent_path,
             &prompt,
@@ -623,7 +654,7 @@ pub async fn chat_send(
                 &prompt,
                 &cursor_cfg_dir.to_string_lossy(),
                 &cwd_path.to_string_lossy(),
-                None,
+                resume.as_deref(),
             )
         }
         // Handled by the early return above, before any CLI machinery.
@@ -704,7 +735,17 @@ pub async fn chat_send(
 
     let mut lines = BufReader::new(stdout).lines();
     let mut saw_done = false;
+    // The CLI's own session id for this turn, captured from the stream so the
+    // NEXT turn can `--resume` it. Claude and Cursor stamp it on every line;
+    // for Codex (different shape, resume scoped out — see its arm above) this
+    // simply never matches and stays `None`. Captured fresh each turn rather
+    // than reusing `resume`: Claude forks a resumed session under a NEW id,
+    // so the stored id must follow the stream, not the input.
+    let mut agent_session: Option<String> = None;
     while let Ok(Some(line)) = lines.next_line().await {
+        if agent_session.is_none() {
+            agent_session = srelens_agent::stream_session_id(&line);
+        }
         saw_done |= emit_events(sink.clone(), &channel, std::iter::once(line), parse_line);
     }
 
@@ -727,7 +768,11 @@ pub async fn chat_send(
 
     finish_turn(sink.as_ref(), &channel, saw_done, crashed, &stderr_tail);
 
-    Ok(())
+    // Fall back to the id we resumed FROM when the stream never yielded one
+    // (crash before the first line, unexpected shape): the caller overwrites
+    // its stored id only with a non-`None` return, so continuity degrades to
+    // "unchanged" rather than snapping back to fresh sessions.
+    Ok(agent_session.or(resume))
 }
 
 /// Kill a running turn's agent process, if any. `turn` is the frontend's turn
