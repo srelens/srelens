@@ -35,9 +35,11 @@ export function avatarColor(name: string): string {
  * since segments are user-defined: the digit requirement keeps hex-alphabet
  * words (`decade`, `cafebabe`) as identity, and the 8-char floor keeps
  * short leetspeak-style names (`c0ffee`, `babe42`) as identity too — real
- * generated ids (k3d, EKS, the #209 set) are 8 hex chars or more. */
+ * generated ids (k3d, EKS, the #209 set) are 8 hex chars or more. Bare
+ * numbers are noise only from 6 digits up (timestamps, serials): a short
+ * number is usually the ONLY thing telling `cluster-1` from `cluster-2`. */
 function isNoiseSegment(segment: string): boolean {
-  return /^(?=.*\d)[0-9a-f]{8,}$/i.test(segment) || /^\d+$/.test(segment);
+  return /^(?=.*\d)[0-9a-f]{8,}$/i.test(segment) || /^\d{6,}$/.test(segment);
 }
 
 /** Up-to-3-char initials from a cluster name (splits on - _ space /),

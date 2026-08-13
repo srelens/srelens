@@ -38,8 +38,15 @@ describe("avatarInitials", () => {
     expect(avatarInitials("prod-babe42")).toBe("PB");
   });
 
+  it("keeps short numeric segments — often the only distinguisher", () => {
+    expect(avatarInitials("cluster-1")).toBe("C1");
+    expect(avatarInitials("cluster-2")).toBe("C2");
+    // Long digit runs are timestamps/serials, not names.
+    expect(avatarInitials("prod-eu-20260813")).toBe("PE");
+  });
+
   it("falls back to raw segments when everything looks generated", () => {
     expect(avatarInitials("7f3a9b21")).toBe("7F");
-    expect(avatarInitials("123-456789ab")).toBe("14");
+    expect(avatarInitials("123456-456789ab")).toBe("14");
   });
 });
