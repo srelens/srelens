@@ -9,10 +9,33 @@ describe("avatarColor", () => {
 });
 
 describe("avatarInitials", () => {
-  it("derives up to two initials, splitting on separators", () => {
+  it("derives up to three initials, splitting on separators", () => {
     expect(avatarInitials("prod")).toBe("PR");
     expect(avatarInitials("kind-dev")).toBe("KD");
-    expect(avatarInitials("my_staging_cluster")).toBe("MS");
+    expect(avatarInitials("my_staging_cluster")).toBe("MSC");
     expect(avatarInitials("")).toBe("?");
+  });
+
+  it("skips generated-id segments so similar contexts stay distinguishable (#209)", () => {
+    // The issue's real-world set: two initials collapsed all of these to
+    // DL/DL/DL/DL and ML/ML.
+    expect(avatarInitials("dev-lon-nrtc-6bcb8b63")).toBe("DLN");
+    expect(avatarInitials("dev-lon-nrtc-6bcb8b63-admin")).toBe("DLN");
+    expect(avatarInitials("dev-lon-workload-15d9c530")).toBe("DLW");
+    expect(avatarInitials("mbr-lon-nrtc-c678b415")).toBe("MLN");
+    expect(avatarInitials("k3d-dev-ai")).toBe("KDA");
+    expect(avatarInitials("k3d-nats")).toBe("KN");
+  });
+
+  it("keeps hex-alphabet words and digit-bearing short names as identity", () => {
+    // Real words that happen to be hex letters are not ids...
+    expect(avatarInitials("decade-cluster")).toBe("DC");
+    // ...and k3d/k8s-style segments have non-hex letters, so they count.
+    expect(avatarInitials("k3d-7f3a9b21")).toBe("K3");
+  });
+
+  it("falls back to raw segments when everything looks generated", () => {
+    expect(avatarInitials("7f3a9b21")).toBe("7F");
+    expect(avatarInitials("123-456789a")).toBe("14");
   });
 });
