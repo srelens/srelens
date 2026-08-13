@@ -443,16 +443,27 @@ fn handle_subscription(
     // into an error — strictly better than accepting a subscription known to
     // be stillborn.
     let dead: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    // This watch's registry generation, filled in right after `insert`. The
+    // callback evicts through `remove_if` with THIS token only — a client may
+    // re-subscribe the same URI while `on_dead` is in flight, and an
+    // unconditional remove would abort the replacement watch, leaving the
+    // client subscribed to nothing while believing otherwise. `None` means
+    // the death beat the insert; the post-insert check below owns that case.
+    let my_generation: std::sync::Arc<std::sync::Mutex<Option<u64>>> = Default::default();
     let on_dead = {
         let dead = dead.clone();
+        let my_generation = my_generation.clone();
         let subs = subs.clone();
         let dead_uri = canonical.clone();
         Box::new(move |reason: String| {
             eprintln!("srelens: mcp watch {dead_uri} evicted: {reason}");
             *dead.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
-            if subs.remove(&dead_uri) {
-                dead_dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(dead_uri.clone());
-                let _ = dead_wake.try_send(());
+            let generation = *my_generation.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(generation) = generation {
+                if subs.remove_if(&dead_uri, generation) {
+                    dead_dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(dead_uri.clone());
+                    let _ = dead_wake.try_send(());
+                }
             }
         })
     };
@@ -461,11 +472,15 @@ fn handle_subscription(
         Ok(h) => h,
         Err(message) => return Some(err(id, -32602, &message)),
     };
-    if let Err(message) = subs.insert(canonical.clone(), handle) {
-        return Some(err(id, -32602, &message));
-    }
+    let generation = match subs.insert(canonical.clone(), handle) {
+        Ok(generation) => generation,
+        Err(message) => return Some(err(id, -32602, &message)),
+    };
+    *my_generation.lock().unwrap_or_else(|e| e.into_inner()) = Some(generation);
     if let Some(reason) = dead.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        subs.remove(&canonical);
+        // Own generation only: a concurrent re-subscribe may already have
+        // replaced this entry, and that newer watch is not ours to evict.
+        subs.remove_if(&canonical, generation);
         return Some(err(id, -32603, &format!("the watch ended immediately: {reason}")));
     }
     Some(ok(id, json!({})))
@@ -1780,6 +1795,63 @@ mod tests {
             "the URI goes dirty so the client re-reads and discovers the death"
         );
         assert!(wake_rx.try_recv().is_ok(), "the serve loop must be woken to drain it");
+    }
+
+    /// The re-subscribe race on eviction: the first watch dies, and BEFORE
+    /// its `on_dead` runs, the client re-subscribes the same URI. The late
+    /// callback must not evict the replacement — the client would be
+    /// subscribed to nothing while holding a success response for it.
+    #[tokio::test]
+    async fn a_late_death_does_not_evict_the_watch_that_replaced_it() {
+        type OnDead = Box<dyn FnOnce(String) + Send>;
+        struct CollectingWatcher(std::sync::Mutex<Vec<OnDead>>);
+        impl crate::resources::ObjectWatcher for CollectingWatcher {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                self.0.lock().unwrap().push(on_dead);
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let watcher = Arc::new(CollectingWatcher(std::sync::Mutex::new(Vec::new())));
+        let server = Arc::new(
+            server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(watcher.clone()),
+        );
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+
+        // Subscribe twice: the second replaces the first in the registry.
+        for _ in 0..2 {
+            let resp =
+                handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                    .unwrap();
+            assert!(resp.get("error").is_none(), "subscribe succeeds: {resp}");
+        }
+
+        // The FIRST watch's death arrives late.
+        let first_on_dead = watcher.0.lock().unwrap().remove(0);
+        first_on_dead("forbidden".to_string());
+
+        assert!(
+            !dirty.lock().unwrap().contains("k8s://c/ns/Pod/web-0"),
+            "no notification for an eviction that must not happen"
+        );
+        assert!(
+            subs.remove("k8s://c/ns/Pod/web-0"),
+            "the replacement watch must still be subscribed"
+        );
     }
 
     /// The coalescing this closes: without it, 5 `on_change` calls to one
