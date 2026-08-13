@@ -472,14 +472,29 @@ fn handle_subscription(
         Ok(h) => h,
         Err(message) => return Some(err(id, -32602, &message)),
     };
+    // Death BEFORE commitment: check before `insert`, because on a
+    // re-subscribe `insert` replaces AND ABORTS the prior still-live watch —
+    // a replacement that was stillborn (the trait allows `on_dead` inside
+    // `watch()` itself) must cost the client an error response, not the
+    // working subscription they already had. The failed handle is aborted
+    // here since it never reaches the registry's ownership.
+    if let Some(reason) = dead.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        handle.abort();
+        return Some(err(id, -32603, &format!("the watch ended immediately: {reason}")));
+    }
     let generation = match subs.insert(canonical.clone(), handle) {
         Ok(generation) => generation,
         Err(message) => return Some(err(id, -32602, &message)),
     };
     *my_generation.lock().unwrap_or_else(|e| e.into_inner()) = Some(generation);
     if let Some(reason) = dead.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        // Own generation only: a concurrent re-subscribe may already have
-        // replaced this entry, and that newer watch is not ours to evict.
+        // A death that lost the race with the check above and landed after
+        // the commit. Own generation only: a concurrent re-subscribe may
+        // already have replaced this entry, and that newer watch is not ours
+        // to evict. On a re-subscribe the prior watch is gone by now
+        // (replaced at commit) — that residual few-instruction window is the
+        // cost of `watch` being synchronous; the client still learns the
+        // truth from the error response.
         subs.remove_if(&canonical, generation);
         return Some(err(id, -32603, &format!("the watch ended immediately: {reason}")));
     }
@@ -1795,6 +1810,61 @@ mod tests {
             "the URI goes dirty so the client re-reads and discovers the death"
         );
         assert!(wake_rx.try_recv().is_ok(), "the serve loop must be woken to drain it");
+    }
+
+    /// A stillborn REPLACEMENT must not cost the client the working watch it
+    /// already had: the death check runs before `insert`, which is what
+    /// replaces (and aborts) the prior entry on a re-subscribe. The failed
+    /// attempt answers an error; the original subscription stays live.
+    #[tokio::test]
+    async fn a_replacement_that_dies_immediately_leaves_the_prior_watch_subscribed() {
+        struct DiesOnSecondWatch(std::sync::atomic::AtomicUsize);
+        impl crate::resources::ObjectWatcher for DiesOnSecondWatch {
+            fn watch(
+                &self,
+                _uri: &crate::resources::ResourceUri,
+                _on_change: Box<dyn FnMut() + Send>,
+                on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                    on_dead("the cluster went away".to_string());
+                }
+                Ok(tokio::spawn(async { std::future::pending::<()>().await }).abort_handle())
+            }
+        }
+        struct Kinds;
+        impl crate::resources::KindResolver for Kinds {
+            fn scope(&self, kind: &str) -> Option<crate::resources::KindScope> {
+                (kind == "Pod").then_some(crate::resources::KindScope::Namespaced)
+            }
+        }
+        let server = Arc::new(server_with_ping().with_resources(Arc::new(Kinds)).with_watcher(
+            Arc::new(DiesOnSecondWatch(std::sync::atomic::AtomicUsize::new(0))),
+        ));
+        let subs = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
+        let dirty = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"resources/subscribe",
+            "params":{"uri":"k8s://c/ns/Pod/web-0"}});
+
+        let first =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        assert!(first.get("error").is_none(), "the first subscribe succeeds: {first}");
+
+        // The re-subscribe's replacement watch is stillborn.
+        let second =
+            handle_subscription(&server, &subs, &dirty, &wake_tx, &req, "resources/subscribe")
+                .unwrap();
+        assert!(
+            second["error"]["message"].as_str().unwrap_or_default().contains("ended immediately"),
+            "the failed re-subscribe answers an error: {second}"
+        );
+
+        assert!(
+            subs.remove("k8s://c/ns/Pod/web-0"),
+            "the ORIGINAL watch must still be subscribed — the failed replacement never touched it"
+        );
     }
 
     /// The re-subscribe race on eviction: the first watch dies, and BEFORE
