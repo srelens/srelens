@@ -11,7 +11,11 @@
 //! ```sh
 //! kind create cluster --name srelens-e2e
 //! pnpm --filter @srelens/desktop build
-//! cargo build -p srelens-desktop
+//! # custom-protocol is what makes the binary serve the EMBEDDED dist — a
+//! # plain debug build expects the Vite dev server and renders only
+//! # "Could not connect to localhost" (learned from the first CI run's
+//! # failure screenshot).
+//! cargo build -p srelens-desktop --features tauri/custom-protocol
 //! cargo install tauri-driver --locked
 //! # Linux: sudo apt-get install webkit2gtk-driver xvfb
 //! xvfb-run --auto-servernum \
@@ -130,7 +134,11 @@ async fn smoke_launch_to_logs_against_kind() {
     let app = std::env::var("SRELENS_SMOKE_APP")
         .map(PathBuf::from)
         .unwrap_or_else(|_| workspace_root().join("target/debug/srelens"));
-    assert!(app.exists(), "app binary missing at {app:?} — build with `cargo build -p srelens-desktop`");
+    assert!(
+        app.exists(),
+        "app binary missing at {app:?} — build with \
+         `cargo build -p srelens-desktop --features tauri/custom-protocol`"
+    );
 
     // ---- tauri-driver proxies WebDriver to WebKitWebDriver and spawns the
     // app; env set here is inherited by the app process.

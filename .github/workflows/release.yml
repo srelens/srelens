@@ -221,8 +221,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install tauri-driver
         run: cargo install tauri-driver --locked
+      # custom-protocol makes the debug binary serve the EMBEDDED frontend
+      # dist; without it the WebView tries the Vite dev server and the whole
+      # window is just "Could not connect to localhost" (first live run's
+      # failure screenshot).
       - name: Build the app binary
-        run: cargo build -p srelens-desktop
+        run: cargo build -p srelens-desktop --features tauri/custom-protocol
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
