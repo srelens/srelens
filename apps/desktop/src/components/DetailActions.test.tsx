@@ -33,6 +33,11 @@ vi.mock("../lib/actions", () => ({
   cronjobTriggerNow: cronjobTriggerNowMock,
   debugPod: debugPodMock,
 }));
+const { getObjectMock } = vi.hoisted(() => ({ getObjectMock: vi.fn() }));
+vi.mock("../lib/manifest", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/manifest")>();
+  return { ...actual, getObject: getObjectMock };
+});
 const { notifyMock } = vi.hoisted(() => ({
   notifyMock: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
@@ -45,7 +50,12 @@ vi.mock("../lib/access", async (importOriginal) => {
 import { useAccess } from "../lib/access";
 import { describeError } from "../lib/errors";
 
-import { PodActions, ResourceActions, desiredReplicasFrom } from "./DetailActions";
+import {
+  PodActions,
+  ResourceActions,
+  desiredReplicasFrom,
+  desiredReplicasForDetail,
+} from "./DetailActions";
 
 const pod = {
   name: "web-1",
@@ -75,6 +85,10 @@ beforeEach(() => {
   cronjobSetSuspendMock.mockReset();
   cronjobTriggerNowMock.mockReset();
   debugPodMock.mockReset();
+  getObjectMock.mockReset();
+  // Default: object fetches resolve to nothing useful — tests that care about
+  // the replica seed set their own return value.
+  getObjectMock.mockResolvedValue({});
   notifyMock.success.mockReset();
   notifyMock.error.mockReset();
   // Default: everything allowed, so pre-existing behavioural tests (written
@@ -212,6 +226,19 @@ describe("desiredReplicasFrom", () => {
     expect(desiredReplicasFrom({ ready: "not-a-fraction" })).toBeUndefined();
     expect(desiredReplicasFrom({ ready: 3 })).toBeUndefined();
   });
+
+  it("matches the detail's row by name AND namespace", () => {
+    // All-namespaces view: two workloads sharing a name must not seed
+    // each other's counts.
+    const rows = [
+      { name: "web", namespace: "team-a", ready: "1/3" },
+      { name: "web", namespace: "team-b", ready: "2/5" },
+    ];
+    expect(desiredReplicasForDetail(rows, "web", "team-b")).toBe(5);
+    expect(desiredReplicasForDetail(rows, "web", "team-a")).toBe(3);
+    expect(desiredReplicasForDetail(rows, "web", "team-c")).toBeUndefined();
+    expect(desiredReplicasForDetail(rows, "api", "team-a")).toBeUndefined();
+  });
 });
 
 describe("ResourceActions", () => {
@@ -257,6 +284,49 @@ describe("ResourceActions", () => {
     // Range: 0 to max(currentReplicas * 2, 10).
     expect(slider.getAttribute("aria-valuemin")).toBe("0");
     expect(slider.getAttribute("aria-valuemax")).toBe("10");
+    // The row already knew the count — no object fetch needed.
+    expect(getObjectMock).not.toHaveBeenCalled();
+  });
+
+  it("fetches the live count when the row can't provide one (ReplicaSets)", async () => {
+    getObjectMock.mockResolvedValue({ object: { spec: { replicas: 4 } } });
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="ReplicaSet"
+        namespace="default"
+        name="web-abc123"
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+
+    expect(getObjectMock).toHaveBeenCalledWith("kind-dev", "ReplicaSet", "default", "web-abc123");
+    await waitFor(() =>
+      expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("4"),
+    );
+    expect(screen.getByRole("slider").getAttribute("aria-valuenow")).toBe("4");
+  });
+
+  it("never lets a late fetch overwrite what the user typed", async () => {
+    let resolveFetch!: (v: unknown) => void;
+    getObjectMock.mockReturnValue(new Promise((r) => (resolveFetch = r)));
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="ReplicaSet"
+        namespace="default"
+        name="web-abc123"
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "7" } });
+
+    resolveFetch({ object: { spec: { replicas: 4 } } });
+    // Give the resolved promise a tick to (wrongly) apply itself.
+    await new Promise((r) => setTimeout(r, 0));
+    expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("7");
   });
 
   it("widens the slider range for larger workloads", () => {

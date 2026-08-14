@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   ArrowLeftRight,
   Bot,
@@ -24,6 +24,7 @@ import {
 } from "../lib/actions";
 import { notify } from "../lib/notify";
 import { useAccess, rbac, kindToResource, denyReason, reportActionError, type AccessCheck } from "../lib/access";
+import { getObject } from "../lib/manifest";
 import { IconButton, ConfirmDialog, TextInput, KubectlPreview } from "../ui";
 import { Slider } from "@/components/ui/slider";
 import { ForwardDialog } from "./ForwardDialog";
@@ -48,6 +49,19 @@ export function desiredReplicasFrom(row?: { desired?: unknown; ready?: unknown }
     if (total !== undefined) return Number(total);
   }
   return undefined;
+}
+
+/** Desired replicas for one specific detail: the row must match name AND
+ * namespace — in an all-namespaces view two workloads can share a name, and
+ * seeding one with the other's count would mis-scale on confirm. */
+export function desiredReplicasForDetail(
+  rows: Array<{ name: string; namespace?: string; desired?: unknown; ready?: unknown }>,
+  name: string,
+  namespace: string | null,
+): number | undefined {
+  return desiredReplicasFrom(
+    rows.find((r) => r.name === name && (namespace == null || r.namespace === namespace)),
+  );
 }
 const RESTARTABLE = ["Deployment", "StatefulSet", "DaemonSet"];
 // Workloads whose pods are reachable via spec.selector.matchLabels.
@@ -331,6 +345,10 @@ export function ResourceActions({
   const [confirmSuspend, setConfirmSuspend] = useState(false);
   const [scaling, setScaling] = useState(false);
   const [replicas, setReplicas] = useState("");
+  // Fallback seed for rows that can't say (e.g. generic ReplicaSet rows):
+  // fetched from the object's spec.replicas when the scale dialog opens.
+  const [fetchedReplicas, setFetchedReplicas] = useState<number | undefined>(undefined);
+  const scaleOpenSeq = useRef(0);
   const [triggering, setTriggering] = useState(false);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
@@ -446,7 +464,8 @@ export function ResourceActions({
 
   // Slider range: 0 to a sensible ceiling above today's count. The input
   // stays free-form for values past the ceiling; the slider then just pins.
-  const sliderMax = Math.max((currentReplicas ?? 0) * 2, 10);
+  const knownReplicas = currentReplicas ?? fetchedReplicas;
+  const sliderMax = Math.max((knownReplicas ?? 0) * 2, 10);
   const sliderValue = validReplicas ? Math.min(replicasN, sliderMax) : 0;
 
   const restartCmd = toKubectl({ action: "rollout-restart", kind, namespace: namespace ?? "", name, context });
@@ -492,7 +511,21 @@ export function ResourceActions({
             // Start from the live count so the slider and input show where
             // the workload is today, not whatever a previous dialog left.
             setReplicas(currentReplicas !== undefined ? String(currentReplicas) : "");
+            setFetchedReplicas(undefined);
             setScaling(true);
+            if (currentReplicas === undefined) {
+              // The list row couldn't say (generic rows carry no counts) —
+              // read spec.replicas off the object. The sequence token drops
+              // a fetch that resolves after this dialog was reopened for a
+              // different resource, and typing always wins over the seed.
+              const seq = ++scaleOpenSeq.current;
+              void getObject(context, kind, namespace, name).then((r) => {
+                const spec = (r.object as { spec?: { replicas?: unknown } } | undefined)?.spec;
+                if (seq !== scaleOpenSeq.current || typeof spec?.replicas !== "number") return;
+                setFetchedReplicas(spec.replicas);
+                setReplicas((prev) => (prev === "" ? String(spec.replicas) : prev));
+              });
+            }
           }}
         />
       )}
@@ -647,9 +680,9 @@ export function ResourceActions({
                   />
                 </div>
               </div>
-              {currentReplicas !== undefined && (
+              {knownReplicas !== undefined && (
                 <p className="text-xs text-muted-foreground">
-                  current {currentReplicas} → target {validReplicas ? replicasN : "—"}
+                  current {knownReplicas} → target {validReplicas ? replicasN : "—"}
                 </p>
               )}
               {scaleCmd && (
