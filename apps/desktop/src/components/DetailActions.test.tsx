@@ -329,6 +329,30 @@ describe("ResourceActions", () => {
     expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("7");
   });
 
+  it("an intentionally CLEARED input also survives a late fetch", async () => {
+    // Clearing the field to type a fresh value is an edit: restoring the
+    // fetched count into the empty window would make the next digit append
+    // (clearing 4 to type 0 must not become 40).
+    let resolveFetch!: (v: unknown) => void;
+    getObjectMock.mockReturnValue(new Promise((r) => (resolveFetch = r)));
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="ReplicaSet"
+        namespace="default"
+        name="web-abc123"
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "" } });
+
+    resolveFetch({ object: { spec: { replicas: 4 } } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("");
+  });
+
   it("widens the slider range for larger workloads", () => {
     render(
       <ResourceActions

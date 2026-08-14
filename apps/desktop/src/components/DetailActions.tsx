@@ -349,6 +349,12 @@ export function ResourceActions({
   // fetched from the object's spec.replicas when the scale dialog opens.
   const [fetchedReplicas, setFetchedReplicas] = useState<number | undefined>(undefined);
   const scaleOpenSeq = useRef(0);
+  // Whether the user has touched the replica control since the dialog opened.
+  // The late-fetch seed keys off THIS, not off the input being empty: a user
+  // who cleared the field to type a fresh value has edited it, and restoring
+  // the fetched count into that window would make their next digit append
+  // (clearing 4 to type 0 must not become 40).
+  const scaleEdited = useRef(false);
   const [triggering, setTriggering] = useState(false);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
@@ -512,6 +518,7 @@ export function ResourceActions({
             // the workload is today, not whatever a previous dialog left.
             setReplicas(currentReplicas !== undefined ? String(currentReplicas) : "");
             setFetchedReplicas(undefined);
+            scaleEdited.current = false;
             setScaling(true);
             if (currentReplicas === undefined) {
               // The list row couldn't say (generic rows carry no counts) —
@@ -523,7 +530,7 @@ export function ResourceActions({
                 const spec = (r.object as { spec?: { replicas?: unknown } } | undefined)?.spec;
                 if (seq !== scaleOpenSeq.current || typeof spec?.replicas !== "number") return;
                 setFetchedReplicas(spec.replicas);
-                setReplicas((prev) => (prev === "" ? String(spec.replicas) : prev));
+                if (!scaleEdited.current) setReplicas(String(spec.replicas));
               });
             }
           }}
@@ -667,14 +674,20 @@ export function ResourceActions({
                   min={0}
                   max={sliderMax}
                   step={1}
-                  onValueChange={([v]) => setReplicas(String(v))}
+                  onValueChange={([v]) => {
+                    scaleEdited.current = true;
+                    setReplicas(String(v));
+                  }}
                   aria-label="Replica count slider"
                   className="flex-1"
                 />
                 <div style={{ width: 80 }}>
                   <TextInput
                     value={replicas}
-                    onValueChange={setReplicas}
+                    onValueChange={(v) => {
+                      scaleEdited.current = true;
+                      setReplicas(v);
+                    }}
                     placeholder="replicas"
                     aria-label="Replicas"
                   />
