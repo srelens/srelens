@@ -81,4 +81,35 @@ describe("Drawer", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it("resizes by dragging the left edge, clamped to the allowed range", () => {
+    const { container } = render(
+      <Drawer open onClose={() => {}}>
+        body
+      </Drawer>,
+    );
+    const aside = screen.getByRole("complementary", { name: "Details" });
+    expect(aside.style.width).toBe("480px");
+
+    const handle = container.querySelector(".cursor-col-resize");
+    expect(handle).not.toBeNull();
+
+    // Dragging left grows the panel; text selection is suppressed meanwhile.
+    fireEvent.mouseDown(handle as Element, { clientX: 800 });
+    expect(document.body.style.userSelect).toBe("none");
+    fireEvent.mouseMove(window, { clientX: 700 });
+    expect(aside.style.width).toBe("580px");
+
+    // Clamped: far left pins at the max, far right at the min.
+    fireEvent.mouseMove(window, { clientX: -2000 });
+    expect(aside.style.width).toBe("960px");
+    fireEvent.mouseMove(window, { clientX: 5000 });
+    expect(aside.style.width).toBe("320px");
+
+    // Releasing detaches the listeners: further movement changes nothing.
+    fireEvent.mouseUp(window);
+    expect(document.body.style.userSelect).toBe("");
+    fireEvent.mouseMove(window, { clientX: 700 });
+    expect(aside.style.width).toBe("320px");
+  });
 });

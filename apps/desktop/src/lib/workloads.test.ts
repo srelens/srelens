@@ -5,7 +5,11 @@ import {
   podLogs,
   listDeployments,
   listServices,
+  listReplicaSets,
+  podsForSelector,
+  podMetrics,
   deletePod,
+  evictPod,
 } from "./workloads";
 
 describe("listNamespaces", () => {
@@ -140,6 +144,89 @@ describe("listServices", () => {
   it("normalises errors", async () => {
     const outcome = await listServices("x", "default", () => Promise.reject(new Error("boom")));
     expect(outcome.error).toContain("boom");
+  });
+});
+
+describe("listReplicaSets", () => {
+  it("passes context+namespace+owner and returns replicasets", async () => {
+    const invoke = vi.fn().mockResolvedValue({ replicasets: [{ name: "web-abc123" }] });
+    const outcome = await listReplicaSets("kind-dev", "default", "web", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.listReplicaSets", {
+      context: "kind-dev",
+      namespace: "default",
+      ownerName: "web",
+    });
+    expect(outcome.replicasets).toEqual([{ name: "web-abc123" }]);
+  });
+
+  it("normalises errors", async () => {
+    const outcome = await listReplicaSets("x", "default", "web", () =>
+      Promise.reject(new Error("forbidden")),
+    );
+    expect(outcome.replicasets).toBeUndefined();
+    expect(outcome.error).toContain("forbidden");
+  });
+});
+
+describe("podsForSelector", () => {
+  it("passes context+namespace+selector and returns pods", async () => {
+    const invoke = vi.fn().mockResolvedValue({ pods: [{ name: "web-1" }] });
+    const outcome = await podsForSelector("kind-dev", "default", { app: "web" }, invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.podsForSelector", {
+      context: "kind-dev",
+      namespace: "default",
+      selector: { app: "web" },
+    });
+    expect(outcome.pods).toEqual([{ name: "web-1" }]);
+  });
+
+  it("normalises errors", async () => {
+    const outcome = await podsForSelector("x", "default", {}, () =>
+      Promise.reject(new Error("forbidden")),
+    );
+    expect(outcome.pods).toBeUndefined();
+    expect(outcome.error).toContain("forbidden");
+  });
+});
+
+describe("podMetrics", () => {
+  it("passes context+namespace and returns metrics", async () => {
+    const invoke = vi.fn().mockResolvedValue({ metrics: [{ name: "web-1", cpu: "5m" }] });
+    const outcome = await podMetrics("kind-dev", "default", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.podMetrics", {
+      context: "kind-dev",
+      namespace: "default",
+    });
+    expect(outcome.metrics).toEqual([{ name: "web-1", cpu: "5m" }]);
+  });
+
+  it("normalises errors", async () => {
+    const outcome = await podMetrics("x", "default", () =>
+      Promise.reject(new Error("metrics-server unavailable")),
+    );
+    expect(outcome.metrics).toBeUndefined();
+    expect(outcome.error).toContain("metrics-server unavailable");
+  });
+});
+
+describe("evictPod", () => {
+  it("passes context+namespace+pod and returns ok", async () => {
+    const invoke = vi.fn().mockResolvedValue({ ok: true });
+    const outcome = await evictPod("kind-dev", "default", "web-1", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.evictPod", {
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+    });
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("normalises errors", async () => {
+    const outcome = await evictPod("x", "default", "p", () =>
+      Promise.reject(new Error("disruption budget")),
+    );
+    expect(outcome.ok).toBeUndefined();
+    expect(outcome.error).toContain("disruption budget");
   });
 });
 

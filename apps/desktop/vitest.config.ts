@@ -10,10 +10,13 @@ export default defineConfig({
       provider: "v8",
       // Enforced floor (vitest 3 shape — the old top-level `lines` was
       // silently ignored by vitest 1, and vitest 3's more accurate v8
-      // remapping measures ~4pp lower than v1 did). Ratchet toward 85:
-      // issue #28. Never lower this.
+      // remapping measures ~4pp lower than v1 did). The 85 target of
+      // issue #29; branches/functions are pragmatic floors at today's
+      // levels. Never lower any of these.
       thresholds: {
-        lines: 80,
+        lines: 85,
+        branches: 80,
+        functions: 76,
       },
       include: ["src/**/*.{ts,tsx}"],
       exclude: [
