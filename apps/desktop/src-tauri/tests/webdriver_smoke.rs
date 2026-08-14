@@ -179,7 +179,12 @@ async fn smoke_launch_to_logs_against_kind() {
     flow.expect("smoke flow");
 }
 
-async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> WebDriverResult<()> {
+type FlowError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Errors, never panics: the caller's failure-artifact branch (screenshot +
+/// app logs) and the fixture/HOME cleanup only run on a RETURNED error — a
+/// panic would unwind straight past the diagnostics meant to explain it.
+async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), FlowError> {
     // ---- 1. First-launch vault gate: create the master password. The
     // recovery checkbox is UNCHECKED first — CI has no OS keychain, and the
     // setup must not depend on one.
@@ -197,9 +202,22 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> WebDriverRes
     // ---- 2. Land, and open the kind context from the landing page.
     click(driver, By::Css(&format!("[aria-label='Open context {context}']")), 60).await?;
 
-    // ---- 3. Browse pods: the Workloads section lists Pods.
+    // ---- 3. Browse pods. Opening a context lands on Overview, so only the
+    // Cluster section starts expanded (`openByDefault` keys off the active
+    // kind in Sidebar.tsx) — the Workloads section must be DISCLOSED before
+    // its Pods entry exists in the DOM at all. Pods is still tried briefly
+    // first, so a future default-open change can't break this by turning
+    // the heading click into a collapse.
     wait_text(driver, "Workloads", 30).await?;
-    button_by_text(driver, "Pods", 15).await?;
+    if button_by_text(driver, "Pods", 3).await.is_err() {
+        click(
+            driver,
+            By::XPath("//button[contains(normalize-space(.), 'Workloads')]".to_string()),
+            15,
+        )
+        .await?;
+        button_by_text(driver, "Pods", 15).await?;
+    }
 
     // ---- 4. The fixture pod is in the default namespace; open its detail.
     click(
@@ -237,7 +255,7 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> WebDriverRes
                 }
             }
             if Instant::now() >= deadline {
-                panic!("port-forward never served the fixture's response");
+                return Err("port-forward never served the fixture's response".into());
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
