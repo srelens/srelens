@@ -5849,6 +5849,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
+ "futures-core",
  "getrandom 0.2.17",
  "percent-encoding",
  "serde",

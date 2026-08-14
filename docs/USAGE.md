@@ -323,6 +323,21 @@ AI clients, using your locally authenticated cluster contexts. Open
 - **View the bearer token and audit log** — rotate or revoke the HTTP token,
   and review recent agent activity, from the same panel.
 
+Both transports support **resource subscriptions** (`resources/subscribe` on
+`k8s://` object URIs): the server pushes a `notifications/resources/updated`
+when the watched object changes, and the client re-reads. Over stdio,
+notifications arrive on the server's stdout. Over HTTP, the client first opens
+the push channel — `GET /mcp` with `Accept: text/event-stream`, same bearer
+token — and notifications arrive as SSE events on that stream; subscribing
+without the stream connected is refused, since the notifications would have
+nowhere to go. Subscriptions live exactly as long as the stream that carries
+them: if the stream drops — client disconnect, a reconnect replacing it, or
+**rotating the bearer token**, which restarts the HTTP server so the old token
+stops being accepted immediately — every watch it carried is released, and the
+client is expected to reconnect (with the new token, after a rotation) and
+subscribe again. That is deliberate: rotation is meant to cut off existing
+clients, and a subscription that silently survived it would be a leak.
+
 You can also start a server directly:
 
 ```sh

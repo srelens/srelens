@@ -13,6 +13,9 @@ serde_yaml = "0.9"
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros", "sync"] }
 axum = "0.7"
+# Only the `Stream` TRAIT, for the hand-rolled SSE body in http.rs — already
+# in the tree under axum; no combinator crate is pulled in for one poll loop.
+futures-core = "0.3"
 # URI segments are percent-encoded because kube context names are arbitrary —
 # EKS names contexts with ARNs containing `/` and `:`, which would otherwise
 # reshape the path. Already in the workspace lockfile via reqwest/url.
