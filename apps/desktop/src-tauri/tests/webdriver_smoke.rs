@@ -255,6 +255,12 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
         loop {
             if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", 18080)) {
                 use std::io::{Read, Write};
+                // Bounded I/O: an accepted connection whose upstream stalls
+                // (port-forward handshake wedged) must fail THIS iteration,
+                // not hang the whole job past its deadline with an
+                // unbounded read.
+                let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
                 let _ = s.write_all(b"GET / HTTP/1.0\r\n\r\n");
                 let mut buf = String::new();
                 let _ = s.read_to_string(&mut buf);
@@ -281,7 +287,18 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
         // discards input while it still shows `connecting…` (`conn?.send`) —
         // typing early is silently lost. The status strip renders `live`
         // once the websocket is actually attached; only then are keys real.
-        wait_text(driver, "live", 60).await?;
+        // Scoped to the TERMINAL's own indicator (the emerald span inside
+        // the dark pane): ResourceBrowser's watch badge also says `live`
+        // and stays mounted behind the dock, so a global text wait would
+        // pass while the exec socket is still connecting.
+        driver
+            .query(By::XPath(
+                "//div[contains(@class,'bg-[#1b1f23]')]//span[contains(@class,'text-emerald-400') and contains(normalize-space(.),'live')]"
+                    .to_string(),
+            ))
+            .wait(Duration::from_secs(60), Duration::from_millis(500))
+            .first()
+            .await?;
         term.click().await.ok();
         driver
             .action_chain()
