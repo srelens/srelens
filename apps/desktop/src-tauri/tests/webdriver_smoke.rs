@@ -269,6 +269,11 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
             .wait(Duration::from_secs(30), Duration::from_millis(500))
             .first()
             .await?;
+        // xterm mounts BEFORE the exec handshake completes, and TerminalPane
+        // discards input while it still shows `connecting…` (`conn?.send`) —
+        // typing early is silently lost. The status strip renders `live`
+        // once the websocket is actually attached; only then are keys real.
+        wait_text(driver, "live", 60).await?;
         term.click().await.ok();
         driver
             .action_chain()
