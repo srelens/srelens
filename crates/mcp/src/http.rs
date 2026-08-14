@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use axum::extract::{Request, State};
@@ -25,67 +25,87 @@ use crate::stdio::{handle_request, handle_subscription, subscription_notificatio
 use crate::subscriptions::SubscriptionRegistry;
 use crate::McpServer;
 
-/// The push half of the transport. At most ONE live SSE stream exists per
-/// server — this is a loopback, single-user endpoint, and one stream is what
-/// the Streamable HTTP shape needs (the client opens GET /mcp once and every
-/// notification flows down it). A new GET replaces the previous stream: the
-/// old stream's wake sender drops, its poll sees the closed channel and ends
-/// the stream, and its guard aborts the watches it owned — so a reconnecting
-/// client starts clean and re-subscribes, and no watch ever outlives the
-/// stream that requested it. Subscriptions arriving while NO stream is
-/// connected are refused (see `rpc`): accepting one would promise
-/// notifications with nowhere to send them, the exact failure shape #195
-/// eliminated.
+/// More concurrent sessions than this and new push streams are refused: this
+/// is a loopback single-user server, and its realistic clients are one IDE
+/// plus an assistant CLI or two — a runaway client must not mint streams
+/// (each carrying up to `MAX_SUBSCRIPTIONS` watches) without bound.
+const MAX_PUSH_SESSIONS: usize = 8;
+
+/// The push half of the transport: one SSE stream PER SESSION, keyed by the
+/// `Mcp-Session-Id` this server minted at `initialize` (see `rpc`). Distinct
+/// clients — a configured IDE and an assistant CLI, say — get distinct
+/// sessions, so one client's GET can never hijack or tear down another's
+/// stream; a GET carrying a session that already has a stream REPLACES that
+/// stream (the reconnect case), ending the old one and aborting the watches
+/// it owned — no watch ever outlives the stream that requested it.
+/// Subscriptions arriving for a session with no connected stream are refused
+/// (see `rpc`): accepting one would promise notifications with nowhere to
+/// send them, the exact failure shape #195 eliminated.
 #[derive(Default)]
 struct PushState {
-    active: Mutex<Option<PushChannels>>,
+    sessions: Mutex<std::collections::BTreeMap<String, PushChannels>>,
     /// Distinguishes streams so a dying stream's guard can only clear ITS
     /// slot, never a successor's (same shape as the subscription registry's
     /// generations).
     next_id: AtomicU64,
-    /// Set by `end_streams` at graceful shutdown. Checked under the `active`
-    /// lock on install, so a GET that was already accepted when shutdown
-    /// began cannot slip a fresh stream in after the teardown and stall the
-    /// shutdown all over again.
+    /// Set by `end_streams` at graceful shutdown. Checked under the
+    /// `sessions` lock on install, so a GET that was already accepted when
+    /// shutdown began cannot slip a fresh stream in after the teardown and
+    /// stall the shutdown all over again.
     closed: std::sync::atomic::AtomicBool,
 }
 
 impl PushState {
-    /// Install `chans` as THE stream, unless the server is shutting down.
-    /// Returns whether it was installed. Dropping a previous occupant here is
-    /// what ends a replaced stream: its wake sender closes, its poll sees the
-    /// closed channel, and its guard aborts the watches it owned.
-    fn install(&self, chans: PushChannels) -> bool {
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+    /// Install `chans` as `session`'s stream, unless the server is shutting
+    /// down or the session cap is hit by OTHER sessions. Returns whether it
+    /// was installed. Dropping a previous same-session occupant here is what
+    /// ends a replaced stream (the reconnect case): its close signal fires
+    /// and its guard aborts the watches it owned.
+    fn install(&self, session: &str, chans: PushChannels) -> Result<(), StatusCode> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if self.closed.load(Ordering::Relaxed) {
-            return false;
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
-        *active = Some(chans);
-        true
+        if !sessions.contains_key(session) && sessions.len() >= MAX_PUSH_SESSIONS {
+            // Reap sessions whose stream already died before refusing —
+            // mirrors the subscription registry's cap-time reaping.
+            sessions.retain(|_, c| !c.wake.is_closed());
+            if sessions.len() >= MAX_PUSH_SESSIONS {
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+        }
+        sessions.insert(session.to_string(), chans);
+        Ok(())
     }
 
-    /// Graceful-shutdown teardown (#193 review): drop the active stream's
-    /// channels so its SSE body ENDS. Without this the state and the stream
-    /// keep each other alive — the guard holds this state, the state's slot
-    /// holds the wake sender the stream waits on — and axum's graceful
-    /// shutdown waits on that body forever; the desktop only escaped by
-    /// timing out and aborting the whole server task, delaying stop and
-    /// token rotation by its two-second fallback.
+    /// Graceful-shutdown teardown (#193 review): drop every session's
+    /// channels so their SSE bodies END. Ending the body is what lets axum's
+    /// graceful shutdown complete instead of waiting on connected clients
+    /// forever (the desktop's only escape was its two-second abort
+    /// fallback, delaying stop and token rotation).
     fn end_streams(&self) {
-        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         self.closed.store(true, Ordering::Relaxed);
-        active.take();
+        sessions.clear();
     }
 }
 
-/// What `resources/subscribe` needs from the active stream: the same
+/// What `resources/subscribe` needs from a session's stream: the same
 /// registry/dirty-set/wakeup trio the stdio serve loop owns per session.
-#[derive(Clone)]
+/// Deliberately NOT `Clone`: `_close` is the one non-cloneable handle whose
+/// drop tells the stream to end. The wake sender CANNOT serve that purpose —
+/// `handle_subscription` clones it into `on_change`/`on_dead`, and the real
+/// `CacheWatcher` moves those into its long-lived watch task, so with any
+/// real subscription active the wake channel stays open long after this
+/// struct is dropped (the first shutdown fix relied on exactly that and
+/// deadlocked: stream waits for watches to drop, watches drop when the
+/// guard runs, the guard runs when the stream ends).
 struct PushChannels {
     id: u64,
     subs: Arc<SubscriptionRegistry>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
     wake: tokio::sync::mpsc::Sender<()>,
+    _close: tokio::sync::oneshot::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -97,19 +117,20 @@ struct AppState {
 /// Aborts the stream's watches when the stream itself is dropped — client
 /// disconnect, replacement by a newer stream, or server shutdown all land
 /// here, so the "no watch outlives its stream" contract has one enforcement
-/// point. Clears the active slot only when it still holds this stream.
+/// point. Clears its session's slot only when it still holds this stream.
 struct StreamGuard {
     push: Arc<PushState>,
     subs: Arc<SubscriptionRegistry>,
+    session: String,
     id: u64,
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         self.subs.abort_all();
-        let mut active = self.push.active.lock().unwrap_or_else(|e| e.into_inner());
-        if active.as_ref().is_some_and(|a| a.id == self.id) {
-            *active = None;
+        let mut sessions = self.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if sessions.get(&self.session).is_some_and(|a| a.id == self.id) {
+            sessions.remove(&self.session);
         }
     }
 }
@@ -123,6 +144,11 @@ impl Drop for StreamGuard {
 /// crate for one loop.
 struct PushStream {
     wake: tokio::sync::mpsc::Receiver<()>,
+    /// Resolves (with `Err`, from the `_close` sender dropping) when this
+    /// stream's `PushChannels` leaves the session map — replacement or
+    /// shutdown. THE end-of-stream signal: the wake channel cannot be it,
+    /// because live watches hold wake-sender clones (see `PushChannels`).
+    closed: tokio::sync::oneshot::Receiver<()>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
     pending: VecDeque<String>,
     _guard: StreamGuard,
@@ -137,6 +163,13 @@ impl futures_core::Stream for PushStream {
             if let Some(uri) = this.pending.pop_front() {
                 let msg = subscription_notification(&uri);
                 return Poll::Ready(Some(Ok(Event::default().data(msg.to_string()))));
+            }
+            // The close signal ends the stream even while queued
+            // notifications exist: the watches are being torn down, and the
+            // client's reconnect re-reads anyway (the initial-list
+            // notification fires on every fresh watch).
+            if std::future::Future::poll(Pin::new(&mut this.closed), cx).is_ready() {
+                return Poll::Ready(None);
             }
             match this.wake.poll_recv(cx) {
                 Poll::Ready(Some(())) => {
@@ -171,28 +204,40 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         return (StatusCode::NOT_ACCEPTABLE, "this endpoint streams text/event-stream").into_response();
     }
 
+    let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
     let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     let chans = PushChannels {
         id: st.push.next_id.fetch_add(1, Ordering::Relaxed),
         subs: Arc::new(SubscriptionRegistry::new()),
         dirty: Arc::default(),
         wake: wake_tx,
+        _close: close_tx,
     };
     let stream = PushStream {
         wake: wake_rx,
+        closed: close_rx,
         dirty: chans.dirty.clone(),
         pending: VecDeque::new(),
-        _guard: StreamGuard { push: st.push.clone(), subs: chans.subs.clone(), id: chans.id },
+        _guard: StreamGuard {
+            push: st.push.clone(),
+            subs: chans.subs.clone(),
+            session: session.clone(),
+            id: chans.id,
+        },
     };
-    // Install as THE stream (see `PushState::install` for replacement and
-    // shutdown semantics). Refusal means graceful shutdown already began on
-    // this in-flight connection's watch — a fresh stream now would stall it.
-    if !st.push.install(chans) {
-        return (StatusCode::SERVICE_UNAVAILABLE, "the server is shutting down").into_response();
+    // Install as this session's stream (see `PushState::install` for
+    // replacement, cap, and shutdown semantics).
+    if let Err(status) = st.push.install(&session, chans) {
+        let message = match status {
+            StatusCode::TOO_MANY_REQUESTS => "too many concurrent push sessions",
+            _ => "the server is shutting down",
+        };
+        return (status, message).into_response();
     }
 
     (
-        [(MCP_SESSION_ID.clone(), session_id())],
+        [(MCP_SESSION_ID.clone(), session)],
         Sse::new(stream).keep_alive(
             KeepAlive::new().interval(std::time::Duration::from_secs(20)).text("keep-alive"),
         ),
@@ -203,53 +248,78 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
 /// The `Mcp-Session-Id` header name, surfaced on every `/mcp` response.
 static MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 
-/// A stable per-process MCP session id. Streamable-HTTP clients (e.g. Codex's
-/// `streamable_http` transport) establish a session on `initialize` and refuse
-/// to load tools unless the response carries this header — a minimal
-/// POST/JSON-RPC endpoint without it hangs their handshake (verified: Codex
-/// retries and reports "no tools"). srelens is stateless — the bearer token,
-/// not this id, is what authorizes each request — so the value only has to be
-/// present and stable across a server's lifetime, never validated on later
-/// requests. Claude Code's more lenient HTTP client works with or without it,
-/// so adding it is purely additive.
-fn session_id() -> &'static str {
-    static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| format!("srelens-{}", std::process::id()))
+/// Mint a fresh MCP session id for one `initialize`. Streamable-HTTP clients
+/// (e.g. Codex's `streamable_http` transport) establish a session on
+/// `initialize` and refuse to load tools unless the response carries this
+/// header — a minimal POST/JSON-RPC endpoint without it hangs their handshake
+/// (verified: Codex retries and reports "no tools"). Each client keeps the id
+/// IT was given and presents it on later requests, which is what routes its
+/// GET stream and its subscriptions to its own session slot — DISTINCT
+/// clients (an IDE and an assistant CLI) must not share one id, or one's
+/// reconnect would tear down the other's stream. The bearer token, not this
+/// id, is what authorizes a request; the id is routing, never auth.
+fn mint_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!("srelens-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-async fn rpc(State(st): State<AppState>, Json(req): Json<Value>) -> Response {
+/// The session id a request presents, if any. Absent for `initialize` (the
+/// client has none yet) and for hand-rolled callers (curl); those fall back
+/// to a shared default slot so single-client use needs no header discipline.
+fn presented_session(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers.get(&MCP_SESSION_ID).and_then(|v| v.to_str().ok()).map(str::to_string)
+}
+
+/// The slot key for requests that present no session id.
+const DEFAULT_SESSION: &str = "default";
+
+async fn rpc(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<Value>,
+) -> Response {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     // Subscription methods are handled here, not in `handle_request` — same
     // split as the stdio serve loop, because they need this transport's push
-    // machinery: the registry, dirty set, and wakeup of the ACTIVE SSE
-    // stream. With no stream connected they are refused outright; accepting
-    // would promise notifications with nowhere to send them.
+    // machinery: the registry, dirty set, and wakeup of the caller's OWN
+    // session stream. With no stream connected for that session they are
+    // refused outright; accepting would promise notifications with nowhere
+    // to send them.
     let resp = if method == "resources/subscribe" || method == "resources/unsubscribe" {
-        // The active-slot lock is held across `handle_subscription`, which is
-        // entirely synchronous (no await), so registration is SERIALIZED with
-        // stream replacement — `PushState::install` takes this same lock. The
-        // race this closes: a reconnecting GET replacing the stream between a
-        // clone of the channels and the registration completing would leave
-        // the watch in the old registry (whose guard then aborts it) while
-        // the client holds a success response for a subscription the new
-        // stream will never deliver.
-        let active = st.push.active.lock().unwrap_or_else(|e| e.into_inner());
-        match active.as_ref() {
+        let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
+        // The sessions lock is held across `handle_subscription`, which is
+        // entirely synchronous (no await), so registration is SERIALIZED
+        // with stream replacement — `PushState::install` takes this same
+        // lock. The race this closes: a reconnecting GET replacing the
+        // stream between lookup and registration would leave the watch in
+        // the old registry (whose guard then aborts it) while the client
+        // holds a success response for a subscription the new stream will
+        // never deliver.
+        let sessions = st.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        match sessions.get(&session) {
             Some(c) => handle_subscription(&st.server, &c.subs, &c.dirty, &c.wake, &req, method),
             None => req.get("id").cloned().map(|id| {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32002, "message":
-                    "no notification stream is connected: open GET /mcp with `Accept: \
-                     text/event-stream` first, then subscribe — this subscription's \
-                     notifications would otherwise have nowhere to go"}})
+                    "no notification stream is connected for this session: open GET /mcp \
+                     with `Accept: text/event-stream` (presenting your Mcp-Session-Id) \
+                     first, then subscribe — this subscription's notifications would \
+                     otherwise have nowhere to go"}})
             }),
         }
     } else {
         handle_request(&st.server, &req, crate::Transport::Http).await
     };
+    // Streamable-HTTP session id: `initialize` MINTS a fresh one (each client
+    // then presents the id it was given, which is what keeps clients'
+    // sessions apart); every other response echoes the presented id back.
+    let sid = match presented_session(&headers) {
+        Some(sid) => sid,
+        None => mint_session_id(),
+    };
     match resp {
         // `Json` sets `content-type: application/json`; we add the session-id
         // header the streamable-HTTP handshake needs.
-        Some(resp) => ([(MCP_SESSION_ID.clone(), session_id())], Json(resp)).into_response(),
+        Some(resp) => ([(MCP_SESSION_ID.clone(), sid)], Json(resp)).into_response(),
         // A JSON-RPC notification (no `id`) expects no body. Streamable-HTTP
         // wants `202 Accepted` here, not `200` with a `{}` body — the latter
         // is what stalled Codex's client.
@@ -612,6 +682,108 @@ mod tests {
             Ok(Err(e)) if e.is_cancelled() => {}
             other => panic!("the watch must be cancelled when its stream drops: {other:?}"),
         }
+    }
+
+    fn sse_get_with_session(session: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", session)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn subscribe_post_with_session(uri: &str, session: &str) -> Request<Body> {
+        let body = json!({"jsonrpc":"2.0","id":7,"method":"resources/subscribe",
+            "params":{"uri": uri}});
+        Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("content-type", "application/json")
+            .header("mcp-session-id", session)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// Two clients (an IDE and an assistant CLI, say) present distinct
+    /// session ids: one's GET must not hijack or tear down the other's
+    /// stream, and each subscribe routes to its own session's registry.
+    #[tokio::test]
+    async fn two_sessions_keep_separate_streams_and_subscriptions() {
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        let app = router(subscribable_server(joins.clone()));
+
+        let a = app.clone().oneshot(sse_get_with_session("sess-a")).await.unwrap();
+        let b = app.clone().oneshot(sse_get_with_session("sess-b")).await.unwrap();
+        assert_eq!(a.status(), StatusCode::OK);
+        assert_eq!(b.status(), StatusCode::OK);
+        let mut a_body = a.into_body().into_data_stream();
+        let mut b_body = b.into_body().into_data_stream();
+
+        // A subscribes; the notification reaches A's stream...
+        let sub = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", "sess-a"))
+            .await
+            .unwrap();
+        let sub_body = axum::body::to_bytes(sub.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&sub_body).unwrap();
+        assert!(v.get("error").is_none(), "A's subscribe must succeed: {v}");
+        let mut seen = String::new();
+        for _ in 0..5 {
+            match next_chunk(&mut a_body).await {
+                Some(chunk) => {
+                    seen.push_str(&chunk);
+                    if seen.contains("notifications/resources/updated") {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        assert!(seen.contains("k8s://c/ns/Pod/web-0"), "A gets its notification: {seen:?}");
+
+        // ...and NOT B's, whose stream stays open and quiet (the bounded read
+        // times out with nothing).
+        assert!(next_chunk(&mut b_body).await.is_none(), "B must not receive A's notification");
+
+        // B's own GET reconnect replaces only B's stream: A's watch survives.
+        let b2 = app.clone().oneshot(sse_get_with_session("sess-b")).await.unwrap();
+        assert_eq!(b2.status(), StatusCode::OK);
+        assert_eq!(joins.lock().unwrap().len(), 1, "A's watch still exists");
+        let join = joins.lock().unwrap().pop().unwrap();
+        assert!(!join.is_finished(), "A's watch must survive B's reconnect");
+        join.abort();
+    }
+
+    /// Each `initialize` mints a fresh session id — two clients handed the
+    /// same id would collide in the session map, one reconnect tearing down
+    /// the other's stream.
+    #[tokio::test]
+    async fn initialize_mints_a_unique_session_id_per_client() {
+        let app = router(test_server());
+        let init = |app: Router| async move {
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/mcp")
+                        .header("host", "127.0.0.1:8765")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            resp.headers().get("mcp-session-id").unwrap().to_str().unwrap().to_string()
+        };
+        let first = init(app.clone()).await;
+        let second = init(app).await;
+        assert_ne!(first, second, "each client must get its own session id");
     }
 
     /// The graceful-shutdown deadlock from review: the state and the stream
