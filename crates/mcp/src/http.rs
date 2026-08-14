@@ -201,19 +201,43 @@ impl futures_core::Stream for PushStream {
     }
 }
 
+/// Whether an `Accept` header value admits `text/event-stream`. Media-type
+/// tokens are case-insensitive (`Text/Event-Stream` is valid) and ranges
+/// carry optional quality values (`text/event-stream;q=0` is an explicit
+/// refusal, not an acceptance) — a bare substring check gets both wrong.
+/// The caller treats an ABSENT header as accepting; this only judges a
+/// header that is present.
+fn accepts_event_stream(accept: &str) -> bool {
+    accept.split(',').any(|range| {
+        let mut parts = range.split(';');
+        let media = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+        if !matches!(media.as_str(), "text/event-stream" | "text/*" | "*/*") {
+            return false;
+        }
+        let q_refused = parts
+            .filter_map(|p| {
+                let p = p.trim().to_ascii_lowercase();
+                p.strip_prefix("q=").map(str::to_string)
+            })
+            .next_back()
+            .is_some_and(|v| v.trim().parse::<f32>().map(|q| q <= 0.0).unwrap_or(false));
+        !q_refused
+    })
+}
+
 /// `GET /mcp`: open the server→client SSE stream. Replaces any previous
 /// stream (see `PushState`). The keep-alive comment every 20s holds idle
 /// connections open through proxies and lets a dead client surface as a
 /// write error instead of a silent zombie.
 async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     // The spec has clients send `Accept: text/event-stream`; a GET that
-    // explicitly refuses it gets 406 rather than a stream it won't parse.
-    // An absent Accept header is allowed (curl convenience).
+    // refuses it gets 406 rather than a stream it won't parse. An absent
+    // Accept header is allowed (curl convenience).
     let accept = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !accept.is_empty() && !accept.contains("text/event-stream") && !accept.contains("*/*") {
+    if !accept.is_empty() && !accepts_event_stream(accept) {
         return (StatusCode::NOT_ACCEPTABLE, "this endpoint streams text/event-stream").into_response();
     }
 
@@ -695,6 +719,19 @@ mod tests {
             Ok(Err(e)) if e.is_cancelled() => {}
             other => panic!("the watch must be cancelled when its stream drops: {other:?}"),
         }
+    }
+
+    #[test]
+    fn accept_header_parsing_is_case_insensitive_and_honors_q_values() {
+        assert!(accepts_event_stream("text/event-stream"));
+        assert!(accepts_event_stream("Text/Event-Stream"), "media types are case-insensitive");
+        assert!(accepts_event_stream("application/json, text/event-stream;q=0.5"));
+        assert!(accepts_event_stream("*/*"));
+        assert!(accepts_event_stream("text/*"));
+        assert!(!accepts_event_stream("application/json"));
+        assert!(!accepts_event_stream("text/event-stream;q=0"), "q=0 is an explicit refusal");
+        assert!(!accepts_event_stream("text/event-stream; q=0.0"));
+        assert!(accepts_event_stream("text/event-stream;charset=utf-8"), "non-q params ignored");
     }
 
     fn sse_get_with_session(session: &str) -> Request<Body> {
