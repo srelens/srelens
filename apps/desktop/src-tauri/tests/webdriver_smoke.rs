@@ -44,6 +44,42 @@ const POD: &str = "srelens-smoke-pod";
 /// Printed by the fixture pod on start; proves the logs path end-to-end.
 const LOG_MARKER: &str = "hello-smoke";
 
+/// Deletes the fixture pod even on panic — setup `.expect`s after the pod
+/// exists (session creation, most notably) must not leak it. The
+/// delete-before-create at suite start is the second line of defense for a
+/// hard-killed process, where no Drop runs at all.
+struct FixtureGuard {
+    context: String,
+}
+impl Drop for FixtureGuard {
+    fn drop(&mut self) {
+        let _ = kubectl(&["--context", &self.context, "delete", "pod", POD, "--ignore-not-found"]);
+    }
+}
+
+/// Removes the sandbox HOME even on panic — and when the thread IS
+/// panicking (a setup failure, before the in-flow error path could collect
+/// anything), first preserves the app's own logs into the artifacts dir, so
+/// the diagnostic that explains the failure survives it.
+struct HomeGuard {
+    home: std::path::PathBuf,
+    artifacts: std::path::PathBuf,
+}
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let _ = Command::new("cp")
+                .args([
+                    "-r",
+                    &self.home.join(".local/share").to_string_lossy(),
+                    &self.artifacts.join("app-data").to_string_lossy(),
+                ])
+                .status();
+        }
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
 /// Kills tauri-driver (which kills the app it spawned) even on panic.
 struct DriverProc(Child);
 impl Drop for DriverProc {
@@ -113,14 +149,21 @@ async fn smoke_launch_to_logs_against_kind() {
     // on 8080 (busybox nc), so logs, exec, and the port-forward check all
     // have something real to hit. `--restart=Never` keeps it a bare pod.
     let _ = kubectl(&["--context", &context, "delete", "pod", POD, "--ignore-not-found"]);
+    // `hello-$(echo smoke)`: the POD's shell expands this to the marker, so
+    // the LOGGED text is `hello-smoke` while the pod SPEC — which the detail
+    // overview renders in the DOM — only ever contains the unexpanded form.
+    // The logs assertion therefore cannot be satisfied by the spec text.
     kubectl(&[
         "--context", &context, "run", POD, "--image=busybox:1.36", "--restart=Never",
         "--command", "--", "sh", "-c",
-        "echo hello-smoke; while true; do { echo -e 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok'; } | nc -l -p 8080; done",
+        "echo hello-$(echo smoke); while true; do { echo -e 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok'; } | nc -l -p 8080; done",
     ])
     .expect("fixture pod creation");
     kubectl(&["--context", &context, "wait", "--for=condition=Ready", &format!("pod/{POD}"), "--timeout=180s"])
         .expect("fixture pod became Ready");
+    // Cleanup by guard, not tail code: a panic anywhere past this point —
+    // including WebDriver session creation failing — still deletes the pod.
+    let _fixture_guard = FixtureGuard { context: context.clone() };
 
     // ---- Throwaway HOME: fresh vault (first-launch setup), fresh settings,
     // no real user state touched. KUBECONFIG must be pinned BEFORE HOME moves
@@ -130,6 +173,10 @@ async fn smoke_launch_to_logs_against_kind() {
     });
     let home = std::env::temp_dir().join(format!("srelens-smoke-home-{}", std::process::id()));
     std::fs::create_dir_all(&home).expect("smoke HOME");
+    // On a PANIC (setup failures like session creation — distinct from the
+    // in-flow error path below), the guard still preserves the app's logs
+    // into the artifacts dir before removing the sandbox.
+    let _home_guard = HomeGuard { home: home.clone(), artifacts: artifacts.clone() };
 
     let app = std::env::var("SRELENS_SMOKE_APP")
         .map(PathBuf::from)
@@ -181,8 +228,6 @@ async fn smoke_launch_to_logs_against_kind() {
         let _ = Command::new("cp").args(["-r", &log_dir.to_string_lossy(), &artifacts.join("app-data").to_string_lossy()]).status();
     }
     let _ = driver.quit().await;
-    let _ = kubectl(&["--context", &context, "delete", "pod", POD, "--ignore-not-found"]);
-    let _ = std::fs::remove_dir_all(&home);
 
     flow.expect("smoke flow");
 }
@@ -326,9 +371,19 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
         }
     }
 
-    // ---- 7. Logs: the drawer must show the marker the pod printed.
+    // ---- 7. Logs: the marker must appear INSIDE the log pane
+    // (`role="log"`, LogsView.tsx) — a global text match could be satisfied
+    // by the pod SPEC in the detail overview, which embeds the fixture's
+    // command (also why the command logs the marker via an expansion the
+    // spec doesn't contain). Only real log output can put it here.
     click(driver, By::Css("[aria-label='Logs']"), 30).await?;
-    wait_text(driver, LOG_MARKER, 60).await?;
+    driver
+        .query(By::XPath(format!(
+            "//*[@role='log']//*[contains(normalize-space(.), '{LOG_MARKER}')]"
+        )))
+        .wait(Duration::from_secs(60), Duration::from_millis(500))
+        .first()
+        .await?;
 
     Ok(())
 }
