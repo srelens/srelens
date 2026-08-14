@@ -1,29 +1,32 @@
-import fs from "node:fs";
-import path from "node:path";
+// @vitest-environment node
+// (importing vitest/config pulls in esbuild, which refuses to run under the
+// jsdom environment the rest of the suite uses — node is fine)
 import { describe, expect, it } from "vitest";
+import config from "../vitest.config";
 
 // Canary for issue #29: vitest 1.x silently ignored thresholds placed at the
 // top level of `coverage` — they only bite under `coverage.thresholds`. This
-// pins the enforced shape and floors so a refactor can't quietly turn
-// coverage enforcement back off (the suite would pass while the gate is gone).
-// The config is asserted on as text: importing vitest/config here would pull
-// esbuild into the jsdom test environment, which it refuses to run in.
+// asserts on the exported config object itself, so a floor that is commented
+// out, moved under `test`, or otherwise outside `test.coverage.thresholds`
+// fails here instead of silently turning the coverage gate off.
 describe("coverage threshold config", () => {
-  const source = fs.readFileSync(path.resolve(__dirname, "../vitest.config.ts"), "utf8");
+  type CoverageShape = {
+    lines?: number;
+    branches?: number;
+    functions?: number;
+    thresholds?: { lines?: number; branches?: number; functions?: number };
+  };
+  const coverage = (config as { test?: { coverage?: CoverageShape } }).test?.coverage;
 
   it("keeps the enforced floors in the shape vitest actually reads", () => {
-    const thresholds = /thresholds:\s*\{([^}]*)\}/.exec(source)?.[1] ?? "";
-    const floor = (key: string) => Number(new RegExp(`${key}:\\s*(\\d+)`).exec(thresholds)?.[1]);
-    expect(floor("lines")).toBeGreaterThanOrEqual(85);
-    expect(floor("branches")).toBeGreaterThanOrEqual(80);
-    expect(floor("functions")).toBeGreaterThanOrEqual(76);
+    expect(coverage?.thresholds?.lines).toBeGreaterThanOrEqual(85);
+    expect(coverage?.thresholds?.branches).toBeGreaterThanOrEqual(80);
+    expect(coverage?.thresholds?.functions).toBeGreaterThanOrEqual(76);
   });
 
-  it("declares each floor exactly once, inside the thresholds block", () => {
-    // A second `lines:`/`branches:`/`functions:` would be the silently-ignored
-    // top-level spot creeping back in.
-    for (const key of ["lines", "branches", "functions"]) {
-      expect(source.match(new RegExp(`${key}:`, "g"))).toHaveLength(1);
-    }
+  it("has no floors in the silently-ignored top-level spot", () => {
+    expect(coverage?.lines).toBeUndefined();
+    expect(coverage?.branches).toBeUndefined();
+    expect(coverage?.functions).toBeUndefined();
   });
 });
