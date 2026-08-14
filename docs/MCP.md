@@ -325,7 +325,9 @@ audited exactly like any other MCP call.
 
 Alongside tools and prompts, srelens exposes cluster state as MCP
 **resources** — addressable under `k8s://` URIs that a client can list,
-read, and (over stdio) subscribe to for change notifications. The exact
+read, and subscribe to for change notifications (on either transport — see
+the subscription section below for how HTTP clients open the push stream).
+The exact
 fixed URIs and parameterised URI shapes are listed in
 [mcp-catalog.md § Resources](mcp-catalog.md#resources); what matters here is
 what they mean and how to use them.

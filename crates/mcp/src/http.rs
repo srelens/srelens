@@ -208,21 +208,39 @@ impl futures_core::Stream for PushStream {
 /// The caller treats an ABSENT header as accepting; this only judges a
 /// header that is present.
 fn accepts_event_stream(accept: &str) -> bool {
-    accept.split(',').any(|range| {
+    // Per RFC 9110 §12.5.1, the MOST SPECIFIC matching range decides the
+    // quality: `text/event-stream;q=0, */*;q=1` refuses SSE (the exact range
+    // zeroes it; the wildcard covers everything ELSE), so ranges cannot be
+    // judged independently. Specificity: exact > text/* > */*.
+    let mut best: Option<(u8, f32)> = None;
+    for range in accept.split(',') {
         let mut parts = range.split(';');
         let media = parts.next().unwrap_or("").trim().to_ascii_lowercase();
-        if !matches!(media.as_str(), "text/event-stream" | "text/*" | "*/*") {
-            return false;
-        }
-        let q_refused = parts
+        let specificity = match media.as_str() {
+            "text/event-stream" => 2u8,
+            "text/*" => 1,
+            "*/*" => 0,
+            _ => continue,
+        };
+        let q = parts
             .filter_map(|p| {
                 let p = p.trim().to_ascii_lowercase();
                 p.strip_prefix("q=").map(str::to_string)
             })
             .next_back()
-            .is_some_and(|v| v.trim().parse::<f32>().map(|q| q <= 0.0).unwrap_or(false));
-        !q_refused
-    })
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(1.0);
+        best = match best {
+            Some((s, _)) if specificity > s => Some((specificity, q)),
+            // Duplicate ranges at equal specificity: keep the acceptance
+            // (lenient — a client contradicting itself gets the stream it
+            // half-asked for rather than a 406).
+            Some((s, bq)) if specificity == s => Some((s, bq.max(q))),
+            Some(kept) => Some(kept),
+            None => Some((specificity, q)),
+        };
+    }
+    best.is_some_and(|(_, q)| q > 0.0)
 }
 
 /// `GET /mcp`: open the server→client SSE stream. Replaces any previous
@@ -732,6 +750,11 @@ mod tests {
         assert!(!accepts_event_stream("text/event-stream;q=0"), "q=0 is an explicit refusal");
         assert!(!accepts_event_stream("text/event-stream; q=0.0"));
         assert!(accepts_event_stream("text/event-stream;charset=utf-8"), "non-q params ignored");
+        // The most specific matching range decides — a wildcard cannot
+        // resurrect an explicitly refused exact range.
+        assert!(!accepts_event_stream("text/event-stream;q=0, */*;q=1"));
+        assert!(!accepts_event_stream("text/*;q=0, */*"));
+        assert!(accepts_event_stream("text/event-stream, text/*;q=0"));
     }
 
     fn sse_get_with_session(session: &str) -> Request<Body> {
