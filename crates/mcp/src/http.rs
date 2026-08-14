@@ -127,11 +127,24 @@ struct StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        self.subs.abort_all();
-        let mut sessions = self.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if sessions.get(&self.session).is_some_and(|a| a.id == self.id) {
-            sessions.remove(&self.session);
+        // Slot removal FIRST, abort SECOND — and the removal takes the same
+        // lock every subscribe POST holds across its registration. After the
+        // slot is gone no POST can reach this registry (it finds no session
+        // and refuses), so the abort that follows closes the set for good.
+        // The reverse order had a window: a POST already holding the lock
+        // could insert its watch AFTER an early abort_all saw an empty
+        // registry, and the slot removal wouldn't abort again — an orphan
+        // watch surviving its stream. (A POST that completed before removal
+        // still answers success for a watch this abort kills moments later —
+        // but its stream is the one that just died, so the client sees the
+        // disconnect and resubscribes; no watch outlives the stream.)
+        {
+            let mut sessions = self.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            if sessions.get(&self.session).is_some_and(|a| a.id == self.id) {
+                sessions.remove(&self.session);
+            }
         }
+        self.subs.abort_all();
     }
 }
 

@@ -20,6 +20,15 @@ use crate::{McpServer, Transport};
 // semantics are identical across the two revisions.
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
+/// Revisions this server can truthfully serve. Initialize NEGOTIATES: a
+/// client requesting one of these gets that revision echoed back (stdio
+/// semantics are identical across them, and HTTP implements the Streamable
+/// shape the newer one names); any other request — older, newer (e.g.
+/// 2025-06-18, whose extra MUSTs this server doesn't implement), or absent —
+/// gets the preferred `PROTOCOL_VERSION`, per the spec's "respond with the
+/// latest version the server supports" rule, and the client decides.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2024-11-05", "2025-03-26"];
+
 /// Stable prefix on the text of a consent-denied tool result. CLI transports
 /// strip `_meta`, so this text is the only denial signal that survives the
 /// round trip through an agent CLI's transcript. `srelens_agent` defines the
@@ -57,10 +66,18 @@ pub async fn handle_request(
     let id = req.get("id").cloned();
 
     match method {
-        "initialize" => Some(ok(
+        "initialize" => {
+            let requested = req
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(Value::as_str);
+            let version = requested
+                .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
+                .unwrap_or(PROTOCOL_VERSION);
+            Some(ok(
             id?,
             json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": version,
                 // Both transports can push now: stdio on its own stdout, HTTP
                 // on the GET /mcp SSE stream (#193) — so `subscribe` is
                 // truthfully true everywhere. `listChanged` is false because
@@ -76,7 +93,8 @@ pub async fn handle_request(
                 },
                 "serverInfo": { "name": "srelens", "version": env!("CARGO_PKG_VERSION") }
             }),
-        )),
+            ))
+        }
         "ping" => Some(ok(id?, json!({}))),
         "notifications/initialized" | "initialized" => None,
         "tools/list" => {
@@ -1276,6 +1294,32 @@ mod tests {
         assert_eq!(caps["resources"]["listChanged"], json!(false));
         assert!(caps["tools"].is_object(), "tools must survive");
         assert!(caps["prompts"].is_object(), "prompts must survive");
+    }
+
+    /// Version negotiation: a client naming a supported revision gets THAT
+    /// revision back — an existing 2024-11-05 client must not be handed a
+    /// newer version it may reject — while unsupported or absent requests
+    /// get the server's preferred version, per spec.
+    #[tokio::test]
+    async fn initialize_negotiates_the_protocol_version() {
+        for (requested, expect) in [
+            (Some("2024-11-05"), "2024-11-05"),
+            (Some("2025-03-26"), "2025-03-26"),
+            (Some("2025-06-18"), PROTOCOL_VERSION),
+            (Some("bogus"), PROTOCOL_VERSION),
+            (None, PROTOCOL_VERSION),
+        ] {
+            let mut req = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+            if let Some(v) = requested {
+                req["params"] = json!({ "protocolVersion": v });
+            }
+            let resp = handle_request(&server_with_ping(), &req, Transport::Stdio).await.unwrap();
+            assert_eq!(
+                resp["result"]["protocolVersion"],
+                json!(expect),
+                "requested {requested:?}"
+            );
+        }
     }
 
     /// HTTP can genuinely push since #193 (the GET /mcp SSE stream), so the
