@@ -15,7 +15,7 @@
 //! # plain debug build expects the Vite dev server and renders only
 //! # "Could not connect to localhost" (learned from the first CI run's
 //! # failure screenshot).
-//! cargo build -p srelens-desktop --features tauri/custom-protocol
+//! cargo build -p srelens-desktop --features custom-protocol
 //! cargo install tauri-driver --locked
 //! # Linux: sudo apt-get install webkit2gtk-driver xvfb
 //! xvfb-run --auto-servernum \
@@ -185,7 +185,7 @@ async fn smoke_launch_to_logs_against_kind() {
     assert!(
         app.exists(),
         "app binary missing at {app:?} — build with \
-         `cargo build -p srelens-desktop --features tauri/custom-protocol`"
+         `cargo build -p srelens-desktop --features custom-protocol`"
     );
 
     // ---- tauri-driver proxies WebDriver to WebKitWebDriver and spawns the

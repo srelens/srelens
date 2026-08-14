@@ -173,7 +173,7 @@ jobs:
       # window is just "Could not connect to localhost" (first live run's
       # failure screenshot).
       - name: Build the app binary
-        run: cargo build -p srelens-desktop --features tauri/custom-protocol
+        run: cargo build -p srelens-desktop --features custom-protocol
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
