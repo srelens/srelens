@@ -54,7 +54,7 @@ import {
   rowInSelection,
 } from "../lib/namespaces";
 import { NamespaceMultiSelect } from "../ui/NamespaceMultiSelect";
-import { PodActions, ResourceActions, ServiceForwardAction } from "./DetailActions";
+import { PodActions, ResourceActions, ServiceForwardAction, desiredReplicasFrom } from "./DetailActions";
 import { BulkActionBar } from "./BulkActionBar";
 import { NodeCordonAction } from "./NodeCordonAction";
 import { ResourceDetail } from "./ResourceDetail";
@@ -956,6 +956,11 @@ export function ResourceBrowser({
             ? (res.rows as CronJobSummary[]).find((r) => r.name === otherDetail.name)?.suspended
             : undefined
         }
+        currentReplicas={desiredReplicasFrom(
+          (res.rows as Array<{ name: string; desired?: number; ready?: string | number }>).find(
+            (r) => r.name === otherDetail.name,
+          ),
+        )}
         onDeleted={closeDetail}
         onChanged={() => setDetailReload((k) => k + 1)}
         onOpenLogs={onOpenWorkloadLogs}

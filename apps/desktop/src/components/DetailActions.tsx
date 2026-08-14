@@ -25,6 +25,7 @@ import {
 import { notify } from "../lib/notify";
 import { useAccess, rbac, kindToResource, denyReason, reportActionError, type AccessCheck } from "../lib/access";
 import { IconButton, ConfirmDialog, TextInput, KubectlPreview } from "../ui";
+import { Slider } from "@/components/ui/slider";
 import { ForwardDialog } from "./ForwardDialog";
 import { CopyAsKubectlButton } from "./CopyAsKubectlButton";
 import { toKubectl } from "../lib/kubectlMapper";
@@ -36,6 +37,18 @@ type Opener = (s: { context: string; namespace: string; pod: string; container?:
 export type AskAssistant = (s: AssistantContext) => void;
 
 const SCALABLE = ["Deployment", "StatefulSet", "ReplicaSet"];
+
+/** The desired replica count a list row implies, for seeding the scale
+ * dialog: ReplicaSet rows carry `desired`; Deployment/StatefulSet rows
+ * encode it as `ready: "ready/total"`. Undefined when the row can't say. */
+export function desiredReplicasFrom(row?: { desired?: unknown; ready?: unknown }): number | undefined {
+  if (typeof row?.desired === "number") return row.desired;
+  if (typeof row?.ready === "string") {
+    const total = /^\d+\/(\d+)$/.exec(row.ready)?.[1];
+    if (total !== undefined) return Number(total);
+  }
+  return undefined;
+}
 const RESTARTABLE = ["Deployment", "StatefulSet", "DaemonSet"];
 // Workloads whose pods are reachable via spec.selector.matchLabels.
 const LOGGABLE = ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"];
@@ -290,6 +303,7 @@ export function ResourceActions({
   namespace,
   name,
   cronjobSuspended,
+  currentReplicas,
   onDeleted,
   onChanged,
   onOpenLogs,
@@ -302,6 +316,9 @@ export function ResourceActions({
   name: string;
   /** For CronJob details: current suspend state, to label Suspend/Resume. */
   cronjobSuspended?: boolean;
+  /** For scalable kinds: the current desired replica count, seeding the
+   * scale dialog's slider and input. Unknown → the dialog starts empty. */
+  currentReplicas?: number;
   onDeleted: () => void;
   /** Fired after a successful non-delete write action so the detail refreshes. */
   onChanged?: () => void;
@@ -427,6 +444,11 @@ export function ResourceActions({
   const replicasN = Number(replicas);
   const validReplicas = replicas.trim() !== "" && Number.isInteger(replicasN) && replicasN >= 0;
 
+  // Slider range: 0 to a sensible ceiling above today's count. The input
+  // stays free-form for values past the ceiling; the slider then just pins.
+  const sliderMax = Math.max((currentReplicas ?? 0) * 2, 10);
+  const sliderValue = validReplicas ? Math.min(replicasN, sliderMax) : 0;
+
   const restartCmd = toKubectl({ action: "rollout-restart", kind, namespace: namespace ?? "", name, context });
   const suspendCmd = toKubectl({
     action: cronjobSuspended ? "cronjob-resume" : "cronjob-suspend",
@@ -466,7 +488,12 @@ export function ResourceActions({
           label="Scale"
           disabled={scaleCheck ? !access.allowed(scaleCheck) : false}
           title={scaleCheck ? denyReason(access, scaleCheck) : undefined}
-          onClick={() => setScaling(true)}
+          onClick={() => {
+            // Start from the live count so the slider and input show where
+            // the workload is today, not whatever a previous dialog left.
+            setReplicas(currentReplicas !== undefined ? String(currentReplicas) : "");
+            setScaling(true);
+          }}
         />
       )}
       {RESTARTABLE.includes(kind) && (
@@ -601,14 +628,30 @@ export function ResourceActions({
               <p style={{ marginTop: 0 }}>
                 Set the replica count for <code>{name}</code>.
               </p>
-              <div style={{ width: 120 }}>
-                <TextInput
-                  value={replicas}
-                  onValueChange={setReplicas}
-                  placeholder="replicas"
-                  aria-label="Replicas"
+              <div className="flex items-center gap-3">
+                <Slider
+                  value={[sliderValue]}
+                  min={0}
+                  max={sliderMax}
+                  step={1}
+                  onValueChange={([v]) => setReplicas(String(v))}
+                  aria-label="Replica count slider"
+                  className="flex-1"
                 />
+                <div style={{ width: 80 }}>
+                  <TextInput
+                    value={replicas}
+                    onValueChange={setReplicas}
+                    placeholder="replicas"
+                    aria-label="Replicas"
+                  />
+                </div>
               </div>
+              {currentReplicas !== undefined && (
+                <p className="text-xs text-muted-foreground">
+                  current {currentReplicas} → target {validReplicas ? replicasN : "—"}
+                </p>
+              )}
               {scaleCmd && (
                 <KubectlPreview command={scaleCmd} onCopy={() => void copyKubectlCommand(scaleCmd)} />
               )}

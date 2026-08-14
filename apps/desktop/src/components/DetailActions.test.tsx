@@ -45,7 +45,7 @@ vi.mock("../lib/access", async (importOriginal) => {
 import { useAccess } from "../lib/access";
 import { describeError } from "../lib/errors";
 
-import { PodActions, ResourceActions } from "./DetailActions";
+import { PodActions, ResourceActions, desiredReplicasFrom } from "./DetailActions";
 
 const pod = {
   name: "web-1",
@@ -197,6 +197,23 @@ describe("PodActions", () => {
   });
 });
 
+describe("desiredReplicasFrom", () => {
+  it("derives the desired count from each scalable kind's row shape", () => {
+    // ReplicaSet rows carry `desired` directly.
+    expect(desiredReplicasFrom({ desired: 4, ready: 2 })).toBe(4);
+    // Deployment / StatefulSet rows encode it as "ready/total".
+    expect(desiredReplicasFrom({ ready: "1/3" })).toBe(3);
+    expect(desiredReplicasFrom({ ready: "0/0" })).toBe(0);
+  });
+
+  it("returns undefined when the row can't say", () => {
+    expect(desiredReplicasFrom(undefined)).toBeUndefined();
+    expect(desiredReplicasFrom({})).toBeUndefined();
+    expect(desiredReplicasFrom({ ready: "not-a-fraction" })).toBeUndefined();
+    expect(desiredReplicasFrom({ ready: 3 })).toBeUndefined();
+  });
+});
+
 describe("ResourceActions", () => {
   it("scales a deployment through the scale dialog", async () => {
     scaleResourceMock.mockResolvedValue({ ok: true });
@@ -219,6 +236,104 @@ describe("ResourceActions", () => {
     );
     // A success toast confirms the operation.
     await waitFor(() => expect(notifyMock.success).toHaveBeenCalledWith(expect.stringMatching(/Scaled web to 3/)));
+  });
+
+  it("defaults the scale dialog to the current replica count, on the slider too", () => {
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="Deployment"
+        namespace="default"
+        name="web"
+        currentReplicas={2}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+
+    expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("2");
+    const slider = screen.getByRole("slider");
+    expect(slider.getAttribute("aria-valuenow")).toBe("2");
+    // Range: 0 to max(currentReplicas * 2, 10).
+    expect(slider.getAttribute("aria-valuemin")).toBe("0");
+    expect(slider.getAttribute("aria-valuemax")).toBe("10");
+  });
+
+  it("widens the slider range for larger workloads", () => {
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="Deployment"
+        namespace="default"
+        name="web"
+        currentReplicas={8}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    expect(screen.getByRole("slider").getAttribute("aria-valuemax")).toBe("16");
+  });
+
+  it("keeps the numeric input and the slider in sync both ways", () => {
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="Deployment"
+        namespace="default"
+        name="web"
+        currentReplicas={2}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+
+    // Typing updates the slider…
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "5" } });
+    const slider = screen.getByRole("slider");
+    expect(slider.getAttribute("aria-valuenow")).toBe("5");
+
+    // …and moving the slider updates the input.
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("6");
+  });
+
+  it("scales to the slider-chosen value on confirm", async () => {
+    scaleResourceMock.mockResolvedValue({ ok: true });
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="Deployment"
+        namespace="default"
+        name="web"
+        currentReplicas={2}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    fireEvent.keyDown(screen.getByRole("slider"), { key: "ArrowRight" });
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    await waitFor(() =>
+      expect(scaleResourceMock).toHaveBeenCalledWith("kind-dev", "Deployment", "default", "web", 3),
+    );
+  });
+
+  it("still rejects a non-integer typed into the input", async () => {
+    scaleResourceMock.mockResolvedValue({ ok: true });
+    render(
+      <ResourceActions
+        context="kind-dev"
+        kind="Deployment"
+        namespace="default"
+        name="web"
+        currentReplicas={2}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    fireEvent.change(screen.getByLabelText("Replicas"), { target: { value: "1.5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    expect(await screen.findByText(/non-negative replica count/)).toBeDefined();
+    expect(scaleResourceMock).not.toHaveBeenCalled();
   });
 
   it("shows an actionable error toast (mapped, not raw) when an operation fails", async () => {
