@@ -468,10 +468,13 @@ export function ResourceActions({
   const replicasN = Number(replicas);
   const validReplicas = replicas.trim() !== "" && Number.isInteger(replicasN) && replicasN >= 0;
 
-  // Slider range: 0 to a sensible ceiling above today's count. The input
-  // stays free-form for values past the ceiling; the slider then just pins.
+  // Slider range: 0 to 100 as the everyday ceiling (a tighter max(current*2)
+  // bound proved too limiting in practice), stretched further for workloads
+  // already above 50 replicas so the slider can always reach and double the
+  // current count. The input stays free-form past the ceiling; the slider
+  // then just pins.
   const knownReplicas = currentReplicas ?? fetchedReplicas;
-  const sliderMax = Math.max((knownReplicas ?? 0) * 2, 10);
+  const sliderMax = Math.max((knownReplicas ?? 0) * 2, 100);
   const sliderValue = validReplicas ? Math.min(replicasN, sliderMax) : 0;
 
   const restartCmd = toKubectl({ action: "rollout-restart", kind, namespace: namespace ?? "", name, context });
@@ -519,13 +522,18 @@ export function ResourceActions({
             setReplicas(currentReplicas !== undefined ? String(currentReplicas) : "");
             setFetchedReplicas(undefined);
             scaleEdited.current = false;
+            // Bump on EVERY open, not only when a fetch is needed: this same
+            // component instance survives the detail switching to a different
+            // resource, and a still-pending fetch from the previous resource
+            // must find its token stale even when THIS open needs no fetch —
+            // otherwise it would overwrite this resource's seeded count.
+            const seq = ++scaleOpenSeq.current;
             setScaling(true);
             if (currentReplicas === undefined) {
               // The list row couldn't say (generic rows carry no counts) —
               // read spec.replicas off the object. The sequence token drops
-              // a fetch that resolves after this dialog was reopened for a
-              // different resource, and typing always wins over the seed.
-              const seq = ++scaleOpenSeq.current;
+              // a fetch that resolves after any later dialog opening, and
+              // typing always wins over the seed.
               void getObject(context, kind, namespace, name).then((r) => {
                 const spec = (r.object as { spec?: { replicas?: unknown } } | undefined)?.spec;
                 if (seq !== scaleOpenSeq.current || typeof spec?.replicas !== "number") return;

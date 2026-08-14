@@ -281,9 +281,9 @@ describe("ResourceActions", () => {
     expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("2");
     const slider = screen.getByRole("slider");
     expect(slider.getAttribute("aria-valuenow")).toBe("2");
-    // Range: 0 to max(currentReplicas * 2, 10).
+    // Range: 0 to max(currentReplicas * 2, 100).
     expect(slider.getAttribute("aria-valuemin")).toBe("0");
-    expect(slider.getAttribute("aria-valuemax")).toBe("10");
+    expect(slider.getAttribute("aria-valuemax")).toBe("100");
     // The row already knew the count — no object fetch needed.
     expect(getObjectMock).not.toHaveBeenCalled();
   });
@@ -353,19 +353,57 @@ describe("ResourceActions", () => {
     expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("");
   });
 
-  it("widens the slider range for larger workloads", () => {
+  it("a pending fetch is invalidated by ANY later dialog open, not only fetching ones", async () => {
+    // The same component instance survives the detail switching resources.
+    // Open Scale on a ReplicaSet (fetch pending), switch to a Deployment
+    // whose row KNOWS its count (no fetch), open Scale again: the old fetch
+    // resolving now must not overwrite the Deployment's seeded count.
+    let resolveFetch!: (v: unknown) => void;
+    getObjectMock.mockReturnValue(new Promise((r) => (resolveFetch = r)));
+    const { rerender } = render(
+      <ResourceActions
+        context="kind-dev"
+        kind="ReplicaSet"
+        namespace="default"
+        name="web-abc123"
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    rerender(
+      <ResourceActions
+        context="kind-dev"
+        kind="Deployment"
+        namespace="default"
+        name="api"
+        currentReplicas={3}
+        onDeleted={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Scale" }));
+    expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("3");
+
+    resolveFetch({ object: { spec: { replicas: 9 } } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect((screen.getByLabelText("Replicas") as HTMLInputElement).value).toBe("3");
+  });
+
+  it("widens the slider range past 100 for larger workloads", () => {
     render(
       <ResourceActions
         context="kind-dev"
         kind="Deployment"
         namespace="default"
         name="web"
-        currentReplicas={8}
+        currentReplicas={80}
         onDeleted={() => {}}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Scale" }));
-    expect(screen.getByRole("slider").getAttribute("aria-valuemax")).toBe("16");
+    // The slider must always be able to reach and double the current count.
+    expect(screen.getByRole("slider").getAttribute("aria-valuemax")).toBe("160");
   });
 
   it("keeps the numeric input and the slider in sync both ways", () => {
