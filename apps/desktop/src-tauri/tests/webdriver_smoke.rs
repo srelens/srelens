@@ -242,23 +242,36 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // ---- 1. First-launch vault gate: create the master password. The
     // recovery checkbox is UNCHECKED first — CI has no OS keychain, and the
     // setup must not depend on one.
-    let pw = driver
+    driver
         .query(By::Css("input[placeholder='At least 8 characters']"))
         .wait(Duration::from_secs(60), Duration::from_millis(500))
         .first()
         .await?;
-    pw.send_keys(MASTER_PASSWORD).await?;
-    let inputs = driver.find_all(By::Css("input[type='password']")).await?;
-    inputs[1].send_keys(MASTER_PASSWORD).await?;
-    click(driver, By::Css("input[type='checkbox'].accent-primary"), 10).await?;
-    // Submit via the form's IMPLICIT submission — Enter in the confirm field
-    // — rather than clicking the button: WebKitWebDriver reported that click
-    // as intercepted even with the form visibly topmost (fourth CI run's
-    // screenshot shows it filled and unobstructed), and Enter is what a
-    // human types anyway. Re-found first: the checkbox click re-rendered
-    // the form, so the earlier element reference may be stale.
-    let confirm = driver.find_all(By::Css("input[type='password']")).await?;
-    confirm[1].send_keys("\u{e007}").await?;
+    // The gate is driven by SCRIPT, not synthesized input: WebDriver-level
+    // interaction with this form proved environment-flaky in two different
+    // ways (CI intercepted the button click; the local container
+    // intercepted the label-nested checkbox and dropped keys mid-render).
+    // The gate is prerequisite plumbing — the WebView↔Rust bridge under
+    // test is exercised by everything AFTER it, which stays real
+    // interaction. React controlled inputs need the native value setter +
+    // an input event; requestSubmit fires the form's onSubmit exactly like
+    // a user submission.
+    driver
+        .execute(
+            r#"
+            const set = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value').set;
+            for (const el of document.querySelectorAll("input[type='password']")) {
+                set.call(el, arguments[0]);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            const cb = document.querySelector("input[type='checkbox'].accent-primary");
+            if (cb && cb.checked) cb.click();
+            document.querySelector('form').requestSubmit();
+            "#,
+            vec![serde_json::json!(MASTER_PASSWORD)],
+        )
+        .await?;
 
     // ---- 2. Land, and open the kind context from the landing page.
     click(driver, By::Css(&format!("[aria-label='Open context {context}']")), 60).await?;
