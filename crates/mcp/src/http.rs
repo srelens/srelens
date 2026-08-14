@@ -173,16 +173,19 @@ impl futures_core::Stream for PushStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
+            // The close signal is checked FIRST — before queued frames — so
+            // it ends the stream even when a slow client is backpressuring
+            // `pending`: replacement and shutdown must terminate promptly,
+            // not after the client deigns to read its backlog. Dropping the
+            // queued notifications is fine — the watches are being torn
+            // down, and the client's reconnect re-reads anyway (the
+            // initial-list notification fires on every fresh watch).
+            if std::future::Future::poll(Pin::new(&mut this.closed), cx).is_ready() {
+                return Poll::Ready(None);
+            }
             if let Some(uri) = this.pending.pop_front() {
                 let msg = subscription_notification(&uri);
                 return Poll::Ready(Some(Ok(Event::default().data(msg.to_string()))));
-            }
-            // The close signal ends the stream even while queued
-            // notifications exist: the watches are being torn down, and the
-            // client's reconnect re-reads anyway (the initial-list
-            // notification fires on every fresh watch).
-            if std::future::Future::poll(Pin::new(&mut this.closed), cx).is_ready() {
-                return Poll::Ready(None);
             }
             match this.wake.poll_recv(cx) {
                 Poll::Ready(Some(())) => {
@@ -251,11 +254,15 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
     // The spec has clients send `Accept: text/event-stream`; a GET that
     // refuses it gets 406 rather than a stream it won't parse. An absent
     // Accept header is allowed (curl convenience).
+    // ALL Accept field lines, combined: HTTP defines repeated field lines as
+    // one comma-joined list, and `HeaderMap::get` sees only one of them.
     let accept = headers
-        .get(axum::http::header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !accept.is_empty() && !accepts_event_stream(accept) {
+        .get_all(axum::http::header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(",");
+    if !accept.is_empty() && !accepts_event_stream(&accept) {
         return (StatusCode::NOT_ACCEPTABLE, "this endpoint streams text/event-stream").into_response();
     }
 
@@ -779,6 +786,25 @@ mod tests {
             .header("mcp-session-id", session)
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// Repeated `Accept` field lines are one combined list per HTTP — a
+    /// client sending `application/json` and `text/event-stream` as separate
+    /// lines is a valid SSE client whichever line the header map yields
+    /// first.
+    #[tokio::test]
+    async fn multiple_accept_field_lines_are_combined() {
+        let app = router(test_server());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("accept", "application/json")
+            .header("accept", "text/event-stream")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// Two clients (an IDE and an assistant CLI, say) present distinct
