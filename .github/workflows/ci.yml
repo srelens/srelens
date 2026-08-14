@@ -184,7 +184,7 @@ jobs:
           SRELENS_SMOKE_ARTIFACTS: ${{ runner.temp }}/smoke-artifacts
         run: |
           xvfb-run --auto-servernum \
-            cargo test -p srelens-desktop --test webdriver_smoke -- --ignored --nocapture
+            cargo test -p srelens-desktop --features custom-protocol --test webdriver_smoke -- --ignored --nocapture
       - name: Upload failure artifacts (screenshot + app logs)
         if: failure()
         uses: actions/upload-artifact@v4

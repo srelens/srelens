@@ -19,7 +19,7 @@
 //! cargo install tauri-driver --locked
 //! # Linux: sudo apt-get install webkit2gtk-driver xvfb
 //! xvfb-run --auto-servernum \
-//!   cargo test -p srelens-desktop --test webdriver_smoke -- --ignored --nocapture
+//!   cargo test -p srelens-desktop --features custom-protocol --test webdriver_smoke -- --ignored --nocapture
 //! ```
 //!
 //! Environment:
