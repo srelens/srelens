@@ -374,16 +374,21 @@ would make — `k8s.getManifest`, `k8s.listEvents`, `k8s.podLogs`, or
 exactly like a tool call**, appearing in the same audit log under the
 underlying capability's name, with the same redaction rules.
 
-**Subscriptions work over stdio only.** A client can send
+**Subscriptions work on both transports.** A client can send
 `resources/subscribe` for an object URI and receive a
 `notifications/resources/updated` message whenever that object changes; the
 notification carries only the URI, and the client re-reads to get the new
-content. The HTTP transport is request/response only, with no channel for
-the server to push a notification back, so it advertises `subscribe: false`
-in `initialize` and answers `resources/subscribe` with an error rather than
-silently accepting a subscription that can never fire. Pushing resource
-updates to HTTP clients (via SSE or similar) is tracked as a follow-up in
-[issue #193](https://github.com/srelens/srelens/issues/193). Up to 32
+content. Over stdio, notifications arrive on the server's stdout. Over HTTP
+([issue #193](https://github.com/srelens/srelens/issues/193)), the client
+first opens the push channel — `GET /mcp` with `Accept: text/event-stream`,
+authenticated with the same bearer token and covered by the same loopback
+`Host` check — and notifications arrive as SSE events on that stream.
+Subscribing with no stream connected is refused rather than silently
+accepted, since the notifications would have nowhere to go, and
+subscriptions live exactly as long as the stream that carries them: a
+disconnect, a reconnect replacing the stream, or a token rotation (which
+restarts the server) releases every watch, and the client re-subscribes on
+its new stream. Up to 32
 subscriptions can be live at once; re-subscribing to a URI you already hold
 replaces it in place rather than counting twice, and past the cap you need
 to unsubscribe from something before adding another.

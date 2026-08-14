@@ -43,6 +43,39 @@ struct PushState {
     /// slot, never a successor's (same shape as the subscription registry's
     /// generations).
     next_id: AtomicU64,
+    /// Set by `end_streams` at graceful shutdown. Checked under the `active`
+    /// lock on install, so a GET that was already accepted when shutdown
+    /// began cannot slip a fresh stream in after the teardown and stall the
+    /// shutdown all over again.
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl PushState {
+    /// Install `chans` as THE stream, unless the server is shutting down.
+    /// Returns whether it was installed. Dropping a previous occupant here is
+    /// what ends a replaced stream: its wake sender closes, its poll sees the
+    /// closed channel, and its guard aborts the watches it owned.
+    fn install(&self, chans: PushChannels) -> bool {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        if self.closed.load(Ordering::Relaxed) {
+            return false;
+        }
+        *active = Some(chans);
+        true
+    }
+
+    /// Graceful-shutdown teardown (#193 review): drop the active stream's
+    /// channels so its SSE body ENDS. Without this the state and the stream
+    /// keep each other alive — the guard holds this state, the state's slot
+    /// holds the wake sender the stream waits on — and axum's graceful
+    /// shutdown waits on that body forever; the desktop only escaped by
+    /// timing out and aborting the whole server task, delaying stop and
+    /// token rotation by its two-second fallback.
+    fn end_streams(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        self.closed.store(true, Ordering::Relaxed);
+        active.take();
+    }
 }
 
 /// What `resources/subscribe` needs from the active stream: the same
@@ -151,10 +184,12 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         pending: VecDeque::new(),
         _guard: StreamGuard { push: st.push.clone(), subs: chans.subs.clone(), id: chans.id },
     };
-    // Install as THE stream. A previous stream's channels drop here: its wake
-    // sender closing is what ends its `PushStream`, whose guard then aborts
-    // the watches that stream owned.
-    *st.push.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(chans);
+    // Install as THE stream (see `PushState::install` for replacement and
+    // shutdown semantics). Refusal means graceful shutdown already began on
+    // this in-flight connection's watch — a fresh stream now would stall it.
+    if !st.push.install(chans) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the server is shutting down").into_response();
+    }
 
     (
         [(MCP_SESSION_ID.clone(), session_id())],
@@ -190,8 +225,16 @@ async fn rpc(State(st): State<AppState>, Json(req): Json<Value>) -> Response {
     // stream. With no stream connected they are refused outright; accepting
     // would promise notifications with nowhere to send them.
     let resp = if method == "resources/subscribe" || method == "resources/unsubscribe" {
-        let chans = st.push.active.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        match chans {
+        // The active-slot lock is held across `handle_subscription`, which is
+        // entirely synchronous (no await), so registration is SERIALIZED with
+        // stream replacement — `PushState::install` takes this same lock. The
+        // race this closes: a reconnecting GET replacing the stream between a
+        // clone of the channels and the registration completing would leave
+        // the watch in the old registry (whose guard then aborts it) while
+        // the client holds a success response for a subscription the new
+        // stream will never deliver.
+        let active = st.push.active.lock().unwrap_or_else(|e| e.into_inner());
+        match active.as_ref() {
             Some(c) => handle_subscription(&st.server, &c.subs, &c.dirty, &c.wake, &req, method),
             None => req.get("id").cloned().map(|id| {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32002, "message":
@@ -322,9 +365,18 @@ pub fn router_with_auth(server: McpServer, token: crate::auth::Token) -> Router 
 /// check is an outer `layer` covering every route (and unmatched paths), so
 /// nothing this server exposes answers a non-loopback caller.
 fn router_inner(server: McpServer, token: Option<crate::auth::Token>) -> Router {
-    let state =
-        AppState { server: Arc::new(server), push: Arc::new(PushState::default()) };
-    Router::new()
+    router_inner_with_push(server, token).0
+}
+
+/// Like `router_inner`, also handing back the push state so a graceful
+/// shutdown can end the live SSE stream (see `PushState::end_streams`).
+fn router_inner_with_push(
+    server: McpServer,
+    token: Option<crate::auth::Token>,
+) -> (Router, Arc<PushState>) {
+    let push = Arc::new(PushState::default());
+    let state = AppState { server: Arc::new(server), push: push.clone() };
+    let router = Router::new()
         // POST and GET share the route, so the token `route_layer` below
         // covers the SSE stream exactly like the JSON-RPC endpoint — a
         // long-lived stream is established under the same bearer check.
@@ -332,7 +384,8 @@ fn router_inner(server: McpServer, token: Option<crate::auth::Token>) -> Router 
         .route_layer(middleware::from_fn_with_state(token, token_guard))
         .route("/healthz", get(|| async { "ok" }))
         .layer(middleware::from_fn(host_guard))
-        .with_state(state)
+        .with_state(state);
+    (router, push)
 }
 
 /// Test-only convenience: a router with authentication disabled. Never
@@ -366,9 +419,15 @@ pub async fn serve_http_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router_with_auth(server, token))
-        .with_graceful_shutdown(shutdown)
-        .await
+    let (router, push) = router_inner_with_push(server, Some(token));
+    // End the live SSE stream BEFORE axum starts waiting on in-flight
+    // bodies, or an idle connected client would hold the shutdown open
+    // forever (see `PushState::end_streams`).
+    let shutdown = async move {
+        shutdown.await;
+        push.end_streams();
+    };
+    axum::serve(listener, router).with_graceful_shutdown(shutdown).await
 }
 
 #[cfg(test)]
@@ -553,6 +612,45 @@ mod tests {
             Ok(Err(e)) if e.is_cancelled() => {}
             other => panic!("the watch must be cancelled when its stream drops: {other:?}"),
         }
+    }
+
+    /// The graceful-shutdown deadlock from review: the state and the stream
+    /// kept each other alive, so axum's shutdown waited on the SSE body
+    /// forever and the desktop escaped only via its 2s abort fallback.
+    /// `end_streams` must END the live body (which is what lets the shutdown
+    /// complete), abort its watches, and refuse a late stream.
+    #[tokio::test]
+    async fn graceful_shutdown_ends_the_live_stream_instead_of_waiting_on_it() {
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        let (app, push) = router_inner_with_push(subscribable_server(joins.clone()), None);
+
+        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
+        let sub = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        assert_eq!(sub.status(), StatusCode::OK);
+        let mut body = stream_resp.into_body().into_data_stream();
+
+        push.end_streams();
+        let mut flushed = 0;
+        loop {
+            match next_chunk(&mut body).await {
+                None => break,
+                Some(_) if flushed < 3 => flushed += 1,
+                Some(chunk) => panic!("the stream must end at shutdown, got: {chunk:?}"),
+            }
+        }
+        // In production hyper drops the completed body, which is what runs
+        // the guard; the drop is explicit here.
+        drop(body);
+        let join = joins.lock().unwrap().pop().unwrap();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), join).await {
+            Ok(Err(e)) if e.is_cancelled() => {}
+            other => panic!("the watch must die with the shut-down stream: {other:?}"),
+        }
+
+        // An already-accepted GET racing the shutdown cannot reopen a stream
+        // and stall it all over again.
+        let late = app.oneshot(sse_get()).await.unwrap();
+        assert_eq!(late.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

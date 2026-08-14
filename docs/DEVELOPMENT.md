@@ -153,7 +153,7 @@ Beyond tools, the server implements:
 
 - **Prompts** (`crates/mcp/src/prompts.rs`) — canned diagnostic flows, with bodies in `crates/mcp/src/prompts/*.md` as `discover`/`targeted` pairs (pod-crashloop, pod-pending, node-pressure, service-no-endpoints), plus user-authored prompts from a host-supplied directory. A test asserts every tool a prompt names really exists and is on the read-only allowlist.
 - **Resources** (`crates/mcp/src/resources.rs`) — `k8s://` URIs resolved through a `KindResolver`. Secrets are deliberately *not* addressable as resources; they stay behind the gated `k8s.getSecret` tool, which is what keeps "the consent gate never fires on a resource read" true.
-- **Subscriptions** (`crates/mcp/src/subscriptions.rs`) — watch-backed `resources/subscribe`. Server→client push currently works on stdio; HTTP push is tracked as future work.
+- **Subscriptions** (`crates/mcp/src/subscriptions.rs`) — watch-backed `resources/subscribe` on both transports: stdio pushes on its stdout, HTTP on the `GET /mcp` SSE stream (`crates/mcp/src/http.rs`, #193), with every watch scoped to the stream that requested it.
 
 Every component fails closed: an `McpServer` whose host wires nothing denies every gated call, resolves no kinds, and refuses every subscription.
 
