@@ -129,3 +129,62 @@ jobs:
           SRELENS_E2E_CONTEXT: kind-srelens-e2e
         run: |
           cargo test -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test-threads=1
+
+  # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
+  # all — driven through tauri-driver against a kind cluster. This is the
+  # only job that crosses the WebView↔Rust bridge itself, so a regression in
+  # the transport shim or command registration fails HERE even when every
+  # other suite stays green. Fast subset on PRs; the release workflow runs
+  # the full tier (exec + port-forward) with SRELENS_SMOKE_FULL=1.
+  smoke:
+    name: smoke (webdriver)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libssl-dev \
+            build-essential \
+            webkit2gtk-driver \
+            xvfb
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+      - name: Build the app binary
+        run: cargo build -p srelens-desktop
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: srelens-e2e
+      - name: Smoke suite through the real app
+        env:
+          SRELENS_E2E_CONTEXT: kind-srelens-e2e
+          SRELENS_SMOKE_ARTIFACTS: ${{ runner.temp }}/smoke-artifacts
+        run: |
+          xvfb-run --auto-servernum \
+            cargo test -p srelens-desktop --test webdriver_smoke -- --ignored --nocapture
+      - name: Upload failure artifacts (screenshot + app logs)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-failure-artifacts
+          path: ${{ runner.temp }}/smoke-artifacts
+          if-no-files-found: ignore

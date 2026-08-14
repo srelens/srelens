@@ -88,3 +88,7 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "process"] }
 futures = "0.3"
+# WebDriver client for the #[ignore]d smoke suite (tests/webdriver_smoke.rs,
+# issue #30) — drives the real built app through tauri-driver. Dev-only; the
+# shipping binary never links it.
+thirtyfour = "0.32"
