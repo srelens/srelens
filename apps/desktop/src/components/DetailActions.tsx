@@ -26,6 +26,7 @@ import { notify } from "../lib/notify";
 import { useAccess, rbac, kindToResource, denyReason, reportActionError, type AccessCheck } from "../lib/access";
 import { getObject } from "../lib/manifest";
 import { IconButton, ConfirmDialog, TextInput, KubectlPreview } from "../ui";
+import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { ForwardDialog } from "./ForwardDialog";
 import { CopyAsKubectlButton } from "./CopyAsKubectlButton";
@@ -690,11 +691,17 @@ export function ResourceActions({
                   className="flex-1"
                 />
                 <div style={{ width: 80 }}>
-                  <TextInput
+                  {/* A number input, not TextInput: the native spinner and
+                      arrow-key stepping give single-replica increments
+                      without touching the slider. */}
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1}
                     value={replicas}
-                    onValueChange={(v) => {
+                    onChange={(e) => {
                       scaleEdited.current = true;
-                      setReplicas(v);
+                      setReplicas(e.target.value);
                     }}
                     placeholder="replicas"
                     aria-label="Replicas"
