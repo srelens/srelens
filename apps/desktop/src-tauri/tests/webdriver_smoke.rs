@@ -300,12 +300,30 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
             .first()
             .await?;
         term.click().await.ok();
-        driver
-            .action_chain()
-            .send_keys("echo smoke$(echo -exec)-done\n")
-            .perform()
-            .await?;
-        wait_text(driver, "smoke-exec-done", 30).await?;
+        // Prove the keystrokes actually EXECUTE in the pod via a side effect
+        // observed from OUTSIDE the app (kubectl), not from the terminal's
+        // rendering. Today that rendering would even be assertable — no
+        // canvas/webgl addon is loaded, so xterm 5 uses its DOM renderer and
+        // output text lands in real DOM nodes — but a renderer addon added
+        // later would break a DOM-text assertion only on stable-release full
+        // runs, the worst place to discover it. A file can also never be
+        // faked by keystroke echo, which no output-matching scheme fully
+        // rules out.
+        driver.action_chain().send_keys("touch /tmp/smoke-exec-done\n").perform().await?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if kubectl(&[
+                "--context", context, "exec", POD, "--", "test", "-f", "/tmp/smoke-exec-done",
+            ])
+            .is_ok()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("the exec'd command never left its marker in the pod".into());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     // ---- 7. Logs: the drawer must show the marker the pod printed.
