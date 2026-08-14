@@ -159,11 +159,12 @@ async fn smoke_launch_to_logs_against_kind() {
         "echo hello-$(echo smoke); while true; do { echo -e 'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok'; } | nc -l -p 8080; done",
     ])
     .expect("fixture pod creation");
+    // The guard exists from the moment the pod does — a readiness failure
+    // (image pull, scheduling) panics on the very next line, and that panic
+    // must delete the pod like any later one.
+    let _fixture_guard = FixtureGuard { context: context.clone() };
     kubectl(&["--context", &context, "wait", "--for=condition=Ready", &format!("pod/{POD}"), "--timeout=180s"])
         .expect("fixture pod became Ready");
-    // Cleanup by guard, not tail code: a panic anywhere past this point —
-    // including WebDriver session creation failing — still deletes the pod.
-    let _fixture_guard = FixtureGuard { context: context.clone() };
 
     // ---- Throwaway HOME: fresh vault (first-launch setup), fresh settings,
     // no real user state touched. KUBECONFIG must be pinned BEFORE HOME moves
