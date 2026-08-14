@@ -251,7 +251,14 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     let inputs = driver.find_all(By::Css("input[type='password']")).await?;
     inputs[1].send_keys(MASTER_PASSWORD).await?;
     click(driver, By::Css("input[type='checkbox'].accent-primary"), 10).await?;
-    button_by_text(driver, "Create password", 10).await?;
+    // Submit via the form's IMPLICIT submission — Enter in the confirm field
+    // — rather than clicking the button: WebKitWebDriver reported that click
+    // as intercepted even with the form visibly topmost (fourth CI run's
+    // screenshot shows it filled and unobstructed), and Enter is what a
+    // human types anyway. Re-found first: the checkbox click re-rendered
+    // the form, so the earlier element reference may be stale.
+    let confirm = driver.find_all(By::Css("input[type='password']")).await?;
+    confirm[1].send_keys("\u{e007}").await?;
 
     // ---- 2. Land, and open the kind context from the landing page.
     click(driver, By::Css(&format!("[aria-label='Open context {context}']")), 60).await?;
