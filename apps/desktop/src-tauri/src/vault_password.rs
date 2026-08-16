@@ -6,9 +6,10 @@
 //! An opt-in recovery copy of the password lives in one OS keychain entry,
 //! read only by the explicit "Forgot password?" flow.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use crate::vault::{self, Vault};
+use crate::vault::{self, RecoveryStore, Vault};
 use crate::vault_biometric;
 
 const MIN_PASSWORD_LEN: usize = 8;
@@ -35,10 +36,18 @@ pub async fn vault_status(
 ) -> Result<VaultStatus, String> {
     use tauri_plugin_biometry::BiometryExt;
     let dir = vault_biometric::vault_dir(&app)?;
+    let biometric_available = app.biometry().status().map(|s| s.is_available).unwrap_or(false);
+    Ok(status_core(&vault, &dir, biometric_available))
+}
+
+/// Everything but the Tauri plumbing (#28 seam): the AppHandle contributes
+/// only the vault dir and the biometric-sensor probe, so the mode decision
+/// itself is unit-tested here.
+fn status_core(vault: &Vault, dir: &Path, biometric_available: bool) -> VaultStatus {
     // EXISTENCE of vault.json decides the mode, not its readability: a
     // truncated/corrupt meta must present as locked (fail closed), never as
     // setup-required — setup would rekey the still-encrypted vault away.
-    let has_meta = vault::meta_path(&dir).exists();
+    let has_meta = vault::meta_path(dir).exists();
     let key_source = vault.key_source();
     let mode = if !has_meta {
         // Fresh install or an upgrade from the machine-key era: the gate
@@ -50,12 +59,12 @@ pub async fn vault_status(
     } else {
         "locked"
     };
-    Ok(VaultStatus {
+    VaultStatus {
         mode,
         key_source,
-        biometric_available: app.biometry().status().map(|s| s.is_available).unwrap_or(false),
-        biometric_enrolled: vault::biometric_marker_path(&dir).exists(),
-    })
+        biometric_available,
+        biometric_enrolled: vault::biometric_marker_path(dir).exists(),
+    }
 }
 
 /// First-launch setup: derive the key, re-encrypt whatever the vault already
@@ -68,17 +77,35 @@ pub async fn vault_setup_password(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<(), String> {
+    let dir = vault_biometric::vault_dir(&app)?;
+    setup_password_core(&vault, &dir, &vault::KeyringRecovery, &password, keep_recovery)?;
+    // Any machine-key-era biometric enrollment held the OLD key — purge it;
+    // the user re-enables the skip afterwards (it then stores the new key).
+    // Plugin-bound, so it stays on the command side of the #28 seam.
+    vault_biometric::purge(&app);
+    Ok(())
+}
+
+/// The whole setup transaction minus the Tauri-plugin step (#28 seam):
+/// recovery operations arrive as `&dyn RecoveryStore` so every path —
+/// including the rollbacks — is unit-tested against in-memory doubles.
+fn setup_password_core(
+    vault: &Vault,
+    dir: &Path,
+    recovery: &dyn RecoveryStore,
+    password: &str,
+    keep_recovery: bool,
+) -> Result<(), String> {
     if password.len() < MIN_PASSWORD_LEN {
         return Err(format!("the master password must be at least {MIN_PASSWORD_LEN} characters"));
     }
-    let dir = vault_biometric::vault_dir(&app)?;
     // The whole setup — existence check, recovery mutation, stage, re-key,
     // promote — runs under the inter-process transition lock, so two
     // concurrent setups serialize and the loser sees "already set".
-    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
+    let _transition = vault::transition_lock(dir).map_err(|e| e.to_string())?;
     // EXISTENCE check, matching `vault_status`: a corrupt-but-present
     // vault.json is a fail-closed locked state, never a setup invitation.
-    if vault::meta_path(&dir).exists() {
+    if vault::meta_path(dir).exists() {
         return Err("a master password is already set".into());
     }
     // Setup requires a USABLE current key (fresh machine key, or the legacy
@@ -90,29 +117,29 @@ pub async fn vault_setup_password(
             "the vault is locked and cannot be re-keyed — restart srelens and try again".into(),
         );
     }
-    let (meta, key) = vault::build_meta(&password)?;
+    let (meta, key) = vault::build_meta(password)?;
     // Order matters: the RECOVERABLE step (keychain recovery copy) lands
     // first, before the transition — if it fails, nothing has changed and
     // setup can simply be retried.
     if keep_recovery {
-        vault::store_recovery_password(&password)?;
+        recovery.store(password)?;
         // The marker IS the opt-in as far as every later flow is concerned —
         // its write is part of the transaction, before anything irreversible:
         // a failure here rolls the copy back and aborts with nothing changed,
         // instead of stranding a stored copy no flow will ever consult.
-        if let Err(e) = std::fs::write(vault::recovery_marker_path(&dir), b"") {
-            vault::delete_recovery_password();
+        if let Err(e) = std::fs::write(vault::recovery_marker_path(dir), b"") {
+            recovery.delete();
             return Err(format!("could not record the recovery choice: {e}"));
         }
     } else {
         // Opting out purges BOTH keychain accounts — a stale main or staged
         // copy from a prior install must not survive an explicit opt-out.
-        vault::delete_recovery_password();
-        let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
+        recovery.delete();
+        let _ = std::fs::remove_file(vault::recovery_marker_path(dir));
     }
     // A stale staged copy (prior install, interrupted change) never belongs
     // to a fresh setup either way.
-    vault::delete_staged_recovery();
+    recovery.delete_staged();
     // Two-phase transition (crash-recoverable): stage the new meta as
     // `.next`, re-key, then promote — the transition lock is already held
     // from the top of this command. A crash before the re-key leaves the
@@ -121,28 +148,25 @@ pub async fn vault_setup_password(
     // never claims a key the vault doesn't have.
     // Staging failure must roll back the recovery artifacts too — they were
     // persisted just above, and a failed setup must leave NOTHING behind.
-    if let Err(e) = vault::write_meta_next(&dir, &meta) {
+    if let Err(e) = vault::write_meta_next(dir, &meta) {
         if keep_recovery {
-            vault::delete_recovery_password();
-            let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
+            recovery.delete();
+            let _ = std::fs::remove_file(vault::recovery_marker_path(dir));
         }
         return Err(e);
     }
     if let Err(e) = vault.rekey_from_current(key, "password") {
-        let _ = std::fs::remove_file(vault::meta_next_path(&dir));
+        let _ = std::fs::remove_file(vault::meta_next_path(dir));
         if keep_recovery {
-            vault::delete_recovery_password();
-            let _ = std::fs::remove_file(vault::recovery_marker_path(&dir));
+            recovery.delete();
+            let _ = std::fs::remove_file(vault::recovery_marker_path(dir));
         }
         return Err(e.to_string());
     }
-    vault::promote_meta_next(&dir)?;
+    vault::promote_meta_next(dir)?;
     // Retire the machine-key homes: the password is the key's origin now.
     vault::delete_master_key_from_keychain();
     let _ = std::fs::remove_file(dir.join("master.key"));
-    // Any machine-key-era biometric enrollment held the OLD key — purge it;
-    // the user re-enables the skip afterwards (it then stores the new key).
-    vault_biometric::purge(&app);
     Ok(())
 }
 
@@ -166,26 +190,35 @@ pub async fn vault_recover_password(
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<String, String> {
     let dir = vault_biometric::vault_dir(&app)?;
+    recover_password_core(&vault, &dir, &vault::KeyringRecovery)
+}
+
+/// The recover flow behind the #28 seam — see `vault_recover_password`.
+fn recover_password_core(
+    vault: &Vault,
+    dir: &Path,
+    recovery: &dyn RecoveryStore,
+) -> Result<String, String> {
     // The filesystem opt-in marker is authoritative: an opted-out vault
     // never consults EITHER keychain account — a stale credential from a
     // prior install must not be revealed (or promoted) against the user's
     // explicit choice.
-    if !vault::recovery_marker_path(&dir).exists() {
+    if !vault::recovery_marker_path(dir).exists() {
         return Err("no recovery copy was stored for this vault".into());
     }
     // The main copy pairs with the current password; a STAGED copy (left by
     // a password change that crashed before its final promote) pairs with
     // the staged/promoted meta. Try main first, then the stage — whichever
     // unlocks is the truth, and a working staged copy finishes its promote.
-    let main = vault::read_recovery_password();
+    let main = recovery.read();
     if let Ok(password) = &main {
-        if vault::unlock_with_master_password(&vault, &dir, password).is_ok() {
+        if vault::unlock_with_master_password(vault, dir, password).is_ok() {
             return Ok(password.clone());
         }
     }
-    if let Some(staged) = vault::read_staged_recovery() {
-        if vault::unlock_with_master_password(&vault, &dir, &staged).is_ok() {
-            vault::promote_staged_recovery();
+    if let Some(staged) = recovery.read_staged() {
+        if vault::unlock_with_master_password(vault, dir, &staged).is_ok() {
+            recovery.promote_staged();
             return Ok(staged);
         }
     }
@@ -210,18 +243,34 @@ pub async fn vault_change_password(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<Option<String>, String> {
+    let dir = vault_biometric::vault_dir(&app)?;
+    let new_key = change_password_core(&vault, &dir, &vault::KeyringRecovery, &current, &new)?;
+    // A refresh failure has already reconciled (purged) the enrollment —
+    // pass its note along as a warning on an otherwise-successful change.
+    // Plugin-bound, so it stays on the command side of the #28 seam.
+    Ok(vault_biometric::refresh_stored_key(&app, &new_key).err())
+}
+
+/// The change transaction minus the biometric refresh (#28 seam): returns
+/// the NEW key on success so the command can refresh the enrollment.
+fn change_password_core(
+    vault: &Vault,
+    dir: &Path,
+    recovery: &dyn RecoveryStore,
+    current: &str,
+    new: &str,
+) -> Result<[u8; 32], String> {
     if new.len() < MIN_PASSWORD_LEN {
         return Err(format!("the new password must be at least {MIN_PASSWORD_LEN} characters"));
     }
-    let dir = vault_biometric::vault_dir(&app)?;
     // The WHOLE change — meta read, current-password verification, recovery
     // mutation, stage, re-key, promote — runs under one inter-process
     // transition lock. Two concurrent changes therefore serialize: the
     // loser re-reads the winner's meta here and its (now old) current
     // password is rejected cleanly, before it can touch the recovery copy.
-    let _transition = vault::transition_lock(&dir).map_err(|e| e.to_string())?;
-    let old_meta = vault::read_meta(&dir).ok_or("no master password is set")?;
-    let current_key = vault::unlock_key_for(&old_meta, &current)?;
+    let _transition = vault::transition_lock(dir).map_err(|e| e.to_string())?;
+    let old_meta = vault::read_meta(dir).ok_or("no master password is set")?;
+    let current_key = vault::unlock_key_for(&old_meta, current)?;
     // The vault may still be locked (changing straight from the gate's
     // "forgot my password → recovered → change it" path): unlock inline with
     // the just-verified key — NOT via unlock_with_master_password, which
@@ -235,8 +284,9 @@ pub async fn vault_change_password(
     // opt-in marker is authoritative: opted-out vaults never consult the
     // keychain at all — a keychain-less host has nothing to refresh and must
     // still be able to change the password.
-    let recovery_enabled = if vault::recovery_marker_path(&dir).exists() {
-        vault::recovery_password_state()
+    let recovery_enabled = if vault::recovery_marker_path(dir).exists() {
+        recovery
+            .state()
             .map_err(|e| {
                 format!("the OS keychain is unreachable, so the recovery copy can't be refreshed — try again later ({e})")
             })?
@@ -250,35 +300,299 @@ pub async fn vault_change_password(
         // window leaves "Forgot password?" holding a value that unlocks
         // nothing: main pairs with the old meta, the stage with the staged
         // meta, and the recover flow tries both.
-        vault::store_staged_recovery(&new)?;
+        recovery.store_staged(new)?;
     }
-    let (new_meta, new_key) = match vault::build_meta(&new) {
+    let (new_meta, new_key) = match vault::build_meta(new) {
         Ok(built) => built,
         Err(e) => {
-            vault::delete_staged_recovery();
+            recovery.delete_staged();
             return Err(e);
         }
     };
     // Same two-phase transition as setup: stage, re-key, promote — the
     // transition lock is already held from the top of this command; a crash
     // in between is healed at the next unlock (unlock_with_master_password).
-    let _ = std::fs::remove_file(vault::meta_next_path(&dir));
-    if let Err(e) = vault::write_meta_next(&dir, &new_meta) {
-        vault::delete_staged_recovery();
+    let _ = std::fs::remove_file(vault::meta_next_path(dir));
+    if let Err(e) = vault::write_meta_next(dir, &new_meta) {
+        recovery.delete_staged();
         return Err(e);
     }
     if let Err(e) = vault.rekey_from_current(new_key, "password") {
-        let _ = std::fs::remove_file(vault::meta_next_path(&dir));
-        vault::delete_staged_recovery();
+        let _ = std::fs::remove_file(vault::meta_next_path(dir));
+        recovery.delete_staged();
         return Err(e.to_string());
     }
-    vault::promote_meta_next(&dir)?;
+    vault::promote_meta_next(dir)?;
     if recovery_enabled {
         // Best-effort: a crash before this promote is covered by the recover
         // flow's staged-copy fallback, which finishes the promote itself.
-        vault::promote_staged_recovery();
+        recovery.promote_staged();
     }
-    // A refresh failure has already reconciled (purged) the enrollment —
-    // pass its note along as a warning on an otherwise-successful change.
-    Ok(vault_biometric::refresh_stored_key(&app, &new_key).err())
+    Ok(new_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::test_support::{MemKeychain, MemRecovery};
+
+    fn test_pw(tag: &str) -> String {
+        format!("{tag}-{}-passphrase", tag.len())
+    }
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "srelens-vpw-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A fresh machine-key vault (what a first launch resolves to) over an
+    /// in-memory keychain — the state `setup_password_core` migrates from.
+    fn fresh_vault(dir: &std::path::Path) -> Vault {
+        Vault::with_backend(dir, Box::new(MemKeychain::empty()))
+    }
+
+    #[test]
+    fn status_walks_setup_locked_unlocked() {
+        let dir = temp_dir("status");
+        let vault = fresh_vault(&dir);
+        assert_eq!(status_core(&vault, &dir, false).mode, "setup-required");
+
+        let pw = test_pw("status");
+        setup_password_core(&vault, &dir, &MemRecovery::default(), &pw, false).unwrap();
+        let s = status_core(&vault, &dir, true);
+        assert_eq!(s.mode, "unlocked");
+        assert!(s.biometric_available);
+        assert!(!s.biometric_enrolled);
+
+        // A fresh open of the same dir starts password-locked.
+        let reopened = fresh_vault(&dir);
+        let s = status_core(&reopened, &dir, false);
+        assert_eq!(s.mode, "locked");
+        assert_eq!(s.key_source, "password-locked");
+    }
+
+    #[test]
+    fn setup_rejects_short_passwords_and_double_setup() {
+        let dir = temp_dir("setup-guards");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        let e = setup_password_core(&vault, &dir, &recovery, "short", false).unwrap_err();
+        assert!(e.contains("at least 8"), "got: {e}");
+
+        let pw = test_pw("guards");
+        setup_password_core(&vault, &dir, &recovery, &pw, false).unwrap();
+        let e = setup_password_core(&vault, &dir, &recovery, &pw, false).unwrap_err();
+        assert!(e.contains("already set"), "got: {e}");
+    }
+
+    #[test]
+    fn setup_refuses_a_locked_vault() {
+        // A vault opened AFTER someone else's setup starts locked — and a
+        // locked vault must never be re-keyed (its secrets would be
+        // destroyed). Meta is removed to make the state "no password set,
+        // but no usable key either" (e.g. stray corruption cleanup).
+        let dir = temp_dir("setup-locked");
+        let first = fresh_vault(&dir);
+        setup_password_core(&first, &dir, &MemRecovery::default(), &test_pw("locked"), false)
+            .unwrap();
+        let locked = fresh_vault(&dir);
+        std::fs::remove_file(vault::meta_path(&dir)).unwrap();
+        let e = setup_password_core(&locked, &dir, &MemRecovery::default(), &test_pw("x"), false)
+            .unwrap_err();
+        assert!(e.contains("locked"), "got: {e}");
+    }
+
+    #[test]
+    fn setup_with_recovery_stores_the_copy_and_marker() {
+        let dir = temp_dir("setup-recovery");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        // A stale staged copy from a prior install must not survive setup.
+        recovery.store_staged("stale").unwrap();
+        let pw = test_pw("recover-on");
+        setup_password_core(&vault, &dir, &recovery, &pw, true).unwrap();
+        assert_eq!(recovery.main.lock().unwrap().as_deref(), Some(pw.as_str()));
+        assert!(recovery.staged.lock().unwrap().is_none(), "stale stage purged");
+        assert!(vault::recovery_marker_path(&dir).exists());
+        // The machine-key file is retired.
+        assert!(!dir.join("master.key").exists());
+    }
+
+    #[test]
+    fn setup_opt_out_purges_a_stale_copy() {
+        let dir = temp_dir("setup-optout");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        recovery.store("stale-from-prior-install").unwrap();
+        recovery.store_staged("stale-stage").unwrap();
+        setup_password_core(&vault, &dir, &recovery, &test_pw("optout"), false).unwrap();
+        assert!(recovery.main.lock().unwrap().is_none());
+        assert!(recovery.staged.lock().unwrap().is_none());
+        assert!(!vault::recovery_marker_path(&dir).exists());
+    }
+
+    #[test]
+    fn setup_rolls_back_recovery_when_the_keychain_fails() {
+        let dir = temp_dir("setup-broken");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery { broken: true, ..Default::default() };
+        let e =
+            setup_password_core(&vault, &dir, &recovery, &test_pw("broken"), true).unwrap_err();
+        assert!(e.contains("unreachable"), "got: {e}");
+        // Nothing changed: still setup-required, no marker.
+        assert!(!vault::meta_path(&dir).exists());
+        assert!(!vault::recovery_marker_path(&dir).exists());
+    }
+
+    #[test]
+    fn unlock_and_secret_round_trip_across_reopen() {
+        let dir = temp_dir("unlock");
+        let vault = fresh_vault(&dir);
+        let pw = test_pw("unlock");
+        setup_password_core(&vault, &dir, &MemRecovery::default(), &pw, false).unwrap();
+        vault.update(|s| s.mcp_token = Some("secret-token".into())).unwrap();
+
+        let reopened = fresh_vault(&dir);
+        let e = vault::unlock_with_master_password(&reopened, &dir, "wrong-password-here")
+            .unwrap_err();
+        assert!(!e.is_empty());
+        vault::unlock_with_master_password(&reopened, &dir, &pw).unwrap();
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("secret-token"));
+        assert_eq!(reopened.key_source(), "password");
+    }
+
+    #[test]
+    fn recover_requires_the_marker_and_returns_the_matching_copy() {
+        let dir = temp_dir("recover");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        let pw = test_pw("recover");
+        setup_password_core(&vault, &dir, &recovery, &pw, true).unwrap();
+
+        let reopened = fresh_vault(&dir);
+        assert_eq!(recover_password_core(&reopened, &dir, &recovery).unwrap(), pw);
+        assert_eq!(reopened.key_source(), "password");
+
+        // Without the marker, the copy is never consulted — opt-out is
+        // authoritative even with a stale credential still stored.
+        std::fs::remove_file(vault::recovery_marker_path(&dir)).unwrap();
+        let e = recover_password_core(&reopened, &dir, &recovery).unwrap_err();
+        assert!(e.contains("no recovery copy"), "got: {e}");
+    }
+
+    #[test]
+    fn recover_falls_back_to_a_staged_copy_and_promotes_it() {
+        // The crash window a change leaves: meta already promoted to the NEW
+        // password, main recovery copy still the OLD one, stage holding the
+        // new. Recover must try the stage and finish the promote.
+        let dir = temp_dir("recover-staged");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        let old_pw = test_pw("old");
+        setup_password_core(&vault, &dir, &recovery, &old_pw, true).unwrap();
+        let new_pw = test_pw("new");
+        change_password_core(&vault, &dir, &recovery, &old_pw, &new_pw).unwrap();
+        // Simulate the crash: regress main to the old copy, stage the new.
+        *recovery.main.lock().unwrap() = Some(old_pw.clone());
+        *recovery.staged.lock().unwrap() = Some(new_pw.clone());
+
+        let reopened = fresh_vault(&dir);
+        assert_eq!(recover_password_core(&reopened, &dir, &recovery).unwrap(), new_pw);
+        assert_eq!(recovery.main.lock().unwrap().as_deref(), Some(new_pw.as_str()));
+        assert!(recovery.staged.lock().unwrap().is_none(), "stage promoted");
+    }
+
+    #[test]
+    fn recover_reports_a_mismatched_copy() {
+        let dir = temp_dir("recover-mismatch");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        setup_password_core(&vault, &dir, &recovery, &test_pw("real"), true).unwrap();
+        *recovery.main.lock().unwrap() = Some("not-the-password-anymore".into());
+
+        let reopened = fresh_vault(&dir);
+        let e = recover_password_core(&reopened, &dir, &recovery).unwrap_err();
+        assert!(e.contains("no longer matches"), "got: {e}");
+    }
+
+    #[test]
+    fn change_verifies_the_current_password_and_rotates_the_key() {
+        let dir = temp_dir("change");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        let old_pw = test_pw("change-old");
+        setup_password_core(&vault, &dir, &recovery, &old_pw, false).unwrap();
+        vault.update(|s| s.mcp_token = Some("keep-me".into())).unwrap();
+
+        let e = change_password_core(&vault, &dir, &recovery, "wrong-current", &test_pw("n"))
+            .unwrap_err();
+        assert!(!e.is_empty());
+        let e = change_password_core(&vault, &dir, &recovery, &old_pw, "short").unwrap_err();
+        assert!(e.contains("at least 8"), "got: {e}");
+
+        let new_pw = test_pw("change-new");
+        change_password_core(&vault, &dir, &recovery, &old_pw, &new_pw).unwrap();
+        // The old password no longer unlocks; the new one does, and the
+        // secrets survived the re-encryption.
+        let reopened = fresh_vault(&dir);
+        assert!(vault::unlock_with_master_password(&reopened, &dir, &old_pw).is_err());
+        vault::unlock_with_master_password(&reopened, &dir, &new_pw).unwrap();
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn change_refreshes_the_recovery_copy_only_when_opted_in() {
+        let dir = temp_dir("change-recovery");
+        let vault = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        let old_pw = test_pw("cr-old");
+        setup_password_core(&vault, &dir, &recovery, &old_pw, true).unwrap();
+        let new_pw = test_pw("cr-new");
+        change_password_core(&vault, &dir, &recovery, &old_pw, &new_pw).unwrap();
+        assert_eq!(recovery.main.lock().unwrap().as_deref(), Some(new_pw.as_str()));
+        assert!(recovery.staged.lock().unwrap().is_none(), "stage promoted after the meta");
+    }
+
+    #[test]
+    fn change_fails_up_front_when_the_recovery_keychain_is_unreachable() {
+        // Opted-in vault, but the keychain can't be asked: failing the whole
+        // change beats silently stranding a stale copy that a later
+        // "Forgot password?" would trust.
+        let dir = temp_dir("change-broken");
+        let vault = fresh_vault(&dir);
+        let working = MemRecovery::default();
+        let old_pw = test_pw("cb-old");
+        setup_password_core(&vault, &dir, &working, &old_pw, true).unwrap();
+
+        let broken = MemRecovery { broken: true, ..Default::default() };
+        let e = change_password_core(&vault, &dir, &broken, &old_pw, &test_pw("cb-new"))
+            .unwrap_err();
+        assert!(e.contains("unreachable"), "got: {e}");
+        // The change never started: the old password still unlocks.
+        let reopened = fresh_vault(&dir);
+        vault::unlock_with_master_password(&reopened, &dir, &old_pw).unwrap();
+    }
+
+    #[test]
+    fn change_from_the_locked_gate_unlocks_inline() {
+        // The "forgot → recovered → change it now" path: the vault is still
+        // locked when the change begins; verification of the current
+        // password must unlock it inline rather than failing.
+        let dir = temp_dir("change-locked");
+        let first = fresh_vault(&dir);
+        let recovery = MemRecovery::default();
+        let old_pw = test_pw("cl-old");
+        setup_password_core(&first, &dir, &recovery, &old_pw, false).unwrap();
+
+        let locked = fresh_vault(&dir);
+        assert!(locked.current_key().is_none());
+        let new_pw = test_pw("cl-new");
+        change_password_core(&locked, &dir, &recovery, &old_pw, &new_pw).unwrap();
+        assert!(locked.current_key().is_some(), "unlocked inline by the change");
+    }
 }

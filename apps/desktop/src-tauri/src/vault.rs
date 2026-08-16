@@ -52,7 +52,7 @@ pub struct Secrets {
 /// The raw master-key keychain operations, factored out so tests can inject a
 /// stub that deterministically fails — the only way to exercise the file
 /// fallback without a real (or deliberately broken) OS keychain.
-trait KeychainBackend: Send + Sync {
+pub(crate) trait KeychainBackend: Send + Sync {
     fn get_password(&self) -> Result<String, keyring::Error>;
     fn set_password(&self, value: &str) -> Result<(), keyring::Error>;
 }
@@ -95,7 +95,9 @@ impl Vault {
         Self::with_backend(dir, Box::new(RealKeychain))
     }
 
-    fn with_backend(dir: &Path, backend: Box<dyn KeychainBackend>) -> Vault {
+    // pub(crate): `vault_password`'s unit tests build vaults over the same
+    // in-memory keychain doubles (`test_support`) the tests here use.
+    pub(crate) fn with_backend(dir: &Path, backend: Box<dyn KeychainBackend>) -> Vault {
         let path = dir.join("secrets.enc");
         // Master-password mode: `vault.json` existing means the key derives
         // from the user's password — nothing to resolve at open; the vault
@@ -559,6 +561,53 @@ pub(crate) fn delete_master_key_from_keychain() {
 /// never for silent unlocks, or the password would be theater.
 const RECOVERY_ACCOUNT: &str = "master-password";
 
+/// The recovery-copy operations behind a seam (#28): the real impl talks to
+/// the OS keychain, and `vault_password`'s command logic takes `&dyn
+/// RecoveryStore` so its flows — setup, recover, change — are unit-testable
+/// against in-memory doubles without ever touching a real keychain (which
+/// tests must not do: on a developer machine that keychain holds the REAL
+/// recovery copy).
+pub(crate) trait RecoveryStore: Sync {
+    fn store(&self, password: &str) -> Result<(), String>;
+    fn read(&self) -> Result<String, String>;
+    fn state(&self) -> Result<Option<String>, String>;
+    fn delete(&self);
+    fn store_staged(&self, password: &str) -> Result<(), String>;
+    fn read_staged(&self) -> Option<String>;
+    fn delete_staged(&self);
+    fn promote_staged(&self);
+}
+
+/// The production impl: one keychain entry per copy, exactly as before.
+pub(crate) struct KeyringRecovery;
+
+impl RecoveryStore for KeyringRecovery {
+    fn store(&self, password: &str) -> Result<(), String> {
+        store_recovery_password(password)
+    }
+    fn read(&self) -> Result<String, String> {
+        read_recovery_password()
+    }
+    fn state(&self) -> Result<Option<String>, String> {
+        recovery_password_state()
+    }
+    fn delete(&self) {
+        delete_recovery_password()
+    }
+    fn store_staged(&self, password: &str) -> Result<(), String> {
+        store_staged_recovery(password)
+    }
+    fn read_staged(&self) -> Option<String> {
+        read_staged_recovery()
+    }
+    fn delete_staged(&self) {
+        delete_staged_recovery()
+    }
+    fn promote_staged(&self) {
+        promote_staged_recovery()
+    }
+}
+
 pub(crate) fn store_recovery_password(password: &str) -> Result<(), String> {
     keyring::Entry::new(SERVICE, RECOVERY_ACCOUNT)
         .and_then(|e| e.set_password(password))
@@ -906,13 +955,19 @@ impl srelens_mcp::auth::TokenStore for VaultTokenStore {
     }
 }
 
+/// Shared test doubles for this module's tests AND `vault_password`'s (#28).
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
-    use srelens_mcp::auth::{Token, TokenStore};
 
     /// A keychain with an in-memory entry — the working case.
-    struct MemKeychain(Mutex<Option<String>>);
+    pub(crate) struct MemKeychain(pub(crate) Mutex<Option<String>>);
+
+    impl MemKeychain {
+        pub(crate) fn empty() -> Self {
+            MemKeychain(Mutex::new(None))
+        }
+    }
 
     impl KeychainBackend for MemKeychain {
         fn get_password(&self) -> Result<String, keyring::Error> {
@@ -925,7 +980,7 @@ mod tests {
     }
 
     /// A keychain that genuinely fails every operation — the headless case.
-    struct BrokenKeychain;
+    pub(crate) struct BrokenKeychain;
 
     impl KeychainBackend for BrokenKeychain {
         fn get_password(&self) -> Result<String, keyring::Error> {
@@ -935,6 +990,78 @@ mod tests {
             Err(keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("stub"))))
         }
     }
+
+    /// An in-memory `RecoveryStore`: main + staged slots, with a switch that
+    /// makes every operation fail (the unreachable-keychain case).
+    #[derive(Default)]
+    pub(crate) struct MemRecovery {
+        pub(crate) main: Mutex<Option<String>>,
+        pub(crate) staged: Mutex<Option<String>>,
+        pub(crate) broken: bool,
+    }
+
+    impl RecoveryStore for MemRecovery {
+        fn store(&self, password: &str) -> Result<(), String> {
+            if self.broken {
+                return Err("keychain unreachable (stub)".into());
+            }
+            *self.main.lock().unwrap() = Some(password.to_string());
+            Ok(())
+        }
+        fn read(&self) -> Result<String, String> {
+            if self.broken {
+                return Err("keychain unreachable (stub)".into());
+            }
+            self.main
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "no recovery copy was stored for this vault".into())
+        }
+        fn state(&self) -> Result<Option<String>, String> {
+            if self.broken {
+                return Err("keychain unreachable (stub)".into());
+            }
+            Ok(self.main.lock().unwrap().clone())
+        }
+        fn delete(&self) {
+            if !self.broken {
+                *self.main.lock().unwrap() = None;
+            }
+        }
+        fn store_staged(&self, password: &str) -> Result<(), String> {
+            if self.broken {
+                return Err("keychain unreachable (stub)".into());
+            }
+            *self.staged.lock().unwrap() = Some(password.to_string());
+            Ok(())
+        }
+        fn read_staged(&self) -> Option<String> {
+            if self.broken {
+                return None;
+            }
+            self.staged.lock().unwrap().clone()
+        }
+        fn delete_staged(&self) {
+            if !self.broken {
+                *self.staged.lock().unwrap() = None;
+            }
+        }
+        fn promote_staged(&self) {
+            if let Some(p) = self.read_staged() {
+                if self.store(&p).is_ok() {
+                    self.delete_staged();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use srelens_mcp::auth::{Token, TokenStore};
+    use test_support::{BrokenKeychain, MemKeychain};
 
 
     /// Build test passphrases at runtime rather than as literals: CodeQL's
