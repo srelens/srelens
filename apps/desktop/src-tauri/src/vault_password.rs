@@ -251,7 +251,13 @@ pub async fn vault_change_password(
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<Option<String>, String> {
     let dir = vault_biometric::vault_dir(&app)?;
-    let new_key = change_password_core(&vault, &dir, &vault::KeyringRecovery, &current, &new)?;
+    // The returned transition lock is HELD across the biometric refresh:
+    // released early, a second process's change could re-key the vault while
+    // this one was still storing its (now old) key in the biometric item —
+    // marker enrolled, key mismatched, and the next launch's biometric
+    // unlock fails and purges the enrollment.
+    let (new_key, _transition) =
+        change_password_core(&vault, &dir, &vault::KeyringRecovery, &current, &new)?;
     // A refresh failure has already reconciled (purged) the enrollment —
     // pass its note along as a warning on an otherwise-successful change.
     // Plugin-bound, so it stays on the command side of the #28 seam.
@@ -259,14 +265,16 @@ pub async fn vault_change_password(
 }
 
 /// The change transaction minus the biometric refresh (#28 seam): returns
-/// the NEW key on success so the command can refresh the enrollment.
+/// the NEW key on success — plus the still-held transition lock, so the
+/// command's refresh stays serialized with the re-key exactly as it was
+/// before the extraction.
 fn change_password_core(
     vault: &Vault,
     dir: &Path,
     recovery: &dyn RecoveryStore,
     current: &str,
     new: &str,
-) -> Result<[u8; 32], String> {
+) -> Result<([u8; 32], std::fs::File), String> {
     if new.len() < MIN_PASSWORD_LEN {
         return Err(format!("the new password must be at least {MIN_PASSWORD_LEN} characters"));
     }
@@ -275,7 +283,7 @@ fn change_password_core(
     // transition lock. Two concurrent changes therefore serialize: the
     // loser re-reads the winner's meta here and its (now old) current
     // password is rejected cleanly, before it can touch the recovery copy.
-    let _transition = vault::transition_lock(dir).map_err(|e| e.to_string())?;
+    let transition = vault::transition_lock(dir).map_err(|e| e.to_string())?;
     let old_meta = vault::read_meta(dir).ok_or("no master password is set")?;
     let current_key = vault::unlock_key_for(&old_meta, current)?;
     // The vault may still be locked (changing straight from the gate's
@@ -335,7 +343,7 @@ fn change_password_core(
         // flow's staged-copy fallback, which finishes the promote itself.
         recovery.promote_staged();
     }
-    Ok(new_key)
+    Ok((new_key, transition))
 }
 
 #[cfg(test)]
@@ -348,10 +356,13 @@ mod tests {
     }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
+        // A counter, not `{:?}` of Instant: that debug form contains `:`,
+        // which is invalid in a Windows path component.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let d = std::env::temp_dir().join(format!(
-            "srelens-vpw-{label}-{}-{:?}",
+            "srelens-vpw-{label}-{}-{}",
             std::process::id(),
-            std::time::Instant::now()
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -539,7 +550,8 @@ mod tests {
         let e = change_password_core(&vault, &dir, &recovery, &test_pw("wrong-cur"), &test_pw("n"))
             .unwrap_err();
         assert!(!e.is_empty());
-        let e = change_password_core(&vault, &dir, &recovery, &old_pw, "s").unwrap_err();
+        let short = &test_pw("s")[..1];
+        let e = change_password_core(&vault, &dir, &recovery, &old_pw, short).unwrap_err();
         assert!(e.contains("at least 8"), "got: {e}");
 
         let new_pw = test_pw("change-new");
