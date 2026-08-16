@@ -85,11 +85,13 @@ PID 1, not the app, and their argv names no client. They are neither
 descendants of the app nor name matches, so neither of the obvious collection
 strategies finds them.
 
-This is not a rounding detail. Measured on this repo's dev build, collecting
-only the app's own processes gave **106.9 MiB**; including the WebKit services
-gave **252.95 MiB** — the app itself was under half the real total. Since an
-Electron app's helpers *are* branded children and get counted, a script that
-misses these would systematically flatter the Tauri side.
+This is not a rounding detail. Spot-checking a dev build while writing this
+script, the WebKit services held roughly as much resident memory as the app
+process itself — collecting only the app's own processes reported well under
+half the real total. (Those were exploratory readings on a debug build, not
+baselines; they are quoted only to show the size of the gap.) Since an Electron
+app's helpers *are* branded children and get counted, a script that misses
+these would systematically flatter the Tauri side.
 
 So the script **refuses to print a macOS total** while unattributed WebKit
 processes are running and `--include` was not passed. A valid macOS

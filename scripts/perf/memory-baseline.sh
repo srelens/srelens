@@ -81,10 +81,20 @@ tree_pids() {
 }
 
 # Extra processes named by --include, matched against the full command.
+#
+# The measurement tooling must never measure itself: with the documented
+# `--include com.apple.WebKit`, that pattern is present in THIS script's own
+# argv (and in the shell that launched it, and any CI wrapper around it), so a
+# naive match adds the sampler's RSS to every reading. Self, the launching
+# shell, and anything whose command mentions this script are excluded.
+SELF_NAME="$(basename "$0")"
 include_pids() {
   [ -z "$INCLUDE" ] && return
-  ps -A -o pid=,args= 2>/dev/null | awk -v pat="$INCLUDE" '
-    { pid = $1; $1 = ""; if (index($0, pat) > 0) print pid }'
+  ps -A -o pid=,args= 2>/dev/null | awk -v pat="$INCLUDE" -v self="$$" -v parent="$PPID" -v script="$SELF_NAME" '
+    { pid = $1; $1 = ""
+      if (pid == self || pid == parent) next
+      if (index($0, script) > 0) next
+      if (index($0, pat) > 0) print pid }'
 }
 
 all_pids() {

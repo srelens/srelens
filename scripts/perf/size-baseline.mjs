@@ -79,14 +79,33 @@ async function githubJson(path) {
   return res.json();
 }
 
-/** Every release, newest first — drafts included (they need GITHUB_TOKEN). */
+/** How many 100-item pages of releases to walk before giving up. */
+const MAX_RELEASE_PAGES = 5;
+
+/**
+ * Every release, newest first — drafts included (they need GITHUB_TOKEN).
+ *
+ * Paginated because release.yml cuts a dev PRERELEASE daily: a single page
+ * covers only a few weeks, so the previous STABLE release drops off it once
+ * two stables are far enough apart. Missing that baseline used to make the
+ * check report "nothing to compare" and pass, publishing an unmeasured
+ * release — so `complete` reports whether the walk actually reached the end,
+ * and the caller fails closed when it didn't.
+ */
 async function allReleases(repo) {
-  return githubJson(`/repos/${repo}/releases?per_page=30`);
+  const releases = [];
+  for (let page = 1; page <= MAX_RELEASE_PAGES; page++) {
+    const batch = await githubJson(`/repos/${repo}/releases?per_page=100&page=${page}`);
+    releases.push(...batch);
+    if (batch.length < 100) return { releases, complete: true };
+  }
+  return { releases, complete: false };
 }
 
 /** Stable (non-draft, non-prerelease) releases, newest first. */
 async function stableReleases(repo) {
-  return (await allReleases(repo)).filter((r) => !r.draft && !r.prerelease);
+  const { releases } = await allReleases(repo);
+  return releases.filter((r) => !r.draft && !r.prerelease);
 }
 
 /** Bucket a release's assets into { key: {name, bytes} }, plus what was skipped. */
@@ -136,7 +155,7 @@ async function checkRegression(maxGrowth, tag) {
   // after the whole pipeline is green), and drafts are excluded from the
   // stable list. Without --tag this would silently compare the two previous
   // published releases and never see the artifacts just built.
-  const releases = await allReleases(SRELENS_REPO);
+  const { releases, complete } = await allReleases(SRELENS_REPO);
   const current = tag
     ? releases.find((r) => r.tag_name === tag)
     : releases.find((r) => !r.draft && !r.prerelease);
@@ -148,6 +167,17 @@ async function checkRegression(maxGrowth, tag) {
     (r) => !r.draft && !r.prerelease && r.tag_name !== current.tag_name,
   );
   if (!previous) {
+    // Only safe to pass when the walk actually saw every release: then there
+    // genuinely is no earlier stable one (the first release ever). If the
+    // page cap cut the walk short, the baseline may simply be out of reach —
+    // that is an unmeasured release, not a clean one.
+    if (!complete) {
+      console.error(
+        `FAIL: no previous stable release within ${MAX_RELEASE_PAGES} pages of releases — ` +
+          "the baseline could not be read, so this release was never actually measured.",
+      );
+      return 1;
+    }
     console.log("No previous stable release to compare against.");
     return 0;
   }
