@@ -413,7 +413,7 @@ mod tests {
         let vault = fresh_vault(&dir);
         let recovery = MemRecovery::default();
         // A stale staged copy from a prior install must not survive setup.
-        recovery.store_staged("stale").unwrap();
+        recovery.store_staged(&test_pw("stale-stage")).unwrap();
         let pw = test_pw("recover-on");
         setup_password_core(&vault, &dir, &recovery, &pw, true).unwrap();
         assert_eq!(recovery.main.lock().unwrap().as_deref(), Some(pw.as_str()));
@@ -428,8 +428,8 @@ mod tests {
         let dir = temp_dir("setup-optout");
         let vault = fresh_vault(&dir);
         let recovery = MemRecovery::default();
-        recovery.store("stale-from-prior-install").unwrap();
-        recovery.store_staged("stale-stage").unwrap();
+        recovery.store(&test_pw("stale-main")).unwrap();
+        recovery.store_staged(&test_pw("stale-two")).unwrap();
         setup_password_core(&vault, &dir, &recovery, &test_pw("optout"), false).unwrap();
         assert!(recovery.main.lock().unwrap().is_none());
         assert!(recovery.staged.lock().unwrap().is_none());
@@ -455,14 +455,14 @@ mod tests {
         let vault = fresh_vault(&dir);
         let pw = test_pw("unlock");
         setup_password_core(&vault, &dir, &MemRecovery::default(), &pw, false).unwrap();
-        vault.update(|s| s.mcp_token = Some("secret-token".into())).unwrap();
+        vault.update(|s| s.mcp_token = Some(test_pw("token"))).unwrap();
 
         let reopened = fresh_vault(&dir);
-        let e = vault::unlock_with_master_password(&reopened, &dir, "wrong-password-here")
+        let e = vault::unlock_with_master_password(&reopened, &dir, &test_pw("wrong"))
             .unwrap_err();
         assert!(!e.is_empty());
         vault::unlock_with_master_password(&reopened, &dir, &pw).unwrap();
-        assert_eq!(reopened.load().mcp_token.as_deref(), Some("secret-token"));
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some(test_pw("token").as_str()));
         assert_eq!(reopened.key_source(), "password");
     }
 
@@ -513,7 +513,7 @@ mod tests {
         let vault = fresh_vault(&dir);
         let recovery = MemRecovery::default();
         setup_password_core(&vault, &dir, &recovery, &test_pw("real"), true).unwrap();
-        *recovery.main.lock().unwrap() = Some("not-the-password-anymore".into());
+        *recovery.main.lock().unwrap() = Some(test_pw("mismatched"));
 
         let reopened = fresh_vault(&dir);
         let e = recover_password_core(&reopened, &dir, &recovery).unwrap_err();
@@ -527,12 +527,12 @@ mod tests {
         let recovery = MemRecovery::default();
         let old_pw = test_pw("change-old");
         setup_password_core(&vault, &dir, &recovery, &old_pw, false).unwrap();
-        vault.update(|s| s.mcp_token = Some("keep-me".into())).unwrap();
+        vault.update(|s| s.mcp_token = Some(test_pw("keep"))).unwrap();
 
-        let e = change_password_core(&vault, &dir, &recovery, "wrong-current", &test_pw("n"))
+        let e = change_password_core(&vault, &dir, &recovery, &test_pw("wrong-cur"), &test_pw("n"))
             .unwrap_err();
         assert!(!e.is_empty());
-        let e = change_password_core(&vault, &dir, &recovery, &old_pw, "short").unwrap_err();
+        let e = change_password_core(&vault, &dir, &recovery, &old_pw, "s").unwrap_err();
         assert!(e.contains("at least 8"), "got: {e}");
 
         let new_pw = test_pw("change-new");
@@ -542,7 +542,7 @@ mod tests {
         let reopened = fresh_vault(&dir);
         assert!(vault::unlock_with_master_password(&reopened, &dir, &old_pw).is_err());
         vault::unlock_with_master_password(&reopened, &dir, &new_pw).unwrap();
-        assert_eq!(reopened.load().mcp_token.as_deref(), Some("keep-me"));
+        assert_eq!(reopened.load().mcp_token.as_deref(), Some(test_pw("keep").as_str()));
     }
 
     #[test]
