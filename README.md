@@ -66,6 +66,12 @@ srelens uses the operating system WebView through Tauri v2 and a Rust backend bu
 with `kube-rs` and `tokio`. It is independently developed and is not affiliated with
 Mirantis Lens or the Freelens project.
 
+That architecture is why the download is small: srelens `v0.5.0` ships a **17.1 MiB**
+macOS installer and a **19.8 MiB** Linux `.deb`, against 190.2 MiB and 146.8 MiB for
+Freelens `v1.10.3` — roughly **11× and 7× smaller**. Those are published release-asset
+sizes, and the [performance baselines](docs/PERFORMANCE.md) explain how to reproduce
+them (including where the gap is narrower, such as the self-contained AppImage).
+
 See the [user guide](docs/USAGE.md) for how to use each of these.
 
 - **Multi-cluster workspace** — discover kubeconfig contexts, add or paste more

@@ -678,6 +678,43 @@ jobs:
             gh release upload dev-channel latest.json --repo "$REPO" --clobber
           fi
 
+  # Download-size baseline (issue #31). Runs after the artifacts are published
+  # so it measures exactly what users download, and flags a release whose
+  # installers grew more than 15% over the previous stable one — the size
+  # advantage over an Electron client is a stated reason for the Tauri port,
+  # so a silent regression should not reach a release unnoticed.
+  size-baseline:
+    needs: [version, build]
+    if: ${{ always() && needs.build.result == 'success' && github.ref_name == 'main' && needs.version.outputs.release == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compare installer sizes against the previous release
+        env:
+          # Authenticates the Releases API reads (the anonymous rate limit is
+          # low enough for a runner pool to hit it).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Capture the verdict rather than piping it: a `| tee` would mask the
+          # check's exit code and a regression would pass silently. The
+          # comparison table is still published either way.
+          status=0
+          node scripts/perf/size-baseline.mjs --check-regression --max-growth 15 > check.txt || status=$?
+          {
+            echo '### Installer sizes'
+            echo
+            echo '```'
+            cat check.txt
+            echo '```'
+            echo
+            node scripts/perf/size-baseline.mjs || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat check.txt
+          exit "$status"
+
   # Attach detached GPG signatures (.asc) to every release asset so users can
   # verify authenticity (`gpg --verify file.asc file`). Activates automatically
   # once the GPG_PRIVATE_KEY secret is set; otherwise it's a no-op.

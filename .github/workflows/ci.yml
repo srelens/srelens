@@ -33,6 +33,11 @@ jobs:
       - name: Unit tests with coverage
         # Vitest enforces the 85% line-coverage floor (vitest.config.ts).
         run: pnpm -r test
+      - name: Performance-baseline script tests
+        # The size classifier decides which artifacts are compared against
+        # which (#31) — a wrong bucket silently publishes a bogus comparison.
+        # Pure unit tests: no network, so they run on every PR.
+        run: node --test scripts/perf/size-baseline.test.mjs
 
   backend:
     name: backend

@@ -1,0 +1,62 @@
+// Unit tests for the size-baseline classifier (#31). Run with:
+//   node --test scripts/perf/size-baseline.test.mjs
+//
+// The classifier is what makes the published table trustworthy: a wrong bucket
+// would compare a macOS installer against a Linux one, and a silent null would
+// drop a platform from the comparison entirely.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { bucketAssets, classifyAsset, growthPct, mib } from "./size-baseline.mjs";
+
+test("classifies srelens release assets", () => {
+  assert.equal(classifyAsset("srelens_0.5.0_aarch64.dmg").key, "macOS arm64 .dmg");
+  assert.equal(classifyAsset("srelens_0.5.0_x64.dmg").key, "macOS x64 .dmg");
+  assert.equal(classifyAsset("srelens_0.5.0_amd64.deb").key, "Linux x64 .deb");
+  assert.equal(classifyAsset("srelens-0.5.0-1.x86_64.rpm").key, "Linux x64 .rpm");
+  assert.equal(classifyAsset("srelens_0.5.0_amd64.AppImage").key, "Linux x64 .AppImage");
+  assert.equal(classifyAsset("srelens_0.5.0_x64-setup.exe").key, "Windows x64 .exe");
+  assert.equal(classifyAsset("srelens_0.5.0_x64_en-US.msi").key, "Windows x64 .msi");
+});
+
+test("classifies Freelens assets into the same buckets", () => {
+  // Different naming scheme, same buckets — otherwise the table would compare
+  // artifacts that aren't counterparts.
+  assert.equal(classifyAsset("Freelens-1.10.3-macos-arm64.dmg").key, "macOS arm64 .dmg");
+  assert.equal(classifyAsset("Freelens-1.10.3-linux-amd64.deb").key, "Linux x64 .deb");
+  assert.equal(classifyAsset("Freelens-1.10.3-linux-amd64.AppImage").key, "Linux x64 .AppImage");
+  assert.equal(classifyAsset("Freelens-1.10.3-windows-amd64.exe").key, "Windows x64 .exe");
+});
+
+test("rejects everything that is not an installer download", () => {
+  for (const name of [
+    "srelens_0.5.0_amd64.deb.sig",
+    "Freelens-1.10.3-linux-amd64.deb.sha256",
+    "Freelens-1.10.3-linux-amd64-sbom.spdx.json",
+    "latest.json",
+    "srelens_x64.app.tar.gz",
+    "Freelens-1.10.3-windows-portable-amd64.exe",
+    "Packages.xz",
+  ]) {
+    assert.equal(classifyAsset(name), null, `${name} should not be a bucket`);
+  }
+});
+
+test("an unclassifiable artifact is reported, not silently dropped", () => {
+  const { sizes, skipped } = bucketAssets([
+    { name: "srelens_0.5.0_x64.dmg", size: 19149790 },
+    { name: "srelens_0.5.0_amd64.deb.sig", size: 412 },
+    { name: "mystery-build.tar.zst", size: 100 },
+  ]);
+  assert.deepEqual(Object.keys(sizes), ["macOS x64 .dmg"]);
+  // Signatures are known non-artifacts; the genuinely unknown one surfaces.
+  assert.deepEqual(skipped, ["mystery-build.tar.zst"]);
+});
+
+test("mib and growthPct round the way the published table does", () => {
+  assert.equal(mib(17882551), 17.1);
+  assert.equal(growthPct(18.7, 19.8), 5.9);
+  assert.equal(growthPct(100, 90), -10);
+  // No previous size means no percentage to report, not a divide-by-zero.
+  assert.equal(growthPct(0, 50), null);
+});
