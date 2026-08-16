@@ -138,6 +138,9 @@ jobs:
   # the full tier (exec + port-forward) with SRELENS_SMOKE_FULL=1.
   smoke:
     name: smoke (webdriver)
+    # PRs only: the push rerun after a merge would duplicate the exact gate
+    # the PR already passed, at ~8 minutes a pop.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -173,7 +176,7 @@ jobs:
       # window is just "Could not connect to localhost" (first live run's
       # failure screenshot).
       - name: Build the app binary
-        run: cargo build -p srelens-desktop --features custom-protocol
+        run: cargo build -p srelens-desktop --features custom-protocol --profile ci-smoke
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
@@ -181,10 +184,11 @@ jobs:
       - name: Smoke suite through the real app
         env:
           SRELENS_E2E_CONTEXT: kind-srelens-e2e
+          SRELENS_SMOKE_APP: ${{ github.workspace }}/target/ci-smoke/srelens
           SRELENS_SMOKE_ARTIFACTS: ${{ runner.temp }}/smoke-artifacts
         run: |
           xvfb-run --auto-servernum \
-            cargo test -p srelens-desktop --features custom-protocol --test webdriver_smoke -- --ignored --nocapture
+            cargo test -p srelens-desktop --features custom-protocol --profile ci-smoke --test webdriver_smoke -- --ignored --nocapture
       - name: Upload failure artifacts (screenshot + app logs)
         if: failure()
         uses: actions/upload-artifact@v4

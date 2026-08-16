@@ -6,3 +6,11 @@ members = ["crates/agent", "crates/capability", "crates/mcp", "crates/kube", "cr
 edition = "2021"
 version = "0.5.0"
 license = "MIT"
+
+# Fast-feedback profile for the CI WebDriver smoke job (issue #30): dev
+# semantics, but no debuginfo — its generation and linking dominate the
+# app-binary build time there, and the smoke suite never reads symbols.
+[profile.ci-smoke]
+inherits = "dev"
+debug = 0
+strip = "debuginfo"
