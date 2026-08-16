@@ -161,12 +161,33 @@ function markdownTable(srelens, comparison) {
   for (const key of keys) {
     const ours = srelens.sizes[key];
     const theirs = comparison.sizes[key];
-    const ratio = theirs ? `${Math.round((theirs.bytes / ours.bytes) * 10) / 10}× smaller` : "—";
     lines.push(
-      `| ${key} | ${mib(ours.bytes)} MiB | ${theirs ? `${mib(theirs.bytes)} MiB` : "—"} | ${ratio} |`,
+      `| ${key} | ${mib(ours.bytes)} MiB | ${theirs ? `${mib(theirs.bytes)} MiB` : "—"} | ${describeRatio(ours?.bytes, theirs?.bytes)} |`,
     );
   }
   return lines.join("\n");
+}
+
+/**
+ * How our artifact compares to theirs, in words. Branches on the direction
+ * rather than always saying "smaller": an unpinned run resolves whatever is
+ * latest, so if a future comparison release ships a smaller artifact this must
+ * report srelens as LARGER instead of printing "0.8× smaller" and implying a
+ * win that isn't there.
+ */
+export function describeRatio(ourBytes, theirBytes) {
+  if (!ourBytes || !theirBytes) return "—";
+  if (ourBytes === theirBytes) return "same size";
+  const [bigger, smaller] = ourBytes > theirBytes ? [ourBytes, theirBytes] : [theirBytes, ourBytes];
+  const factor = Math.round((bigger / smaller) * 10) / 10;
+  const direction = ourBytes > theirBytes ? "larger" : "smaller";
+  // Below 1.5x a multiple reads oddly ("1.1x smaller" for a 5% gap); percent
+  // is the honest way to describe near-parity.
+  if (factor < 1.5) {
+    const pct = Math.round(Math.abs((ourBytes - theirBytes) / theirBytes) * 1000) / 10;
+    return `${pct}% ${direction}`;
+  }
+  return `${factor}× ${direction}`;
 }
 
 async function checkRegression(maxGrowth, tag) {

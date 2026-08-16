@@ -127,18 +127,35 @@ fi
 # prevent.
 assert_webkit_attributable() {
   [ "$(uname -s)" != "Darwin" ] && return 0
-  [ -n "$INCLUDE" ] && return 0
-  orphans="$(orphan_webkit_pids)"
+  # Coverage is what matters, not whether --include was passed: a narrow
+  # pattern like `--include WebContent` picks up the renderer while silently
+  # dropping the GPU and Networking services, which is the same understated
+  # total the guard exists to catch. So check which orphans are ACTUALLY in
+  # the collected set and complain about the ones that are not.
+  collected=" $(all_pids | tr '\n' ' ') "
+  orphans=""
+  for orphan_pid in $(orphan_webkit_pids); do
+    case "$collected" in
+      *" $orphan_pid "*) ;;
+      *) orphans="$orphans $orphan_pid" ;;
+    esac
+  done
+  orphans="$(echo "$orphans" | tr ' ' '\n' | grep -v '^$' || true)"
   if [ -n "$orphans" ]; then
     orphan_mib="$(ps -o rss= -p "$(echo "$orphans" | tr '\n' ',' | sed 's/,$//')" 2>/dev/null \
       | awk '{sum += $1} END {printf "%.1f", sum / 1024}')"
     {
       echo "REFUSING TO REPORT: $(echo "$orphans" | wc -l | tr -d ' ') launchd-parented"
-      echo "com.apple.WebKit processes are running, holding ${orphan_mib} MiB that this"
-      echo "script cannot attribute to an app (PPID 1, no client in argv)."
+      echo "com.apple.WebKit process(es) are running and NOT in the counted set,"
+      echo "holding ${orphan_mib} MiB this script cannot attribute (PPID 1, no"
+      echo "client in argv):"
+      echo "$orphans" | while read -r p; do
+        [ -n "$p" ] && ps -o pid=,comm= -p "$p" 2>/dev/null | sed 's/^/  /'
+      done
       echo
       echo "For a Tauri app those ARE its WebView, and excluding them understates it."
-      echo "Quit every other WebKit app (Safari included), then re-run with:"
+      echo "Quit every other WebKit app (Safari included), then re-run with a"
+      echo "pattern that covers all of them:"
       echo "  $0 $APP --include com.apple.WebKit"
     } >&2
     exit 2
@@ -152,6 +169,7 @@ echo "Settling for ${SETTLE}s before sampling '$APP'..." >&2
 sleep "$SETTLE"
 
 readings=()
+snapshots=()
 for _ in $(seq "$SAMPLES"); do
   # Liveness is checked on the ROOTS, not on the aggregate reading. With
   # --include, launchd-owned WebKit helpers outlive the app they served, so a
@@ -160,9 +178,16 @@ for _ in $(seq "$SAMPLES"); do
   [ -z "$(root_pids)" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
   # Helpers may have appeared during the settle delay or between samples.
   assert_webkit_attributable
-  reading="$(total_rss_mib)"
+  # The PID set is captured ONCE per sample and the reading taken from that
+  # exact set, so the audit below describes the processes that actually
+  # produced these numbers — not whatever happens to be running at print time.
+  snapshot="$(all_pids)"
+  [ -z "$snapshot" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
+  reading="$(ps -o rss= -p "$(echo "$snapshot" | tr '\n' ',' | sed 's/,$//')" 2>/dev/null \
+    | awk '{sum += $1} END {printf "%.1f", sum / 1024}')"
   [ -z "$reading" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
   readings+=("$reading")
+  snapshots+=("$(echo "$snapshot" | tr '\n' ' ')")
   sleep 1
 done
 # The settle delay and sampling window are both long enough for a crash to
@@ -177,9 +202,24 @@ echo "processes:  $(all_pids | wc -l | tr -d ' ')"
 echo "samples:    ${readings[*]}"
 echo "median RSS: ${median} MiB"
 echo "counted:"
-# Every counted process, so contamination (a second instance, a stray headless
-# server, an unrelated WebKit client) is visible instead of averaged in.
-for pid in $(all_pids); do
-  ps -o pid=,rss=,comm= -p "$pid" 2>/dev/null \
-    | awk '{ pid = $1; rss = $2; $1 = ""; $2 = ""; sub(/^ +/, ""); printf "  %-8s %8.1f MiB  %s\n", pid, rss / 1024, $0 }'
+# Every process that contributed to a reading, so contamination (a second
+# instance, a stray headless server, an unrelated WebKit client) is visible
+# instead of averaged in. A process present in only SOME samples is flagged:
+# it moved the numbers without being there throughout, which is exactly the
+# transient contamination a re-query at print time would have hidden.
+sampled_pids="$(printf '%s\n' "${snapshots[@]}" | tr ' ' '\n' | grep -v '^$' | sort -u -n)"
+for pid in $sampled_pids; do
+  seen=0
+  for snap in "${snapshots[@]}"; do
+    case " $snap " in *" $pid "*) seen=$((seen + 1)) ;; esac
+  done
+  detail="$(ps -o rss=,comm= -p "$pid" 2>/dev/null || true)"
+  if [ -z "$detail" ]; then
+    printf '  %-8s %13s  (exited during sampling) [%d/%d samples]\n' "$pid" "-" "$seen" "$SAMPLES"
+  else
+    echo "$detail" | awk -v pid="$pid" -v seen="$seen" -v total="$SAMPLES" '
+      { rss = $1; $1 = ""; sub(/^ +/, "")
+        flag = (seen == total) ? "" : sprintf(" [%d/%d samples]", seen, total)
+        printf "  %-8s %8.1f MiB  %s%s\n", pid, rss / 1024, $0, flag }'
+  fi
 done

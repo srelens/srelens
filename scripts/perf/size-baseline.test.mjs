@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bucketAssets, classifyAsset, compareBuckets, growthPct, mib } from "./size-baseline.mjs";
+import { bucketAssets, classifyAsset, compareBuckets, describeRatio, growthPct, mib } from "./size-baseline.mjs";
 
 const bucket = (bytes) => ({ name: "x", bytes });
 
@@ -107,4 +107,15 @@ test("mib and growthPct round the way the published table does", () => {
   assert.equal(growthPct(100, 90), -10);
   // No previous size means no percentage to report, not a divide-by-zero.
   assert.equal(growthPct(0, 50), null);
+});
+
+test("describes the ratio in the correct direction", () => {
+  assert.equal(describeRatio(100, 1000), "10× smaller");
+  // The case that used to print a misleading "0.8× smaller": if a future
+  // comparison release is smaller than ours, say so plainly.
+  assert.equal(describeRatio(1000, 800), "25% larger");
+  assert.equal(describeRatio(1000, 1000), "same size");
+  // Near-parity rounds to 1.0×, which is not a meaningful multiple.
+  assert.equal(describeRatio(1000, 1050), "4.8% smaller");
+  assert.equal(describeRatio(1000, undefined), "—");
 });
