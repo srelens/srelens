@@ -1,0 +1,191 @@
+#!/usr/bin/env node
+// Download-size baselines for issue #31.
+//
+// Reads published release assets straight from the GitHub Releases API — for
+// srelens and for a comparison project — and buckets them by (os, arch,
+// format) so like is compared with like. Nothing is built or estimated here:
+// every number is the byte size of an artifact a user would actually download.
+//
+// Usage:
+//   node scripts/perf/size-baseline.mjs                 # markdown table
+//   node scripts/perf/size-baseline.mjs --json          # machine-readable
+//   node scripts/perf/size-baseline.mjs --check-regression [--max-growth 15]
+//
+// --check-regression compares the two most recent srelens stable releases and
+// exits non-zero if any artifact grew by more than --max-growth percent. Set
+// GITHUB_TOKEN to avoid the unauthenticated API rate limit.
+
+const SRELENS_REPO = "srelens/srelens";
+const COMPARISON_REPO = "freelensapp/freelens";
+
+/** Artifacts that are not themselves downloads: signatures, digests, SBOMs. */
+const NOT_AN_ARTIFACT = /\.(sig|sha256|asc|spdx\.json)$|-sbom|^latest\.json$/i;
+
+/**
+ * Classify a release asset filename into a comparable bucket. Returns null for
+ * anything unrecognized rather than guessing — an unclassified artifact is
+ * reported as skipped, never silently folded into another bucket.
+ */
+export function classifyAsset(name) {
+  if (NOT_AN_ARTIFACT.test(name)) return null;
+  // "portable" builds are a different distribution shape; keep them out of the
+  // installer comparison rather than double-counting a platform.
+  if (/portable/i.test(name)) return null;
+
+  const format = name.match(/\.(dmg|deb|rpm|AppImage|msi|exe|pkg)$/i)?.[1];
+  if (!format) return null;
+  // A .tar.gz app bundle is an update payload, not an installer.
+  if (/\.app\.tar\.gz$/i.test(name)) return null;
+
+  const os = /macos|darwin|\.dmg$|\.pkg$/i.test(name)
+    ? "macOS"
+    : /windows|win32|\.msi$|-setup\.exe$|\.exe$/i.test(name)
+      ? "Windows"
+      : /linux|\.deb$|\.rpm$|\.AppImage$/i.test(name)
+        ? "Linux"
+        : null;
+  if (!os) return null;
+
+  const arch = /aarch64|arm64/i.test(name)
+    ? "arm64"
+    : /x86_64|amd64|x64/i.test(name)
+      ? "x64"
+      : null;
+  if (!arch) return null;
+
+  // Canonical casing so the table names the artifact the way its ecosystem
+  // spells it (".AppImage", not ".appimage").
+  const canonical = { dmg: "dmg", deb: "deb", rpm: "rpm", appimage: "AppImage", msi: "msi", exe: "exe", pkg: "pkg" };
+  const ext = canonical[format.toLowerCase()];
+  return { os, arch, format: ext, key: `${os} ${arch} .${ext}` };
+}
+
+/** MiB with one decimal — the unit release pages use. */
+export function mib(bytes) {
+  return Math.round((bytes / 1024 / 1024) * 10) / 10;
+}
+
+/** Percent growth from `before` to `after`, rounded to one decimal. */
+export function growthPct(before, after) {
+  if (!before) return null;
+  return Math.round(((after - before) / before) * 1000) / 10;
+}
+
+async function githubJson(path) {
+  const headers = { accept: "application/vnd.github+json", "user-agent": "srelens-perf-baseline" };
+  if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const res = await fetch(`https://api.github.com${path}`, { headers });
+  if (!res.ok) throw new Error(`GitHub API ${path} failed: ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+/** Stable (non-draft, non-prerelease) releases, newest first. */
+async function stableReleases(repo) {
+  const releases = await githubJson(`/repos/${repo}/releases?per_page=30`);
+  return releases.filter((r) => !r.draft && !r.prerelease);
+}
+
+/** Bucket a release's assets into { key: {name, bytes} }, plus what was skipped. */
+export function bucketAssets(assets) {
+  const sizes = {};
+  const skipped = [];
+  for (const asset of assets) {
+    const bucket = classifyAsset(asset.name);
+    if (!bucket) {
+      if (!NOT_AN_ARTIFACT.test(asset.name)) skipped.push(asset.name);
+      continue;
+    }
+    // Keep the smallest when a bucket somehow collides, and record the name so
+    // the table always says exactly which file a number came from.
+    if (!sizes[bucket.key] || asset.size < sizes[bucket.key].bytes) {
+      sizes[bucket.key] = { name: asset.name, bytes: asset.size };
+    }
+  }
+  return { sizes, skipped };
+}
+
+async function latestStableSizes(repo) {
+  const [release] = await stableReleases(repo);
+  if (!release) throw new Error(`${repo} has no stable release`);
+  return { tag: release.tag_name, ...bucketAssets(release.assets) };
+}
+
+function markdownTable(srelens, comparison) {
+  const keys = Object.keys(srelens.sizes).sort();
+  const lines = [
+    `| Installer | srelens \`${srelens.tag}\` | Freelens \`${comparison.tag}\` | Difference |`,
+    "| --- | ---: | ---: | ---: |",
+  ];
+  for (const key of keys) {
+    const ours = srelens.sizes[key];
+    const theirs = comparison.sizes[key];
+    const ratio = theirs ? `${Math.round((theirs.bytes / ours.bytes) * 10) / 10}× smaller` : "—";
+    lines.push(
+      `| ${key} | ${mib(ours.bytes)} MiB | ${theirs ? `${mib(theirs.bytes)} MiB` : "—"} | ${ratio} |`,
+    );
+  }
+  return lines.join("\n");
+}
+
+async function checkRegression(maxGrowth) {
+  const releases = await stableReleases(SRELENS_REPO);
+  if (releases.length < 2) {
+    console.log("Only one stable release published — no previous release to compare against.");
+    return 0;
+  }
+  const [current, previous] = releases;
+  const now = bucketAssets(current.assets).sizes;
+  const before = bucketAssets(previous.assets).sizes;
+
+  const rows = [];
+  let worst = 0;
+  for (const key of Object.keys(now).sort()) {
+    if (!before[key]) continue;
+    const pct = growthPct(before[key].bytes, now[key].bytes);
+    worst = Math.max(worst, pct);
+    rows.push(`  ${key.padEnd(22)} ${mib(before[key].bytes)} → ${mib(now[key].bytes)} MiB (${pct >= 0 ? "+" : ""}${pct}%)`);
+  }
+  console.log(`Size change ${previous.tag_name} → ${current.tag_name}:`);
+  console.log(rows.join("\n") || "  (no comparable artifacts)");
+
+  if (worst > maxGrowth) {
+    console.error(`\nFAIL: an installer grew ${worst}%, over the ${maxGrowth}% budget.`);
+    return 1;
+  }
+  console.log(`\nOK: largest growth ${worst}% is within the ${maxGrowth}% budget.`);
+  return 0;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const maxGrowth = Number(args[args.indexOf("--max-growth") + 1]) || 15;
+
+  if (args.includes("--check-regression")) {
+    process.exit(await checkRegression(maxGrowth));
+  }
+
+  const [srelens, comparison] = await Promise.all([
+    latestStableSizes(SRELENS_REPO),
+    latestStableSizes(COMPARISON_REPO),
+  ]);
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify({ srelens, comparison, measuredBy: "release asset bytes" }, null, 2));
+    return;
+  }
+
+  console.log(markdownTable(srelens, comparison));
+  for (const [label, data] of [["srelens", srelens], ["comparison", comparison]]) {
+    if (data.skipped.length) {
+      console.log(`\n<!-- ${label} assets not classified: ${data.skipped.join(", ")} -->`);
+    }
+  }
+}
+
+// Only run when invoked directly, so the helpers above stay unit-testable.
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}
