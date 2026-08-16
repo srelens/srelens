@@ -13,7 +13,17 @@ srelens is independently developed and not affiliated with it.
 
 Every number below is the byte size of a published release asset, read from the
 GitHub Releases API — nothing is built locally, estimated, or rounded up from a
-directory listing. Reproduce it with:
+directory listing.
+
+Reproduce **this exact table** by pinning both sides; without the tags each
+side resolves to whatever is latest, so the numbers move as either project
+ships:
+
+```bash
+node scripts/perf/size-baseline.mjs --tag srelens-v0.5.0 --comparison-tag v1.10.3
+```
+
+For the current comparison instead, drop both flags:
 
 ```bash
 node scripts/perf/size-baseline.mjs
@@ -110,8 +120,11 @@ above are complete and independent of it.
 
 ## Methodology notes
 
-- Sizes come from release metadata, so they are reproducible by anyone at any
-  time and do not depend on the machine running the script.
+- Sizes come from release metadata, so they do not depend on the machine
+  running the script. They are reproducible by anyone at any time **when both
+  releases are pinned** — an unpinned run reports today's latest releases,
+  which is the right default for a fresh comparison but will not reproduce a
+  dated table once either project publishes again.
 - Set `GITHUB_TOKEN` when running the size script repeatedly; the
   unauthenticated Releases API rate limit is easy to hit.
 - Memory readings depend on machine, OS version, and cluster size, so they are

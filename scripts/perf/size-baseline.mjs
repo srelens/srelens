@@ -11,6 +11,10 @@
 //   node scripts/perf/size-baseline.mjs --json          # machine-readable
 //   node scripts/perf/size-baseline.mjs --check-regression [--max-growth 15]
 //
+// --tag / --comparison-tag pin each side to a specific release. Pin BOTH to
+// reproduce a dated table: without them each side resolves to whatever is
+// latest, so the numbers drift as either project ships.
+//
 // --check-regression compares the two most recent srelens stable releases and
 // exits non-zero if any artifact grew by more than --max-growth percent. Set
 // GITHUB_TOKEN to avoid the unauthenticated API rate limit.
@@ -266,18 +270,23 @@ export function compareBuckets(before, now, maxGrowth) {
 async function main() {
   const args = process.argv.slice(2);
   const maxGrowth = Number(args[args.indexOf("--max-growth") + 1]) || 15;
-  const tagIndex = args.indexOf("--tag");
-  const tag = tagIndex === -1 ? null : args[tagIndex + 1];
+  const arg = (name) => {
+    const i = args.indexOf(name);
+    return i === -1 ? null : args[i + 1];
+  };
+  const tag = arg("--tag");
+  const comparisonTag = arg("--comparison-tag");
 
   if (args.includes("--check-regression")) {
     process.exit(await checkRegression(maxGrowth, tag));
   }
 
-  // The tag pins OUR side to the release under test; the comparison project
-  // is always its own latest stable.
+  // Each side resolves to its own latest stable unless pinned. A release run
+  // pins only --tag (its own draft) and wants the comparison project's
+  // current release; a documented table pins both so it stays reproducible.
   const [srelens, comparison] = await Promise.all([
     releaseSizes(SRELENS_REPO, tag),
-    releaseSizes(COMPARISON_REPO, null),
+    releaseSizes(COMPARISON_REPO, comparisonTag),
   ]);
 
   if (args.includes("--json")) {

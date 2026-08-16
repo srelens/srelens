@@ -120,8 +120,14 @@ if [ -z "$(root_pids)" ]; then
   exit 1
 fi
 
-# Refuse to publish a knowingly-low macOS number.
-if [ "$(uname -s)" = "Darwin" ] && [ -z "$INCLUDE" ]; then
+# Refuse to publish a knowingly-low macOS number. Called before the settle
+# delay AND before every sample: a WebView is created lazily, so helpers can
+# appear after the app root is already visible — passing the guard once at
+# startup would then wave through the exact understated total it exists to
+# prevent.
+assert_webkit_attributable() {
+  [ "$(uname -s)" != "Darwin" ] && return 0
+  [ -n "$INCLUDE" ] && return 0
   orphans="$(orphan_webkit_pids)"
   if [ -n "$orphans" ]; then
     orphan_mib="$(ps -o rss= -p "$(echo "$orphans" | tr '\n' ',' | sed 's/,$//')" 2>/dev/null \
@@ -137,7 +143,10 @@ if [ "$(uname -s)" = "Darwin" ] && [ -z "$INCLUDE" ]; then
     } >&2
     exit 2
   fi
-fi
+  return 0
+}
+
+assert_webkit_attributable
 
 echo "Settling for ${SETTLE}s before sampling '$APP'..." >&2
 sleep "$SETTLE"
@@ -149,6 +158,8 @@ for _ in $(seq "$SAMPLES"); do
   # total stays nonempty after the app has quit — and the median would then
   # describe orphaned helpers rather than the application.
   [ -z "$(root_pids)" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
+  # Helpers may have appeared during the settle delay or between samples.
+  assert_webkit_attributable
   reading="$(total_rss_mib)"
   [ -z "$reading" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
   readings+=("$reading")
