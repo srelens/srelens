@@ -716,7 +716,10 @@ jobs:
             cat check.txt
             echo '```'
             echo
-            node scripts/perf/size-baseline.mjs || true
+            # --tag here too: without it the table would describe the
+            # previous PUBLISHED release, not the draft just built.
+            node scripts/perf/size-baseline.mjs \
+              --tag "srelens-v${{ needs.version.outputs.version }}" || true
           } >> "$GITHUB_STEP_SUMMARY"
           cat check.txt
           exit "$status"

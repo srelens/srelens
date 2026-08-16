@@ -127,7 +127,22 @@ export function bucketAssets(assets) {
   return { sizes, skipped };
 }
 
-async function latestStableSizes(repo) {
+/**
+ * Sizes for a repo's latest stable release, or for an explicit tag. The tag
+ * form is what a release run needs: the release being built is still a DRAFT
+ * until publish-release flips it, and drafts are excluded from the stable
+ * list — so without it the published table would describe the PREVIOUS
+ * release rather than the artifacts from this run.
+ */
+async function releaseSizes(repo, tag) {
+  if (tag) {
+    const { releases } = await allReleases(repo);
+    const release = releases.find((r) => r.tag_name === tag);
+    if (!release) {
+      throw new Error(`${repo} has no release tagged ${tag} (drafts need GITHUB_TOKEN)`);
+    }
+    return { tag: release.tag_name, ...bucketAssets(release.assets) };
+  }
   const [release] = await stableReleases(repo);
   if (!release) throw new Error(`${repo} has no stable release`);
   return { tag: release.tag_name, ...bucketAssets(release.assets) };
@@ -251,15 +266,18 @@ export function compareBuckets(before, now, maxGrowth) {
 async function main() {
   const args = process.argv.slice(2);
   const maxGrowth = Number(args[args.indexOf("--max-growth") + 1]) || 15;
+  const tagIndex = args.indexOf("--tag");
+  const tag = tagIndex === -1 ? null : args[tagIndex + 1];
 
   if (args.includes("--check-regression")) {
-    const tagIndex = args.indexOf("--tag");
-    process.exit(await checkRegression(maxGrowth, tagIndex === -1 ? null : args[tagIndex + 1]));
+    process.exit(await checkRegression(maxGrowth, tag));
   }
 
+  // The tag pins OUR side to the release under test; the comparison project
+  // is always its own latest stable.
   const [srelens, comparison] = await Promise.all([
-    latestStableSizes(SRELENS_REPO),
-    latestStableSizes(COMPARISON_REPO),
+    releaseSizes(SRELENS_REPO, tag),
+    releaseSizes(COMPARISON_REPO, null),
   ]);
 
   if (args.includes("--json")) {
