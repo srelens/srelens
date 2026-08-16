@@ -118,15 +118,29 @@ async fn wait_text(driver: &WebDriver, needle: &str, secs: u64) -> WebDriverResu
         .await
 }
 
-/// Click the first CLICKABLE element matching `by`, waiting for it to appear.
+/// Click the first element matching `by`, retrying until `secs` — on
+/// absence AND on click rejection. The retry-on-intercepted half matters as
+/// much as the wait: the app mounts views UNDER overlays (the vault gate,
+/// dialogs), so a target can exist and still be legitimately covered for
+/// seconds — e.g. the landing page behind the gate while a debug build's
+/// argon2id derivation finishes. One attempt would fail instantly with
+/// ElementClickIntercepted; retrying makes every click "when actually
+/// clickable, within the deadline".
 async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
-    let el = driver
-        .query(by)
-        .wait(Duration::from_secs(secs), Duration::from_millis(500))
-        .first()
-        .await?;
-    el.scroll_into_view().await.ok();
-    el.click().await
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let attempt = async {
+            let el = driver.query(by.clone()).nowait().first().await?;
+            el.scroll_into_view().await.ok();
+            el.click().await
+        }
+        .await;
+        match attempt {
+            Ok(()) => return Ok(()),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
 }
 
 async fn button_by_text(driver: &WebDriver, text: &str, secs: u64) -> WebDriverResult<()> {
@@ -190,13 +204,17 @@ async fn smoke_launch_to_logs_against_kind() {
 
     // ---- tauri-driver proxies WebDriver to WebKitWebDriver and spawns the
     // app; env set here is inherited by the app process.
+    // stderr goes to the artifacts dir, not /dev/null: when session
+    // creation fails, tauri-driver's own complaint is the only diagnosis.
+    let driver_log = std::fs::File::create(artifacts.join("tauri-driver.log"))
+        .expect("driver log file");
     let driver_proc = Command::new("tauri-driver")
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("KUBECONFIG", &real_kubeconfig)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(driver_log)
         .spawn()
         .expect("tauri-driver on PATH — `cargo install tauri-driver`");
     let _driver_guard = DriverProc(driver_proc);
@@ -216,8 +234,21 @@ async fn smoke_launch_to_logs_against_kind() {
         "tauri:options".to_string(),
         serde_json::json!({ "application": app.to_string_lossy() }),
     );
-    let driver =
-        WebDriver::new("http://127.0.0.1:4444", caps).await.expect("WebDriver session");
+    // Session creation retries: the port accepting a TCP connect does not
+    // mean tauri-driver is ready to serve /session yet (observed locally as
+    // an immediate HttpError) — give it a bounded warmup.
+    let mut driver = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while driver.is_none() {
+        match WebDriver::new("http://127.0.0.1:4444", caps.clone()).await {
+            Ok(d) => driver = Some(d),
+            Err(e) if Instant::now() >= deadline => {
+                panic!("WebDriver session never came up: {e} (see tauri-driver.log in artifacts)")
+            }
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    let driver = driver.expect("set above");
 
     let flow = run_flow(&driver, &context, full).await;
 
