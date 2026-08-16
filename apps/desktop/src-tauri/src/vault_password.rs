@@ -79,6 +79,12 @@ pub async fn vault_setup_password(
 ) -> Result<(), String> {
     let dir = vault_biometric::vault_dir(&app)?;
     setup_password_core(&vault, &dir, &vault::KeyringRecovery, &password, keep_recovery)?;
+    // The machine key's KEYCHAIN home is retired here, not in the core: it
+    // is the real OS keychain's `master-key` entry, and the #28 seam exists
+    // precisely so the unit suite can never touch it — a test run on a
+    // developer machine with a genuine machine-key-era vault must not
+    // delete the credential that vault still decrypts with.
+    vault::delete_master_key_from_keychain();
     // Any machine-key-era biometric enrollment held the OLD key — purge it;
     // the user re-enables the skip afterwards (it then stores the new key).
     // Plugin-bound, so it stays on the command side of the #28 seam.
@@ -164,8 +170,9 @@ fn setup_password_core(
         return Err(e.to_string());
     }
     vault::promote_meta_next(dir)?;
-    // Retire the machine-key homes: the password is the key's origin now.
-    vault::delete_master_key_from_keychain();
+    // Retire the machine key's FILE home — dir-scoped, so safe under test.
+    // Its keychain home is the command's to retire (see the caller): the
+    // real OS entry must stay beyond this unit-testable core's reach.
     let _ = std::fs::remove_file(dir.join("master.key"));
     Ok(())
 }
