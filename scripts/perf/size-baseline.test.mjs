@@ -7,7 +7,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bucketAssets, classifyAsset, growthPct, mib } from "./size-baseline.mjs";
+import { bucketAssets, classifyAsset, compareBuckets, growthPct, mib } from "./size-baseline.mjs";
+
+const bucket = (bytes) => ({ name: "x", bytes });
 
 test("classifies srelens release assets", () => {
   assert.equal(classifyAsset("srelens_0.5.0_aarch64.dmg").key, "macOS arm64 .dmg");
@@ -51,6 +53,52 @@ test("an unclassifiable artifact is reported, not silently dropped", () => {
   assert.deepEqual(Object.keys(sizes), ["macOS x64 .dmg"]);
   // Signatures are known non-artifacts; the genuinely unknown one surfaces.
   assert.deepEqual(skipped, ["mystery-build.tar.zst"]);
+});
+
+test("passes a release within the growth budget", () => {
+  const verdict = compareBuckets(
+    { "macOS x64 .dmg": bucket(1000), "Linux x64 .deb": bucket(1000) },
+    { "macOS x64 .dmg": bucket(1050), "Linux x64 .deb": bucket(1100) },
+    15,
+  );
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.worst, 10);
+});
+
+test("fails a release that blows the growth budget", () => {
+  const verdict = compareBuckets({ "macOS x64 .dmg": bucket(1000) }, { "macOS x64 .dmg": bucket(1200) }, 15);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.reason, /grew 20%/);
+});
+
+test("fails CLOSED when a bucket the previous release had disappears", () => {
+  // A bundler renaming an installer, or an upload silently dropping one, must
+  // not leave that artifact quietly unguarded.
+  const verdict = compareBuckets(
+    { "macOS x64 .dmg": bucket(1000), "Linux x64 .deb": bucket(1000) },
+    { "macOS x64 .dmg": bucket(1000) },
+    15,
+  );
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.reason, /Linux x64 \.deb/);
+});
+
+test("fails CLOSED when nothing can be compared at all", () => {
+  // The dangerous case: if the classifier stops recognizing every artifact,
+  // an empty comparison must not report success and let the release through.
+  const verdict = compareBuckets({}, {}, 15);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.reason, /no installers could be compared/);
+});
+
+test("a brand-new installer is reported, not treated as a regression", () => {
+  const verdict = compareBuckets(
+    { "macOS x64 .dmg": bucket(1000) },
+    { "macOS x64 .dmg": bucket(1000), "Linux arm64 .deb": bucket(5000) },
+    15,
+  );
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(verdict.appeared, ["Linux arm64 .deb"]);
 });
 
 test("mib and growthPct round the way the published table does", () => {

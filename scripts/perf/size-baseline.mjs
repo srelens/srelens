@@ -153,24 +153,69 @@ async function checkRegression(maxGrowth, tag) {
   }
   const now = bucketAssets(current.assets).sizes;
   const before = bucketAssets(previous.assets).sizes;
+  const verdict = compareBuckets(before, now, maxGrowth);
 
-  const rows = [];
-  let worst = 0;
-  for (const key of Object.keys(now).sort()) {
-    if (!before[key]) continue;
-    const pct = growthPct(before[key].bytes, now[key].bytes);
-    worst = Math.max(worst, pct);
-    rows.push(`  ${key.padEnd(22)} ${mib(before[key].bytes)} → ${mib(now[key].bytes)} MiB (${pct >= 0 ? "+" : ""}${pct}%)`);
-  }
   console.log(`Size change ${previous.tag_name} → ${current.tag_name}:`);
-  console.log(rows.join("\n") || "  (no comparable artifacts)");
+  console.log(verdict.rows.join("\n") || "  (no comparable artifacts)");
+  if (verdict.appeared.length) {
+    console.log(`\nNew installers (no previous size to compare): ${verdict.appeared.join(", ")}`);
+  }
 
-  if (worst > maxGrowth) {
-    console.error(`\nFAIL: an installer grew ${worst}%, over the ${maxGrowth}% budget.`);
+  if (!verdict.ok) {
+    console.error(`\nFAIL: ${verdict.reason}`);
     return 1;
   }
-  console.log(`\nOK: largest growth ${worst}% is within the ${maxGrowth}% budget.`);
+  console.log(`\nOK: largest growth ${verdict.worst}% is within the ${maxGrowth}% budget.`);
   return 0;
+}
+
+/**
+ * Compare two releases' buckets. Fails CLOSED: a bucket the previous release
+ * had and this one doesn't is a failure, not a skip — a renamed installer (a
+ * bundler update changing its filename) or an upload that silently dropped one
+ * would otherwise leave that artifact unguarded, and if EVERY bucket stopped
+ * classifying, an empty comparison would report success and let the release
+ * through unmeasured.
+ */
+export function compareBuckets(before, now, maxGrowth) {
+  const keys = [...new Set([...Object.keys(before), ...Object.keys(now)])].sort();
+  const rows = [];
+  const missing = [];
+  const appeared = [];
+  let worst = 0;
+  let compared = 0;
+
+  for (const key of keys) {
+    if (!now[key]) {
+      missing.push(key);
+      rows.push(`  ${key.padEnd(22)} ${mib(before[key].bytes)} MiB → MISSING`);
+      continue;
+    }
+    if (!before[key]) {
+      appeared.push(key);
+      continue;
+    }
+    const pct = growthPct(before[key].bytes, now[key].bytes);
+    worst = Math.max(worst, pct);
+    compared += 1;
+    rows.push(
+      `  ${key.padEnd(22)} ${mib(before[key].bytes)} → ${mib(now[key].bytes)} MiB (${pct >= 0 ? "+" : ""}${pct}%)`,
+    );
+  }
+
+  if (missing.length) {
+    return { rows, missing, appeared, worst, ok: false,
+      reason: `installer(s) present in the previous release are missing or no longer recognized: ${missing.join(", ")}` };
+  }
+  if (compared === 0) {
+    return { rows, missing, appeared, worst, ok: false,
+      reason: "no installers could be compared — the classifier or the upload is broken, so nothing was actually checked" };
+  }
+  if (worst > maxGrowth) {
+    return { rows, missing, appeared, worst, ok: false,
+      reason: `an installer grew ${worst}%, over the ${maxGrowth}% budget.` };
+  }
+  return { rows, missing, appeared, worst, ok: true, reason: "" };
 }
 
 async function main() {

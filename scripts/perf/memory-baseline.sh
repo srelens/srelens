@@ -134,11 +134,19 @@ sleep "$SETTLE"
 
 readings=()
 for _ in $(seq "$SAMPLES"); do
+  # Liveness is checked on the ROOTS, not on the aggregate reading. With
+  # --include, launchd-owned WebKit helpers outlive the app they served, so a
+  # total stays nonempty after the app has quit — and the median would then
+  # describe orphaned helpers rather than the application.
+  [ -z "$(root_pids)" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
   reading="$(total_rss_mib)"
-  [ -z "$reading" ] && { echo "'$APP' exited while sampling." >&2; exit 1; }
+  [ -z "$reading" ] && { echo "'$APP' exited while sampling — discarding." >&2; exit 1; }
   readings+=("$reading")
   sleep 1
 done
+# The settle delay and sampling window are both long enough for a crash to
+# land after the final reading, so confirm the app is still up at the end too.
+[ -z "$(root_pids)" ] && { echo "'$APP' exited during sampling — discarding." >&2; exit 1; }
 
 median="$(printf '%s\n' "${readings[@]}" | sort -n \
   | awk '{a[NR]=$1} END {print (NR % 2) ? a[(NR+1)/2] : (a[NR/2] + a[NR/2+1]) / 2}')"
