@@ -78,7 +78,13 @@ pub async fn vault_setup_password(
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<(), String> {
     let dir = vault_biometric::vault_dir(&app)?;
-    setup_password_core(&vault, &dir, &vault::KeyringRecovery, &password, keep_recovery)?;
+    // The returned transition lock is HELD across the retirement and purge
+    // below: released early, a second process could establish and re-key a
+    // password (even refreshing a biometric item with its newer key) while
+    // this process was still blocked here — then resume and purge that
+    // valid enrollment out from under it.
+    let _transition =
+        setup_password_core(&vault, &dir, &vault::KeyringRecovery, &password, keep_recovery)?;
     // The machine key's KEYCHAIN home is retired here, not in the core: it
     // is the real OS keychain's `master-key` entry, and the #28 seam exists
     // precisely so the unit suite can never touch it — a test run on a
@@ -95,20 +101,22 @@ pub async fn vault_setup_password(
 /// The whole setup transaction minus the Tauri-plugin step (#28 seam):
 /// recovery operations arrive as `&dyn RecoveryStore` so every path —
 /// including the rollbacks — is unit-tested against in-memory doubles.
+/// Success hands back the still-held transition lock so the command's
+/// keychain retirement and biometric purge stay serialized with the setup.
 fn setup_password_core(
     vault: &Vault,
     dir: &Path,
     recovery: &dyn RecoveryStore,
     password: &str,
     keep_recovery: bool,
-) -> Result<(), String> {
+) -> Result<std::fs::File, String> {
     if password.len() < MIN_PASSWORD_LEN {
         return Err(format!("the master password must be at least {MIN_PASSWORD_LEN} characters"));
     }
     // The whole setup — existence check, recovery mutation, stage, re-key,
     // promote — runs under the inter-process transition lock, so two
     // concurrent setups serialize and the loser sees "already set".
-    let _transition = vault::transition_lock(dir).map_err(|e| e.to_string())?;
+    let transition = vault::transition_lock(dir).map_err(|e| e.to_string())?;
     // EXISTENCE check, matching `vault_status`: a corrupt-but-present
     // vault.json is a fail-closed locked state, never a setup invitation.
     if vault::meta_path(dir).exists() {
@@ -174,7 +182,7 @@ fn setup_password_core(
     // Its keychain home is the command's to retire (see the caller): the
     // real OS entry must stay beyond this unit-testable core's reach.
     let _ = std::fs::remove_file(dir.join("master.key"));
-    Ok(())
+    Ok(transition)
 }
 
 #[tauri::command]
