@@ -701,8 +701,14 @@ jobs:
           # Capture the verdict rather than piping it: a `| tee` would mask the
           # check's exit code and a regression would pass silently. The
           # comparison table is still published either way.
+          # --tag pins the comparison to the release just built. On main that
+          # release is still a DRAFT until publish-release flips it, and drafts
+          # are excluded from the stable list — without this the check would
+          # compare the two PREVIOUS published releases and never see these
+          # artifacts at all.
           status=0
-          node scripts/perf/size-baseline.mjs --check-regression --max-growth 15 > check.txt || status=$?
+          node scripts/perf/size-baseline.mjs --check-regression --max-growth 15 \
+            --tag "srelens-v${{ needs.version.outputs.version }}" > check.txt || status=$?
           {
             echo '### Installer sizes'
             echo
@@ -758,8 +764,11 @@ jobs:
   # run leaves an invisible draft to delete instead of a public, `latest`-
   # resolving release with no manifest behind it.
   publish-release:
-    needs: [version, build, updater-manifest, sign-artifacts]
-    if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.version.outputs.release == 'true' }}
+    # size-baseline included so an over-budget installer never goes public: a
+    # failed check leaves the release as an invisible draft to inspect, exactly
+    # like a failed build or a missing updater manifest.
+    needs: [version, build, updater-manifest, sign-artifacts, size-baseline]
+    if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.size-baseline.result == 'success' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write

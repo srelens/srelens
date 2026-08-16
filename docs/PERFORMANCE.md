@@ -47,8 +47,10 @@ Measured on 2026-08-16, srelens `v0.5.0` against Freelens `v1.10.3`:
 
 ### Regression budget
 
-The release workflow re-runs this comparison after publishing and fails if any
-installer grew more than **15%** over the previous stable release:
+The release workflow runs this comparison against the **draft** release before
+it is published, and blocks publication if any installer grew more than **15%**
+over the previous stable release — a failed check leaves the release as an
+invisible draft to inspect rather than a public one to retract:
 
 ```bash
 node scripts/perf/size-baseline.mjs --check-regression --max-growth 15
@@ -67,13 +69,34 @@ architecture keeps more of itself in children.
 
 ```bash
 # start the app, set up the scenario, then:
-scripts/perf/memory-baseline.sh srelens --settle 30 --samples 5
-scripts/perf/memory-baseline.sh Freelens --settle 30 --samples 5
+scripts/perf/memory-baseline.sh srelens --include com.apple.WebKit --settle 30
+scripts/perf/memory-baseline.sh Freelens --settle 30
 ```
 
 The script reports the median of several readings after a settle delay, and
 prints every process it counted so contamination is visible rather than
 averaged in.
+
+### The macOS WebView caveat
+
+On macOS a Tauri app's WebView runs as `com.apple.WebKit.WebContent`, `.GPU`,
+and `.Networking` — XPC services adopted by **launchd**, so their parent is
+PID 1, not the app, and their argv names no client. They are neither
+descendants of the app nor name matches, so neither of the obvious collection
+strategies finds them.
+
+This is not a rounding detail. Measured on this repo's dev build, collecting
+only the app's own processes gave **106.9 MiB**; including the WebKit services
+gave **252.95 MiB** — the app itself was under half the real total. Since an
+Electron app's helpers *are* branded children and get counted, a script that
+misses these would systematically flatter the Tauri side.
+
+So the script **refuses to print a macOS total** while unattributed WebKit
+processes are running and `--include` was not passed. A valid macOS
+measurement therefore requires quitting every other WebKit client (Safari
+included) so the remaining WebKit processes can only belong to the app under
+test. On Linux the equivalent helpers (`WebKitWebProcess`) are genuine child
+processes and need no special handling.
 
 **Numbers are not published here yet.** Producing figures worth citing requires
 a run this repository has not yet done: release builds of both apps (a debug

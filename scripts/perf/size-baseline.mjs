@@ -79,10 +79,14 @@ async function githubJson(path) {
   return res.json();
 }
 
+/** Every release, newest first — drafts included (they need GITHUB_TOKEN). */
+async function allReleases(repo) {
+  return githubJson(`/repos/${repo}/releases?per_page=30`);
+}
+
 /** Stable (non-draft, non-prerelease) releases, newest first. */
 async function stableReleases(repo) {
-  const releases = await githubJson(`/repos/${repo}/releases?per_page=30`);
-  return releases.filter((r) => !r.draft && !r.prerelease);
+  return (await allReleases(repo)).filter((r) => !r.draft && !r.prerelease);
 }
 
 /** Bucket a release's assets into { key: {name, bytes} }, plus what was skipped. */
@@ -127,13 +131,26 @@ function markdownTable(srelens, comparison) {
   return lines.join("\n");
 }
 
-async function checkRegression(maxGrowth) {
-  const releases = await stableReleases(SRELENS_REPO);
-  if (releases.length < 2) {
-    console.log("Only one stable release published — no previous release to compare against.");
+async function checkRegression(maxGrowth, tag) {
+  // On main the release under test is still a DRAFT (release.yml flips it only
+  // after the whole pipeline is green), and drafts are excluded from the
+  // stable list. Without --tag this would silently compare the two previous
+  // published releases and never see the artifacts just built.
+  const releases = await allReleases(SRELENS_REPO);
+  const current = tag
+    ? releases.find((r) => r.tag_name === tag)
+    : releases.find((r) => !r.draft && !r.prerelease);
+  if (!current) {
+    console.error(`No release found for tag ${tag}. Is GITHUB_TOKEN set (drafts need auth)?`);
+    return 1;
+  }
+  const previous = releases.find(
+    (r) => !r.draft && !r.prerelease && r.tag_name !== current.tag_name,
+  );
+  if (!previous) {
+    console.log("No previous stable release to compare against.");
     return 0;
   }
-  const [current, previous] = releases;
   const now = bucketAssets(current.assets).sizes;
   const before = bucketAssets(previous.assets).sizes;
 
@@ -161,7 +178,8 @@ async function main() {
   const maxGrowth = Number(args[args.indexOf("--max-growth") + 1]) || 15;
 
   if (args.includes("--check-regression")) {
-    process.exit(await checkRegression(maxGrowth));
+    const tagIndex = args.indexOf("--tag");
+    process.exit(await checkRegression(maxGrowth, tagIndex === -1 ? null : args[tagIndex + 1]));
   }
 
   const [srelens, comparison] = await Promise.all([
