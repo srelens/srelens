@@ -699,7 +699,23 @@ export function App() {
     const ns = namespace ?? "";
     const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
     if (existing) {
-      setTabs((ts) => ts.map((t) => (t.id === existing.id ? { ...t, focus, namespace: ns } : t)));
+      setTabs((ts) =>
+        ts.map((t) =>
+          t.id === existing.id
+            ? {
+                ...t,
+                focus,
+                namespace: ns,
+                // Clear THIS tab's search only. The detail opens from the
+                // unfiltered rows, so a leftover query would leave the user
+                // on a list that doesn't contain what they navigated to once
+                // the drawer closes. Sort and filter column are unaffected,
+                // and other tabs keep their own searches.
+                view: applyViewPatch(t.view, { query: "" }),
+              }
+            : t,
+        ),
+      );
       setActiveTabId(existing.id);
     } else {
       const id = tabIdRef.current++;
