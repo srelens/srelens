@@ -180,13 +180,17 @@ export function App() {
       tabsRef.current.filter((t) => t.crd && t.cluster).map((t) => t.cluster as string),
     )].filter((name) => contexts.some((c) => c.name === name));
     if (pending.length === 0) return;
-    crdTabsValidated.current = true;
 
     let cancelled = false;
     void Promise.all(
       pending.map(async (context) => ({ context, result: await listCrds(context) })),
     ).then((results) => {
+      // Superseded by a newer contexts value (a kubeconfig change mid-flight):
+      // drop this result and leave the one-shot flag CLEAR, so the replacement
+      // effect still validates. Setting it before the await would have retired
+      // the check without it ever having run.
       if (cancelled) return;
+      crdTabsValidated.current = true;
       let total = 0;
       let next = tabsRef.current;
       for (const { context, result } of results) {
