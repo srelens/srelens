@@ -104,6 +104,11 @@ export function dedupeDeepLinkTargets(targets: DeepLinkTarget[]): DeepLinkTarget
         : // Keyed by the VIEW, not the resource: two pods in one cluster share
           // a single Pods tab.
           `resource:${target.context}:${target.kind}`;
+    // Delete before re-inserting: Map.set keeps a replaced key at its ORIGINAL
+    // position, which would emit an earlier link after a later one. Routing
+    // order is what decides which tab ends up active, so the batch has to come
+    // out in last-occurrence order for "the last link wins" to hold.
+    byView.delete(key);
     byView.set(key, target);
   }
   return [...byView.values()];

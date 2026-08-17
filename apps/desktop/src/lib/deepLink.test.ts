@@ -123,13 +123,17 @@ describe("dedupeDeepLinkTargets", () => {
     expect(result).toEqual([{ route: "cluster", context: "prod" }]);
   });
 
-  it("preserves order of first appearance", () => {
+  it("orders by LAST occurrence, so the final link is routed last", () => {
+    // Routing order decides which tab ends up active. A replaced entry must
+    // move to the end, or an earlier link would be applied after a later one
+    // and steal focus from the link the user actually clicked most recently.
     const result = dedupeDeepLinkTargets([
       resource("prod", "Pod", "a"),
       { route: "cluster", context: "prod" },
       resource("prod", "Pod", "b"),
     ]);
-    expect(result[0]).toMatchObject({ route: "resource", name: "b" });
-    expect(result[1]).toMatchObject({ route: "cluster" });
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ route: "cluster" });
+    expect(result[1]).toMatchObject({ route: "resource", name: "b" });
   });
 });
