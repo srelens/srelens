@@ -67,6 +67,7 @@ import {
   reconcileActiveTab,
   reconcileCrdTabs,
 } from "./lib/openTabs";
+import { flushSettingsWrites } from "./lib/settingsStorage";
 import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
@@ -75,6 +76,9 @@ import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "./lib/clusters";
 import { deletePod } from "./lib/workloads";
 import { clearAccessCache } from "./lib/access";
+
+/** How long a closing window waits for the settings write to land. */
+const CLOSE_WRITE_TIMEOUT_MS = 2000;
 
 export interface ViewTab {
   id: number;
@@ -373,8 +377,10 @@ export function App() {
 
   // Persist the open tabs (web only) so a browser reload restores them.
   useEffect(() => scheduleSaveOpenTabs(tabs, activeTabId), [tabs, activeTabId]);
-  // A coalesced session must still reach disk if the window goes away first.
+
+  // Web: localStorage writes are synchronous, so unload handlers suffice.
   useEffect(() => {
+    if (isTauri()) return;
     const flush = () => flushSaveOpenTabs();
     window.addEventListener("beforeunload", flush);
     window.addEventListener("pagehide", flush);
@@ -385,6 +391,41 @@ export function App() {
     // Deliberately no flush on unmount: the real teardown is the window going
     // away, which fires the events above. Flushing here would also write on
     // every test/HMR unmount, persisting a session the next mount restores.
+  }, []);
+
+  // Desktop: the durable write is an async IPC round trip, which an unload
+  // handler cannot wait for — it returns immediately and the WebView is torn
+  // down mid-write. Intercept the close instead, drain the queue, then close.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const win = getCurrentWindow();
+    // Older runtimes (and the test harness) may not expose this; losing the
+    // close-time flush is far better than failing to mount the app.
+    if (typeof win?.onCloseRequested !== "function") return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void win
+      .onCloseRequested(async (event) => {
+        event.preventDefault();
+        flushSaveOpenTabs();
+        // Bounded: a stuck or slow write must never leave the user unable to
+        // quit, so the close proceeds either way.
+        await Promise.race([
+          flushSettingsWrites(),
+          new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
+        ]);
+        // destroy(), not close() — close() re-emits this event and would loop.
+        await win.destroy();
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   /** The namespace a new tab in `cluster` should start on. */

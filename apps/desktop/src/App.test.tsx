@@ -7,9 +7,12 @@ import React from "react";
 const tauri = vi.hoisted(() => {
   const handlers = new Map<string, (e: { payload: unknown }) => void>();
   const windowClose = vi.fn();
+  const windowDestroy = vi.fn();
   return {
     handlers,
     windowClose,
+    windowDestroy,
+    closeRequestedHandler: null as null | ((event: { preventDefault: () => void }) => unknown),
     listen: vi.fn((name: string, cb: (e: { payload: unknown }) => void) => {
       handlers.set(name, cb);
       return Promise.resolve(() => handlers.delete(name));
@@ -18,7 +21,17 @@ const tauri = vi.hoisted(() => {
 });
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ close: tauri.windowClose }),
+  getCurrentWindow: () => ({
+    close: tauri.windowClose,
+    destroy: tauri.windowDestroy,
+    // Capture the handler so a test can drive the close-request path.
+    onCloseRequested: (handler: (event: { preventDefault: () => void }) => unknown) => {
+      tauri.closeRequestedHandler = handler;
+      return Promise.resolve(() => {
+        tauri.closeRequestedHandler = null;
+      });
+    },
+  }),
 }));
 
 const { checkForUpdateMock, notifyUpdateAvailableMock } = vi.hoisted(() => ({
@@ -240,6 +253,26 @@ describe("App", () => {
     fireEvent.click(screen.getByText("open-assistant"));
     expect(screen.queryByTestId("assistant-tab")).toBeNull();
     expect(screen.queryByRole("tab", { name: /^Assistant$/ })).toBeNull();
+  });
+
+  it("waits for the settings write before letting the window close (#254)", async () => {
+    // The durable write is an async IPC round trip; an unload handler returns
+    // immediately and the WebView is torn down mid-write, losing the last
+    // sort/search. The close is intercepted and resumed instead.
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    tauri.windowDestroy.mockClear();
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+
+    expect(tauri.closeRequestedHandler).toBeTypeOf("function");
+    const preventDefault = vi.fn();
+    await tauri.closeRequestedHandler!({ preventDefault });
+
+    // The default close is cancelled, then re-issued as destroy() once the
+    // write has drained — close() would re-enter this handler and loop.
+    expect(preventDefault).toHaveBeenCalled();
+    expect(tauri.windowDestroy).toHaveBeenCalled();
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
   it("close-active-tab (Cmd+W) closes the active tab, not the window", () => {
