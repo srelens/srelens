@@ -61,6 +61,11 @@ const CLUSTER_SCOPED_KINDS = new Set([
   "ValidatingWebhookConfiguration",
 ]);
 
+/** True for kinds that exist outside any namespace (Node, ClusterRole, …). */
+export function isClusterScopedKind(kind: string): boolean {
+  return CLUSTER_SCOPED_KINDS.has(kind);
+}
+
 export function targetNamespace(kind: string, namespace: string | null): string | null {
   return CLUSTER_SCOPED_KINDS.has(kind) ? null : namespace;
 }

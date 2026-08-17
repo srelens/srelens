@@ -305,8 +305,10 @@ to the front.
 | `srelens://cluster/<context>` | That context's cluster overview |
 | `srelens://resource/<context>/<namespace>/<kind>/<name>` | That resource's detail view |
 
-`<kind>` is the Kubernetes kind (`Pod`, `Deployment`, `Service`, …). For a
-cluster-scoped resource such as a Node, use `-` in place of the namespace:
+`<kind>` is the Kubernetes kind (`Pod`, `Deployment`, `Service`, …). Use `-` in
+place of the namespace for a **cluster-scoped** resource such as a Node; a
+namespaced kind must name its namespace, since searching every namespace could
+otherwise open the wrong object when the name is not unique:
 
 ```
 srelens://resource/prod-eu/kube-system/Pod/coredns-7db6d8ff4d-abcde
@@ -320,8 +322,9 @@ usually need this:
 srelens://cluster/default%2Fapi-example-com%3A6443%2Fdev
 ```
 
-A link naming a context you don't have, or a kind srelens has no view for, is
-reported and otherwise ignored.
+A link is reported and otherwise ignored when it names a context you don't
+have, a kind with no detail view (Events, for instance, are list-only), or a
+namespaced kind without a namespace.
 
 ## Window and session state
 

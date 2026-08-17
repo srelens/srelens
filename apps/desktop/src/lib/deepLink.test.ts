@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDeepLink } from "./deepLink";
+import { dedupeDeepLinkTargets, parseDeepLink, type DeepLinkTarget } from "./deepLink";
 
 describe("parseDeepLink", () => {
   it("parses a cluster link", () => {
@@ -82,5 +82,54 @@ describe("parseDeepLink", () => {
   it("refuses control characters and malformed encoding", () => {
     expect(parseDeepLink("srelens://cluster/pro%00d")).toBeNull();
     expect(parseDeepLink("srelens://cluster/bad%ZZ")).toBeNull();
+  });
+});
+
+describe("dedupeDeepLinkTargets", () => {
+  const resource = (context: string, kind: string, name: string): DeepLinkTarget => ({
+    route: "resource",
+    context,
+    namespace: "default",
+    kind,
+    name,
+  });
+
+  it("collapses links that open the same view, keeping the last", () => {
+    // A double-click would otherwise append two Pods tabs against the same
+    // render's state, duplicating the tab and its resource watch.
+    const result = dedupeDeepLinkTargets([
+      resource("prod", "Pod", "first"),
+      resource("prod", "Pod", "second"),
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ name: "second" });
+  });
+
+  it("keeps distinct views separate", () => {
+    const result = dedupeDeepLinkTargets([
+      resource("prod", "Pod", "a"),
+      resource("prod", "Service", "b"),
+      resource("staging", "Pod", "c"),
+      { route: "cluster", context: "prod" },
+    ]);
+    expect(result).toHaveLength(4);
+  });
+
+  it("collapses repeated cluster links", () => {
+    const result = dedupeDeepLinkTargets([
+      { route: "cluster", context: "prod" },
+      { route: "cluster", context: "prod" },
+    ]);
+    expect(result).toEqual([{ route: "cluster", context: "prod" }]);
+  });
+
+  it("preserves order of first appearance", () => {
+    const result = dedupeDeepLinkTargets([
+      resource("prod", "Pod", "a"),
+      { route: "cluster", context: "prod" },
+      resource("prod", "Pod", "b"),
+    ]);
+    expect(result[0]).toMatchObject({ route: "resource", name: "b" });
+    expect(result[1]).toMatchObject({ route: "cluster" });
   });
 });

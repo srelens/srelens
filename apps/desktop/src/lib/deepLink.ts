@@ -86,3 +86,25 @@ export function parseDeepLink(url: string): DeepLinkTarget | null {
 
   return null;
 }
+
+/**
+ * Collapse links that would open the SAME view, keeping the last of each.
+ *
+ * A batch is routed against one render's `tabs`, so two links to the same
+ * cluster+kind would each find no existing tab and append their own —
+ * duplicate tabs and duplicate resource watches from one double-click. The
+ * last link wins because it is the one whose focus should end up in front.
+ */
+export function dedupeDeepLinkTargets(targets: DeepLinkTarget[]): DeepLinkTarget[] {
+  const byView = new Map<string, DeepLinkTarget>();
+  for (const target of targets) {
+    const key =
+      target.route === "cluster"
+        ? `cluster:${target.context}`
+        : // Keyed by the VIEW, not the resource: two pods in one cluster share
+          // a single Pods tab.
+          `resource:${target.context}:${target.kind}`;
+    byView.set(key, target);
+  }
+  return [...byView.values()];
+}

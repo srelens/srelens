@@ -28,7 +28,12 @@ import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
 import { listCrds, type CrdRef } from "./lib/crds";
-import { targetNamespace, type ResourceTarget } from "./lib/resourceNavigation";
+import {
+  isClusterScopedKind,
+  isNavigableResourceKind,
+  targetNamespace,
+  type ResourceTarget,
+} from "./lib/resourceNavigation";
 import {
   loadClusterNamespaces,
   saveClusterNamespaces,
@@ -50,7 +55,7 @@ import {
   loadMcpSettings,
 } from "./lib/settings";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "./lib/uiScale";
-import { parseDeepLink } from "./lib/deepLink";
+import { dedupeDeepLinkTargets, parseDeepLink, type DeepLinkTarget } from "./lib/deepLink";
 import { invokeCommand } from "./transport/transport";
 import {
   loadOpenTabs,
@@ -216,6 +221,11 @@ export function App() {
     // rest. They open in order, so the last one ends up in front.
     const queued = pendingLinks;
     setPendingLinks([]);
+
+    // Validate first, then route: a batch is applied against ONE render's
+    // `tabs`, so links sharing a view have to be collapsed before any of them
+    // appends a tab (see dedupeDeepLinkTargets).
+    const valid: DeepLinkTarget[] = [];
     for (const url of queued) {
       const target = parseDeepLink(url);
       if (!target) {
@@ -226,15 +236,35 @@ export function App() {
         notify.error("Couldn't open that link", `No kube context named "${target.context}".`);
         continue;
       }
+      if (target.route === "resource") {
+        // K8S_KIND alone is too permissive: Events have a list view but no
+        // detail, so such a link would quietly land on the list instead of
+        // the object it named.
+        if (!isNavigableResourceKind(target.kind)) {
+          notify.error("Couldn't open that link", `srelens can't open a ${target.kind} directly.`);
+          continue;
+        }
+        // "-" means cluster-scoped. Allowing it for a namespaced kind would
+        // search every namespace and focus whichever matching name came back
+        // first — a link that silently opens the wrong object.
+        if (!isClusterScopedKind(target.kind) && target.namespace === null) {
+          notify.error(
+            "Couldn't open that link",
+            `${target.kind} is namespaced, so the link needs a namespace.`,
+          );
+          continue;
+        }
+      }
+      valid.push(target);
+    }
+
+    for (const target of dedupeDeepLinkTargets(valid)) {
       if (target.route === "cluster") {
         openView(target.context, "overview");
         continue;
       }
       const entry = Object.entries(K8S_KIND).find(([, k8sKind]) => k8sKind === target.kind);
-      if (!entry) {
-        notify.error("Couldn't open that link", `srelens has no view for "${target.kind}".`);
-        continue;
-      }
+      if (!entry) continue;
       openResourceIn(
         target.context,
         entry[0] as ResourceKind,
