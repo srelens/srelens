@@ -85,6 +85,52 @@ export function saveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void 
 }
 
 /**
+ * How long to gather tab changes before writing the session.
+ *
+ * Search text lives on the tab (#254), so every keystroke mutates `tabs`.
+ * Writing per keystroke means a full read-modify-rewrite of settings.json —
+ * under an interprocess lock, ending in `sync_all` — for each character, which
+ * queues fsyncs behind each other and delays unrelated settings writes.
+ */
+const SAVE_DEBOUNCE_MS = 400;
+
+let pendingSave: { tabs: ViewTab[]; activeTabId: number | null } | null = null;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Persist the session, coalescing bursts. The in-memory state is untouched —
+ * only the durable write is delayed — so the UI stays instant.
+ *
+ * The timer is NOT restarted by later changes: the write lands a fixed delay
+ * after the first change of a burst, carrying the newest snapshot. A restarting
+ * debounce would starve during continuous typing and never write at all.
+ */
+export function scheduleSaveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void {
+  pendingSave = { tabs, activeTabId };
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const snapshot = pendingSave;
+    pendingSave = null;
+    if (snapshot) saveOpenTabs(snapshot.tabs, snapshot.activeTabId);
+  }, SAVE_DEBOUNCE_MS);
+}
+
+/**
+ * Write any coalesced session immediately. Called when the window is going
+ * away, so the last keystrokes before a quit are not lost with the timer.
+ */
+export function flushSaveOpenTabs(): void {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const snapshot = pendingSave;
+  pendingSave = null;
+  if (snapshot) saveOpenTabs(snapshot.tabs, snapshot.activeTabId);
+}
+
+/**
  * Drop restored tabs whose cluster is no longer among the discovered
  * contexts, returning the survivors and how many were dropped. Cluster-less
  * tabs (Settings, Toolbox, the landing view) are always kept — they do not

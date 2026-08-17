@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CrdRef } from "./crds";
 import {
   loadOpenTabs,
   saveOpenTabs,
+  scheduleSaveOpenTabs,
+  flushSaveOpenTabs,
   nextTabId,
   pruneMissingContexts,
   reconcileActiveTab,
@@ -255,5 +257,51 @@ describe("reconcileCrdTabs", () => {
     const result = reconcileCrdTabs(tabs, "prod", [crd()]);
     expect(result.tabs[0]).toBe(tabs[0]);
     expect(result.dropped).toBe(0);
+  });
+});
+
+describe("coalesced session persistence", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    flushSaveOpenTabs();
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  it("writes once for a burst, carrying the newest snapshot", () => {
+    // Search text lives on the tab, so a burst here is one per keystroke.
+    // Each write is a full settings.json rewrite ending in fsync, so they
+    // must not go one-per-change.
+    scheduleSaveOpenTabs([tab({ id: 1 })], 1);
+    scheduleSaveOpenTabs([tab({ id: 1 }), tab({ id: 2 })], 2);
+    scheduleSaveOpenTabs([tab({ id: 1 }), tab({ id: 2 }), tab({ id: 3 })], 3);
+    // Nothing written yet.
+    expect(localStorage.getItem("srelens.openTabs")).toBeNull();
+
+    vi.advanceTimersByTime(400);
+    const stored = JSON.parse(localStorage.getItem("srelens.openTabs") ?? "{}");
+    expect(stored.tabs.map((t: { id: number }) => t.id)).toEqual([1, 2, 3]);
+    expect(stored.activeTabId).toBe(3);
+  });
+
+  it("does not restart the timer, so continuous typing still reaches disk", () => {
+    scheduleSaveOpenTabs([tab({ id: 1 })], 1);
+    // A change every 300ms would starve a restarting debounce forever.
+    vi.advanceTimersByTime(300);
+    scheduleSaveOpenTabs([tab({ id: 2 })], 2);
+    vi.advanceTimersByTime(300);
+    expect(localStorage.getItem("srelens.openTabs")).not.toBeNull();
+  });
+
+  it("flushes a pending write immediately, for a closing window", () => {
+    scheduleSaveOpenTabs([tab({ id: 9 })], 9);
+    expect(localStorage.getItem("srelens.openTabs")).toBeNull();
+    flushSaveOpenTabs();
+    expect(JSON.parse(localStorage.getItem("srelens.openTabs") ?? "{}").activeTabId).toBe(9);
+  });
+
+  it("flushing with nothing pending is a no-op", () => {
+    flushSaveOpenTabs();
+    expect(localStorage.getItem("srelens.openTabs")).toBeNull();
   });
 });

@@ -60,7 +60,8 @@ import { applyViewPatch, type TabViewState } from "./lib/tabView";
 import { invokeCommand } from "./transport/transport";
 import {
   loadOpenTabs,
-  saveOpenTabs,
+  scheduleSaveOpenTabs,
+  flushSaveOpenTabs,
   nextTabId,
   pruneMissingContexts,
   reconcileActiveTab,
@@ -371,7 +372,20 @@ export function App() {
   useEffect(() => saveClusterNamespaces(clusterNs), [clusterNs]);
 
   // Persist the open tabs (web only) so a browser reload restores them.
-  useEffect(() => saveOpenTabs(tabs, activeTabId), [tabs, activeTabId]);
+  useEffect(() => scheduleSaveOpenTabs(tabs, activeTabId), [tabs, activeTabId]);
+  // A coalesced session must still reach disk if the window goes away first.
+  useEffect(() => {
+    const flush = () => flushSaveOpenTabs();
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+    // Deliberately no flush on unmount: the real teardown is the window going
+    // away, which fires the events above. Flushing here would also write on
+    // every test/HMR unmount, persisting a session the next mount restores.
+  }, []);
 
   /** The namespace a new tab in `cluster` should start on. */
   const namespaceFor = (cluster: string) => clusterNs[cluster] ?? defaultNs;
