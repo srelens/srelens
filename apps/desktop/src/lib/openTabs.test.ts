@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadOpenTabs, saveOpenTabs, nextTabId, pruneMissingContexts } from "./openTabs";
+import type { CrdRef } from "./crds";
+import {
+  loadOpenTabs,
+  saveOpenTabs,
+  nextTabId,
+  pruneMissingContexts,
+  reconcileActiveTab,
+  reconcileCrdTabs,
+} from "./openTabs";
 
 // ViewTab is a type; tests build plain objects matching its shape.
 type Tab = Parameters<typeof saveOpenTabs>[0][number];
@@ -164,5 +172,64 @@ describe("nextTabId", () => {
   });
   it("is 1 for an empty set", () => {
     expect(nextTabId([])).toBe(1);
+  });
+});
+
+describe("reconcileActiveTab", () => {
+  it("keeps the active tab when it survived the prune", () => {
+    expect(reconcileActiveTab([tab({ id: 1 }), tab({ id: 2 })], 2)).toBe(2);
+  });
+
+  it("falls back to the first survivor when the active tab was pruned", () => {
+    // Otherwise the workspace renders blank behind a populated tab strip.
+    expect(reconcileActiveTab([tab({ id: 3 }), tab({ id: 4 })], 99)).toBe(3);
+  });
+
+  it("clears the active id when nothing survives", () => {
+    // A stale id here also costs the native close command its no-tabs path.
+    expect(reconcileActiveTab([], 7)).toBeNull();
+  });
+});
+
+describe("reconcileCrdTabs", () => {
+  const crd = (over: Partial<CrdRef> = {}): CrdRef => ({
+    name: "widgets.example.com",
+    group: "example.com",
+    version: "v1",
+    kind: "Widget",
+    plural: "widgets",
+    namespaced: true,
+    ...over,
+  });
+  const crdTab = (id: number, over: Partial<CrdRef> = {}) =>
+    ({ ...tab({ id, cluster: "prod" }), crd: crd(over) }) as Tab;
+
+  it("drops a tab whose CRD is no longer installed", () => {
+    const result = reconcileCrdTabs([crdTab(1)], "prod", []);
+    expect(result.tabs).toHaveLength(0);
+    expect(result.dropped).toBe(1);
+  });
+
+  it("adopts the currently served version instead of dropping the tab", () => {
+    // The CRD still exists, just at v2 — keeping the stale v1 ref would query
+    // a version the cluster no longer serves.
+    const result = reconcileCrdTabs([crdTab(1)], "prod", [crd({ version: "v2" })]);
+    expect(result.dropped).toBe(0);
+    expect(result.tabs[0].crd?.version).toBe("v2");
+  });
+
+  it("leaves tabs from other contexts and non-CRD tabs untouched", () => {
+    const other = { ...tab({ id: 2, cluster: "staging" }), crd: crd() } as Tab;
+    const plain = tab({ id: 3, cluster: "prod" });
+    const result = reconcileCrdTabs([other, plain], "prod", []);
+    expect(result.tabs.map((t) => t.id)).toEqual([2, 3]);
+    expect(result.dropped).toBe(0);
+  });
+
+  it("returns the same tab objects when nothing changed", () => {
+    const tabs = [crdTab(1)];
+    const result = reconcileCrdTabs(tabs, "prod", [crd()]);
+    expect(result.tabs[0]).toBe(tabs[0]);
+    expect(result.dropped).toBe(0);
   });
 });

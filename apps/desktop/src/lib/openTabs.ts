@@ -8,6 +8,7 @@
 
 import { loadRestoreSession } from "./settings";
 import { settingsStorage } from "./settingsStorage";
+import type { CrdRef } from "./crds";
 import type { ViewTab } from "../App";
 
 const KEY = "srelens.openTabs";
@@ -89,6 +90,51 @@ export function saveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void 
  * tabs (Settings, Toolbox, the landing view) are always kept — they do not
  * depend on a context existing.
  */
+/**
+ * The active tab id after a prune: keep it when it survived, otherwise fall
+ * back to the first remaining tab, or null when nothing is left. A stale id
+ * would leave the workspace blank behind a populated tab strip, and would
+ * also stop the native close command taking its no-tabs path.
+ */
+export function reconcileActiveTab(tabs: ViewTab[], activeTabId: number | null): number | null {
+  if (tabs.length === 0) return null;
+  return tabs.some((t) => t.id === activeTabId) ? activeTabId : tabs[0].id;
+}
+
+/**
+ * Reconcile restored CRD tabs for one context against the CRDs actually
+ * discovered there. A CRD that is gone drops its tab; a CRD that still exists
+ * under a different served version (or plural) has its stale `CrdRef` replaced
+ * with the current one, so the tab keeps working instead of querying a version
+ * the cluster no longer serves.
+ *
+ * Only ever called with a SUCCESSFUL discovery result: an unreachable cluster
+ * must not be read as "this CRD is gone" and silently delete the workspace.
+ */
+export function reconcileCrdTabs(
+  tabs: ViewTab[],
+  context: string,
+  crds: readonly CrdRef[],
+): { tabs: ViewTab[]; dropped: number } {
+  const current = new Map(crds.map((c) => [`${c.group}/${c.kind}`, c]));
+  let dropped = 0;
+  const kept: ViewTab[] = [];
+  for (const t of tabs) {
+    if (t.cluster !== context || !t.crd) {
+      kept.push(t);
+      continue;
+    }
+    const live = current.get(`${t.crd.group}/${t.crd.kind}`);
+    if (!live) {
+      dropped += 1;
+      continue;
+    }
+    const stale = live.version !== t.crd.version || live.plural !== t.crd.plural;
+    kept.push(stale ? { ...t, crd: live } : t);
+  }
+  return { tabs: kept, dropped };
+}
+
 export function pruneMissingContexts(
   tabs: ViewTab[],
   contexts: readonly string[],

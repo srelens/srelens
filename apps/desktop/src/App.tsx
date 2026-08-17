@@ -27,7 +27,7 @@ import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
-import type { CrdRef } from "./lib/crds";
+import { listCrds, type CrdRef } from "./lib/crds";
 import type { ResourceTarget } from "./lib/resourceNavigation";
 import {
   loadClusterNamespaces,
@@ -50,7 +50,14 @@ import {
   loadMcpSettings,
 } from "./lib/settings";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "./lib/uiScale";
-import { loadOpenTabs, saveOpenTabs, nextTabId, pruneMissingContexts } from "./lib/openTabs";
+import {
+  loadOpenTabs,
+  saveOpenTabs,
+  nextTabId,
+  pruneMissingContexts,
+  reconcileActiveTab,
+  reconcileCrdTabs,
+} from "./lib/openTabs";
 import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
@@ -134,20 +141,26 @@ export function App() {
       // Auto close any tabs of clusters/contexts that no longer exist!
       if (o.contexts) {
         const names = o.contexts.map((c) => c.name);
-        setTabs((ts) => {
-          const { tabs: kept, dropped } = pruneMissingContexts(ts, names);
+        // Computed from the ref rather than inside the updater: the active id
+        // has to be reconciled alongside, and state updaters must stay free
+        // of side effects (React re-invokes them in development).
+        const { tabs: kept, dropped } = pruneMissingContexts(tabsRef.current, names);
+        if (dropped > 0) {
+          setTabs(kept);
+          // Without this the workspace goes blank behind a populated tab
+          // strip, and the native close command loses its no-tabs path.
+          setActiveTabId((cur) => reconcileActiveTab(kept, cur));
           // Say something only for a RESTORED session (#159): a user who just
           // removed a kubeconfig already knows why those tabs closed, and
           // this runs on every kubeconfig change.
-          if (dropped > 0 && !sessionPruneReported.current) {
+          if (!sessionPruneReported.current) {
             notify.info(
               dropped === 1 ? "Closed 1 restored tab" : `Closed ${dropped} restored tabs`,
               "Their cluster context is no longer available.",
             );
           }
-          sessionPruneReported.current = true;
-          return kept;
-        });
+        }
+        sessionPruneReported.current = true;
       }
     });
   };
@@ -155,6 +168,50 @@ export function App() {
   useEffect(() => {
     refreshContexts();
   }, [kubeconfigFiles]);
+
+  // Restored CRD tabs carry a CrdRef captured in a previous session (#159).
+  // The CRD may since have been deleted, or may now serve a different version,
+  // and CustomResourceBrowser would surface that as a raw API error. Validate
+  // once per launch, per context that actually has a restored CRD tab.
+  const crdTabsValidated = useRef(false);
+  useEffect(() => {
+    if (crdTabsValidated.current || !contexts || !restored) return;
+    const pending = [...new Set(
+      tabsRef.current.filter((t) => t.crd && t.cluster).map((t) => t.cluster as string),
+    )].filter((name) => contexts.some((c) => c.name === name));
+    if (pending.length === 0) return;
+    crdTabsValidated.current = true;
+
+    let cancelled = false;
+    void Promise.all(
+      pending.map(async (context) => ({ context, result: await listCrds(context) })),
+    ).then((results) => {
+      if (cancelled) return;
+      let total = 0;
+      let next = tabsRef.current;
+      for (const { context, result } of results) {
+        // Only a SUCCESSFUL discovery is evidence of absence. An unreachable
+        // cluster must never silently delete the user's restored tabs.
+        if (!result.crds) continue;
+        const reconciled = reconcileCrdTabs(next, context, result.crds);
+        next = reconciled.tabs;
+        total += reconciled.dropped;
+      }
+      if (next !== tabsRef.current) {
+        setTabs(next);
+        setActiveTabId((cur) => reconcileActiveTab(next, cur));
+      }
+      if (total > 0) {
+        notify.info(
+          total === 1 ? "Closed 1 restored tab" : `Closed ${total} restored tabs`,
+          "Their custom resource is no longer installed.",
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [contexts, restored]);
 
   // Listen to external/internal kubeconfig changes
   useEffect(() => {
