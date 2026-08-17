@@ -902,6 +902,8 @@ export function App() {
                       initialNamespace={activeTab.namespace ?? ""}
                       onNamespaceChange={(ns) => setTabNamespace(activeTab.id, activeCluster, ns)}
                       kubeconfigFiles={kubeconfigFiles}
+                      view={activeView}
+                      onViewChange={updateActiveView}
                     />
                   ) : activeCluster && activeKind === "newresource" ? (
                     <NewResourceEditor

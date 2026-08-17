@@ -10,6 +10,7 @@ import {
   type HelmReleaseDetail,
 } from "../lib/helm";
 import { ageFromTimestamp, absoluteTimestamp, Section, KV } from "./ResourceOverview";
+import type { TabViewState } from "../lib/tabView";
 import {
   Table,
   filterTableData,
@@ -66,6 +67,8 @@ export function HelmReleasesView({
   initialNamespace,
   onNamespaceChange,
   kubeconfigFiles = [],
+  view,
+  onViewChange,
 }: {
   context: string;
   detailDrawerWidth?: number;
@@ -74,6 +77,9 @@ export function HelmReleasesView({
   initialNamespace?: string;
   /** Notified when the namespace filter changes, so the parent can preserve it. */
   onNamespaceChange?: (namespace: string) => void;
+  /** Sort + search owned by the tab, so they survive a switch (#254). */
+  view?: TabViewState;
+  onViewChange?: (patch: Partial<TabViewState>) => void;
   /**
    * All configured kubeconfig files (default path + pasted/additional). Used to
    * register their paths in the backend client cache before we build a client
@@ -108,7 +114,14 @@ export function HelmReleasesView({
     if (nsScope) setSelection([nsScope]);
   }, [nsScope]);
   const scopeNs = watchNamespaceForSelection(selection);
-  const [query, setQuery] = useState("");
+  // Tab-owned when a change handler is supplied (#254), so sorting or
+  // searching releases survives a tab switch like every other list.
+  const [localQuery, setLocalQuery] = useState("");
+  const query = onViewChange ? (view?.query ?? "") : localQuery;
+  const setQuery = (next: string) => {
+    if (onViewChange) onViewChange({ query: next });
+    else setLocalQuery(next);
+  };
   const [detail, setDetail] = useState<HelmReleaseDetail | null>(null);
   const [detailError, setDetailError] = useState("");
 
@@ -276,6 +289,8 @@ export function HelmReleasesView({
               getRowKey={(r) => `${r.namespace}/${r.name}`}
               onRowClick={setSelected}
               selectedKey={selected ? `${selected.namespace}/${selected.name}` : undefined}
+              sort={view?.sort ?? null}
+              onSortChange={onViewChange ? (sort) => onViewChange({ sort }) : undefined}
             />
           )}
         </div>
