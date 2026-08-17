@@ -325,6 +325,25 @@ describe("App", () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
+  it("persists the post-close session when Cmd+W closes the last tab (#254)", async () => {
+    // closeView only SCHEDULES the state change, and the window close fires in
+    // the same callback — so without queueing the post-close snapshot first,
+    // the flush writes the pre-close one and the closed tab returns on the
+    // next launch.
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    localStorage.clear();
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+
+    tauri.handlers.get("close-active-tab")?.({ payload: null });
+    // Drive the close the way Tauri would, so the flush runs.
+    await tauri.closeRequestedHandler?.({ preventDefault: vi.fn() });
+
+    // Nothing to restore: the user closed their last tab deliberately.
+    expect(localStorage.getItem("srelens.openTabs")).toBeNull();
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
   it("close-active-tab (Cmd+W) closes the window when the last tab is closed", () => {
     (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
     tauri.windowClose.mockClear();

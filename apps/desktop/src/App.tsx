@@ -529,7 +529,14 @@ export function App() {
       const id = activeTabIdRef.current;
       if (id != null) {
         const closingLastTab = tabsRef.current.length === 1 && tabsRef.current[0]?.id === id;
+        const remaining = tabsRef.current.filter((t) => t.id !== id);
         closeView(id);
+        // `closeView` only SCHEDULES the state change; the close below fires
+        // in this same callback, before React has re-rendered and run the
+        // persistence effect. Without queueing the post-close snapshot here,
+        // the close-request flush would write the pre-close one and the tab
+        // the user just closed would come back on the next launch.
+        scheduleSaveOpenTabs(remaining, remaining.at(-1)?.id ?? null);
         if (closingLastTab) void getCurrentWindow().close();
       } else {
         void getCurrentWindow().close();
