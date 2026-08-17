@@ -8,6 +8,8 @@
   "permissions": [
     "core:default",
     "core:webview:allow-set-webview-zoom",
-    "process:default"
+    "process:default",
+    "deep-link:default",
+    "window-state:default"
   ]
 }

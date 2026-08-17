@@ -1,4 +1,5 @@
 mod app_log;
+mod deep_link;
 mod appimage;
 mod assistant;
 mod assistant_history;
@@ -248,14 +249,32 @@ pub fn run() {
     let cache = ClientCache::new_many(capabilities::default_kubeconfig_paths());
     let registry = capabilities::build_registry_with(cache.clone());
 
-    let builder = tauri::Builder::default()
+    // single-instance is registered BEFORE every other plugin, as the plugin
+    // requires: it has to claim the lock and hand a second launch's argv over
+    // before anything else initializes. Its `deep-link` feature forwards those
+    // arguments to the deep-link plugin first, so an `srelens://` link on
+    // Windows/Linux reaches the running app rather than starting a rival one.
+    #[cfg(desktop)]
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
+        |app, _argv, _cwd| {
+            deep_link::focus_main_window(app);
+        },
+    ));
+    #[cfg(not(desktop))]
+    let builder = tauri::Builder::default();
+
+    let builder = builder
+        .manage(deep_link::PendingDeepLink::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_biometry::init())
         .plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_deep_link::init())
+        // Size, position and maximized state, restored at window creation.
+        .plugin(tauri_plugin_window_state::Builder::default().build());
 
     let watcher_cache = cache.clone();
     let oidc_cache = cache.clone();
@@ -288,8 +307,15 @@ pub fn run() {
                     .build(),
             )?;
             log::info!("srelens {} starting", env!("CARGO_PKG_VERSION"));
+            // Only impose the default geometry on a first launch: after that
+            // the window-state plugin has already restored the user's own
+            // size and position, and re-centering would undo it every time.
             #[cfg(desktop)]
-            size_main_window(app);
+            if !deep_link::has_saved_window_state(app) {
+                size_main_window(app);
+            }
+            #[cfg(desktop)]
+            deep_link::register_deep_links(app);
             #[cfg(target_os = "macos")]
             install_macos_menu(app)?;
 
@@ -394,6 +420,7 @@ pub fn run() {
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
         .invoke_handler(tauri::generate_handler![
+            deep_link::take_pending_deep_link,
             assistant::agent_list,
             assistant::chat_start,
             assistant::chat_send,

@@ -90,6 +90,14 @@ base64 = "0.22"
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Issue #36. single-instance must be registered FIRST so a second launch hands
+# its argv to the running app instead of opening a rival window; its
+# `deep-link` feature is what forwards an `srelens://` URL on Windows/Linux,
+# where the OS starts a new process per link rather than signalling the
+# running one (macOS delivers the event to the existing app itself).
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-window-state = "2"
 # GUI-launched apps on macOS/Linux get launchd's minimal PATH, so kubeconfig
 # exec plugins (kubectl, krew plugins, cloud CLIs) can't be found. This
 # resolves the user's login-shell PATH at startup. No-op on Windows.
