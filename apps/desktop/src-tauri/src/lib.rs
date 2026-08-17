@@ -420,7 +420,7 @@ pub fn run() {
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
         .invoke_handler(tauri::generate_handler![
-            deep_link::take_pending_deep_link,
+            deep_link::take_pending_deep_links,
             assistant::agent_list,
             assistant::chat_start,
             assistant::chat_send,

@@ -174,20 +174,35 @@ export function App() {
   // Deep links (#36). The backend stashes the URL and only nudges us, so a
   // link that launched the app cold is not lost while the WebView boots; both
   // paths DRAIN the same slot, so a link is acted on exactly once.
-  const [pendingLink, setPendingLink] = useState<string | null>(null);
+  const [pendingLinks, setPendingLinks] = useState<string[]>([]);
   useEffect(() => {
     if (!isTauri()) return;
     const drain = () => {
-      void invokeCommand<string | null>("take_pending_deep_link")
-        .then((url) => {
-          if (url) setPendingLink(url);
+      void invokeCommand<string[]>("take_pending_deep_links")
+        .then((urls) => {
+          if (urls.length > 0) setPendingLinks((queued) => [...queued, ...urls]);
         })
         .catch(() => {});
     };
-    drain();
-    const unlistenPromise = listen("deep-link-pending", drain).catch(() => () => {});
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    // Subscribe BEFORE the first drain. Draining first leaves a window
+    // between taking the queue and the listener being attached, and a link
+    // landing in it would be stored, nudged into the void, and never drained
+    // again until some later link happened to fire another event.
+    void listen("deep-link-pending", drain)
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+        drain();
+      })
+      .catch(() => {});
     return () => {
-      void unlistenPromise.then((unlisten) => unlisten());
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -195,33 +210,39 @@ export function App() {
   // start would otherwise be judged against an empty context list and
   // rejected as pointing at a cluster that "doesn't exist".
   useEffect(() => {
-    if (!pendingLink || !contexts) return;
-    setPendingLink(null);
-    const target = parseDeepLink(pendingLink);
-    if (!target) {
-      notify.error("Couldn't open that link", "It isn't a link srelens understands.");
-      return;
+    if (pendingLinks.length === 0 || !contexts) return;
+    // Drain the whole queue: several links can arrive while the contexts are
+    // still loading, and routing only the newest would silently swallow the
+    // rest. They open in order, so the last one ends up in front.
+    const queued = pendingLinks;
+    setPendingLinks([]);
+    for (const url of queued) {
+      const target = parseDeepLink(url);
+      if (!target) {
+        notify.error("Couldn't open that link", "It isn't a link srelens understands.");
+        continue;
+      }
+      if (!contexts.some((c) => c.name === target.context)) {
+        notify.error("Couldn't open that link", `No kube context named "${target.context}".`);
+        continue;
+      }
+      if (target.route === "cluster") {
+        openView(target.context, "overview");
+        continue;
+      }
+      const entry = Object.entries(K8S_KIND).find(([, k8sKind]) => k8sKind === target.kind);
+      if (!entry) {
+        notify.error("Couldn't open that link", `srelens has no view for "${target.kind}".`);
+        continue;
+      }
+      openResourceIn(
+        target.context,
+        entry[0] as ResourceKind,
+        targetNamespace(target.kind, target.namespace),
+        target.name,
+      );
     }
-    if (!contexts.some((c) => c.name === target.context)) {
-      notify.error("Couldn't open that link", `No kube context named "${target.context}".`);
-      return;
-    }
-    if (target.route === "cluster") {
-      openView(target.context, "overview");
-      return;
-    }
-    const entry = Object.entries(K8S_KIND).find(([, k8sKind]) => k8sKind === target.kind);
-    if (!entry) {
-      notify.error("Couldn't open that link", `srelens has no view for "${target.kind}".`);
-      return;
-    }
-    openResourceIn(
-      target.context,
-      entry[0] as ResourceKind,
-      targetNamespace(target.kind, target.namespace),
-      target.name,
-    );
-  }, [pendingLink, contexts]);
+  }, [pendingLinks, contexts]);
 
   // Restored CRD tabs carry a CrdRef captured in a previous session (#159).
   // The CRD may since have been deleted, or may now serve a different version,
