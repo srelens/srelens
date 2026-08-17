@@ -47,6 +47,7 @@ import {
 type NodeRow = NodeSummary & { cpu?: number; memory?: number };
 type PodRow = PodSummary & { cpu?: number; memory?: number };
 import { watchResource, WATCHABLE_KINDS, type WatchHandle, type WatchStatus } from "../lib/watch";
+import type { TabViewState } from "../lib/tabView";
 import {
   parseNamespaceSelection,
   serializeNamespaceSelection,
@@ -582,11 +583,17 @@ export function ResourceBrowser({
   onNamespaceChange,
   detailDrawerWidth = 480,
   kubeconfigFiles = [],
+  view,
+  onViewChange,
 }: {
   context: string;
   kind: ResourceKind;
   query?: string;
   onQueryChange?: (q: string) => void;
+  /** Sort + filtered column, owned by the tab so they survive a switch (#254).
+   *  Absent means the browser keeps them itself, as it used to. */
+  view?: TabViewState;
+  onViewChange?: (patch: Partial<TabViewState>) => void;
   onOpenTerminal?: (s: {
     context: string;
     namespace: string;
@@ -652,7 +659,14 @@ export function ResourceBrowser({
   const [bulkKeys, setBulkKeys] = useState<Set<string>>(new Set());
   // Bumped after a write action so the open detail overview re-fetches.
   const [detailReload, setDetailReload] = useState(0);
-  const [filterColumn, setFilterColumn] = useState<string | null>(null);
+  // Owned by the tab when it supplies a change handler; otherwise local, so
+  // the component still works standalone (tests, and any non-tabbed caller).
+  const [localFilterColumn, setLocalFilterColumn] = useState<string | null>(null);
+  const filterColumn = onViewChange ? (view?.filterColumn ?? null) : localFilterColumn;
+  const setFilterColumn = (next: string | null) => {
+    if (onViewChange) onViewChange({ filterColumn: next });
+    else setLocalFilterColumn(next);
+  };
   // Per-pod CPU/memory (millicores / MiB), merged into the pods table.
   const [podCpuMem, setPodCpuMem] = useState<Map<string, { cpu: number; mem: number }>>(new Map());
   const viewKeyRef = useRef("");
@@ -1086,6 +1100,8 @@ export function ResourceBrowser({
                   onRowClick={kind === "events" ? undefined : onRowClick}
                   activeFilterKey={filterColumn}
                   onActiveFilterKeyChange={setFilterColumn}
+                  sort={view?.sort ?? null}
+                  onSortChange={onViewChange ? (sort) => onViewChange({ sort }) : undefined}
                   emptyText={
                     query
                       ? "No matches"

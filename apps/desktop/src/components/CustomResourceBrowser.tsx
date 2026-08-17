@@ -5,6 +5,7 @@ import { listNamespaces } from "../lib/workloads";
 import { YamlView } from "./YamlView";
 import { Table, filterTableData, Select, Button, ColumnPicker, useColumnVisibility, Spinner, Drawer, TextInput, type Column } from "../ui";
 import { ageSortValue } from "../lib/age";
+import type { TabViewState } from "../lib/tabView";
 
 interface Selected {
   name: string;
@@ -22,12 +23,17 @@ export function CustomResourceBrowser({
   query = "",
   onQueryChange,
   detailDrawerWidth = 480,
+  view,
+  onViewChange,
 }: {
   context: string;
   crd: CrdRef;
   query?: string;
   onQueryChange?: (q: string) => void;
   detailDrawerWidth?: number;
+  /** Sort + filtered column owned by the tab, so they survive a switch (#254). */
+  view?: TabViewState;
+  onViewChange?: (patch: Partial<TabViewState>) => void;
 }) {
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [namespace, setNamespace] = useState("");
@@ -35,7 +41,13 @@ export function CustomResourceBrowser({
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
   const [selected, setSelected] = useState<Selected | null>(null);
-  const [filterColumn, setFilterColumn] = useState<string | null>(null);
+  // Tab-owned when a change handler is supplied; local otherwise.
+  const [localFilterColumn, setLocalFilterColumn] = useState<string | null>(null);
+  const filterColumn = onViewChange ? (view?.filterColumn ?? null) : localFilterColumn;
+  const setFilterColumn = (next: string | null) => {
+    if (onViewChange) onViewChange({ filterColumn: next });
+    else setLocalFilterColumn(next);
+  };
 
   useEffect(() => {
     if (!crd.namespaced) return;
@@ -141,6 +153,8 @@ export function CustomResourceBrowser({
               onRowClick={(r) => setSelected({ name: r.name, namespace: r.namespace })}
               activeFilterKey={filterColumn}
               onActiveFilterKeyChange={setFilterColumn}
+              sort={view?.sort ?? null}
+              onSortChange={onViewChange ? (sort) => onViewChange({ sort }) : undefined}
               emptyText={query ? "No matches" : `No ${crd.kind} resources`}
             />
           )}

@@ -115,6 +115,30 @@ describe("openTabs on desktop", () => {
   });
 });
 
+describe("view state round trip", () => {
+  afterEach(() => localStorage.clear());
+
+  it("carries sort, search and filter column through a save/load cycle (#254)", () => {
+    // Tabs are already serialized, so putting view state on the tab makes it
+    // survive a restart for free — this locks that in.
+    const withView = {
+      ...tab({ id: 1 }),
+      view: { sort: { key: "age", direction: "desc" }, query: "nginx", filterColumn: "name" },
+    } as Tab;
+    saveOpenTabs([withView], 1);
+    expect(loadOpenTabs()?.tabs[0]).toMatchObject({
+      view: { sort: { key: "age", direction: "desc" }, query: "nginx", filterColumn: "name" },
+    });
+  });
+
+  it("restores a tab that never had view state without inventing one", () => {
+    saveOpenTabs([tab({ id: 2 })], 2);
+    const restored = loadOpenTabs()?.tabs[0];
+    expect(restored).toBeDefined();
+    expect(restored && "view" in restored).toBe(false);
+  });
+});
+
 describe("session restore opt-out", () => {
   afterEach(() => {
     localStorage.clear();

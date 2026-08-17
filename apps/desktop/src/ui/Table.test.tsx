@@ -154,6 +154,44 @@ describe("Table", () => {
     expect(filterTableData(rows, ageColumns, "1y", null)).toEqual([{ name: "old", age: "1y" }]);
   });
 
+  it("hands sort changes to the owner when controlled (#254)", () => {
+    // The tab owns the sort so it survives a switch; the table must not keep
+    // a private copy that silently diverges from what it was handed.
+    const onSortChange = vi.fn();
+    const { rerender } = render(
+      <Table
+        columns={columns}
+        data={data}
+        getRowKey={(r) => r.name}
+        sort={null}
+        onSortChange={onSortChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Name" }));
+    expect(onSortChange).toHaveBeenCalledWith({ key: "name", direction: "asc" });
+
+    // Still unsorted on screen until the owner feeds the new value back.
+    expect(screen.getAllByRole("row")[1].textContent).toContain("web-1");
+
+    rerender(
+      <Table
+        columns={columns}
+        data={[...data].reverse()}
+        getRowKey={(r) => r.name}
+        sort={{ key: "name", direction: "asc" }}
+        onSortChange={onSortChange}
+      />,
+    );
+    expect(screen.getAllByRole("row")[1].textContent).toContain("web-1");
+  });
+
+  it("keeps its own sort when uncontrolled", () => {
+    // Tables outside the tabbed workspace have no tab to store a sort on.
+    render(<Table columns={columns} data={[...data].reverse()} getRowKey={(r) => r.name} />);
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Name" }));
+    expect(screen.getAllByRole("row")[1].textContent).toContain("web-1");
+  });
+
   it("selects a column for the toolbar search", () => {
     const onChange = vi.fn();
     render(

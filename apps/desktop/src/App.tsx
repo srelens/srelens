@@ -56,6 +56,7 @@ import {
 } from "./lib/settings";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "./lib/uiScale";
 import { dedupeDeepLinkTargets, parseDeepLink, type DeepLinkTarget } from "./lib/deepLink";
+import { applyViewPatch, type TabViewState } from "./lib/tabView";
 import { invokeCommand } from "./transport/transport";
 import {
   loadOpenTabs,
@@ -88,6 +89,8 @@ export interface ViewTab {
   edit?: { kind: string; namespace: string | null; name: string };
   /** Selected namespace filter (empty = all), preserved per tab. */
   namespace?: string;
+  /** Sort, search text and filtered column for this tab's list (#254). */
+  view?: TabViewState;
 }
 
 export function App() {
@@ -100,7 +103,6 @@ export function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(
     () => restored?.activeTabId ?? null,
   );
-  const [query, setQuery] = useState("");
   const [layout, setLayout] = useState(loadWorkspaceLayout);
   const [sidebarWidth, setSidebarWidth] = useState(layout.leftSidebarWidth);
   const [contextProfiles, setContextProfiles] = useState(loadContextProfiles);
@@ -485,6 +487,18 @@ export function App() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
   const activeCluster = activeTab?.cluster ?? null;
+  // Sort, search text and filtered column belong to the ACTIVE tab (#254).
+  // Previously sort/filter lived in the unmounted-on-switch view components
+  // and the search box was one App-level value shared by every tab, so the
+  // first vanished on a switch and the second leaked across tabs.
+  const activeView = activeTab?.view;
+  const query = activeView?.query ?? "";
+  const updateActiveView = (patch: Partial<TabViewState>) => {
+    if (activeTabId == null) return;
+    setTabs((ts) =>
+      ts.map((t) => (t.id === activeTabId ? { ...t, view: applyViewPatch(t.view, patch) } : t)),
+    );
+  };
   const activeKind: ResourceKind = activeTab?.kind ?? "pods";
   const activeCrd = activeTab?.crd ?? null;
   const clusters = orderContexts(
@@ -521,7 +535,6 @@ export function App() {
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster, kind, namespace: namespaceFor(cluster) }]);
     setActiveTabId(id);
-    setQuery("");
   }
 
   /** Open the single workspace-level Settings tab, optionally at a section. */
@@ -540,7 +553,6 @@ export function App() {
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster: null, kind: "settings" }]);
     setActiveTabId(id);
-    setQuery("");
   }
 
   /** Open (or focus) the single workspace-level Toolbox tab. When `context` is
@@ -556,7 +568,6 @@ export function App() {
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster: null, kind: "toolbox" }]);
     setActiveTabId(id);
-    setQuery("");
   }
 
   /** Open (or focus) the single workspace-level Assistant tab: a full-tab,
@@ -577,7 +588,6 @@ export function App() {
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster: null, kind: "assistant", namespace: "" }]);
     setActiveTabId(id);
-    setQuery("");
   }
   // Keep a stable handle to openSettings so the update-check effect's toast
   // action always uses the current tab state, not a stale closure.
@@ -642,7 +652,6 @@ export function App() {
       setActiveTabId(id);
     }
     setClusterNs((m) => ({ ...m, [cluster]: ns }));
-    setQuery("");
   }
 
   /** Open a resource's kind view and deep-link to its detail (from search). */
@@ -696,7 +705,6 @@ export function App() {
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster, kind: "overview", crd }]);
     setActiveTabId(id);
-    setQuery("");
   }
   function closeView(id: number) {
     setTabs((ts) => {
@@ -867,7 +875,9 @@ export function App() {
                       context={activeCluster}
                       crd={activeTab.crd}
                       query={query}
-                      onQueryChange={setQuery}
+                      onQueryChange={(q) => updateActiveView({ query: q })}
+                      view={activeView}
+                      onViewChange={updateActiveView}
                       detailDrawerWidth={layout.rightSidebarWidth}
                     />
                   ) : activeCluster && activeKind === "overview" ? (
@@ -913,7 +923,9 @@ export function App() {
                       context={activeCluster}
                       kind={activeKind}
                       query={query}
-                      onQueryChange={setQuery}
+                      onQueryChange={(q) => updateActiveView({ query: q })}
+                      view={activeView}
+                      onViewChange={updateActiveView}
                       onOpenTerminal={(s) => openDock("terminal", s)}
                       onOpenLogs={(s) => openDock("logs", s)}
                       onOpenEdit={openEditResource}

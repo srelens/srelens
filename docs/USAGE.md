@@ -332,6 +332,11 @@ The window's size, position, and maximized state are remembered across
 restarts, as are your open tabs and the active one — see
 [Reopen tabs on launch](#settings-reference) to turn the tab part off.
 
+Each tab also keeps its own **sort, search text, and column filter**, so
+switching between tabs no longer resets them and a search typed in one list
+never carries into another. These are restored along with the tabs themselves.
+Column show/hide choices remain shared by every tab of the same kind.
+
 ## Application logs
 
 srelens keeps its own rotating log file so you can diagnose problems after they
