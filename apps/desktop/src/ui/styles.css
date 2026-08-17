@@ -2816,6 +2816,41 @@ body {
   accent-color: var(--fl-color-accent);
   cursor: pointer;
 }
+/* A checkbox preference with a title + explanation, matching the framing of
+   the slider controls above it (session restore, #159). */
+.fl-settings-toggle {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 13px;
+  border: 1px solid var(--fl-color-border-faint);
+  border-radius: var(--fl-radius-lg);
+  background: var(--fl-color-bg);
+  padding: 12px;
+  cursor: pointer;
+}
+.fl-settings-toggle > input {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: var(--fl-color-accent);
+  cursor: pointer;
+}
+.fl-settings-toggle > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.fl-settings-toggle strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.fl-settings-toggle small {
+  color: var(--fl-color-text-muted);
+  font-size: 12px;
+}
+
 /* Interface scale (#237): −/+ steppers flanking the slider, then Reset.
    Request timeout (#238): slider plus an exact number box, since the range
    now runs to two minutes and dragging alone can't land a precise value.

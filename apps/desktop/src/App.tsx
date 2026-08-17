@@ -50,7 +50,7 @@ import {
   loadMcpSettings,
 } from "./lib/settings";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "./lib/uiScale";
-import { loadOpenTabs, saveOpenTabs, nextTabId } from "./lib/openTabs";
+import { loadOpenTabs, saveOpenTabs, nextTabId, pruneMissingContexts } from "./lib/openTabs";
 import { startMcpHttp } from "./lib/mcp";
 import { checkForUpdateAndNotify } from "./lib/updateNotifier";
 import { notify } from "./lib/notify";
@@ -120,6 +120,9 @@ export function App() {
 
   const [contexts, setContexts] = useState<ClusterContext[] | null>(null);
   const [contextsError, setContextsError] = useState("");
+  // The restored-session notice fires at most once, on the first contexts
+  // resolution after launch.
+  const sessionPruneReported = useRef(false);
 
   const refreshContexts = () => {
     // Web has no local kubeconfig files to merge in — the server resolves
@@ -130,8 +133,21 @@ export function App() {
 
       // Auto close any tabs of clusters/contexts that no longer exist!
       if (o.contexts) {
-        const existingNames = new Set(o.contexts.map((c) => c.name));
-        setTabs((ts) => ts.filter((t) => !t.cluster || existingNames.has(t.cluster)));
+        const names = o.contexts.map((c) => c.name);
+        setTabs((ts) => {
+          const { tabs: kept, dropped } = pruneMissingContexts(ts, names);
+          // Say something only for a RESTORED session (#159): a user who just
+          // removed a kubeconfig already knows why those tabs closed, and
+          // this runs on every kubeconfig change.
+          if (dropped > 0 && !sessionPruneReported.current) {
+            notify.info(
+              dropped === 1 ? "Closed 1 restored tab" : `Closed ${dropped} restored tabs`,
+              "Their cluster context is no longer available.",
+            );
+          }
+          sessionPruneReported.current = true;
+          return kept;
+        });
       }
     });
   };

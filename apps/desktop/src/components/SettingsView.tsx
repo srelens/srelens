@@ -57,7 +57,9 @@ import {
   contextDisplayName,
   clampTimeoutSecs,
   getRequestTimeoutSecs,
+  loadRestoreSession,
   loadUpdateChannel,
+  saveRestoreSession,
   saveUpdateChannel,
   type ContextLogo,
   type ContextProfiles,
@@ -228,6 +230,7 @@ export function SettingsView({
     // committed timeout alone until it becomes a number again.
     if (raw.trim() !== "" && Number.isFinite(Number(raw))) changeRequestTimeout(Number(raw));
   };
+  const [restoreSession, setRestoreSession] = useState(() => loadRestoreSession());
   const [uiScale, setUiScaleState] = useState(() => getUiScale());
   // The zoom shortcuts (App.tsx) announce changes so an open slider tracks them.
   useEffect(() => {
@@ -624,6 +627,23 @@ export function SettingsView({
                   />
                 </label>
               </div>
+              <label className="fl-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={restoreSession}
+                  onChange={(event) => {
+                    setRestoreSession(event.target.checked);
+                    saveRestoreSession(event.target.checked);
+                  }}
+                />
+                <span>
+                  <strong>Reopen tabs on launch</strong>
+                  <small>
+                    Start where you left off. Turn this off to open a clean workspace every
+                    time; tabs whose cluster is gone are closed either way.
+                  </small>
+                </span>
+              </label>
               <Button variant="ghost" size="sm" className="mt-3" onClick={() => onLayoutChange({ ...DEFAULT_WORKSPACE_LAYOUT })}>
                 <RotateCcw data-icon="inline-start" />
                 Restore layout defaults

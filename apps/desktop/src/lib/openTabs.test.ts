@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadOpenTabs, saveOpenTabs, nextTabId } from "./openTabs";
+import { loadOpenTabs, saveOpenTabs, nextTabId, pruneMissingContexts } from "./openTabs";
 
 // ViewTab is a type; tests build plain objects matching its shape.
 type Tab = Parameters<typeof saveOpenTabs>[0][number];
@@ -95,13 +95,66 @@ describe("openTabs on desktop", () => {
     localStorage.clear();
   });
 
-  it("never reads or writes localStorage", () => {
+  // #159 changed this deliberately: the desktop used to be a no-op and start
+  // blank every launch. It now persists through the same settingsStorage
+  // path as the web, which is file-backed once the durable store loads.
+  it("persists and restores like the web does", () => {
     setDesktop(true);
-    saveOpenTabs([tab({ id: 1 })], 1);
-    expect(localStorage.getItem(KEY)).toBeNull();
-    // Even with data present, desktop restore is a no-op.
-    localStorage.setItem(KEY, JSON.stringify({ tabs: [tab({ id: 9 })], activeTabId: 9 }));
+    saveOpenTabs([tab({ id: 1 }), tab({ id: 2, kind: "services" })], 2);
+    const restored = loadOpenTabs();
+    expect(restored?.tabs.map((t) => t.id)).toEqual([1, 2]);
+    expect(restored?.activeTabId).toBe(2);
+  });
+});
+
+describe("session restore opt-out", () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("starts fresh when disabled, without discarding the stored session", () => {
+    saveOpenTabs([tab({ id: 4 })], 4);
+    expect(loadOpenTabs()?.tabs).toHaveLength(1);
+
+    localStorage.setItem("srelens.restoreSession", "false");
     expect(loadOpenTabs()).toBeNull();
+    // A later save must not clobber the snapshot either, so re-enabling the
+    // setting brings back the real session rather than an empty one.
+    saveOpenTabs([tab({ id: 5 })], 5);
+    localStorage.setItem("srelens.restoreSession", "true");
+    expect(loadOpenTabs()?.tabs.map((t) => t.id)).toEqual([4]);
+  });
+
+  it("is on unless explicitly disabled", () => {
+    saveOpenTabs([tab({ id: 6 })], 6);
+    localStorage.setItem("srelens.restoreSession", "garbage");
+    expect(loadOpenTabs()?.tabs).toHaveLength(1);
+  });
+});
+
+describe("pruneMissingContexts", () => {
+  it("drops tabs whose cluster is gone and reports how many", () => {
+    const result = pruneMissingContexts(
+      [tab({ id: 1, cluster: "prod" }), tab({ id: 2, cluster: "retired" })],
+      ["prod"],
+    );
+    expect(result.tabs.map((t) => t.id)).toEqual([1]);
+    expect(result.dropped).toBe(1);
+  });
+
+  it("keeps cluster-less tabs, which do not depend on a context", () => {
+    // Settings/Toolbox/landing tabs must survive a context disappearing.
+    const result = pruneMissingContexts(
+      [tab({ id: 1, cluster: null }), tab({ id: 2, cluster: "gone" })],
+      [],
+    );
+    expect(result.tabs.map((t) => t.id)).toEqual([1]);
+    expect(result.dropped).toBe(1);
+  });
+
+  it("reports nothing dropped when every context is still present", () => {
+    const tabs = [tab({ id: 1, cluster: "a" }), tab({ id: 2, cluster: "b" })];
+    expect(pruneMissingContexts(tabs, ["a", "b"])).toEqual({ tabs, dropped: 0 });
   });
 });
 

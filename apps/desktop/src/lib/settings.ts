@@ -221,6 +221,31 @@ export function saveContextOrder(order: string[]): void {
   }
 }
 
+const RESTORE_SESSION_KEY = "srelens.restoreSession";
+
+/**
+ * Whether to reopen the previous session's tabs on launch (#159). Defaults to
+ * true: landing back where you left off is the useful behavior, and the
+ * opt-out exists for people who prefer a clean workspace every launch.
+ */
+export function loadRestoreSession(): boolean {
+  try {
+    // Only an explicit "false" disables it, so an absent or unparseable value
+    // keeps the default rather than silently starting fresh.
+    return stored(RESTORE_SESSION_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function saveRestoreSession(enabled: boolean): void {
+  try {
+    settingsStorage.setItem(RESTORE_SESSION_KEY, String(enabled));
+  } catch {
+    // ignore unavailable/quota-exceeded storage
+  }
+}
+
 /** Which release channel the in-app updater follows. */
 export type UpdateChannel = "stable" | "dev";
 
