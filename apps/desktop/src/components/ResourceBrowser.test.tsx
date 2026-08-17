@@ -161,6 +161,29 @@ describe("ResourceBrowser", () => {
     expect(screen.getByRole("button", { name: "Choose columns" })).toBeDefined();
   });
 
+  it("does not wipe a tab-restored search column on mount (#254)", async () => {
+    // The browser is keyed by tab id, so it remounts on every tab switch. A
+    // mount-time reset would patch filterColumn: null straight back into the
+    // tab and silently undo the state this feature exists to preserve.
+    listNamespacesMock.mockResolvedValue({ namespaces: ["default"] });
+    watchResourceMock.mockImplementation(watchWith([pod]));
+    const onViewChange = vi.fn();
+
+    render(
+      <ResourceBrowser
+        context="kind-dev"
+        kind="pods"
+        view={{ filterColumn: "name" }}
+        onViewChange={onViewChange}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("web-1")).toBeDefined());
+
+    expect(onViewChange).not.toHaveBeenCalledWith(
+      expect.objectContaining({ filterColumn: null }),
+    );
+  });
+
   it("re-opening a tab shows cached rows instantly instead of a full re-fetch", async () => {
     listNamespacesMock.mockResolvedValue({ namespaces: ["default"] });
     watchResourceMock.mockImplementation(watchWith([pod]));

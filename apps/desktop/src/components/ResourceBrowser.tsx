@@ -673,7 +673,16 @@ export function ResourceBrowser({
 
   const namespaced = isNamespaced(kind);
 
-  useEffect(() => setFilterColumn(null), [kind]);
+  // Reset the search column only when the kind genuinely CHANGES in place —
+  // not on mount. This component is keyed by tab id, so it remounts on every
+  // tab switch, and a mount-time reset would patch `filterColumn: null` into
+  // the tab and wipe the very value #254 restores.
+  const previousKindRef = useRef(kind);
+  useEffect(() => {
+    if (previousKindRef.current === kind) return;
+    previousKindRef.current = kind;
+    setFilterColumn(null);
+  }, [kind]);
 
   useEffect(() => {
     if (namespaced && namespaces === null) return; // wait for the namespace list
