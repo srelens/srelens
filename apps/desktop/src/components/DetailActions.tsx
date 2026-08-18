@@ -105,6 +105,8 @@ export function PodActions({
   /** The container the annotation (or the running state) nominates. */
   const [preferred, setPreferred] = useState<string | undefined>(undefined);
   const [containerMenu, setContainerMenu] = useState(false);
+  /** Bumped to re-read the containers: a pod's are not fixed for its lifetime. */
+  const [containerReload, setContainerReload] = useState(0);
 
   const deleteCheck = rbac.deletePod(pod.namespace);
   const evictCheck = rbac.evictPod(pod.namespace);
@@ -113,13 +115,18 @@ export function PodActions({
 
   const target = { context, namespace: pod.namespace, pod: pod.name };
 
+  // Switching to a different pod must not leave the previous pod's containers
+  // on screen for the moment the fetch below takes.
+  useEffect(() => {
+    setContainers([]);
+    setPreferred(undefined);
+  }, [context, pod.namespace, pod.name]);
+
   // Read the pod's containers up front so the Shell button knows whether there
   // is a choice to offer. The header stays interactive while this is in flight;
   // a failure just leaves the old single-shot behaviour in place.
   useEffect(() => {
     let current = true;
-    setContainers([]);
-    setPreferred(undefined);
     void getObject(context, "Pod", pod.namespace, pod.name).then((r) => {
       if (!current || !r.object) return;
       const choices = podContainerChoices(r.object);
@@ -129,7 +136,7 @@ export function PodActions({
     return () => {
       current = false;
     };
-  }, [context, pod.namespace, pod.name]);
+  }, [context, pod.namespace, pod.name, containerReload]);
 
   function openShell() {
     // Nothing to choose between (or a pod we couldn't read) → no menu.
@@ -137,6 +144,11 @@ export function PodActions({
       onOpenTerminal?.(preferred ? { ...target, container: preferred } : target);
       return;
     }
+    // Re-read while the menu opens rather than showing a snapshot from whenever
+    // the drawer happened to open: containers restart, and ephemeral debug
+    // containers get attached — including by the Debug button next to this one.
+    // The list fills in from the previous read and corrects itself in place.
+    setContainerReload((n) => n + 1);
     setContainerMenu((open) => !open);
   }
 
@@ -167,6 +179,9 @@ export function PodActions({
     }
     setDialog(null);
     notify.success(`Debug container ${out.container} added to ${pod.name}`);
+    // The pod now has a container it didn't a moment ago; the shell menu has to
+    // know about it.
+    setContainerReload((n) => n + 1);
     onOpenTerminal?.({ context, namespace: pod.namespace, pod: pod.name, container: out.container });
   }
 

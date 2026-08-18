@@ -221,6 +221,49 @@ describe("PodActions", () => {
     expect(titleOf(items[2])).toBe("Shell into generate-tls-certs (not running)");
   });
 
+  it("re-reads the containers when the menu opens", async () => {
+    // A pod's containers aren't fixed for its lifetime: they restart, and
+    // ephemeral debug containers get attached (by the button next to this one).
+    // A snapshot from whenever the drawer opened goes stale.
+    const twoContainers = {
+      object: {
+        spec: { containers: [{ name: "mongodb" }, { name: "metrics" }] },
+        status: {
+          containerStatuses: [
+            { name: "mongodb", state: { running: {} } },
+            { name: "metrics", state: { running: {} } },
+          ],
+        },
+      },
+    };
+    getObjectMock.mockResolvedValueOnce(twoContainers).mockResolvedValue({
+      object: {
+        spec: {
+          containers: [{ name: "mongodb" }, { name: "metrics" }],
+          ephemeralContainers: [{ name: "debugger-abc12" }],
+        },
+        status: {
+          containerStatuses: [
+            { name: "mongodb", state: { running: {} } },
+            { name: "metrics", state: { running: {} } },
+          ],
+          ephemeralContainerStatuses: [{ name: "debugger-abc12", state: { running: {} } }],
+        },
+      },
+    });
+    render(<PodActions context="kind-dev" pod={pod} onOpenTerminal={vi.fn()} />);
+    await waitFor(() => expect(getObjectMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Shell" }));
+    await waitFor(async () =>
+      expect((await screen.findAllByRole("menuitem")).map((i) => i.textContent)).toEqual([
+        "mongodb",
+        "metrics",
+        "debugger-abc12",
+      ]),
+    );
+  });
+
   it("falls back to the old behaviour when the pod can't be read", async () => {
     // An RBAC-restricted get must not disable the shell button: without a
     // container the API server picks, exactly as before the picker existed.
