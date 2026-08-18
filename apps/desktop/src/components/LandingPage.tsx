@@ -254,8 +254,8 @@ export function LandingPage({
               <CardContent>
                 <ul className="fl-landing__firstrun-list">
                   <li>
-                    <strong>Pick a context below</strong> to open that cluster. srelens reads your
-                    kubeconfig; nothing is uploaded anywhere.
+                    <strong>Pick a context below</strong> to open that cluster — these come from your
+                    kubeconfig.
                   </li>
                   <li>
                     <strong>Cmd/Ctrl-K</strong> jumps to any view or resource by name.
