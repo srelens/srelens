@@ -324,27 +324,41 @@ Confirm with `gh secret list --repo srelens/srelens`. Setting them through the
 web UI works too, but then the encoded key exists in a file or on the clipboard
 for as long as it takes to paste it.
 
-**4. Publish the public half.** Export it to the repo's `KEYS` file and to a
-keyserver, so a user can verify without trusting the download page:
+**4. Publish the public half.** `KEYS` is **cumulative** — export the new key
+*alongside* every key already in it, never over the top. Someone verifying an
+older release still needs the key that signed it, and needs to be able to see
+that key's revocation status; overwriting the file strands those releases with
+signatures nobody can check.
 
 ```bash
-gpg --export --armor "$KEYID" > KEYS
+# Append: re-export every key already published, plus the new one.
+gpg --with-colons --import-options show-only --import KEYS 2>/dev/null \
+  | awk -F: '/^fpr/{print $10}' > /tmp/published-keys
+gpg --export --armor $(cat /tmp/published-keys) "$KEYID" > KEYS
+
 gpg --send-keys --keyserver hkps://keys.openpgp.org "$KEYID"
 ```
 
-Commit `KEYS`, then **replace the fingerprint placeholder** in
+For the very first key there is nothing to preserve, so `gpg --export --armor
+"$KEYID" > KEYS` is enough.
+
+Commit `KEYS`, then **replace the fingerprint** in
 [docs/INSTALL.md](INSTALL.md#verifying-a-download) with the real value:
 
 ```bash
 gpg --fingerprint "$KEYID"
 ```
 
-This step is not cosmetic. A `Good signature` only proves the asset matches
-whichever key the verifier happens to hold; anyone can upload a key to a
-keyserver under any name or address. The published fingerprint is the only
-thing that ties a signature back to this project, so verification instructions
-without it offer false assurance. Until the placeholder is replaced, the
-verification section stays marked as pending.
+This step is not cosmetic, and it is enforced. A `Good signature` only proves
+the asset matches whichever key the verifier happens to hold; anyone can upload
+a key to a keyserver under any name or address. The published fingerprint is
+the only thing that ties a signature back to this project.
+
+It is also the **authoritative record of which key is current**: `sign-artifacts`
+refuses to sign a stable release unless the key in `GPG_PRIVATE_KEY` matches
+this fingerprint exactly and appears in `KEYS`. A rotation that updates the
+secret but not this line — or the reverse — fails the release rather than
+publishing signatures the instructions tell users to reject.
 
 **5. Verify the next release.** After the following release completes, download
 one asset and its `.asc` and confirm `gpg --verify` succeeds following only the

@@ -767,9 +767,10 @@ jobs:
           echo "GPG_PRIVATE_KEY is not set, so this stable release cannot be signed." >&2
           echo "Set the secret (docs/DEVELOPMENT.md -> Release signing key) and re-run." >&2
           exit 1
-      # KEYS is the fingerprint users verify against, so it is also the right
-      # thing to check the signing key against — no second copy of the
-      # fingerprint to drift out of date.
+      # The fingerprint printed in docs/INSTALL.md is what a user is told to
+      # compare against, so it — not KEYS — is the authoritative statement of
+      # which key is current. KEYS is a cumulative archive holding retired keys
+      # too, so "the key in KEYS" is not a well-defined thing to check against.
       - uses: actions/checkout@v4
         if: env.ENABLE_GPG == 'true'
         with:
@@ -790,32 +791,43 @@ jobs:
       # ships .asc files that no user can verify against the documented
       # fingerprint. The failure is silent at signing time and only surfaces
       # when someone tries to verify a download, so it is caught here instead.
-      - name: Check the signing key matches the published KEYS file
+      - name: Check the signing key matches what users are told to expect
         if: env.ENABLE_GPG == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f KEYS ]; then
-            echo "KEYS is missing, so the signing key cannot be checked against" >&2
-            echo "what users verify with. Publish the public key first." >&2
-            exit 1
-          fi
+          [ -f KEYS ] || { echo "KEYS is missing — publish the public key first." >&2; exit 1; }
+
           SIGNING_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          # The fingerprint block in the install guide, spaces stripped.
+          DOC_FPR=$(grep -oE '^[0-9A-F]{4}( +[0-9A-F]{4}){9}$' docs/INSTALL.md \
+            | tr -d ' ' | head -1)
+
+          if [ -z "$SIGNING_FPR" ] || [ -z "$DOC_FPR" ]; then
+            echo "Could not read a fingerprint (signing='$SIGNING_FPR' docs='$DOC_FPR')." >&2
+            exit 1
+          fi
+
+          # Catches a rotation that updated the secret but not the docs, or the
+          # reverse: users following the guide would reject a good release, or
+          # accept one signed by a key the guide never named.
+          if [ "$SIGNING_FPR" != "$DOC_FPR" ]; then
+            echo "Signing key does not match the fingerprint published to users:" >&2
+            echo "  GPG_PRIVATE_KEY:   $SIGNING_FPR" >&2
+            echo "  docs/INSTALL.md:   $DOC_FPR" >&2
+            exit 1
+          fi
+
+          # …and that the key is actually IN the archive users import from,
+          # anywhere in it, since KEYS also carries retired keys.
           # show-only inspects KEYS without importing it into the keyring.
-          PUBLISHED_FPR=$(gpg --with-colons --import-options show-only --import KEYS \
-            | awk -F: '/^fpr/{print $10; exit}')
-          if [ -z "$SIGNING_FPR" ] || [ -z "$PUBLISHED_FPR" ]; then
-            echo "Could not read a fingerprint (signing='$SIGNING_FPR' published='$PUBLISHED_FPR')." >&2
+          if ! gpg --with-colons --import-options show-only --import KEYS \
+                 | awk -F: '/^fpr/{print $10}' | grep -qx "$SIGNING_FPR"; then
+            echo "Signing key $SIGNING_FPR is not published in KEYS," >&2
+            echo "so users could not import the key needed to verify it." >&2
             exit 1
           fi
-          if [ "$SIGNING_FPR" != "$PUBLISHED_FPR" ]; then
-            echo "Signing key does not match the published KEYS file:" >&2
-            echo "  GPG_PRIVATE_KEY: $SIGNING_FPR" >&2
-            echo "  KEYS:            $PUBLISHED_FPR" >&2
-            echo "Signatures would not verify against the documented fingerprint." >&2
-            exit 1
-          fi
-          echo "Signing key matches KEYS ($SIGNING_FPR)."
+          echo "Signing key $SIGNING_FPR matches the docs and is present in KEYS."
       - name: Sign release assets
         if: env.ENABLE_GPG == 'true'
         env:
