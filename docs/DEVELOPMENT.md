@@ -283,32 +283,41 @@ Note the key id it prints (the long hex string); `$KEYID` below refers to it.
 the key signs anything. Without the revocation certificate a lost or compromised
 key cannot be retired, only abandoned.
 
+> **Write these OUTSIDE the repository.** Both files are key material and a
+> `git add -A` will happily commit them. The revocation certificate is the
+> dangerous one: it carries no passphrase, so anyone who obtains it can revoke
+> the key permanently and irreversibly. The paths below are absolute for that
+> reason — do not run these with the repo as your working directory.
+
 ```bash
-gpg --output srelens-revoke.asc --gen-revoke "$KEYID"
-gpg --export-secret-keys --armor "$KEYID" > srelens-signing-key.asc
+mkdir -p ~/srelens-keys && chmod 700 ~/srelens-keys
+gpg --output ~/srelens-keys/revoke.asc --gen-revoke "$KEYID"
+gpg --export-secret-keys --armor "$KEYID" > ~/srelens-keys/signing-key.asc
 ```
 
-Store both on offline media (not in this repo, not in a cloud drive that syncs
-to a workstation). Then delete the working copies.
+Move both to offline media (not this repo, not a cloud drive that syncs to a
+workstation), then remove `~/srelens-keys`. If either file ever reaches a
+remote, treat the key as spent and generate a new one: purging the commit does
+not help, because the revocation certificate stays valid forever.
 
 **3. Add the CI secrets.** The workflow base64-decodes the private key, so it
 must be encoded — a raw armored block loses its newlines through the secret
 store.
 
-```bash
-# Linux
-gpg --export-secret-keys "$KEYID" | base64 -w0
+Pipe it straight into `gh`: the key then never lands on disk or in the
+clipboard, so there is nothing to commit by accident.
 
-# macOS (BSD base64 spells the wrap option -b; current macOS also accepts -w0)
-gpg --export-secret-keys "$KEYID" | base64 -b 0 | pbcopy
+```bash
+# Linux uses -w0, macOS's BSD base64 uses -b 0 (current macOS accepts either).
+gpg --export-secret-keys "$KEYID" | base64 -w0 \
+  | gh secret set GPG_PRIVATE_KEY --repo srelens/srelens
+
+gh secret set GPG_PASSPHRASE --repo srelens/srelens   # prompts; stays out of shell history
 ```
 
-In **Settings → Secrets and variables → Actions**, add:
-
-| Secret | Value |
-| --- | --- |
-| `GPG_PRIVATE_KEY` | the base64 blob from above |
-| `GPG_PASSPHRASE` | the passphrase protecting the key |
+Confirm with `gh secret list --repo srelens/srelens`. Setting them through the
+web UI works too, but then the encoded key exists in a file or on the clipboard
+for as long as it takes to paste it.
 
 **4. Publish the public half.** Export it to the repo's `KEYS` file and to a
 keyserver, so a user can verify without trusting the download page:

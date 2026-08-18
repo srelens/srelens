@@ -63,11 +63,10 @@ just Linux — is being enabled; see
 
 ## Verifying a download
 
-> **Not yet available.** GPG release signing is being enabled in
-> [#33](https://github.com/srelens/srelens/issues/33). Current releases carry no
-> `.asc` files and the `KEYS` file below does not exist yet, so the steps here
-> cannot be followed until the first signed release. They are documented in
-> advance so the procedure is settled before any signature is published.
+> **From the next release onward.** Release signing is configured, and stable
+> releases published from here on carry `.asc` signatures. Releases made before
+> that — including the current latest — have none, so there is nothing to verify
+> on those yet.
 
 Once signing is live, every installer on a **stable** release is published with a
 detached GPG signature alongside it — `srelens_1.2.3_amd64.deb` has
@@ -99,9 +98,7 @@ gpg --fingerprint releases@srelens.com
 It must match, exactly:
 
 ```
-<!-- MAINTAINERS: replace with the real fingerprint when the key is published;
-     see docs/DEVELOPMENT.md → Release signing key -->
-FINGERPRINT NOT YET PUBLISHED
+6CFC 3480 3A21 C0E6 DB18  BA47 DDEE DBFF 499D 9481
 ```
 
 This comparison is the step that matters. A `Good signature` line only proves
