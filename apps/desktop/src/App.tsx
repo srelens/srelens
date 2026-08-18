@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ClusterHotbar } from "./components/ClusterHotbar";
@@ -941,6 +941,17 @@ export function App() {
     setActiveDock(null);
   }
 
+  // Contexts the status bar's terminal launcher can open a shell for, in the
+  // hotbar's order so the two lists agree.
+  const terminalContexts = useMemo(
+    () =>
+      orderContexts(contexts ?? [], contextOrder).map((c) => ({
+        name: c.name,
+        label: contextDisplayName(c.name, contextProfiles[c.name]),
+      })),
+    [contexts, contextOrder, contextProfiles],
+  );
+
   const tabDescriptors: TabDescriptor[] = tabs.map((t) => ({
     id: t.id,
     label: t.edit
@@ -1161,14 +1172,17 @@ export function App() {
           activeTab ? (activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
         }
         tabCount={tabs.length}
+        // Every configured context, not just the active tab's: a shell for a
+        // second cluster used to need a tab opened for it first, and the
+        // launcher disappeared entirely on tabs with no cluster (#257).
+        terminalContexts={terminalContexts}
         onOpenTerminal={
           // The host shell (`kubectl · <ctx>`) is desktop-only: on the shared
           // web server a container-host shell would break user isolation. Web
           // users reach an RBAC-scoped in-pod exec terminal from a pod instead.
-          activeCluster && !isWeb
-            ? () =>
-                openDock("shell", { context: activeCluster, namespace: "", kubeconfigFiles })
-            : undefined
+          isWeb
+            ? undefined
+            : (context) => openDock("shell", { context, namespace: "", kubeconfigFiles })
         }
       />
       <CommandPalette
