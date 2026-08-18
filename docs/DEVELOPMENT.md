@@ -278,7 +278,11 @@ must be encoded — a raw armored block loses its newlines through the secret
 store.
 
 ```bash
-gpg --export-secret-keys "$KEYID" | base64 -w0 | pbcopy   # macOS; base64 -w0 on Linux
+# Linux
+gpg --export-secret-keys "$KEYID" | base64 -w0
+
+# macOS (BSD base64 spells the wrap option -b; current macOS also accepts -w0)
+gpg --export-secret-keys "$KEYID" | base64 -b 0 | pbcopy
 ```
 
 In **Settings → Secrets and variables → Actions**, add:
@@ -296,8 +300,19 @@ gpg --export --armor "$KEYID" > KEYS
 gpg --send-keys --keyserver hkps://keys.openpgp.org "$KEYID"
 ```
 
-Commit `KEYS`, then document the fingerprint in
-[docs/INSTALL.md](INSTALL.md#verifying-a-download).
+Commit `KEYS`, then **replace the fingerprint placeholder** in
+[docs/INSTALL.md](INSTALL.md#verifying-a-download) with the real value:
+
+```bash
+gpg --fingerprint "$KEYID"
+```
+
+This step is not cosmetic. A `Good signature` only proves the asset matches
+whichever key the verifier happens to hold; anyone can upload a key to a
+keyserver under any name or address. The published fingerprint is the only
+thing that ties a signature back to this project, so verification instructions
+without it offer false assurance. Until the placeholder is replaced, the
+verification section stays marked as pending.
 
 **5. Verify the next release.** After the following release completes, download
 one asset and its `.asc` and confirm `gpg --verify` succeeds following only the

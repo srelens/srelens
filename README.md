@@ -118,9 +118,6 @@ Download the latest release for your platform from
 | Linux | `.AppImage`, `.deb`, `.rpm` | AppImage supports the in-app updater |
 | Windows | `.exe`, `.msi` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
 
-Release assets are GPG-signed — see
-[verifying a download](docs/INSTALL.md#verifying-a-download).
-
 See the [installation guide](docs/INSTALL.md) for platform-specific installation,
 first-launch, updating, verification, and uninstall instructions.
 

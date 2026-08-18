@@ -45,8 +45,10 @@ runtime packages (Debian/Ubuntu: `libwayland-client0`, `libwayland-cursor0`,
 
 ### Verifying Linux downloads (optional)
 
-See [Verifying a download](#verifying-a-download) — the same GPG signatures
-cover every platform's assets, not just Linux.
+Each Linux asset ships a Tauri updater signature (`.sig`), used by the in-app
+updater. GPG signing of release assets — which will cover every platform, not
+just Linux — is being enabled; see
+[Verifying a download](#verifying-a-download).
 
 ## Windows
 
@@ -61,43 +63,66 @@ cover every platform's assets, not just Linux.
 
 ## Verifying a download
 
-Every release asset is published with a detached GPG signature alongside it —
-`srelens_0.6.0_amd64.deb` has `srelens_0.6.0_amd64.deb.asc`. Verifying proves
-the file came from the srelens release key and reached you intact.
+> **Not yet available.** GPG release signing is being enabled in
+> [#33](https://github.com/srelens/srelens/issues/33). Current releases carry no
+> `.asc` files and the `KEYS` file below does not exist yet, so the steps here
+> cannot be followed until the first signed release. They are documented in
+> advance so the procedure is settled before any signature is published.
 
-Import the signing key once, either from the [`KEYS`](../KEYS) file in this
-repository or from a keyserver:
+Once signing is live, every release asset is published with a detached GPG
+signature alongside it — `srelens_1.2.3_amd64.deb` has
+`srelens_1.2.3_amd64.deb.asc`.
+
+**1. Import the signing key from this repository.**
 
 ```bash
-# From the repository
 curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/KEYS | gpg --import
-
-# …or from a keyserver
-gpg --keyserver hkps://keys.openpgp.org --search-keys releases@srelens.com
 ```
 
-Then check the asset against its signature:
+Prefer this over a keyserver search. Anyone can upload a key to a keyserver
+under any name or address, so a search for "srelens" can return a key that has
+nothing to do with this project.
+
+**2. Check the fingerprint before trusting anything it signs.**
 
 ```bash
-gpg --verify srelens_0.6.0_amd64.deb.asc srelens_0.6.0_amd64.deb
+gpg --fingerprint releases@srelens.com
 ```
 
-A `Good signature from "srelens release signing"` line means the file is
-authentic. **A "This key is not certified with a trusted signature" warning is
-expected** and does not indicate a problem: it only means you have not
-personally certified the key, which is normal unless you have verified the
-fingerprint out of band.
+It must match, exactly:
 
-`BAD signature`, or a missing key, means the file should not be run — download
-it again from the [releases page](https://github.com/srelens/srelens/releases).
+```
+<!-- MAINTAINERS: replace with the real fingerprint when the key is published;
+     see docs/DEVELOPMENT.md → Release signing key -->
+FINGERPRINT NOT YET PUBLISHED
+```
+
+This comparison is the step that matters. A `Good signature` line only proves
+the file matches whichever key you imported — it says nothing about whether that
+key is ours. Without checking the fingerprint, a substituted key verifies just
+as cleanly as the real one.
+
+**3. Verify the asset.**
+
+```bash
+gpg --verify srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb
+```
+
+`Good signature from "srelens release signing"`, **with the fingerprint above
+confirmed**, means the file is authentic.
+
+A `This key is not certified with a trusted signature` warning alongside it is
+expected and is not a failure: it only means you have not personally signed our
+key in your own web of trust. The fingerprint check in step 2 is what replaces
+that certification.
+
+`BAD signature`, or a key that cannot be found, means the file should not be
+run — download it again from the
+[releases page](https://github.com/srelens/srelens/releases).
 
 Some assets also carry a `.sig` file. Those are Tauri updater signatures, used
 by the in-app updater to check its own downloads, and are not GPG signatures —
 `gpg --verify` does not apply to them.
-
-> Signatures are attached by the release pipeline, so releases published before
-> release signing was enabled do not have `.asc` files. Verification applies
-> from the first signed release onward.
 
 ## Connect MCP clients
 
