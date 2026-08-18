@@ -26,6 +26,7 @@ actions are identified and ask for confirmation before they run.
 - [Toolbox: CLI toolchain and auth plugins](#toolbox-cli-toolchain-and-auth-plugins)
 - [Metrics](#metrics)
 - [Command palette](#command-palette)
+- [Keyboard shortcuts](#keyboard-shortcuts)
 - [Application logs](#application-logs)
 - [MCP server for AI agents](#mcp-server-for-ai-agents)
 - [AI assistant](#ai-assistant)
@@ -297,6 +298,20 @@ Press **Cmd/Ctrl-K** to open the command palette. It offers your **recent** pick
 **Go to** any resource view or CRD, and fuzzy search across resources by name
 (pods, deployments, services, config, and more, indexed when you open the
 palette). Selecting a view opens its tab; selecting a resource opens its detail.
+
+## Keyboard shortcuts
+
+Press **?** anywhere outside a text field for the full list, grouped by where
+each key applies. The ones worth knowing before you look:
+
+| Key | Does |
+| --- | --- |
+| **Cmd/Ctrl-K** | Command palette |
+| **?** | This list |
+| **Cmd-W** (macOS only) | Close the tab — or the window, on the last one. It comes from the macOS app menu, so there is no Windows/Linux equivalent yet. |
+| **Cmd/Ctrl +** / **-** / **0** | Interface larger / smaller / reset |
+| **Cmd/Ctrl-F** | Search the terminal's scrollback, or find in the YAML editor |
+| **Esc** | Close the open dialog, drawer, or search bar |
 
 ## Deep links
 

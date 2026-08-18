@@ -1,0 +1,32 @@
+{{!
+  Desktop entry for the .deb and .rpm packages (#35).
+
+  A copy of tauri-bundler's default template plus GenericName and Keywords,
+  which it has no fields for — those are what make the app findable by what it
+  does ("kubernetes", "k8s", "cluster") rather than only by its name in GNOME's
+  overview and KDE's launcher.
+
+  Everything else is deliberately identical to the default, including
+  StartupWMClass, which the bundler already emits so the running window is
+  matched to this entry instead of showing a generic icon, and the mime_type
+  block, which carries the srelens:// scheme handler that makes deep links work.
+
+  Variables available: categories, comment, exec, icon, name, mime_type,
+  long_description.
+}}
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}} %u
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name={{name}}
+GenericName=Kubernetes Workspace
+Keywords=kubernetes;k8s;kubectl;cluster;container;devops;sre;helm;
+Terminal=false
+Type=Application
+{{#if mime_type}}
+MimeType={{mime_type}}
+{{/if}}

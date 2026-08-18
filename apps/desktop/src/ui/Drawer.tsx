@@ -19,6 +19,8 @@ export interface DrawerProps {
 export function Drawer({ open, title, headerActions, onClose, children, defaultWidth = 480 }: DrawerProps) {
   const [width, setWidth] = useState(defaultWidth);
   const handleRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const returnFocusTo = useRef<HTMLElement | null>(null);
   const startX = useRef(0);
   const startW = useRef(0);
   const widthRef = useRef(width);
@@ -56,6 +58,25 @@ export function Drawer({ open, title, headerActions, onClose, children, defaultW
     };
   }, [open]);
 
+  // Move focus into the panel when it opens, and hand it back to whatever
+  // opened it when it closes (#160). The drawer is deliberately NOT modal — it
+  // sits beside the list rather than over it, so focus is placed, never
+  // trapped: a keyboard user can tab straight back out to the rows behind.
+  useEffect(() => {
+    if (!open) return;
+    const opener = document.activeElement;
+    returnFocusTo.current = opener instanceof HTMLElement ? opener : null;
+    panelRef.current?.focus();
+    return () => {
+      // Only if focus is still inside the closing panel: the user may have
+      // clicked elsewhere, and yanking focus back would be the panel arguing
+      // with them on the way out.
+      const active = document.activeElement;
+      const inside = panelRef.current?.contains(active as Node) || active === document.body;
+      if (inside && returnFocusTo.current?.isConnected) returnFocusTo.current.focus();
+    };
+  }, [open]);
+
   // Close on Escape while open. Bail when a modal dialog is layered on top — it
   // owns Esc, so the first Esc closes the dialog and a second closes the drawer —
   // and when focus is in an editable field / the manifest editor, where Esc has
@@ -78,9 +99,14 @@ export function Drawer({ open, title, headerActions, onClose, children, defaultW
   if (!open) return null;
   return (
     <aside
+      ref={panelRef}
       aria-label="Details"
+      // -1: focusable so opening can land here, but never a Tab stop of its
+      // own — tabbing from the list should reach the panel's controls, not the
+      // panel itself.
+      tabIndex={-1}
       style={{ width }}
-      className="relative flex shrink-0 flex-col border-l border-border bg-card"
+      className="relative flex shrink-0 flex-col border-l border-border bg-card outline-none"
     >
       <div
         ref={handleRef}

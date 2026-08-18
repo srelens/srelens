@@ -45,6 +45,7 @@ const NAV_SECTIONS: Array<{ heading: string; kinds: ResourceKind[] }> = [
 function Caret({ open }: { open: boolean }) {
   return (
     <ChevronRight
+      aria-hidden="true"
       className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
     />
   );
@@ -66,6 +67,9 @@ function TreeRow({
     <button
       type="button"
       onClick={onToggle}
+      // The caret is the only signal that these rows expand, and it is drawn
+      // with an aria-hidden icon — so the state has to be said out loud.
+      aria-expanded={open}
       className={cn(
         "fl-tree-row flex w-full items-center gap-1.5 rounded-md py-0.5 text-left hover:bg-muted/50",
         className,
@@ -149,7 +153,9 @@ export function Sidebar({
   }, [onResize]);
 
   return (
-    <aside className="fl-sidebar">
+    // Named, because a screen reader announcing "complementary" tells the user
+    // nothing about which of the app's two navigation regions they are in.
+    <aside className="fl-sidebar" aria-label="Cluster resources">
       <div className="flex flex-col p-1 text-sm">
         {clusters.map((cluster) => (
           <React.Fragment key={cluster}>

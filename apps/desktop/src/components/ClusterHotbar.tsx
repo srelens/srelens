@@ -77,7 +77,9 @@ export function ClusterHotbar({
   const localContexts = contexts.filter((c) => c.isLocal);
 
   return (
-    <div className="fl-hotbar">
+    // A navigation landmark, named: it is the app's other nav region, and
+    // "Clusters" is how a screen-reader user tells the two apart.
+    <nav className="fl-hotbar" aria-label="Clusters">
       {/* Only the cluster list scrolls — with many contexts it must never
           push the fixed controls below (toolbox, assistant, settings) out
           of the window. */}
@@ -124,6 +126,6 @@ export function ClusterHotbar({
       >
         <Settings aria-hidden="true" />
       </button>
-    </div>
+    </nav>
   );
 }

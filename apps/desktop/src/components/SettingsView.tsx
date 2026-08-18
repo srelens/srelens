@@ -1128,13 +1128,21 @@ export function SettingsView({
                     {updateState.update.notes && <ReleaseNotes notes={updateState.update.notes} />}
                     {updateState.update.external ? (
                       <p className="fl-settings-update__status">
-                        This install is managed by your system package manager — update it there
-                        (AUR: <code>paru -Syu</code> or <code>yay -Syu</code>).
+                        This install is managed by your system package manager — update it there.
+                        On Arch (AUR): <code>paru -Syu</code> or <code>yay -Syu</code>.
                       </p>
                     ) : (
-                      <Button onClick={() => void startInstall()}>
-                        <Download data-icon="inline-start" /> Download &amp; install
-                      </Button>
+                      <>
+                        {updateState.update.elevates && (
+                          <p className="fl-settings-update__status">
+                            Installing a package update needs administrator rights, so your system
+                            will ask for your password.
+                          </p>
+                        )}
+                        <Button onClick={() => void startInstall()}>
+                          <Download data-icon="inline-start" /> Download &amp; install
+                        </Button>
+                      </>
                     )}
                   </div>
                 )}

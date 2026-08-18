@@ -49,6 +49,17 @@ fn self_updatable(os: &str, bundle: Option<BundleType>, has_dpkg: bool, has_rpm:
     }
 }
 
+/// Whether installing the update will ask for administrator rights.
+///
+/// The AppImage is rewritten in place and macOS/Windows installers run as the
+/// user, but a .deb or .rpm is applied with `dpkg -i` / `rpm -U` through
+/// pkexec (falling back to a graphical or terminal sudo). Saying so beforehand
+/// is the difference between an expected password prompt and one that appears
+/// out of nowhere over a Kubernetes console.
+fn needs_privileges(os: &str, bundle: Option<BundleType>) -> bool {
+    os == "linux" && matches!(bundle, Some(BundleType::Deb) | Some(BundleType::Rpm))
+}
+
 fn externally_managed() -> bool {
     let rpm_db = std::path::Path::new("/var/lib/rpm").exists()
         || std::path::Path::new("/usr/lib/sysimage/rpm").exists();
@@ -69,6 +80,10 @@ pub struct UpdateMeta {
     /// can't drive (e.g. pacman for the AUR package) — the UI should point at
     /// that manager instead of offering an in-app install.
     pub external: bool,
+    /// True when applying the update needs administrator rights (a .deb or
+    /// .rpm install, which runs `dpkg -i` / `rpm -U` under pkexec or sudo), so
+    /// the UI can warn before a password prompt appears unannounced.
+    pub elevates: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -102,6 +117,7 @@ pub async fn update_check(app: AppHandle, channel: String) -> Result<Option<Upda
         current_version: u.current_version.clone(),
         notes: u.body.clone(),
         external: externally_managed(),
+        elevates: needs_privileges(std::env::consts::OS, tauri::utils::platform::bundle_type()),
     }))
 }
 
@@ -179,6 +195,22 @@ mod tests {
     #[test]
     fn unknown_linux_packaging_is_externally_managed() {
         assert!(!self_updatable("linux", None, true, true));
+    }
+
+    #[test]
+    fn deb_and_rpm_updates_need_a_password_prompt() {
+        // dpkg/rpm run under pkexec or sudo; the AppImage rewrites itself in
+        // place and needs nothing.
+        assert!(needs_privileges("linux", Some(BundleType::Deb)));
+        assert!(needs_privileges("linux", Some(BundleType::Rpm)));
+        assert!(!needs_privileges("linux", Some(BundleType::AppImage)));
+    }
+
+    #[test]
+    fn other_platforms_never_prompt_for_a_password() {
+        assert!(!needs_privileges("macos", Some(BundleType::App)));
+        assert!(!needs_privileges("windows", Some(BundleType::Nsis)));
+        assert!(!needs_privileges("linux", None));
     }
 
     #[test]

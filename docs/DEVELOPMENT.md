@@ -221,6 +221,43 @@ cargo test -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test
 
 The e2e suite prints `covered N/M capabilities` and fails if any registered capability is neither exercised nor explicitly excluded with a reason — so a new capability cannot land with no end-to-end case.
 
+### Accessibility check
+
+Automated tests catch labels and roles; they cannot tell you whether the app is
+usable without a mouse. Run this by hand before a release, and after any change
+to navigation, dialogs, or the tab bar.
+
+**Keyboard, no mouse.** Unplug it or sit on your hands.
+
+1. From a fresh launch, `Tab` through the window. Every stop must be visible —
+   there is a focus ring on everything focusable, so a stop you cannot see is a
+   bug, not a subtlety.
+2. Reach a cluster from the hotbar and a resource list from the sidebar using
+   only `Tab`, arrow keys, and `Enter`. Collapsible rows announce themselves via
+   `aria-expanded` and toggle on `Enter`/`Space`.
+3. `Cmd/Ctrl-K` opens the palette; typing filters; `↑`/`↓` and `Enter` run a
+   command; `Esc` closes it and returns focus to where you were.
+4. `?` opens the shortcut sheet; `Esc` closes it. In a search field, `?` types a
+   question mark instead — check that too.
+5. Open a resource detail drawer. Focus moves into the panel, and `Esc` closes
+   it and hands focus back to the row you opened it from. The drawer is
+   deliberately not modal — it sits beside the list rather than over it — so
+   `Tab` is free to leave it; that is correct, not a bug.
+
+**Screen reader.** VoiceOver on macOS (`Cmd-F5`), NVDA on Windows, Orca on
+Linux. With the rotor / element list:
+
+1. Landmarks list both navigation regions by name: **Clusters** (hotbar) and
+   **Cluster resources** (sidebar).
+2. Every button announces a name, not "button" alone — icon-only controls carry
+   an `aria-label` and their icon is `aria-hidden`.
+3. Resource tables announce as tables with column headers, and row navigation
+   reads the header with each cell.
+4. Opening a dialog announces its title; closing returns you to the trigger.
+
+Anything that fails belongs in an issue with the step number, the assistive
+technology, and its version.
+
 ## Adding a new capability (walkthrough)
 
 1. **Write the handler test-first** in the right `crates/kube` module (or a new one): a `pub fn <name>_capability(cache: …) -> Capability` returning schemas derived with `schemars` and an async handler.

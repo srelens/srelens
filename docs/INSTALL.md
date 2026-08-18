@@ -32,8 +32,7 @@ Pick the package for your distribution:
 | Fedora/RHEL | `srelens-<version>-1.x86_64.rpm` | `sudo dnf install ./srelens-*.rpm` |
 
 Requires a WebKitGTK runtime (`webkit2gtk-4.1`); the deb/rpm pull it in
-automatically. The in-app updater applies to the **AppImage** build; update
-deb/rpm installs by downloading the new package.
+automatically. See [Updating](#updating) for how each format updates itself.
 
 The AppImage deliberately does **not** bundle the Wayland client libraries
 (`libwayland-client/cursor/egl/server`) — bundling them breaks EGL on hosts with
@@ -205,8 +204,43 @@ srelens checks for updates from **Settings → Updates**:
 - **Stable** — released versions (default).
 - **Dev** — rolling pre-releases for early access.
 
-Updates are cryptographically signed and verified before install. On Linux, the
-in-app updater applies to the AppImage build only.
+Updates are cryptographically signed and verified before install.
+
+On Linux what happens next depends on how srelens was installed, and the app
+works this out for itself rather than asking you:
+
+| Install | In-app update |
+| --- | --- |
+| AppImage | Replaces the AppImage in place. Nothing else needed. |
+| `.deb` / `.rpm` | Downloads the new package and applies it with `dpkg -i` / `rpm -U`. This needs administrator rights, so your desktop will ask for your password; Settings warns you before the prompt appears. |
+| AUR (`srelens-bin`) | Not offered. pacman owns the files, so srelens points you at `paru -Syu` / `yay -Syu` instead of desyncing its database. |
+
+A package update can fail in two different ways, and they need different
+answers.
+
+**Before anything is applied** — no `pkexec` or polkit agent, the password
+prompt cancelled, a locked package database. Nothing has changed; download the
+new `.deb`/`.rpm` from
+[Releases](https://github.com/srelens/srelens/releases/latest) and install it
+the way you installed the first one.
+
+**Part-way through** — `dpkg`/`rpm` accepted the package and then failed while
+unpacking or configuring it (a full disk, an unmet dependency, a failing
+maintainer script). The package is left unpacked or unconfigured and srelens may
+not start until the package manager finishes the job:
+
+```bash
+sudo dpkg --configure -a        # Debian/Ubuntu: finish a half-configured install
+sudo apt --fix-broken install   # …and pull in whatever it was missing
+sudo dnf reinstall ./srelens-*.rpm   # Fedora/RHEL, from the downloaded file
+```
+
+srelens is distributed as a downloaded package rather than from a repository,
+so the `dnf` line needs the `.rpm` file itself — plain `dnf reinstall srelens`
+has nowhere to fetch it from and fails.
+
+The error `dpkg` or `rpm` printed names the actual cause; fix that first, since
+the commands above will otherwise stop at the same point.
 
 ## Uninstalling
 

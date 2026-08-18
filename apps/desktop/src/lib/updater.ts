@@ -11,6 +11,12 @@ export interface UpdateMeta {
    * (e.g. pacman for the AUR package) — offer guidance, not an install button.
    */
   external: boolean;
+  /**
+   * Applying the update needs administrator rights — a .deb or .rpm install,
+   * which runs `dpkg -i` / `rpm -U` under pkexec or sudo. Warn first, so the
+   * password prompt isn't a surprise.
+   */
+  elevates: boolean;
 }
 
 interface RawUpdateMeta {
@@ -18,6 +24,7 @@ interface RawUpdateMeta {
   current_version: string;
   notes: string | null;
   external?: boolean;
+  elevates?: boolean;
 }
 
 interface RawProgress {
@@ -34,6 +41,7 @@ export async function checkForUpdate(channel: UpdateChannel): Promise<UpdateMeta
     currentVersion: meta.current_version,
     notes: meta.notes ?? "",
     external: meta.external ?? false,
+    elevates: meta.elevates ?? false,
   };
 }
 

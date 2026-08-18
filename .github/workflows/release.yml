@@ -46,7 +46,7 @@ jobs:
       release: ${{ steps.compute.outputs.release }}
       notes: ${{ steps.compute.outputs.notes }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -193,7 +193,7 @@ jobs:
     if: needs.version.outputs.release == 'true' && github.ref_name == 'main'
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -269,7 +269,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Stamp the release version into the workspace before the image builds:
       # every crate inherits [workspace.package].version, and without this the
       # server binary in the image reports the committed placeholder instead
@@ -338,7 +338,7 @@ jobs:
       packages: write
     steps:
       - name: Download digests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: /tmp/digests
           pattern: docker-digest-*
@@ -419,7 +419,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # On main, the version job already pushed the bump commit — build it.
           ref: ${{ github.ref_name == 'main' && 'main' || github.sha }}
@@ -533,7 +533,7 @@ jobs:
           echo "REL_NAME=srelens v${{ needs.version.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Build app & publish release
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Updater signing — produces the .sig files latest.json needs so the
@@ -604,7 +604,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Compose and publish release notes
@@ -650,7 +650,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref_name == 'main' && 'main' || github.sha }}
       - name: Compose and publish updater manifest
@@ -691,7 +691,7 @@ jobs:
     if: ${{ always() && needs.build.result == 'success' && github.ref_name == 'main' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -774,7 +774,7 @@ jobs:
       # compare against, so it — not KEYS — is the authoritative statement of
       # which key is current. KEYS is a cumulative archive holding retired keys
       # too, so "the key in KEYS" is not a well-defined thing to check against.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.ENABLE_GPG == 'true'
         with:
           ref: ${{ github.ref_name == 'main' && 'main' || github.sha }}

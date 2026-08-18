@@ -29,6 +29,7 @@ describe("checkForUpdate", () => {
       current_version: "0.1.0",
       notes: "### Features\n- things",
       external: false,
+      elevates: true,
     });
     const meta = await checkForUpdate("dev");
     expect(invokeCommandMock).toHaveBeenCalledWith("update_check", { channel: "dev" });
@@ -37,7 +38,14 @@ describe("checkForUpdate", () => {
       currentVersion: "0.1.0",
       notes: "### Features\n- things",
       external: false,
+      elevates: true,
     });
+  });
+
+  it("treats a backend that says nothing about privileges as needing none", async () => {
+    // Defaulting the other way would warn about a password prompt on macOS.
+    invokeCommandMock.mockResolvedValue({ version: "0.2.0", current_version: "0.1.0", notes: null });
+    expect((await checkForUpdate("stable"))?.elevates).toBe(false);
   });
 
   it("defaults notes to an empty string", async () => {

@@ -45,16 +45,41 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "srelens",
+    "homepage": "https://srelens.com",
+    "license": "MIT",
+    "copyright": "Copyright (c) srelens contributors",
+    "category": "DeveloperTool",
+    "shortDescription": "Kubernetes desktop workspace",
+    "longDescription": "srelens is a local-first Kubernetes desktop workspace for SREs, platform engineers, and DevOps engineers. Browse live cluster resources, inspect manifests and events, follow logs, open pod shells and port forwards, manage Helm releases, and take confirmation-gated cluster actions from one application. Cluster access uses your local kubeconfig and connects directly to the API server.",
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
+      "icons/64x64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ],
+        "desktopTemplate": "linux/srelens.desktop"
+      },
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3"
+        ],
+        "desktopTemplate": "linux/srelens.desktop"
+      }
     }
   }
 }

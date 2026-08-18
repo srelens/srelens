@@ -39,6 +39,19 @@ describe("Sidebar", () => {
     expect(screen.queryByRole("button", { name: "ConfigMaps" })).toBeNull();
   });
 
+  it("announces the region and which rows expand (#160)", () => {
+    render(<Sidebar {...base} />);
+    // Two navigation regions in the app; "complementary" alone names neither.
+    expect(screen.getByRole("complementary", { name: "Cluster resources" })).toBeDefined();
+    // The caret is a decorative icon, so the state has to be in the markup.
+    const group = screen.getByRole("button", { name: "Workloads" });
+    expect(group.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(group);
+    expect(screen.getByRole("button", { name: "Workloads" }).getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+  });
+
   it("renders a tree per opened cluster", () => {
     render(<Sidebar {...base} clusters={["kind-dev", "prod-east"]} />);
     expect(screen.getByRole("button", { name: /kind-dev/ })).toBeDefined();

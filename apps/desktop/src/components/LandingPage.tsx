@@ -261,8 +261,7 @@ export function LandingPage({
                     <strong>Cmd/Ctrl-K</strong> jumps to any view or resource by name.
                   </li>
                   <li>
-                    <strong>The strip on the left</strong> switches clusters once one is open, and
-                    holds settings and the toolbox.
+                    <strong>?</strong> lists every keyboard shortcut.
                   </li>
                 </ul>
               </CardContent>

@@ -2,7 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { checkForUpdateAndNotify } from "./updateNotifier";
 import type { UpdateMeta } from "./updater";
 
-const update: UpdateMeta = { version: "0.3.0", currentVersion: "0.2.0", notes: "", external: false };
+const update: UpdateMeta = {
+  version: "0.3.0",
+  currentVersion: "0.2.0",
+  notes: "",
+  external: false,
+  elevates: false,
+};
 
 describe("checkForUpdateAndNotify", () => {
   it("notifies when a newer version is available", async () => {

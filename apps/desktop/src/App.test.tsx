@@ -346,6 +346,25 @@ describe("App", () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
+  it("`?` opens the shortcut cheat sheet", () => {
+    render(<App />);
+    fireEvent.keyDown(window, { key: "?", shiftKey: true });
+    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeDefined();
+  });
+
+  it("`?` typed into a field stays a question mark", () => {
+    // The sheet's key carries no modifier, so it has to yield to typing —
+    // otherwise searching for "why?" opens a help overlay mid-word.
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.focus();
+    fireEvent.keyDown(field, { key: "?", shiftKey: true, bubbles: true });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
+    field.remove();
+  });
+
   it("close-active-tab (Cmd+W) closes the active tab, not the window", () => {
     (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
     tauri.windowClose.mockClear();

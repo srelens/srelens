@@ -20,6 +20,8 @@ import { SettingsView } from "./components/SettingsView";
 import { ToolboxView } from "./components/ToolboxView";
 import { AssistantTab } from "./components/AssistantTab";
 import { CommandPalette } from "./components/CommandPalette";
+import { ShortcutCheatSheet } from "./components/ShortcutCheatSheet";
+import { isTypingTarget, matchesShortcut } from "./lib/shortcuts";
 import { McpConfirmDialog } from "./components/McpConfirmDialog";
 import { VaultGate } from "./components/VaultGate";
 import { Toaster } from "./components/ui/sonner";
@@ -131,6 +133,7 @@ export function App() {
   const [contextOrderById, setContextOrderById] = useState(loadContextOrder);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [cheatSheetOpen, setCheatSheetOpen] = useState(false);
   // Bumped after a palette action mutates a resource, so the active
   // ResourceBrowser remounts and re-fetches (mirrors the settingsSectionNonce
   // remount-via-key pattern below).
@@ -569,12 +572,21 @@ export function App() {
     }));
   }
 
-  // Global Cmd/Ctrl-K opens the command palette.
+  // Global shortcuts, matched against the registry the cheat sheet reads from
+  // (#160), so the two cannot drift apart.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if (matchesShortcut("palette", e)) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
+        return;
+      }
+      // `?` carries no modifier, so it has to yield to whatever the user is
+      // typing into — in a search box it is a question mark, not a request
+      // for help.
+      if (matchesShortcut("cheatsheet", e) && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        setCheatSheetOpen((o) => !o);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -1211,6 +1223,7 @@ export function App() {
         currentViewKind={activeTab?.kind}
         onAfterAction={() => setViewReloadNonce((n) => n + 1)}
       />
+      <ShortcutCheatSheet open={cheatSheetOpen} onOpenChange={setCheatSheetOpen} desktop={!isWeb} />
       <Toaster position="top-right" richColors closeButton />
       <McpConfirmDialog />
       <VaultGate onReady={() => setVaultReady(true)} />
