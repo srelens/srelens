@@ -4478,3 +4478,17 @@ body {
   background: rgba(128, 128, 128, 0.65);
   opacity: 1;
 }
+
+/* First-run help on the landing page (#161) */
+.fl-landing__firstrun-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fl-color-text-muted);
+  font-size: 13px;
+}
+.fl-landing__firstrun-list strong {
+  color: var(--fl-color-text);
+}

@@ -64,6 +64,7 @@ import { isTauri } from "../transport/platform";
 import type { OpenResource } from "../lib/resourceNavigation";
 import { describeError } from "../lib/errors";
 import { ageSortValue } from "../lib/age";
+import { emptyListMessage } from "../lib/onboarding";
 import {
   Table,
   filterTableData,
@@ -929,6 +930,13 @@ export function ResourceBrowser({
   );
   // Clear the selection whenever the underlying list changes shape.
   useEffect(() => setBulkKeys(new Set()), [context, kind, watchNamespace, selectionKey]);
+  const emptyMessage = emptyListMessage({
+    kind: RESOURCE_LABELS[kind].toLowerCase(),
+    query,
+    filtered: !!filterColumn,
+    namespaces: selection,
+    namespaced,
+  });
   const filterLabel = filterColumn
     ? visibleColumns.find((column) => column.key === filterColumn)?.header
     : null;
@@ -1112,17 +1120,11 @@ export function ResourceBrowser({
                   onActiveFilterKeyChange={setFilterColumn}
                   sort={view?.sort ?? null}
                   onSortChange={onViewChange ? (sort) => onViewChange({ sort }) : undefined}
-                  emptyText={
-                    query
-                      ? "No matches"
-                      : `No ${kind}${
-                          namespaced && selection.length === 1
-                            ? ` in ${selection[0]}`
-                            : namespaced && selection.length > 1
-                              ? ` in ${selection.length} namespaces`
-                              : ""
-                        }`
-                  }
+                  // Say what is narrowing the view, not just that nothing was
+                  // found (#161): an empty list otherwise reads the same
+                  // whether the cluster is empty or a filter is hiding it.
+                  emptyText={emptyMessage.title}
+                  emptyHint={emptyMessage.hint}
                 />
               )}
             </div>

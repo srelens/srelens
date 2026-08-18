@@ -48,6 +48,8 @@ export interface TableProps<T> {
   selection?: TableSelection;
   /** Shown when `data` is empty. */
   emptyText?: React.ReactNode;
+  /** Second line of the empty state: what the reader can do about it. */
+  emptyHint?: React.ReactNode;
   /** Column currently used by the toolbar search; null searches every column. */
   activeFilterKey?: string | null;
   onActiveFilterKeyChange?: (key: string | null) => void;
@@ -116,6 +118,7 @@ export function Table<T>({
   selectedKey,
   selection,
   emptyText = "No items",
+  emptyHint,
   activeFilterKey = null,
   onActiveFilterKeyChange,
   sort: controlledSort,
@@ -313,7 +316,7 @@ export function Table<T>({
   const bottomPad = virtualize ? (visibleData.length - range.end) * metrics.rowHeight : 0;
 
   if (data.length === 0) {
-    return <EmptyState title={emptyText} />;
+    return <EmptyState title={emptyText} description={emptyHint} />;
   }
   return (
     <div ref={rootRef} style={{ display: "contents" }}>
