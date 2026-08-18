@@ -728,8 +728,12 @@ jobs:
   # verify authenticity (`gpg --verify file.asc file`). Activates automatically
   # once the GPG_PRIVATE_KEY secret is set; otherwise it's a no-op.
   sign-artifacts:
-    needs: [version, build]
-    if: ${{ always() && needs.build.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
+    # updater-manifest included so latest.json is already attached when the
+    # assets are downloaded. Both used to run off [version, build], i.e. in
+    # parallel, so whether latest.json ended up signed depended on which job
+    # happened to finish first.
+    needs: [version, build, updater-manifest]
+    if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -738,7 +742,15 @@ jobs:
     steps:
       - name: Import GPG key
         if: env.ENABLE_GPG == 'true'
-        run: echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 --decode | gpg --batch --import
+        env:
+          # Through the environment rather than interpolated into the script:
+          # a secret spliced into the command text is one quoting accident away
+          # from being mangled, and it keeps the value out of the shell trace.
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GPG_PRIVATE_KEY" | base64 --decode | gpg --batch --import
       - name: Sign release assets
         if: env.ENABLE_GPG == 'true'
         env:
@@ -749,17 +761,33 @@ jobs:
           set -euo pipefail
           TAG="srelens-v${{ needs.version.outputs.version }}"
           KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+          if [ -z "$KEYID" ]; then
+            echo "GPG_PRIVATE_KEY is set but no secret key was imported." >&2
+            exit 1
+          fi
+          echo "Signing with key $KEYID"
           mkdir -p _assets && cd _assets
           gh release download "$TAG" --repo "${{ github.repository }}" --clobber
           shopt -s nullglob
+          signed=0
           for f in *; do
-            case "$f" in *.asc) continue ;; esac
+            # Skip our own output, and the minisign updater signatures — those
+            # are verified by the updater's own key, and a .sig.asc is noise on
+            # the release page.
+            case "$f" in *.asc | *.sig) continue ;; esac
             gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
                 --local-user "$KEYID" --armor --detach-sign --output "$f.asc" "$f"
+            signed=$((signed + 1))
           done
-          if ls *.asc >/dev/null 2>&1; then
-            gh release upload "$TAG" --repo "${{ github.repository }}" *.asc --clobber
+          # A configured key that signs nothing means the download or the skip
+          # rules are wrong; failing here keeps the release a draft rather than
+          # publishing one that silently claims to be signed.
+          if [ "$signed" -eq 0 ]; then
+            echo "No assets were signed — nothing matched on $TAG." >&2
+            exit 1
           fi
+          echo "Signed $signed asset(s)."
+          gh release upload "$TAG" --repo "${{ github.repository }}" *.asc --clobber
 
   # Stable only (dev never drafts — see releaseDraft above). Flip the draft once
   # the whole pipeline is green: every matrix leg built and passed its asserts,

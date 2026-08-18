@@ -244,6 +244,66 @@ All three must be green.
 
 A separate Release workflow (`.github/workflows/release.yml`) publishes on pushes to `main` — Conventional-Commit-driven stable releases. Rolling `dev` pre-releases are **not** cut on every push: they come from a daily 18:00 UTC cron, or on demand via *Run workflow*. AUR publishing is split into `.github/workflows/aur-publish.yml` so it can also be run by hand.
 
+### Release signing key (maintainers)
+
+Release assets are GPG-signed by the `sign-artifacts` job, which activates
+automatically once `GPG_PRIVATE_KEY` is present and stays dormant otherwise. The
+key must be generated on a maintainer's own machine: a release-signing private
+key should never be pasted into a chat, an issue, a CI log, or any tool that
+retains input.
+
+**1. Generate a dedicated key.** Not a personal key — this one only ever signs
+srelens releases, so it can be revoked without collateral damage.
+
+```bash
+gpg --quick-generate-key "srelens release signing <releases@srelens.com>" ed25519 sign 3y
+```
+
+Note the key id it prints (the long hex string); `$KEYID` below refers to it.
+
+**2. Make a revocation certificate and back both up offline.** Do this *before*
+the key signs anything. Without the revocation certificate a lost or compromised
+key cannot be retired, only abandoned.
+
+```bash
+gpg --output srelens-revoke.asc --gen-revoke "$KEYID"
+gpg --export-secret-keys --armor "$KEYID" > srelens-signing-key.asc
+```
+
+Store both on offline media (not in this repo, not in a cloud drive that syncs
+to a workstation). Then delete the working copies.
+
+**3. Add the CI secrets.** The workflow base64-decodes the private key, so it
+must be encoded — a raw armored block loses its newlines through the secret
+store.
+
+```bash
+gpg --export-secret-keys "$KEYID" | base64 -w0 | pbcopy   # macOS; base64 -w0 on Linux
+```
+
+In **Settings → Secrets and variables → Actions**, add:
+
+| Secret | Value |
+| --- | --- |
+| `GPG_PRIVATE_KEY` | the base64 blob from above |
+| `GPG_PASSPHRASE` | the passphrase protecting the key |
+
+**4. Publish the public half.** Export it to the repo's `KEYS` file and to a
+keyserver, so a user can verify without trusting the download page:
+
+```bash
+gpg --export --armor "$KEYID" > KEYS
+gpg --send-keys --keyserver hkps://keys.openpgp.org "$KEYID"
+```
+
+Commit `KEYS`, then document the fingerprint in
+[docs/INSTALL.md](INSTALL.md#verifying-a-download).
+
+**5. Verify the next release.** After the following release completes, download
+one asset and its `.asc` and confirm `gpg --verify` succeeds following only the
+public instructions — the signing job failing loudly is not proof the signature
+is *usable*.
+
 ## Conventions
 
 - **Branching** — `dev` is the default branch; open PRs against it. `main` carries stable releases.

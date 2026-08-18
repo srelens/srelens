@@ -45,9 +45,8 @@ runtime packages (Debian/Ubuntu: `libwayland-client0`, `libwayland-cursor0`,
 
 ### Verifying Linux downloads (optional)
 
-Each Linux asset ships a Tauri updater signature (`.sig`). GPG signatures for
-release assets are on the [roadmap](https://github.com/orgs/srelens/projects/1);
-until then, verify by matching the file against the release.
+See [Verifying a download](#verifying-a-download) — the same GPG signatures
+cover every platform's assets, not just Linux.
 
 ## Windows
 
@@ -59,6 +58,46 @@ until then, verify by matching the file against the release.
 > [roadmap](https://github.com/orgs/srelens/projects/1), so Windows may show a
 > "Windows protected your PC" prompt. Click **More info → Run anyway** to
 > proceed. Signed installers will remove this step in a future release.
+
+## Verifying a download
+
+Every release asset is published with a detached GPG signature alongside it —
+`srelens_0.6.0_amd64.deb` has `srelens_0.6.0_amd64.deb.asc`. Verifying proves
+the file came from the srelens release key and reached you intact.
+
+Import the signing key once, either from the [`KEYS`](../KEYS) file in this
+repository or from a keyserver:
+
+```bash
+# From the repository
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/KEYS | gpg --import
+
+# …or from a keyserver
+gpg --keyserver hkps://keys.openpgp.org --search-keys releases@srelens.com
+```
+
+Then check the asset against its signature:
+
+```bash
+gpg --verify srelens_0.6.0_amd64.deb.asc srelens_0.6.0_amd64.deb
+```
+
+A `Good signature from "srelens release signing"` line means the file is
+authentic. **A "This key is not certified with a trusted signature" warning is
+expected** and does not indicate a problem: it only means you have not
+personally certified the key, which is normal unless you have verified the
+fingerprint out of band.
+
+`BAD signature`, or a missing key, means the file should not be run — download
+it again from the [releases page](https://github.com/srelens/srelens/releases).
+
+Some assets also carry a `.sig` file. Those are Tauri updater signatures, used
+by the in-app updater to check its own downloads, and are not GPG signatures —
+`gpg --verify` does not apply to them.
+
+> Signatures are attached by the release pipeline, so releases published before
+> release signing was enabled do not have `.asc` files. Verification applies
+> from the first signed release onward.
 
 ## Connect MCP clients
 
