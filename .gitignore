@@ -13,3 +13,9 @@ docs/superpowers/
 
 # OS
 .DS_Store
+
+# Never commit release signing material (see docs/DEVELOPMENT.md).
+srelens-signing-key.asc
+srelens-revoke.asc
+*.private.asc
+*-secret.asc

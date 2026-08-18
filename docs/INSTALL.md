@@ -69,9 +69,16 @@ just Linux — is being enabled; see
 > cannot be followed until the first signed release. They are documented in
 > advance so the procedure is settled before any signature is published.
 
-Once signing is live, every installer you download is published with a detached
-GPG signature alongside it — `srelens_1.2.3_amd64.deb` has
-`srelens_1.2.3_amd64.deb.asc`.
+Once signing is live, every installer on a **stable** release is published with a
+detached GPG signature alongside it — `srelens_1.2.3_amd64.deb` has
+`srelens_1.2.3_amd64.deb.asc`. A stable release is only made public after
+signing succeeds, so a missing `.asc` there means you are not looking at a
+finished release.
+
+Dev-channel pre-releases are published as soon as they build, before signing
+runs, so their signatures are best-effort: usually present, but absent if
+signing failed for that build. Treat a dev pre-release without an `.asc` as
+unverified rather than as evidence of tampering.
 
 **1. Import the signing key from this repository.**
 

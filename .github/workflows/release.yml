@@ -737,8 +737,17 @@ jobs:
   # and the updater verifies the installer it downloads against the public key
   # pinned in tauri.conf.json — so tampering with the manifest cannot get a
   # modified build accepted. (The manifest itself carries no signature of its
-  # own, on either channel.) The installers a human downloads ARE signed on
-  # both channels, which is what the docs promise.
+  # own, on either channel.)
+  #
+  # Signing is a publication GATE on stable only: publish-release requires this
+  # job, so a stable release that fails to sign stays an invisible draft. Dev
+  # pre-releases are public the moment they build (releaseDraft is false for
+  # dev), so a failure here turns the run red but the assets are already
+  # downloadable. That is deliberate — the dev-channel manifest points at those
+  # asset URLs, so drafting the release would 404 the updater until a publish
+  # step ran, and gating a daily automated pre-release on GPG infrastructure
+  # trades availability for a guarantee dev users have not asked for. The docs
+  # scope the promise to stable accordingly.
   sign-artifacts:
     needs: [version, build, updater-manifest]
     if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
