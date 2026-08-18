@@ -15,6 +15,7 @@ import {
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { listContexts, type ClusterContext } from "../lib/clusters";
 import { ContextAvatar } from "./ContextAvatar";
+import type { SettingsSection } from "./SettingsView";
 import { contextDisplayName, orderContexts, type ContextProfiles } from "../lib/settings";
 import { loadOnboarded, saveOnboarded, shouldShowFirstRun } from "../lib/onboarding";
 
@@ -48,7 +49,7 @@ export function LandingPage({
   contextsError = "",
 }: {
   onOpenContext: (context: string) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: SettingsSection) => void;
   contextProfiles?: ContextProfiles;
   kubeconfigFiles?: string[];
   contextOrder?: string[];
@@ -162,7 +163,7 @@ export function LandingPage({
               <small>Kubernetes desktop workspace</small>
             </span>
           </div>
-          <Button variant="ghost" size="sm" onClick={onOpenSettings} aria-label="Workspace preferences">
+          <Button variant="ghost" size="sm" onClick={() => onOpenSettings()} aria-label="Workspace preferences">
             <Settings data-icon="inline-start" />
             Preferences
           </Button>
@@ -233,6 +234,10 @@ export function LandingPage({
             </Card>
           </section>
 
+          {/* One column, not two siblings: the workspace is a two-column grid,
+              so a third auto-placed child would take the right column and push
+              the context list underneath the intro on the left. */}
+          <div className="fl-landing__side">
           {firstRun && (
             <Card className="fl-landing__firstrun" aria-labelledby="firstrun-title">
               <CardHeader>
@@ -296,7 +301,7 @@ export function LandingPage({
                     <p>
                       No clusters yet — srelens read your kubeconfig and found no contexts in it.
                     </p>
-                    <Button size="sm" onClick={onOpenSettings}>
+                    <Button size="sm" onClick={() => onOpenSettings("contexts")}>
                       Add or paste a kubeconfig
                       <ArrowRight data-icon="inline-end" />
                     </Button>
@@ -318,6 +323,7 @@ export function LandingPage({
               <span>Source: local kubeconfig</span>
             </CardFooter>
           </Card>
+          </div>
         </main>
 
         <section className="fl-landing__capabilities" aria-labelledby="capabilities-title">

@@ -41,10 +41,13 @@ describe("emptyListMessage", () => {
     expect(m.hint).toMatch(/Clear the search/);
   });
 
-  it("blames a column filter next", () => {
-    const m = emptyListMessage({ kind: "pods", filtered: true, namespaces: ["default"] });
-    expect(m.title).toBe("No pods match the filter");
-    expect(m.hint).toMatch(/column filter/);
+  it("does not blame a selected search column, which narrows nothing on its own", () => {
+    // Picking a column decides WHERE a search looks, not which rows survive:
+    // with an empty query the list really is empty, and telling the user to
+    // clear a filter sends them after something that cannot change the rows.
+    const m = emptyListMessage({ kind: "pods", namespaces: [] });
+    expect(m.title).toBe("No pods");
+    expect(m.hint).toBe("This cluster has no pods you can see.");
   });
 
   it("names the namespace being looked at", () => {
@@ -76,7 +79,7 @@ describe("emptyListMessage", () => {
   it("prefers the search over the namespace scope", () => {
     // Both narrow the view, but the one the user just typed is the one they
     // can undo without thinking.
-    const m = emptyListMessage({ kind: "pods", query: "web", namespaces: ["prod"], filtered: true });
+    const m = emptyListMessage({ kind: "pods", query: "web", namespaces: ["prod"] });
     expect(m.title).toBe("No pods match “web”");
   });
 });

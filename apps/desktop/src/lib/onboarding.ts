@@ -49,31 +49,29 @@ export interface EmptyListMessage {
  * The empty state for a resource list.
  *
  * "No pods" alone leaves the user unsure whether the cluster is empty or they
- * are looking at the wrong slice of it, so each case names the thing that is
- * most likely narrowing the view — a search, a column filter, or the namespace
- * scope — rather than repeating that nothing was found.
+ * are looking at the wrong slice of it, so each case names what is narrowing
+ * the view rather than repeating that nothing was found.
+ *
+ * Only two things narrow it: the search box and the namespace scope. Picking a
+ * column narrows WHERE a search looks, not which rows survive, so with an empty
+ * query it is not a filter and must not be blamed for an empty list.
  */
 export function emptyListMessage(opts: {
   /** Plural resource label as shown in the UI, e.g. "pods". */
   kind: string;
   /** The active search text, if any. */
   query?: string;
-  /** Whether a per-column filter is narrowing the list. */
-  filtered?: boolean;
   /** Selected namespaces; empty means every namespace. */
   namespaces?: readonly string[];
   /** False for cluster-scoped kinds, where namespaces are meaningless. */
   namespaced?: boolean;
 }): EmptyListMessage {
-  const { kind, query, filtered, namespaces = [], namespaced = true } = opts;
+  const { kind, query, namespaces = [], namespaced = true } = opts;
   if (query) {
     return {
       title: `No ${kind} match “${query}”`,
       hint: "Clear the search to see everything in scope.",
     };
-  }
-  if (filtered) {
-    return { title: `No ${kind} match the filter`, hint: "Clear the column filter to see the rest." };
   }
   const scope =
     !namespaced || namespaces.length === 0

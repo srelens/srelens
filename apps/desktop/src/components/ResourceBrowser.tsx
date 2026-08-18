@@ -933,7 +933,6 @@ export function ResourceBrowser({
   const emptyMessage = emptyListMessage({
     kind: RESOURCE_LABELS[kind].toLowerCase(),
     query,
-    filtered: !!filterColumn,
     namespaces: selection,
     namespaced,
   });

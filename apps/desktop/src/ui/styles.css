@@ -4492,3 +4492,12 @@ body {
 .fl-landing__firstrun-list strong {
   color: var(--fl-color-text);
 }
+
+/* Right-hand column of the landing workspace: first-run help above the
+   context list, sharing one grid cell (#161). */
+.fl-landing__side {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
