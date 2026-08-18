@@ -802,8 +802,18 @@ jobs:
           # The install guide lists a fingerprint per key generation so older
           # releases stay verifiable after a rotation; the row marked **current**
           # is the one this release must be signed with.
+          # Exactly one row may be marked current. A rotation that adds the new
+          # row but forgets to unmark the old one would otherwise let head -1
+          # pick the retired fingerprint, match a stale secret, and publish
+          # under a key the release range does not point users at.
+          CURRENT_ROWS=$(grep -icE '^\|.*\*\*current\*\*.*\|' docs/INSTALL.md || true)
+          if [ "$CURRENT_ROWS" -ne 1 ]; then
+            echo "docs/INSTALL.md marks $CURRENT_ROWS signing-key rows as **current**;" >&2
+            echo "exactly one must be marked. Fix the fingerprint table." >&2
+            exit 1
+          fi
           DOC_FPR=$(grep -iE '^\|.*\*\*current\*\*.*\|' docs/INSTALL.md \
-            | grep -oE '[0-9A-F]{8}( +[0-9A-F]{8}){4}' | tr -d ' ' | head -1)
+            | grep -oE '[0-9A-F]{8}( +[0-9A-F]{8}){4}' | tr -d ' ')
 
           if [ -z "$SIGNING_FPR" ] || [ -z "$DOC_FPR" ]; then
             echo "Could not read a fingerprint (signing='$SIGNING_FPR' docs='$DOC_FPR')." >&2

@@ -63,10 +63,9 @@ just Linux — is being enabled; see
 
 ## Verifying a download
 
-> **From the next release onward.** Release signing is configured, and stable
-> releases published from here on carry `.asc` signatures. Releases made before
-> that — including the current latest — have none, so there is nothing to verify
-> on those yet.
+> **srelens 0.6.0 and earlier are unsigned.** Release signing begins with
+> 0.6.1; there are no `.asc` files on releases before it, so there is nothing to
+> verify on those.
 
 Once signing is live, every installer on a **stable** release is published with a
 detached GPG signature alongside it — `srelens_1.2.3_amd64.deb` has
@@ -109,10 +108,22 @@ STATUS=$(gpg --verify --status-fd 1 \
   srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb 2>/dev/null)
 
 grep -q "^\[GNUPG:\] VALIDSIG $EXPECTED " <<<"$STATUS" \
-  && ! grep -qE '^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG)' <<<"$STATUS" \
+  && ! grep -q '^\[GNUPG:\] REVKEYSIG' <<<"$STATUS" \
   && echo "AUTHENTIC" \
   || echo "REJECT - do not run this file"
 ```
+
+Signing keys expire on a schedule, so verifying an **older** release will
+eventually report `EXPKEYSIG` — GnuPG says that whenever the key is expired
+*now*, even though the signature was made while it was valid. That is expected
+for an archived release and the check above deliberately tolerates it: expiry
+is a rotation schedule, not evidence of anything wrong. A revoked key is a
+different matter and is always rejected, because revocation is how a lost or
+compromised key is announced.
+
+If you see `EXPKEYSIG` on a **current** release, treat it as suspicious and
+report it — our release job refuses to sign with an expired key, so that
+combination should not occur.
 
 Do not substitute `gpg --fingerprint releases@srelens.com` for this. That looks
 up keys by address, and **anyone can create a key carrying our exact name and
@@ -135,13 +146,18 @@ One warning is expected and harmless:
   not personally signed our key in your own web of trust. The fingerprint check
   in step 2 is what replaces that certification.
 
-These are **not** harmless, and mean you should stop even though `gpg` prints
-`Good signature` and exits successfully:
+This one means stop, even though `gpg` prints `Good signature` and exits
+successfully:
 
 - `This key has been revoked` — the key was retired, possibly because it was
   lost or compromised. A signature made with a revoked key proves only that
   *someone* holding it signed the file, which may not be us.
-- `This key has expired` — signatures made after expiry carry no assurance.
+
+And this one depends on which release you are verifying:
+
+- `This key has expired` — expected on an older release whose signing key has
+  since been rotated out, harmless there. On a current release it should not
+  happen; treat it as suspicious.
 
 `gpg --verify` reports whether the signature is cryptographically intact, not
 whether the key is still fit to trust, so its exit status alone is not the
