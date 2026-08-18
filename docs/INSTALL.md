@@ -69,8 +69,8 @@ just Linux — is being enabled; see
 > cannot be followed until the first signed release. They are documented in
 > advance so the procedure is settled before any signature is published.
 
-Once signing is live, every release asset is published with a detached GPG
-signature alongside it — `srelens_1.2.3_amd64.deb` has
+Once signing is live, every installer you download is published with a detached
+GPG signature alongside it — `srelens_1.2.3_amd64.deb` has
 `srelens_1.2.3_amd64.deb.asc`.
 
 **1. Import the signing key from this repository.**
@@ -120,9 +120,15 @@ that certification.
 run — download it again from the
 [releases page](https://github.com/srelens/srelens/releases).
 
-Some assets also carry a `.sig` file. Those are Tauri updater signatures, used
-by the in-app updater to check its own downloads, and are not GPG signatures —
-`gpg --verify` does not apply to them.
+Two kinds of file on a release are updater plumbing rather than downloads, and
+are not covered by the above:
+
+- `.sig` files are Tauri updater signatures, used by the in-app updater to check
+  its own downloads. They are not GPG signatures, so `gpg --verify` does not
+  apply to them.
+- `latest.json` is the updater manifest. The updater authenticates it with its
+  own key, so it carries no GPG signature on the dev channel; on stable
+  releases it happens to be signed along with everything else on the tag.
 
 ## Connect MCP clients
 
