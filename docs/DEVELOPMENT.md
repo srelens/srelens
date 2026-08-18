@@ -308,8 +308,13 @@ Pipe it straight into `gh`: the key then never lands on disk or in the
 clipboard, so there is nothing to commit by accident.
 
 ```bash
-# Linux uses -w0, macOS's BSD base64 uses -b 0 (current macOS accepts either).
+# Linux
 gpg --export-secret-keys "$KEYID" | base64 -w0 \
+  | gh secret set GPG_PRIVATE_KEY --repo srelens/srelens
+
+# macOS — BSD base64 spells the wrap option -b; current macOS also accepts -w0,
+# but -b 0 works on both old and new.
+gpg --export-secret-keys "$KEYID" | base64 -b 0 \
   | gh secret set GPG_PRIVATE_KEY --repo srelens/srelens
 
 gh secret set GPG_PASSPHRASE --repo srelens/srelens   # prompts; stays out of shell history

@@ -113,12 +113,25 @@ gpg --verify srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb
 ```
 
 `Good signature from "srelens release signing"`, **with the fingerprint above
-confirmed**, means the file is authentic.
+confirmed and no warning below**, means the file is authentic.
 
-A `This key is not certified with a trusted signature` warning alongside it is
-expected and is not a failure: it only means you have not personally signed our
-key in your own web of trust. The fingerprint check in step 2 is what replaces
-that certification.
+One warning is expected and harmless:
+
+- `This key is not certified with a trusted signature` — it only means you have
+  not personally signed our key in your own web of trust. The fingerprint check
+  in step 2 is what replaces that certification.
+
+These are **not** harmless, and mean you should stop even though `gpg` prints
+`Good signature` and exits successfully:
+
+- `This key has been revoked` — the key was retired, possibly because it was
+  lost or compromised. A signature made with a revoked key proves only that
+  *someone* holding it signed the file, which may not be us.
+- `This key has expired` — signatures made after expiry carry no assurance.
+
+`gpg --verify` reports whether the signature is cryptographically intact, not
+whether the key is still fit to trust, so its exit status alone is not the
+answer. Read the warnings.
 
 `BAD signature`, or a key that cannot be found, means the file should not be
 run — download it again from the

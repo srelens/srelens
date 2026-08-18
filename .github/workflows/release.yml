@@ -757,6 +757,16 @@ jobs:
     env:
       ENABLE_GPG: ${{ secrets.GPG_PRIVATE_KEY != '' }}
     steps:
+      # ENABLE_GPG makes signing opt-in, which is right for dev but fail-OPEN
+      # for stable: a deleted or renamed secret would skip both steps, report
+      # success, and let publish-release ship an unsigned release while the
+      # docs promise otherwise. Stable requires the key.
+      - name: Require a signing key for stable releases
+        if: github.ref_name == 'main' && env.ENABLE_GPG != 'true'
+        run: |
+          echo "GPG_PRIVATE_KEY is not set, so this stable release cannot be signed." >&2
+          echo "Set the secret (docs/DEVELOPMENT.md -> Release signing key) and re-run." >&2
+          exit 1
       - name: Import GPG key
         if: env.ENABLE_GPG == 'true'
         env:
