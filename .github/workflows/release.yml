@@ -799,9 +799,11 @@ jobs:
           [ -f KEYS ] || { echo "KEYS is missing — publish the public key first." >&2; exit 1; }
 
           SIGNING_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
-          # The fingerprint block in the install guide, spaces stripped.
-          DOC_FPR=$(grep -oE '^[0-9A-F]{4}( +[0-9A-F]{4}){9}$' docs/INSTALL.md \
-            | tr -d ' ' | head -1)
+          # The install guide lists a fingerprint per key generation so older
+          # releases stay verifiable after a rotation; the row marked **current**
+          # is the one this release must be signed with.
+          DOC_FPR=$(grep -iE '^\|.*\*\*current\*\*.*\|' docs/INSTALL.md \
+            | grep -oE '[0-9A-F]{8}( +[0-9A-F]{8}){4}' | tr -d ' ' | head -1)
 
           if [ -z "$SIGNING_FPR" ] || [ -z "$DOC_FPR" ]; then
             echo "Could not read a fingerprint (signing='$SIGNING_FPR' docs='$DOC_FPR')." >&2
@@ -813,8 +815,8 @@ jobs:
           # accept one signed by a key the guide never named.
           if [ "$SIGNING_FPR" != "$DOC_FPR" ]; then
             echo "Signing key does not match the fingerprint published to users:" >&2
-            echo "  GPG_PRIVATE_KEY:   $SIGNING_FPR" >&2
-            echo "  docs/INSTALL.md:   $DOC_FPR" >&2
+            echo "  GPG_PRIVATE_KEY:            $SIGNING_FPR" >&2
+            echo "  docs/INSTALL.md (current):  $DOC_FPR" >&2
             exit 1
           fi
 

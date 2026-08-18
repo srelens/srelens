@@ -89,19 +89,26 @@ Prefer this over a keyserver search. Anyone can upload a key to a keyserver
 under any name or address, so a search for "srelens" can return a key that has
 nothing to do with this project.
 
-**2. Note the fingerprint your verification must produce.**
+**2. Find the fingerprint for the release you are verifying.**
 
-```
-6CFC 3480 3A21 C0E6 DB18  BA47 DDEE DBFF 499D 9481
-```
+Signing keys are rotated over time, and `KEYS` keeps the retired ones so older
+releases stay verifiable. Pick the row covering your download — a release is
+signed by whichever key was current when it was published, not by the newest
+one.
+
+| Releases | Fingerprint |
+| --- | --- |
+| 0.6.1 and later — **current** | `6CFC3480 3A21C0E6 DB18BA47 DDEEDBFF 499D9481` |
 
 **3. Verify the asset, binding the result to that fingerprint.**
 
 ```bash
+EXPECTED=6CFC34803A21C0E6DB18BA47DDEEDBFF499D9481   # from the table above
+
 STATUS=$(gpg --verify --status-fd 1 \
   srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb 2>/dev/null)
 
-grep -q '^\[GNUPG:\] VALIDSIG 6CFC34803A21C0E6DB18BA47DDEEDBFF499D9481 ' <<<"$STATUS" \
+grep -q "^\[GNUPG:\] VALIDSIG $EXPECTED " <<<"$STATUS" \
   && ! grep -qE '^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG)' <<<"$STATUS" \
   && echo "AUTHENTIC" \
   || echo "REJECT - do not run this file"

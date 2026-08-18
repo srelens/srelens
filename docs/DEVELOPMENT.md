@@ -357,8 +357,12 @@ gpg --with-colons --import-options show-only --import KEYS \
 For the very first key there is nothing to preserve, so `gpg --export --armor
 "$KEYID" > KEYS` is enough.
 
-Commit `KEYS`, then **replace the fingerprint** in
-[docs/INSTALL.md](INSTALL.md#verifying-a-download) with the real value:
+Commit `KEYS`, then update the fingerprint table in
+[docs/INSTALL.md](INSTALL.md#verifying-a-download). On a **rotation**, add a
+new row rather than editing the old one, and move the `**current**` marker —
+the previous row must keep its fingerprint and gain the release range it
+covers, or every release it signed becomes unverifiable even though its key is
+still in `KEYS`:
 
 ```bash
 gpg --fingerprint "$KEYID"
@@ -370,10 +374,11 @@ a key to a keyserver under any name or address. The published fingerprint is
 the only thing that ties a signature back to this project.
 
 It is also the **authoritative record of which key is current**: `sign-artifacts`
-refuses to sign a stable release unless the key in `GPG_PRIVATE_KEY` matches
-this fingerprint exactly and appears in `KEYS`. A rotation that updates the
-secret but not this line — or the reverse — fails the release rather than
-publishing signatures the instructions tell users to reject.
+refuses to sign a stable release unless the key in `GPG_PRIVATE_KEY` matches the
+fingerprint in the row marked `**current**` and that key appears in `KEYS`,
+unrevoked. A rotation that updates the secret but not the table — or the
+reverse — fails the release rather than publishing signatures the instructions
+tell users to reject.
 
 **5. Verify the next release.** After the following release completes, download
 one asset and its `.asc` and confirm `gpg --verify` succeeds following only the
