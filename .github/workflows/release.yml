@@ -732,10 +732,13 @@ jobs:
   # hence the dependency below, since both used to run off [version, build] in
   # parallel and whether the manifest got signed came down to which finished
   # first. On a dev pre-release the manifest instead goes to the rolling
-  # `dev-channel` release, so it is NOT signed here: latest.json is consumed by
-  # the updater, which authenticates it with its own minisign key, so a GPG
-  # signature on it has no verifier. The installers a human downloads are
-  # signed on both channels, which is what the docs promise.
+  # `dev-channel` release, so it is NOT signed here. That is acceptable because
+  # the manifest is not a trust anchor: it lists each installer's URL and .sig,
+  # and the updater verifies the installer it downloads against the public key
+  # pinned in tauri.conf.json — so tampering with the manifest cannot get a
+  # modified build accepted. (The manifest itself carries no signature of its
+  # own, on either channel.) The installers a human downloads ARE signed on
+  # both channels, which is what the docs promise.
   sign-artifacts:
     needs: [version, build, updater-manifest]
     if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}

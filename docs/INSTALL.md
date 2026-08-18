@@ -126,9 +126,13 @@ are not covered by the above:
 - `.sig` files are Tauri updater signatures, used by the in-app updater to check
   its own downloads. They are not GPG signatures, so `gpg --verify` does not
   apply to them.
-- `latest.json` is the updater manifest. The updater authenticates it with its
-  own key, so it carries no GPG signature on the dev channel; on stable
-  releases it happens to be signed along with everything else on the tag.
+- `latest.json` is the updater manifest. It is **not** itself signed: it lists
+  each installer's URL along with that installer's `.sig`, and the updater
+  checks the installer it downloads against a public key built into the app.
+  A tampered manifest therefore cannot make the app accept a modified build,
+  because the attacker cannot produce a signature valid under that pinned key.
+  The manifest carries no GPG signature on the dev channel; on stable releases
+  it happens to be signed along with everything else on the tag.
 
 ## Connect MCP clients
 
