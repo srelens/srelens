@@ -4507,6 +4507,7 @@ body {
   outline: 2px solid var(--fl-color-accent);
   outline-offset: 2px;
   border-radius: var(--fl-radius-sm, 4px);
+}
 
 /* First-run help on the landing page (#161) */
 .fl-landing__firstrun-list {
