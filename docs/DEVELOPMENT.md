@@ -252,6 +252,24 @@ key must be generated on a maintainer's own machine: a release-signing private
 key should never be pasted into a chat, an issue, a CI log, or any tool that
 retains input.
 
+**0. Check that gpg can prompt for a passphrase.** GnuPG delegates the prompt to
+a `pinentry` program, and a missing or misconfigured one fails the key
+generation with `agent_genkey failed: No pinentry` before anything is created.
+
+```bash
+grep pinentry ~/.gnupg/gpg-agent.conf 2>/dev/null   # what the agent expects
+ls -l "$(grep -oE '/\S*pinentry\S*' ~/.gnupg/gpg-agent.conf 2>/dev/null)"
+```
+
+If the configured program is missing, install it (`brew install pinentry-mac`
+on macOS; your distribution's `pinentry-gtk2`/`pinentry-curses` on Linux) or
+point `pinentry-program` at one you do have, then restart the agent so it picks
+up the change:
+
+```bash
+gpgconf --kill gpg-agent
+```
+
 **1. Generate a dedicated key.** Not a personal key — this one only ever signs
 srelens releases, so it can be revoked without collateral damage.
 
