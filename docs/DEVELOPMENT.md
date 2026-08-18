@@ -330,13 +330,28 @@ older release still needs the key that signed it, and needs to be able to see
 that key's revocation status; overwriting the file strands those releases with
 signatures nobody can check.
 
+Build the new file in a scratch keyring holding the archive plus the new key.
+`gpg --export` can only emit keys it actually holds, and it does **not** fail
+when asked for one it lacks — it exports what it can and exits 0 — so listing
+the retired fingerprints on an export from your own keyring silently drops
+every key you no longer have, which is exactly the case after a rotation.
+
 ```bash
-# Append: re-export every key already published, plus the new one.
-gpg --with-colons --import-options show-only --import KEYS 2>/dev/null \
-  | awk -F: '/^fpr/{print $10}' > /tmp/published-keys
-gpg --export --armor $(cat /tmp/published-keys) "$KEYID" > KEYS
+RING=$(mktemp -d) && chmod 700 "$RING"
+gpg --homedir "$RING" --import KEYS            # the keys already published
+gpg --export "$KEYID" | gpg --homedir "$RING" --import   # plus the new one
+gpg --homedir "$RING" --export --armor > KEYS
+rm -rf "$RING"
 
 gpg --send-keys --keyserver hkps://keys.openpgp.org "$KEYID"
+```
+
+Confirm nothing was lost before committing — the count must have gone up by
+one, and the retired fingerprints must still be listed:
+
+```bash
+gpg --with-colons --import-options show-only --import KEYS \
+  | awk -F: '/^fpr/{print $10}'
 ```
 
 For the very first key there is nothing to preserve, so `gpg --export --armor
