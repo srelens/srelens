@@ -767,6 +767,13 @@ jobs:
           echo "GPG_PRIVATE_KEY is not set, so this stable release cannot be signed." >&2
           echo "Set the secret (docs/DEVELOPMENT.md -> Release signing key) and re-run." >&2
           exit 1
+      # KEYS is the fingerprint users verify against, so it is also the right
+      # thing to check the signing key against — no second copy of the
+      # fingerprint to drift out of date.
+      - uses: actions/checkout@v4
+        if: env.ENABLE_GPG == 'true'
+        with:
+          ref: ${{ github.ref_name == 'main' && 'main' || github.sha }}
       - name: Import GPG key
         if: env.ENABLE_GPG == 'true'
         env:
@@ -778,6 +785,37 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$GPG_PRIVATE_KEY" | base64 --decode | gpg --batch --import
+      # A rotation done in the wrong order — new key published in KEYS, old one
+      # still in GPG_PRIVATE_KEY, or the reverse — otherwise signs happily and
+      # ships .asc files that no user can verify against the documented
+      # fingerprint. The failure is silent at signing time and only surfaces
+      # when someone tries to verify a download, so it is caught here instead.
+      - name: Check the signing key matches the published KEYS file
+        if: env.ENABLE_GPG == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f KEYS ]; then
+            echo "KEYS is missing, so the signing key cannot be checked against" >&2
+            echo "what users verify with. Publish the public key first." >&2
+            exit 1
+          fi
+          SIGNING_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          # show-only inspects KEYS without importing it into the keyring.
+          PUBLISHED_FPR=$(gpg --with-colons --import-options show-only --import KEYS \
+            | awk -F: '/^fpr/{print $10; exit}')
+          if [ -z "$SIGNING_FPR" ] || [ -z "$PUBLISHED_FPR" ]; then
+            echo "Could not read a fingerprint (signing='$SIGNING_FPR' published='$PUBLISHED_FPR')." >&2
+            exit 1
+          fi
+          if [ "$SIGNING_FPR" != "$PUBLISHED_FPR" ]; then
+            echo "Signing key does not match the published KEYS file:" >&2
+            echo "  GPG_PRIVATE_KEY: $SIGNING_FPR" >&2
+            echo "  KEYS:            $PUBLISHED_FPR" >&2
+            echo "Signatures would not verify against the documented fingerprint." >&2
+            exit 1
+          fi
+          echo "Signing key matches KEYS ($SIGNING_FPR)."
       - name: Sign release assets
         if: env.ENABLE_GPG == 'true'
         env:
