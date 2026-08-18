@@ -89,31 +89,38 @@ Prefer this over a keyserver search. Anyone can upload a key to a keyserver
 under any name or address, so a search for "srelens" can return a key that has
 nothing to do with this project.
 
-**2. Check the fingerprint before trusting anything it signs.**
-
-```bash
-gpg --fingerprint releases@srelens.com
-```
-
-It must match, exactly:
+**2. Note the fingerprint your verification must produce.**
 
 ```
 6CFC 3480 3A21 C0E6 DB18  BA47 DDEE DBFF 499D 9481
 ```
 
-This comparison is the step that matters. A `Good signature` line only proves
-the file matches whichever key you imported — it says nothing about whether that
-key is ours. Without checking the fingerprint, a substituted key verifies just
-as cleanly as the real one.
-
-**3. Verify the asset.**
+**3. Verify the asset, binding the result to that fingerprint.**
 
 ```bash
-gpg --verify srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb
+STATUS=$(gpg --verify --status-fd 1 \
+  srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb 2>/dev/null)
+
+grep -q '^\[GNUPG:\] VALIDSIG 6CFC34803A21C0E6DB18BA47DDEEDBFF499D9481 ' <<<"$STATUS" \
+  && ! grep -qE '^\[GNUPG:\] (REVKEYSIG|EXPKEYSIG)' <<<"$STATUS" \
+  && echo "AUTHENTIC" \
+  || echo "REJECT - do not run this file"
 ```
 
-`Good signature from "srelens release signing"`, **with the fingerprint above
-confirmed and no warning below**, means the file is authentic.
+Do not substitute `gpg --fingerprint releases@srelens.com` for this. That looks
+up keys by address, and **anyone can create a key carrying our exact name and
+address** — if such a key is in your keyring, that command lists it too and
+`gpg --verify` will happily print `Good signature from "srelens release
+signing"` for it. The check above avoids the problem entirely: `VALIDSIG`
+reports the full fingerprint of the key that *actually made this signature*, so
+matching it leaves no room for a look-alike key to be mistaken for ours.
+
+`AUTHENTIC` means the signature was made by our key and the key was neither
+revoked nor expired when checked.
+
+If you would rather read the output yourself, `gpg --verify
+srelens_1.2.3_amd64.deb.asc srelens_1.2.3_amd64.deb` prints it in human form —
+but judge it by the rules below, not by the `Good signature` line alone.
 
 One warning is expected and harmless:
 

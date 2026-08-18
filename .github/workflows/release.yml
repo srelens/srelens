@@ -818,16 +818,26 @@ jobs:
             exit 1
           fi
 
-          # …and that the key is actually IN the archive users import from,
-          # anywhere in it, since KEYS also carries retired keys.
+          # …and that the key is actually IN the archive users import from —
+          # anywhere in it, since KEYS also carries retired keys — and that
+          # KEYS does not itself say the key is revoked or expired. Presence
+          # alone is not enough: a revocation added to KEYS while the secret
+          # still holds the un-revoked key would sign and publish happily,
+          # while every user importing KEYS gets the revocation warning the
+          # install guide tells them to treat as a failure.
           # show-only inspects KEYS without importing it into the keyring.
-          if ! gpg --with-colons --import-options show-only --import KEYS \
-                 | awk -F: '/^fpr/{print $10}' | grep -qx "$SIGNING_FPR"; then
+          VALIDITY=$(gpg --with-colons --import-options show-only --import KEYS \
+            | awk -F: -v want="$SIGNING_FPR" '/^pub:/{v=$2} /^fpr:/{if ($10==want) {print v; exit}}')
+          if [ -z "$VALIDITY" ]; then
             echo "Signing key $SIGNING_FPR is not published in KEYS," >&2
             echo "so users could not import the key needed to verify it." >&2
             exit 1
           fi
-          echo "Signing key $SIGNING_FPR matches the docs and is present in KEYS."
+          case "$VALIDITY" in
+            r) echo "KEYS marks $SIGNING_FPR as REVOKED — rotate before releasing." >&2; exit 1 ;;
+            e) echo "KEYS marks $SIGNING_FPR as EXPIRED — rotate before releasing." >&2; exit 1 ;;
+          esac
+          echo "Signing key $SIGNING_FPR matches the docs, is published in KEYS, and is usable."
       - name: Sign release assets
         if: env.ENABLE_GPG == 'true'
         env:
