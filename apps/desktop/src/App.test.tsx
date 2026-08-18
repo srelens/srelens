@@ -125,6 +125,25 @@ vi.mock("./components/ResourceBrowser", () => ({
 vi.mock("./components/SettingsView", () => ({
   SettingsView: () => <div data-testid="settings">workspace settings</div>,
 }));
+// The dock hosts xterm, which is dynamically imported and has no place in
+// jsdom; these tests only care about whether it is mounted and with what.
+vi.mock("./components/Dock", () => ({
+  Dock: ({ sessions }: { sessions: Array<{ kind: string; context: string }> }) => (
+    <div data-testid="dock">{sessions.map((s) => `${s.kind}:${s.context}`).join(",")}</div>
+  ),
+}));
+// The host shell is desktop-only, and `isWeb` is decided once at import time,
+// so it has to be replaced rather than set up per test. `isTauri` is left real:
+// flipping it too would switch on every Tauri-only effect in these tests.
+vi.mock("./transport/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./transport/platform")>()),
+  isWeb: false,
+}));
+const { listContextsMock } = vi.hoisted(() => ({ listContextsMock: vi.fn() }));
+vi.mock("./lib/clusters", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./lib/clusters")>()),
+  listContexts: listContextsMock,
+}));
 vi.mock("./components/EditResourceTab", () => ({
   EditResourceTab: ({ kind, name }: { kind: string; name: string }) => (
     <div data-testid="edit-tab">
@@ -135,10 +154,20 @@ vi.mock("./components/EditResourceTab", () => ({
 
 import { App } from "./App";
 
+const context = (name: string) => ({
+  name,
+  stableId: `/k/config#${name}`,
+  cluster: name,
+  server: "https://example",
+  isCurrent: false,
+});
+
 beforeEach(() => {
   checkForUpdateMock.mockReset();
   checkForUpdateMock.mockResolvedValue(null); // up to date unless a test says otherwise
   notifyUpdateAvailableMock.mockReset();
+  listContextsMock.mockReset();
+  listContextsMock.mockResolvedValue({ contexts: [context("kind-dev"), context("prod")] });
 });
 
 describe("App", () => {
@@ -160,6 +189,16 @@ describe("App", () => {
     render(<App />);
     expect(screen.getByText(/pure-Rust Kubernetes UI/)).toBeDefined();
     expect(screen.queryByTestId("overview")).toBeNull();
+  });
+
+  it("opens a terminal for a chosen context with no tabs open at all", async () => {
+    // The dock used to mount only alongside an open tab, so a shell started
+    // from the landing page went nowhere — the session existed and nothing
+    // rendered it (#257).
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open kubectl terminal" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "prod" }));
+    expect((await screen.findByTestId("dock")).textContent).toBe("shell:prod");
   });
 
   it("opening a cluster lands on its Overview tab", () => {

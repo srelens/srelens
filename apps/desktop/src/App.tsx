@@ -1127,42 +1127,50 @@ export function App() {
                     />
                   )}
                 </div>
-                {dockSessions.length > 0 && (
-                  <Dock
-                    sessions={dockSessions}
-                    activeId={activeDock}
-                    height={dockHeight}
-                    onActivate={setActiveDock}
-                    onCloseTab={closeDockTab}
-                    onClose={closeDock}
-                    onResize={setDockHeight}
-                    onNewTerminal={(() => {
-                      // "+" opens another host shell for the active shell's
-                      // context. The host shell is desktop-only — web users get
-                      // in-pod exec terminals, so no "+" there.
-                      if (isWeb) return undefined;
-                      const active = dockSessions.find((s) => s.id === activeDock);
-                      const ctx = active?.kind === "shell" ? active.context : activeCluster;
-                      const files =
-                        active?.kind === "shell" ? active.kubeconfigFiles ?? kubeconfigFiles : kubeconfigFiles;
-                      return ctx
-                        ? () => openDock("shell", { context: ctx, namespace: "", kubeconfigFiles: files })
-                        : undefined;
-                    })()}
-                  />
-                )}
               </>
             )}
           </>
         ) : (
-          <LandingPage
-            onOpenContext={(ctx) => openView(ctx, "overview")}
-            onOpenSettings={openSettings}
-            contextProfiles={contextProfiles}
-            kubeconfigFiles={kubeconfigFiles}
-            contextOrder={contextOrder}
-            contexts={contexts}
-            contextsError={contextsError}
+          // Wrapped so the landing page shrinks when the dock is open: it asks
+          // for `min-height: 100%`, which unwrapped is 100% of the whole main
+          // column and would push the dock off the bottom.
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <LandingPage
+              onOpenContext={(ctx) => openView(ctx, "overview")}
+              onOpenSettings={openSettings}
+              contextProfiles={contextProfiles}
+              kubeconfigFiles={kubeconfigFiles}
+              contextOrder={contextOrder}
+              contexts={contexts}
+              contextsError={contextsError}
+            />
+          </div>
+        )}
+        {/* Outside the tab branch: the status bar can start a shell with no
+            tabs open at all, and a dock that only mounts alongside a tab would
+            swallow that session silently. */}
+        {dockSessions.length > 0 && (
+          <Dock
+            sessions={dockSessions}
+            activeId={activeDock}
+            height={dockHeight}
+            onActivate={setActiveDock}
+            onCloseTab={closeDockTab}
+            onClose={closeDock}
+            onResize={setDockHeight}
+            onNewTerminal={(() => {
+              // "+" opens another host shell for the active shell's context.
+              // The host shell is desktop-only — web users get in-pod exec
+              // terminals, so no "+" there.
+              if (isWeb) return undefined;
+              const active = dockSessions.find((s) => s.id === activeDock);
+              const ctx = active?.kind === "shell" ? active.context : activeCluster;
+              const files =
+                active?.kind === "shell" ? active.kubeconfigFiles ?? kubeconfigFiles : kubeconfigFiles;
+              return ctx
+                ? () => openDock("shell", { context: ctx, namespace: "", kubeconfigFiles: files })
+                : undefined;
+            })()}
           />
         )}
       </div>
