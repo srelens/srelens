@@ -40,6 +40,12 @@ export function StatusBar({
   const showTerminal = !!onOpenTerminal && terminalContexts.length > 0;
   const preferred =
     terminalContexts.find((c) => c.name === activeCluster) ?? terminalContexts[0];
+  // The context you are already in is the one you most often want a shell for,
+  // so it leads regardless of where it sits in the hotbar — on a machine with
+  // twenty kubeconfig contexts it would otherwise be somewhere down the scroll.
+  const ordered = preferred
+    ? [preferred, ...terminalContexts.filter((c) => c.name !== preferred.name)]
+    : terminalContexts;
 
   function launch() {
     if (terminalContexts.length === 1) {
@@ -83,8 +89,15 @@ export function StatusBar({
                 Terminal
               </button>
             </PopoverAnchor>
-            <PopoverContent align="end" side="top" role="menu" className="w-auto min-w-44 gap-0 p-1">
-              {terminalContexts.map((c) => (
+            {/* Capped and scrollable: a kubeconfig with twenty contexts would
+                otherwise open a menu taller than the window. */}
+            <PopoverContent
+              align="end"
+              side="top"
+              role="menu"
+              className="max-h-64 w-auto min-w-40 max-w-80 gap-0 overflow-y-auto p-1 text-xs"
+            >
+              {ordered.map((c) => (
                 <button
                   key={c.name}
                   type="button"
@@ -98,8 +111,8 @@ export function StatusBar({
                 >
                   <span
                     aria-hidden="true"
-                    className={`size-2 shrink-0 rounded-full ${
-                      c.name === preferred?.name ? "bg-emerald-500" : "bg-muted-foreground/40"
+                    className={`size-1.5 shrink-0 rounded-full ${
+                      c.name === activeCluster ? "bg-emerald-500" : "bg-muted-foreground/40"
                     }`}
                   />
                   <span className="min-w-0 truncate">{c.label}</span>

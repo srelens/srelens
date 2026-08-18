@@ -65,6 +65,26 @@ describe("StatusBar", () => {
     expect(onOpenTerminal).toHaveBeenCalledWith("prod");
   });
 
+  it("puts the open context first, wherever it sits in the list", async () => {
+    // With a kubeconfig full of contexts the one you are already in would
+    // otherwise be somewhere down a scrolling menu.
+    render(
+      <StatusBar
+        activeCluster="prod"
+        tabCount={1}
+        terminalContexts={[
+          { name: "dev", label: "dev" },
+          { name: "staging", label: "staging" },
+          { name: "prod", label: "production" },
+        ]}
+        onOpenTerminal={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open kubectl terminal" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((i) => i.textContent)).toEqual(["production", "dev", "staging"]);
+  });
+
   it("still launches a terminal on a tab with no cluster", async () => {
     // Settings/Toolbox/Assistant tabs have no cluster; the launcher used to
     // disappear on them entirely, even with clusters configured (#257).
