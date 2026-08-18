@@ -119,6 +119,125 @@ describe("PodActions", () => {
     expect(onOpenTerminal).toHaveBeenCalledWith({ context: "kind-dev", namespace: "default", pod: "web-1" });
   });
 
+  it("asks which container to open a shell into on a multi-container pod", async () => {
+    getObjectMock.mockResolvedValue({
+      object: {
+        spec: { containers: [{ name: "istio-proxy" }, { name: "app" }] },
+        status: {
+          containerStatuses: [
+            { name: "istio-proxy", state: { running: {} } },
+            { name: "app", state: { running: {} } },
+          ],
+        },
+      },
+    });
+    const onOpenTerminal = vi.fn();
+    render(<PodActions context="kind-dev" pod={pod} onOpenTerminal={onOpenTerminal} />);
+    await waitFor(() => expect(getObjectMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Shell" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^app/ }));
+    expect(onOpenTerminal).toHaveBeenCalledWith({
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+      container: "app",
+    });
+  });
+
+  it("opens the annotated default container without asking on a single-container pod", async () => {
+    // One container means there is no choice to make; the annotation still
+    // decides, because the API server ignores it and would pick spec order.
+    getObjectMock.mockResolvedValue({
+      object: {
+        metadata: { annotations: { "kubectl.kubernetes.io/default-container": "app" } },
+        spec: { containers: [{ name: "app" }] },
+        status: { containerStatuses: [{ name: "app", state: { running: {} } }] },
+      },
+    });
+    const onOpenTerminal = vi.fn();
+    render(<PodActions context="kind-dev" pod={pod} onOpenTerminal={onOpenTerminal} />);
+    await waitFor(() => expect(getObjectMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Shell" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() =>
+      expect(onOpenTerminal).toHaveBeenCalledWith({
+        context: "kind-dev",
+        namespace: "default",
+        pod: "web-1",
+        container: "app",
+      }),
+    );
+  });
+
+  it("does not ask when the only other container is a finished init step", async () => {
+    getObjectMock.mockResolvedValue({
+      object: {
+        spec: { containers: [{ name: "app" }], initContainers: [{ name: "migrate" }] },
+        status: {
+          containerStatuses: [{ name: "app", state: { running: {} } }],
+          initContainerStatuses: [{ name: "migrate", state: { terminated: { exitCode: 0 } } }],
+        },
+      },
+    });
+    const onOpenTerminal = vi.fn();
+    render(<PodActions context="kind-dev" pod={pod} onOpenTerminal={onOpenTerminal} />);
+    await waitFor(() => expect(getObjectMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Shell" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onOpenTerminal).toHaveBeenCalledWith({
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+      container: "app",
+    });
+  });
+
+  it("lists every container in the menu, including ones that aren't running", async () => {
+    getObjectMock.mockResolvedValue({
+      object: {
+        spec: {
+          containers: [{ name: "mongodb" }, { name: "metrics" }],
+          initContainers: [{ name: "generate-tls-certs" }],
+        },
+        status: {
+          containerStatuses: [
+            { name: "mongodb", state: { running: {} } },
+            { name: "metrics", state: { running: {} } },
+          ],
+          initContainerStatuses: [{ name: "generate-tls-certs", state: { terminated: {} } }],
+        },
+      },
+    });
+    render(<PodActions context="kind-dev" pod={pod} onOpenTerminal={vi.fn()} />);
+    await waitFor(() => expect(getObjectMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Shell" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((i) => i.textContent)).toEqual(["mongodb", "metrics", "generate-tls-certs"]);
+    // The finished init container is shown but marked, not silently dropped.
+    expect(titleOf(items[2])).toBe("Shell into generate-tls-certs (not running)");
+  });
+
+  it("falls back to the old behaviour when the pod can't be read", async () => {
+    // An RBAC-restricted get must not disable the shell button: without a
+    // container the API server picks, exactly as before the picker existed.
+    getObjectMock.mockResolvedValue({ error: "forbidden" });
+    const onOpenTerminal = vi.fn();
+    render(<PodActions context="kind-dev" pod={pod} onOpenTerminal={onOpenTerminal} />);
+    await waitFor(() => expect(getObjectMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Shell" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onOpenTerminal).toHaveBeenCalledWith({
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+    });
+  });
+
   it("confirms and deletes the pod", async () => {
     deletePodMock.mockResolvedValue({ deleted: true });
     const onDeleted = vi.fn();

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowLeftRight,
   Bot,
@@ -25,9 +25,16 @@ import {
 import { notify } from "../lib/notify";
 import { useAccess, rbac, kindToResource, denyReason, reportActionError, type AccessCheck } from "../lib/access";
 import { getObject } from "../lib/manifest";
+import {
+  defaultContainer,
+  execCandidates,
+  podContainerChoices,
+  type ContainerChoice,
+} from "../lib/podContainers";
 import { IconButton, ConfirmDialog, TextInput, KubectlPreview } from "../ui";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { ForwardDialog } from "./ForwardDialog";
 import { CopyAsKubectlButton } from "./CopyAsKubectlButton";
 import { toKubectl } from "../lib/kubectlMapper";
@@ -91,6 +98,13 @@ export function PodActions({
   const [error, setError] = useState("");
   const [debugImage, setDebugImage] = useState("busybox");
   const [debugTarget, setDebugTarget] = useState("");
+  // Containers to choose between when opening a shell (#262). Empty until the
+  // pod object arrives, and for a pod we couldn't read — in both cases the
+  // Shell button behaves as it always did and lets the API server choose.
+  const [containers, setContainers] = useState<ContainerChoice[]>([]);
+  /** The container the annotation (or the running state) nominates. */
+  const [preferred, setPreferred] = useState<string | undefined>(undefined);
+  const [containerMenu, setContainerMenu] = useState(false);
 
   const deleteCheck = rbac.deletePod(pod.namespace);
   const evictCheck = rbac.evictPod(pod.namespace);
@@ -98,6 +112,33 @@ export function PodActions({
   const access = useAccess(context, [deleteCheck, evictCheck, editCheck]);
 
   const target = { context, namespace: pod.namespace, pod: pod.name };
+
+  // Read the pod's containers up front so the Shell button knows whether there
+  // is a choice to offer. The header stays interactive while this is in flight;
+  // a failure just leaves the old single-shot behaviour in place.
+  useEffect(() => {
+    let current = true;
+    setContainers([]);
+    setPreferred(undefined);
+    void getObject(context, "Pod", pod.namespace, pod.name).then((r) => {
+      if (!current || !r.object) return;
+      const choices = podContainerChoices(r.object);
+      setContainers(choices);
+      setPreferred(defaultContainer(r.object, choices));
+    });
+    return () => {
+      current = false;
+    };
+  }, [context, pod.namespace, pod.name]);
+
+  function openShell() {
+    // Nothing to choose between (or a pod we couldn't read) → no menu.
+    if (execCandidates(containers).length < 2) {
+      onOpenTerminal?.(preferred ? { ...target, container: preferred } : target);
+      return;
+    }
+    setContainerMenu((open) => !open);
+  }
 
   async function doDelete() {
     setBusy(true);
@@ -149,7 +190,41 @@ export function PodActions({
   return (
     <>
       <IconButton icon={Logs} label="Logs" onClick={() => onOpenLogs?.(target)} />
-      <IconButton icon={SquareTerminal} label="Shell" onClick={() => onOpenTerminal?.(target)} />
+      <Popover open={containerMenu} onOpenChange={setContainerMenu}>
+        <PopoverAnchor asChild>
+          <span className="inline-flex">
+            <IconButton
+              icon={SquareTerminal}
+              label="Shell"
+              title={containers.length > 1 ? `Shell — ${containers.length} containers` : "Shell"}
+              onClick={openShell}
+            />
+          </span>
+        </PopoverAnchor>
+        <PopoverContent align="start" role="menu" className="w-auto min-w-44 gap-0 p-1">
+          {containers.map((c) => (
+            <button
+              key={c.name}
+              type="button"
+              role="menuitem"
+              title={`Shell into ${c.name}${c.running ? "" : " (not running)"}`}
+              className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent hover:text-accent-foreground ${
+                c.running ? "" : "text-muted-foreground"
+              }`}
+              onClick={() => {
+                setContainerMenu(false);
+                onOpenTerminal?.({ ...target, container: c.name });
+              }}
+            >
+              <span
+                aria-hidden="true"
+                className={`size-2 shrink-0 rounded-xs ${c.running ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
+              />
+              <span className="min-w-0 truncate">{c.name}</span>
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
       <CopyAsKubectlButton kind="Pod" name={pod.name} namespace={pod.namespace} context={context} />
       <IconButton
         icon={Zap}

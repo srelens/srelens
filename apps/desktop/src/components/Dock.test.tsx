@@ -44,6 +44,19 @@ describe("Dock", () => {
     expect(screen.getByTestId("terminal").textContent).toBe("web-1");
   });
 
+  it("distinguishes two shells into different containers of one pod", () => {
+    // Both tabs would otherwise read "web-1" and the user couldn't tell the
+    // sidecar's shell from the app's (#262).
+    renderDock({
+      sessions: [
+        { id: 1, kind: "terminal", context: "c", namespace: "default", pod: "web-1", container: "app" },
+        { id: 2, kind: "terminal", context: "c", namespace: "default", pod: "web-1", container: "istio-proxy" },
+      ],
+    });
+    expect(screen.getByRole("tab", { name: /web-1 · app/ })).toBeDefined();
+    expect(screen.getByRole("tab", { name: /web-1 · istio-proxy/ })).toBeDefined();
+  });
+
   it("keeps every session mounted and shows only the active one", () => {
     renderDock({ activeId: 2 });
     // Both panes are mounted (so terminals/streams survive tab switches)…

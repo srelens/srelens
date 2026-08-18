@@ -32,6 +32,9 @@ export interface DockSession {
 function sessionLabel(s: DockSession): string {
   if (s.kind === "shell") return `kubectl · ${s.context}`;
   if (s.kind === "helm") return s.helm?.title ?? "Helm";
+  // Two shells into the same multi-container pod are different sessions, so
+  // the container has to be in the label or the tabs are indistinguishable.
+  if (s.pod && s.kind === "terminal" && s.container) return `${s.pod} · ${s.container}`;
   if (s.pod) return s.pod;
   if (s.workload) return `${s.workload.kind}/${s.workload.name}`;
   return "session";
