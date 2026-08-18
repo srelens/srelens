@@ -62,6 +62,11 @@ describe("emptyListMessage", () => {
     );
   });
 
+  it("ignores a whitespace-only search, as the table itself does", () => {
+    const m = emptyListMessage({ kind: "pods", query: "   ", namespaces: [] });
+    expect(m.title).toBe("No pods");
+  });
+
   it("says the cluster is empty when nothing is narrowing the view", () => {
     // No search, no filter, all namespaces: the list really is empty, and the
     // hint must not send the user hunting for a filter that isn't set.

@@ -66,7 +66,11 @@ export function emptyListMessage(opts: {
   /** False for cluster-scoped kinds, where namespaces are meaningless. */
   namespaced?: boolean;
 }): EmptyListMessage {
-  const { kind, query, namespaces = [], namespaced = true } = opts;
+  const { kind, namespaces = [], namespaced = true } = opts;
+  // Trimmed, to match filterTableData: it ignores a whitespace-only query and
+  // returns every row, so treating one as an active search would blame a
+  // filter that is not filtering.
+  const query = opts.query?.trim();
   if (query) {
     return {
       title: `No ${kind} match “${query}”`,
