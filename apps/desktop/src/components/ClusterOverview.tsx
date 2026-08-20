@@ -23,7 +23,7 @@ import {
   type OverviewStats as Stats,
 } from "../lib/overviewSnapshot";
 import { isTauri } from "../transport/platform";
-import type { ResourceKind } from "./ResourceBrowser";
+import type { ResourceKind } from "../lib/kinds";
 
 const CACHE_TTL_MS = 30_000;
 const overviewCache = new Map<string, OverviewSnapshot>();

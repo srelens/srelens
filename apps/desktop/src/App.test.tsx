@@ -85,7 +85,9 @@ vi.mock("./components/ClusterOverview", () => ({
     <div data-testid="overview">{context}</div>
   ),
 }));
-vi.mock("./components/ResourceBrowser", () => ({
+// The kind tables moved to lib/kinds; the reduced set stays mocked here so the
+// sidebar renders five entries rather than the real forty.
+vi.mock("./lib/kinds", () => ({
   RESOURCE_LABELS: {
     overview: "Overview",
     pods: "Pods",
@@ -94,6 +96,8 @@ vi.mock("./components/ResourceBrowser", () => ({
     assistant: "Assistant",
   },
   K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "", assistant: "" },
+}));
+vi.mock("./components/ResourceBrowser", () => ({
   ResourceBrowser: ({
     context,
     kind,

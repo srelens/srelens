@@ -9,7 +9,7 @@ import {
   CommandGroup,
   CommandItem,
 } from "./ui/command";
-import { RESOURCE_LABELS, K8S_KIND, type ResourceKind } from "./ResourceBrowser";
+import { RESOURCE_LABELS, K8S_KIND, type ResourceKind } from "../lib/kinds";
 import { listResource } from "../lib/manifest";
 import { listCrds, type CrdRef } from "../lib/crds";
 import { getRecents, pushRecent, recentId, type RecentItem } from "../lib/recents";

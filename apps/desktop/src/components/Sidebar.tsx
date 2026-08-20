@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import { RESOURCE_LABELS, type ResourceKind } from "./ResourceBrowser";
+import { RESOURCE_LABELS, type ResourceKind } from "../lib/kinds";
 import { CustomResourceGroup } from "./CustomResourceGroup";
 import { iconForResourceKind, NavIcon } from "../ui/NavIcon";
 import { cn } from "@/lib/utils";

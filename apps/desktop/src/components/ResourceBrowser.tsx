@@ -84,9 +84,6 @@ import {
 } from "../ui";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "../lib/kinds";
 
-// Re-exported while the other importers are repointed; removed in the next commit.
-export { K8S_KIND, RESOURCE_LABELS, type ResourceKind };
-
 
 
 

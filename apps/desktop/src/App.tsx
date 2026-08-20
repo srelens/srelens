@@ -4,12 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ClusterHotbar } from "./components/ClusterHotbar";
 import { ResourceTabs, type TabDescriptor } from "./components/ResourceTabs";
 import { Sidebar } from "./components/Sidebar";
-import {
-  ResourceBrowser,
-  K8S_KIND,
-  RESOURCE_LABELS,
-  type ResourceKind,
-} from "./components/ResourceBrowser";
+import { ResourceBrowser } from "./components/ResourceBrowser";
+import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "./lib/kinds";
 import { CustomResourceBrowser } from "./components/CustomResourceBrowser";
 import { ClusterOverview } from "./components/ClusterOverview";
 import { PortForwardsView } from "./components/PortForwardsView";
