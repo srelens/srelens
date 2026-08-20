@@ -83,31 +83,11 @@ import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "./lib/clusters";
 import { deletePod } from "./lib/workloads";
 import { clearAccessCache } from "./lib/access";
+import type { ViewTab } from "./lib/tabs";
 
 /** How long a closing window waits for the settings write to land. */
 const CLOSE_WRITE_TIMEOUT_MS = 2000;
 
-export interface ViewTab {
-  id: number;
-  cluster: string | null;
-  kind: ResourceKind;
-  /** Present when the tab is a custom-resource (CRD) view. */
-  crd?: CrdRef;
-  /** Deep-link target from global search (opens the resource's detail). */
-  focus?: { name: string; namespace: string | null; nonce: number };
-  /** For a "new resource" tab: the template kind to start from. */
-  create?: { initialKind?: string };
-  /** For an "edit resource" tab: the resource to preload and apply back. */
-  edit?: { kind: string; namespace: string | null; name: string };
-  /** Identity of `cluster` (#265). The display name changes when another
-   *  kubeconfig declares the same context name; this does not, so a rename
-   *  never reads as a deleted context and never closes the tab. */
-  clusterId?: string;
-  /** Selected namespace filter (empty = all), preserved per tab. */
-  namespace?: string;
-  /** Sort, search text and filtered column for this tab's list (#254). */
-  view?: TabViewState;
-}
 
 export function App() {
   // Each tab is a (cluster, resource-kind) view, like browser tabs. In web mode

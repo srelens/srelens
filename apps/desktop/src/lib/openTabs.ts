@@ -9,7 +9,7 @@
 import { loadRestoreSession } from "./settings";
 import { settingsStorage } from "./settingsStorage";
 import type { CrdRef } from "./crds";
-import type { ViewTab } from "../App";
+import type { ViewTab } from "./tabs";
 
 const KEY = "srelens.openTabs";
 
