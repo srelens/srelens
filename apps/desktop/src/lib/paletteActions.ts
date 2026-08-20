@@ -1,4 +1,4 @@
-import { K8S_KIND, type ResourceKind } from "../components/ResourceBrowser";
+import { K8S_KIND, type ResourceKind } from "./kinds";
 import {
   deleteResource,
   rolloutRestart,
