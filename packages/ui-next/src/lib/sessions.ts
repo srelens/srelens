@@ -1,6 +1,8 @@
 import { Terminal } from "@xterm/xterm";
 import {
+  deletePod,
   describeError,
+  notify,
   startLocalTerminal,
   startPodExec,
   type TerminalConnection,
@@ -35,8 +37,9 @@ import {
  */
 
 /** What kind of shell a session is. `node` is a pod exec into the privileged
- *  debug pod srelens created for a node — the cleanup that makes it different
- *  is the store's, and lands with Task 2. */
+ *  debug pod srelens created for a node — the store deletes that pod when the
+ *  session ends (see {@link endSession}), which is the cleanup a pod exec and
+ *  a local shell have nothing to do. */
 export type SessionKind = "pod" | "node" | "local";
 
 /**
@@ -125,6 +128,18 @@ const handles = new Map<number, TerminalConnection>();
 /** Everything wired to a session's emulator, unwired when the row goes. */
 const unwires = new Map<number, () => void>();
 const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+/**
+ * The privileged debug pod a `kind: "node"` session is exec'd into — the
+ * object `k8s.createNodeDebugPod` left on the cluster, and the store's own to
+ * delete. Absent for a pod exec or a local shell, neither of which created
+ * anything: deleting a pod the reader is merely looking at would be the wrong
+ * kind of cleanup.
+ *
+ * Entries come out the moment {@link endSession} acts on them, which is also
+ * what keeps the delete to once: a second `endSession` on the same id finds
+ * nothing left to clean up.
+ */
+const nodeDebugPods = new Map<number, { context: string; namespace: string; pod: string }>();
 
 /** Ids are the store's own: a pod exec and a local PTY number themselves
  *  independently on the backend, so their ids collide. */
@@ -167,12 +182,20 @@ export function terminalFor(id: number): Terminal | undefined {
  *  `closed` row carrying the reason, because a failure the reader can read is
  *  worth more than one they have to catch. */
 export async function startPodSession(req: PodSessionRequest): Promise<number> {
+  const kind = req.kind ?? "pod";
   const id = register({
-    kind: req.kind ?? "pod",
+    kind,
     title: req.title ?? titleOf(req.pod, req.container),
     context: req.context,
     namespace: req.namespace,
   });
+  // `req.pod` for a node session IS the debug pod: `k8s.createNodeDebugPod`
+  // made it, this exec runs `nsenter` inside it, and nothing else knows its
+  // name. Recorded before the connect, same as the row itself, so a session
+  // the reader ends while it is still opening (see `connect`) still cleans up.
+  if (kind === "node") {
+    nodeDebugPods.set(id, { context: req.context, namespace: req.namespace, pod: req.pod });
+  }
   await connect(id, (onData, onExit, size) =>
     startPodExec(
       req.context,
@@ -218,13 +241,37 @@ export function endSession(id: number): void {
   disconnect(id);
   emulators.get(id)?.dispose();
   emulators.delete(id);
+  // Taken out of the map here, synchronously, rather than after the delete
+  // resolves: that is what makes a second `endSession(id)` — the row is
+  // already gone, but nothing stops the reader clicking again — find nothing
+  // left to delete, instead of racing the first delete or firing a second one.
+  const debugPod = nodeDebugPods.get(id);
+  nodeDebugPods.delete(id);
+  if (debugPod) void deleteDebugPod(debugPod);
   commit(sessions.filter((s) => s.id !== id));
+}
+
+/**
+ * Delete the debug pod a finished node session leaves behind.
+ *
+ * The row is already gone by the time this runs — `endSession` does not wait
+ * on it — so a failure has nowhere on screen to land. It goes to `notify`
+ * instead, described rather than raw: the pod may already be gone, or the
+ * reader may lack permission to delete it, and either way `deletePod` itself
+ * never throws, so the row is never left stranded waiting on this.
+ */
+async function deleteDebugPod(target: { context: string; namespace: string; pod: string }): Promise<void> {
+  const out = await deletePod(target.context, target.namespace, target.pod);
+  if (out.error) {
+    notify.error(`Couldn't delete debug pod ${target.pod}`, describeError(out.error).detail);
+  }
 }
 
 /** Reset the module-level store between tests. */
 export function __resetSessionsForTests(): void {
   for (const id of [...emulators.keys()]) endSession(id);
   for (const id of [...handles.keys()]) disconnect(id);
+  nodeDebugPods.clear();
   sessions = [];
   listeners.clear();
   seq = 0;

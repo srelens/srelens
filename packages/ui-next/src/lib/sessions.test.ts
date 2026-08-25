@@ -3,6 +3,8 @@ import type { Terminal } from "@xterm/xterm";
 
 const startPodExec = vi.fn();
 const startLocalTerminal = vi.fn();
+const deletePod = vi.fn();
+const notifyError = vi.fn();
 
 vi.mock("@srelens/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core")>();
@@ -10,6 +12,8 @@ vi.mock("@srelens/core", async (importOriginal) => {
     ...actual,
     startPodExec: (...args: unknown[]) => startPodExec(...args),
     startLocalTerminal: (...args: unknown[]) => startLocalTerminal(...args),
+    deletePod: (...args: unknown[]) => deletePod(...args),
+    notify: { ...actual.notify, error: notifyError },
   };
 });
 
@@ -96,9 +100,20 @@ const pod = {
   container: "api",
 };
 
+const nodeDebugPod = {
+  context: "kind-srelens-demo",
+  namespace: "srelens-debug",
+  pod: "srelens-node-debug-x1",
+  container: "debug",
+  kind: "node" as const,
+};
+
 beforeEach(() => {
   startPodExec.mockReset();
   startLocalTerminal.mockReset();
+  deletePod.mockReset();
+  deletePod.mockResolvedValue({ deleted: true });
+  notifyError.mockReset();
   __resetSessionsForTests();
 });
 
@@ -358,6 +373,76 @@ describe("the session store", () => {
     vi.advanceTimersByTime(SESSION_IDLE_AFTER_MS * 2);
 
     expect(getSessions()[0].state).toBe("closed");
+  });
+});
+
+describe("a node session's debug pod", () => {
+  it("deletes the debug pod when the session ends", async () => {
+    fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    endSession(id);
+
+    await vi.waitFor(() => {
+      expect(deletePod).toHaveBeenCalledWith(
+        "kind-srelens-demo",
+        "srelens-debug",
+        "srelens-node-debug-x1",
+      );
+    });
+  });
+
+  it("deletes nothing when an ordinary pod session ends", async () => {
+    fakeBackend();
+    const id = await startPodSession(pod);
+
+    endSession(id);
+    // Give any stray async cleanup a turn before asserting the negative.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deletePod).not.toHaveBeenCalled();
+  });
+
+  it("deletes nothing when a local session ends", async () => {
+    fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+
+    endSession(id);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deletePod).not.toHaveBeenCalled();
+  });
+
+  it("deletes the debug pod once, even though endSession is called twice", async () => {
+    fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    endSession(id);
+    endSession(id);
+
+    await vi.waitFor(() => expect(deletePod).toHaveBeenCalledTimes(1));
+    // Hold the assertion past the first resolution, so a second delete fired
+    // a tick later would still be caught.
+    await Promise.resolve();
+    expect(deletePod).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a failed delete through describeError, without stranding the row", async () => {
+    deletePod.mockResolvedValue({ error: 'handler error: pods "srelens-node-debug-x1" not found' });
+    fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    endSession(id);
+
+    // The row is gone immediately — ending a session is the reader's own act
+    // and does not wait on cleanup to complete.
+    expect(getSessions()).toEqual([]);
+    await vi.waitFor(() => expect(notifyError).toHaveBeenCalled());
+    const [, detail] = notifyError.mock.calls[0] as [string, string];
+    expect(detail).not.toContain("handler error:");
+    expect(detail).toContain("not found");
   });
 });
 
