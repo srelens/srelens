@@ -19,6 +19,7 @@ import { Icons } from "../lib/icons";
 import { ROW_ACTION_LABEL } from "../lib/kinds/rowActions";
 import type { KindActions, ListRow } from "../lib/kinds/types";
 import { openTab } from "../lib/tabsStore";
+import { NewForwardDialog } from "./forwards/NewForwardDialog";
 import { logsRoute } from "./Logs";
 
 export interface UseRowMenuArgs {
@@ -45,15 +46,17 @@ function isSuspended(row: ListRow): boolean {
 }
 
 /**
- * The row menu's shell/forward tabs — placeholders for screens that do not
- * exist yet. Deliberately NOT `detailRoute`: designing their real route model
- * is a later step's job, not this one's.
+ * The row menu's shell tab — a placeholder for a screen that does not exist
+ * yet. Deliberately NOT `detailRoute`: designing its real route model is a
+ * later step's job, not this one's.
  *
- * Logs no longer comes through here. This shape carries a name and nothing
- * else, so it cannot say which kind or namespace the subject is in — which was
- * survivable while every one of these rendered a Placeholder, and stopped being
- * so the moment Logs became a real screen: the front door opened onto an empty
- * pane. It mints {@link logsRoute} instead.
+ * Neither Logs nor Port forward comes through here any more. This shape
+ * carries a name and nothing else, so it cannot say which kind or namespace
+ * the subject is in — which was survivable while every one of these rendered a
+ * Placeholder, and stopped being so the moment those screens became real: the
+ * front door opened onto an empty pane. Logs mints {@link logsRoute}; Port
+ * forward opens §A.4's dialog on the row itself, through the same `dialog`
+ * slot every write action here uses.
  */
 const nav = (name: string, suffix: string) => `/resources/${encodeURIComponent(name)}/${suffix}`;
 
@@ -78,6 +81,15 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
   dialog: ReactNode;
 } {
   const [pending, setPending] = useState<Pending | null>(null);
+  /**
+   * The row whose `Port forward` was picked, if any.
+   *
+   * A slot of its own rather than a `Pending` variant: every member of that
+   * union is a question with a confirm behind it, and §A.4's dialog IS the
+   * confirm — it has its own fields, its own equivalent command and its own
+   * error line, none of which `PendingDialog` has a shape for.
+   */
+  const [forwarding, setForwarding] = useState<ListRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [replicas, setReplicas] = useState("");
@@ -169,7 +181,11 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
       list.push({
         label: ROW_ACTION_LABEL.forward,
         icon: Icons.portforwards,
-        onPick: () => openTab(nav(row.name, "forward"), { clusterName: context }),
+        // Opens §A.4's dialog on this row rather than minting
+        // `/resources/<name>/forward`, which no screen is registered for and
+        // which therefore rendered a Placeholder — the menu offering a way in
+        // to a dead end. The same mistake Follow logs shipped with (#346).
+        onPick: () => setForwarding(row),
       });
     }
     list.push({
@@ -221,7 +237,19 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     return list;
   }
 
-  const dialog = pending ? <PendingDialog pending={pending} kind={kind} context={context} busy={busy} error={error} replicas={replicas} onReplicasChange={setReplicas} onConfirm={() => void confirm()} onCancel={close} /> : null;
+  const dialog = pending ? (
+    <PendingDialog pending={pending} kind={kind} context={context} busy={busy} error={error} replicas={replicas} onReplicasChange={setReplicas} onConfirm={() => void confirm()} onCancel={close} />
+  ) : forwarding ? (
+    // The row's own kind and identity, prefilled. A list row knows no ports,
+    // so the remote one is the reader's to name — and the dialog stays fully
+    // editable either way: a prefill is a starting point.
+    <NewForwardDialog
+      context={context}
+      namespace={forwarding.namespace}
+      target={{ kind, name: forwarding.name }}
+      onClose={() => setForwarding(null)}
+    />
+  ) : null;
 
   return { items, dialog };
 }

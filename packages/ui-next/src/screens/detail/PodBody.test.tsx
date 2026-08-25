@@ -1,9 +1,26 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { K8sObject } from "@srelens/core";
 import { KV } from "@srelens/ui-kit";
+
+// What §A.4's dialog reaches for once a container's port opens it. This file
+// has no cluster; every formatter (`portText`, `containerStateText`, …) and
+// both forward rules (`toKubectl`, `kindToForwardTarget`) stay REAL, since
+// "a Pod is `pod/`, not `svc/`" is one of the things under test.
+const forwardCore = vi.hoisted(() => ({
+  listNamespaces: vi.fn(async () => ({ namespaces: ["default"] })),
+  listServices: vi.fn(async () => ({ services: [] })),
+  listPods: vi.fn(async () => ({ pods: [{ name: "web-1", namespace: "default" }] })),
+  startPortForward: vi.fn(async () => ({ id: 1, localPort: 9090 })),
+}));
+vi.mock("@srelens/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core")>()),
+  ...forwardCore,
+}));
+
 import { Section } from "./Section";
-import { PodContainersBody, PodDetailsBody, podFacts } from "./PodBody";
+import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
 
 const APP_CONTAINER = {
   name: "app",
@@ -52,6 +69,7 @@ describe("PodContainersBody", () => {
   it("names every container", () => {
     render(
       <PodContainersBody
+        context="ctx"
         object={pod(
           { containers: [APP_CONTAINER, SIDECAR_CONTAINER] },
           { containerStatuses: [APP_STATUS, SIDECAR_STATUS] },
@@ -65,6 +83,7 @@ describe("PodContainersBody", () => {
   it("shows a container's state and its restart count", () => {
     render(
       <PodContainersBody
+        context="ctx"
         object={pod({ containers: [APP_CONTAINER] }, { containerStatuses: [APP_STATUS] })}
       />,
     );
@@ -76,6 +95,7 @@ describe("PodContainersBody", () => {
   it("shows ports, probes, environment and mounts for a container that has them", () => {
     render(
       <PodContainersBody
+        context="ctx"
         object={pod({ containers: [APP_CONTAINER] }, { containerStatuses: [APP_STATUS] })}
       />,
     );
@@ -93,6 +113,7 @@ describe("PodContainersBody", () => {
   it("omits ports, probes, environment and mounts for a container that has none", () => {
     render(
       <PodContainersBody
+        context="ctx"
         object={pod({ containers: [SIDECAR_CONTAINER] }, { containerStatuses: [SIDECAR_STATUS] })}
       />,
     );
@@ -106,7 +127,7 @@ describe("PodContainersBody", () => {
   });
 
   it("shows No containers when the pod has none", () => {
-    render(<PodContainersBody object={pod({})} />);
+    render(<PodContainersBody context="ctx" object={pod({})} />);
     expect(screen.getByText("No containers")).toBeDefined();
   });
 
@@ -120,6 +141,7 @@ describe("PodContainersBody", () => {
     };
     render(
       <PodContainersBody
+        context="ctx"
         object={pod({ containers: [APP_CONTAINER] }, { containerStatuses: [status] })}
       />,
     );
@@ -135,7 +157,7 @@ describe("PodContainersBody", () => {
 
   it("shows which container an ephemeral container is debugging", () => {
     const debugContainer = { name: "debugger", image: "busybox", targetContainerName: "app" };
-    render(<PodContainersBody object={pod({ ephemeralContainers: [debugContainer] })} />);
+    render(<PodContainersBody context="ctx" object={pod({ ephemeralContainers: [debugContainer] })} />);
     expect(screen.getByText("Ephemeral containers")).toBeDefined();
     expect(screen.getByText("debugger")).toBeDefined();
     expect(screen.getByText("Debugging")).toBeDefined();
@@ -146,6 +168,7 @@ describe("PodContainersBody", () => {
     const commandContainer = { ...APP_CONTAINER, command: ["/bin/sh", "-c"], args: ["sleep 3600"] };
     render(
       <PodContainersBody
+        context="ctx"
         object={pod({ containers: [commandContainer] }, { containerStatuses: [APP_STATUS] })}
       />,
     );
@@ -156,11 +179,155 @@ describe("PodContainersBody", () => {
   it("omits Debugging and Command when a container has neither", () => {
     render(
       <PodContainersBody
+        context="ctx"
         object={pod({ containers: [SIDECAR_CONTAINER] }, { containerStatuses: [SIDECAR_STATUS] })}
       />,
     );
     expect(screen.queryByText("Debugging")).toBeNull();
     expect(screen.queryByText("Command")).toBeNull();
+  });
+});
+
+/**
+ * A container's ports, on both surfaces that draw them.
+ *
+ * Two ports on two containers, and NEITHER number is one of §A.4's own
+ * placeholders (9090 local, 8080 remote) — so a prefill that came from the
+ * field's default rather than from the click cannot pass.
+ */
+const PORTED_CONTAINER = {
+  name: "api",
+  image: "ghcr.io/example/api:2",
+  ports: [
+    { name: "http", containerPort: 9376, protocol: "TCP" },
+    { name: "metrics", containerPort: 5432, protocol: "TCP" },
+  ],
+};
+
+const PORTED_STATUS = {
+  name: "api",
+  ready: true,
+  restartCount: 0,
+  state: { running: { startedAt: "2026-08-20T00:00:00Z" } },
+};
+
+const dialogSelect = (name: string) => screen.getByLabelText(name) as HTMLSelectElement;
+const dialogInput = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
+
+/**
+ * The container's ports are the other place the reader is already looking at
+ * the exact port they want. They used to be a run of inert strings — on the
+ * peek's pane a list, on the full tab's table one comma-joined cell — with the
+ * affordance classic offers inline missing from both.
+ */
+describe("a container's ports as the way in to a forward", () => {
+  it("makes every port of every container its own forward, on the peek's pane", async () => {
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod(
+          { containers: [PORTED_CONTAINER, SIDECAR_CONTAINER] },
+          { containerStatuses: [PORTED_STATUS, SIDECAR_STATUS] },
+        )}
+      />,
+    );
+    // Core's own `portText`, still — the words did not change, only what they
+    // are attached to.
+    expect(screen.getByRole("button", { name: "Forward http: 9376/TCP on api" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Forward metrics: 5432/TCP on api" })).toBeDefined();
+    // A container with no ports gains no affordance and no empty row.
+    expect(screen.queryByRole("button", { name: /on sidecar/ })).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("opens §A.4's dialog on this POD, in its namespace, on the port that was clicked", async () => {
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod({ containers: [PORTED_CONTAINER] }, { containerStatuses: [PORTED_STATUS] })}
+      />,
+    );
+    // The SECOND port, so a cell that always handed over its first cannot pass.
+    await userEvent.click(screen.getByRole("button", { name: "Forward metrics: 5432/TCP on api" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("New port forward")).toBeDefined();
+    await waitFor(() => expect(dialogSelect("Target").value).toBe("pod/web-1"));
+    await waitFor(() => expect(dialogSelect("Namespace").value).toBe("default"));
+    expect(dialogInput("Remote port").value).toBe("5432");
+    // Offered, not demanded, and NOT the far end again — a free port from a
+    // range nothing claims by convention. The property, not the draw.
+    const offered = Number(dialogInput("Local port").value);
+    expect(offered).toBeGreaterThanOrEqual(10000);
+    expect(offered).toBeLessThanOrEqual(32767);
+    expect(offered).not.toBe(5432);
+  });
+
+  it("names the Pod as a Pod — pod/, from its kind, not the container's name", async () => {
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod({ containers: [PORTED_CONTAINER] }, { containerStatuses: [PORTED_STATUS] })}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Forward http: 9376/TCP on api" }));
+    await screen.findByRole("dialog");
+    await userEvent.clear(screen.getByLabelText("Local port"));
+    await userEvent.type(screen.getByLabelText("Local port"), "9091");
+    await waitFor(() =>
+      expect(screen.getByText(/port-forward pod\/web-1 9091:9376/)).toBeDefined(),
+    );
+    expect(screen.queryByText(/port-forward pod\/api/)).toBeNull();
+  });
+
+  it("does the same in the full tab's containers table, where they were one joined string", async () => {
+    render(
+      <PodContainersTable
+        context="ctx"
+        object={pod({ containers: [PORTED_CONTAINER] }, { containerStatuses: [PORTED_STATUS] })}
+      />,
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Forward metrics: 5432/TCP on api" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(dialogSelect("Target").value).toBe("pod/web-1"));
+    expect(dialogInput("Remote port").value).toBe("5432");
+  });
+
+  it("still says a portless container has no ports, on both surfaces", () => {
+    const { unmount } = render(
+      <PodContainersTable
+        context="ctx"
+        object={pod({ containers: [SIDECAR_CONTAINER] }, { containerStatuses: [SIDECAR_STATUS] })}
+      />,
+    );
+    // The Ports cell's own dash — several columns render one for a container
+    // this bare, so the count is what says the cell did not vanish.
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    unmount();
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod({ containers: [SIDECAR_CONTAINER] }, { containerStatuses: [SIDECAR_STATUS] })}
+      />,
+    );
+    expect(screen.queryByText("Ports")).toBeNull();
+  });
+
+  it("puts no port or command in a title attribute", async () => {
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod({ containers: [PORTED_CONTAINER] }, { containerStatuses: [PORTED_STATUS] })}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Forward http: 9376/TCP on api" }));
+    await screen.findByRole("dialog");
+    const joined = Array.from(document.querySelectorAll("[title]"))
+      .map((el) => el.getAttribute("title") ?? "")
+      .join("\n");
+    for (const leak of ["9376", "5432", "port-forward", "--context"]) {
+      expect(joined).not.toContain(leak);
+    }
   });
 });
 

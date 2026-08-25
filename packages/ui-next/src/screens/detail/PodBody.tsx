@@ -32,6 +32,7 @@ import {
   Table,
   type Column,
 } from "@srelens/ui-kit";
+import { ForwardAction } from "../forwards/ForwardAction";
 import { Section } from "./Section";
 import { ConditionsSection, StringList } from "./sections";
 import type { DetailFact, FactsFor } from "./facts";
@@ -303,6 +304,76 @@ export function PodDetailsBody({ object }: { object: K8sObject }) {
   return <>{sections}</>;
 }
 
+/** The highest port a TCP socket can bind. */
+const MAX_PORT = 65_535;
+
+/** Where a container's ports are being drawn, so a forward opened from one
+ *  knows what it is a port OF. A container is not a forward target; the pod
+ *  around it is. */
+interface PortsSubject {
+  context: string;
+  namespace: string;
+  /** The POD's name — `kubectl port-forward pod/<name>`. */
+  pod: string;
+  /** The container the ports belong to, which is what tells two identical
+   *  port numbers on one pod apart in an accessible name. */
+  container: string;
+}
+
+/**
+ * A container's ports, each one a way into a forward.
+ *
+ * THE ONE RENDERING OF A CONTAINER'S PORTS, drawn by both surfaces that show
+ * them — the peek's Containers pane down a column, the full tab's table across
+ * a cell. They used to be two inert renderings of core's `portText`: a
+ * `StringList` in one and `ports.map(portText).join(", ")` in the other. The
+ * words are still core's, unchanged; what changed is that each one is now the
+ * control that forwards it, rather than a string with no way to act on it.
+ *
+ * A port is a chip and not a button beside a string on purpose: a row of
+ * "Forward" buttons next to `http: 8080/TCP, metrics: 9090/TCP` would make the
+ * reader match a verb to a number by position.
+ *
+ * A port with no number a socket could bind — a malformed spec — renders as
+ * the same text it always did rather than as a control that could not work.
+ */
+function ContainerPorts({
+  ports,
+  subject,
+}: {
+  ports: Record<string, unknown>[];
+  subject?: PortsSubject;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {ports.map((port, i) => {
+        const text = portText(port);
+        const number = Number(str(port.containerPort));
+        const forwardable =
+          subject && Number.isInteger(number) && number > 0 && number <= MAX_PORT;
+        return forwardable ? (
+          <ForwardAction
+            key={`${text}-${i}`}
+            context={subject.context}
+            namespace={subject.namespace}
+            kind="Pod"
+            name={subject.pod}
+            remotePort={number}
+            // Contains the chip's own words, so the spoken name and the drawn
+            // one are one label — and carries the container, because two
+            // containers in a pod may well publish the same port.
+            label={`Forward ${text} on ${subject.container}`}
+          >
+            {text}
+          </ForwardAction>
+        ) : (
+          <span key={`${text}-${i}`}>{text}</span>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * One container's block — app, init or ephemeral. State and restart count come
  * from its `containerStatuses` entry (absent while the pod is still being
@@ -320,9 +391,13 @@ export function PodDetailsBody({ object }: { object: K8sObject }) {
 function ContainerCard({
   container,
   status,
+  subject,
 }: {
   container: Record<string, unknown>;
   status?: Record<string, unknown>;
+  /** Absent only where the pane cannot say which pod in which cluster it is
+   *  drawing, which is what a forward would need. */
+  subject?: Omit<PortsSubject, "container">;
 }) {
   const name = str(container.name);
   const state = status ? containerStateText(status) : undefined;
@@ -355,7 +430,12 @@ function ContainerCard({
       {lastRestart && <KV k="Last restart" v={timestampWithAge(lastRestart, Date.now())} />}
       {runningSince && <KV k="Running since" v={timestampWithAge(runningSince, Date.now())} />}
       {image && <KV k="Image" v={image} mono />}
-      {ports.length > 0 && <KV k="Ports" v={<StringList items={ports.map(portText)} />} />}
+      {ports.length > 0 && (
+        <KV
+          k="Ports"
+          v={<ContainerPorts ports={ports} subject={subject && { ...subject, container: name }} />}
+        />
+      )}
       {env.length > 0 && <KV k="Environment" v={<StringList items={env.map(envText)} />} />}
       {mounts.length > 0 && <KV k="Mounts" v={<StringList items={mounts.map(mountText)} />} />}
       {Object.keys(liveness).length > 0 && <KV k="Liveness" v={<StringList items={probeChips(liveness)} />} />}
@@ -372,17 +452,24 @@ function ContainerGroup({
   title,
   containers,
   statuses,
+  subject,
 }: {
   title: string;
   containers: Record<string, unknown>[];
   statuses: Map<string, Record<string, unknown>>;
+  subject?: Omit<PortsSubject, "container">;
 }) {
   if (containers.length === 0) return null;
   return (
     <Section title={title}>
       <div className="flex flex-col gap-4">
         {containers.map((c) => (
-          <ContainerCard key={str(c.name)} container={c} status={statuses.get(str(c.name))} />
+          <ContainerCard
+            key={str(c.name)}
+            container={c}
+            status={statuses.get(str(c.name))}
+            subject={subject}
+          />
         ))}
       </div>
     </Section>
@@ -394,18 +481,37 @@ function statusesByName(list: unknown): Map<string, Record<string, unknown>> {
 }
 
 /**
+ * What a container's ports can be forwarded AS, or `undefined` where they
+ * cannot be forwarded at all.
+ *
+ * One derivation for both surfaces, so the peek's pane and the tab's table
+ * cannot come to disagree about which pod a port belongs to. A pod with no
+ * namespace or no name — or a screen with no cluster in focus — has nothing to
+ * point a forward at, and the ports render as the text they always were.
+ */
+function forwardSubject(
+  object: K8sObject,
+  context: string,
+): Omit<PortsSubject, "container"> | undefined {
+  const namespace = str(object.metadata?.namespace);
+  const pod = str(object.metadata?.name);
+  return context && namespace && pod ? { context, namespace, pod } : undefined;
+}
+
+/**
  * A pod's Containers pane: every container named, its runtime state and
  * restart count, its ports, probes, environment and mounts. Ported from
  * classic's `ContainerCard`/`PodDetailView` — the largest single body in
- * `ResourceOverview.tsx` — onto kit components; the interactive port-forward
- * affordance classic offers inline is not wired here, since neither ui-next
- * nor the kit has a forward dialog yet (see the task report).
+ * `ResourceOverview.tsx` — onto kit components. The interactive port-forward
+ * affordance classic offers inline IS wired now, through
+ * {@link ContainerPorts}: each port is the control that forwards it, into
+ * §A.4's dialog.
  *
  * Flat blocks, like the Details pane beside it: the two panes are read in the
  * same 352px column, and a card here beside a rule there is two answers to
  * one question.
  */
-export function PodContainersBody({ object }: { object: K8sObject }) {
+export function PodContainersBody({ object, context }: { object: K8sObject; context: string }) {
   const spec = asRecord(object.spec);
   const status = asRecord(object.status);
   const containers = asArray(spec.containers).map(asRecord);
@@ -417,6 +523,7 @@ export function PodContainersBody({ object }: { object: K8sObject }) {
   }
 
   const containerStatuses = statusesByName(status.containerStatuses);
+  const subject = forwardSubject(object, context);
 
   return (
     <>
@@ -424,6 +531,7 @@ export function PodContainersBody({ object }: { object: K8sObject }) {
         title="Init containers"
         containers={initContainers}
         statuses={statusesByName(status.initContainerStatuses)}
+        subject={subject}
       />
       {/* Always open, never conditional on this pod having init or ephemeral
           containers beside it. It is the pane's subject — a reader who clicks
@@ -441,7 +549,12 @@ export function PodContainersBody({ object }: { object: K8sObject }) {
         ) : (
           <div className="flex flex-col gap-4">
             {containers.map((c) => (
-              <ContainerCard key={str(c.name)} container={c} status={containerStatuses.get(str(c.name))} />
+              <ContainerCard
+                key={str(c.name)}
+                container={c}
+                status={containerStatuses.get(str(c.name))}
+                subject={subject}
+              />
             ))}
           </div>
         )}
@@ -450,6 +563,7 @@ export function PodContainersBody({ object }: { object: K8sObject }) {
         title="Ephemeral containers"
         containers={ephemeralContainers}
         statuses={statusesByName(status.ephemeralContainerStatuses)}
+        subject={subject}
       />
     </>
   );
@@ -481,15 +595,36 @@ function probeSummary(container: Record<string, unknown>): string {
   return "—";
 }
 
-const CONTAINER_COLUMNS: Column<ContainerRow>[] = [
+/**
+ * The summary table's columns, built against the pod they are drawn for.
+ *
+ * A function rather than a module-level constant because ONE of these cells is
+ * interactive — a port has to know which pod it would forward — and the reason
+ * the rest of this app keeps its columns module-level (so sort and filter read
+ * the same strings the reader sees) is not in play for a cell holding
+ * controls: that column is neither sortable nor filterable, and says so.
+ */
+function containerColumns(subject?: Omit<PortsSubject, "container">): Column<ContainerRow>[] {
+  return [
   { key: "name", header: "Name", render: (r) => <span className="font-mono">{str(r.container.name)}</span> },
   { key: "image", header: "Image", render: (r) => <span className="font-mono">{str(r.container.image) || "—"}</span> },
   {
     key: "ports",
     header: "Ports",
+    // Controls, not text: there is nothing here for a comparator to order or a
+    // search to match, and a header that sorted by rendered nodes would sort
+    // by nothing at all.
+    sortable: false,
+    filterable: false,
     render: (r) => {
       const ports = asArray(r.container.ports).map(asRecord);
-      return ports.length > 0 ? ports.map(portText).join(", ") : "—";
+      if (ports.length === 0) return "—";
+      return (
+        <ContainerPorts
+          ports={ports}
+          subject={subject && { ...subject, container: str(r.container.name) }}
+        />
+      );
     },
   },
   // `cpu · memory` in one cell, the design's own form — `resourceSummary` is
@@ -518,7 +653,8 @@ const CONTAINER_COLUMNS: Column<ContainerRow>[] = [
       return <StatusPill status={state.text} kind={state.kind} tinted />;
     },
   },
-];
+  ];
+}
 
 /**
  * A pod's containers as one table, the way the full tab reads them inline on
@@ -540,7 +676,7 @@ const CONTAINER_COLUMNS: Column<ContainerRow>[] = [
  * app containers, and the peek's pane is where a finished migration step or an
  * attached debug container is read in full.
  */
-export function PodContainersTable({ object }: { object: K8sObject }) {
+export function PodContainersTable({ object, context }: { object: K8sObject; context: string }) {
   const spec = asRecord(object.spec);
   const containers = asArray(spec.containers).map(asRecord);
   if (containers.length === 0) return null;
@@ -552,7 +688,7 @@ export function PodContainersTable({ object }: { object: K8sObject }) {
   return (
     <Section title="Containers">
       <Table
-        columns={CONTAINER_COLUMNS}
+        columns={containerColumns(forwardSubject(object, context))}
         data={rows}
         getRowKey={(r) => str(r.container.name)}
       />

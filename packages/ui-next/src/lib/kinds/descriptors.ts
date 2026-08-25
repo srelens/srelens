@@ -113,7 +113,9 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     // only reads `phase`, a field `ListRow` does not promise.
     flagged: podFlagged as (row: ListRow) => boolean,
     // Task 10 ported `PodContainersBody` off classic's `ContainerCard` — the
-    // detail shell only offers the Containers tab where this is set.
+    // detail shell only offers the Containers tab where this is set. The
+    // pane's ports are also the way into a port forward, which is why `Pod`
+    // sets both this and `actions.forward`.
     panes: { containers: true },
   },
   deployments: {

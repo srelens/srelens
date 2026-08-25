@@ -3,10 +3,12 @@ import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 import { parseDetailRoute } from "./detailRoute";
 import { AppLog } from "../screens/AppLog";
 import { Events } from "../screens/Events";
+import { Forwards } from "../screens/Forwards";
 import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { Toolbox } from "../screens/Toolbox";
 import { Workloads } from "../screens/Workloads";
 
 /**
@@ -81,11 +83,15 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");
     const name = decodeURIComponent(rawName ?? "");
-    // The row menu (`ResourceMenu.tsx`) mints `/resources/<name>/logs|shell|forward`
-    // alongside the bare `/resources/<name>` — same prefix, so without this a
-    // pod opened three ways ("Open in new tab", "Follow logs", "Open shell")
-    // got three tabs with the identical title and kind, indistinguishable in
-    // the strip.
+    // `/resources/<name>/logs|shell|forward` shares the bare
+    // `/resources/<name>` prefix — so without this a pod opened three ways
+    // ("Open in new tab", "Follow logs", "Open shell") got three tabs with the
+    // identical title and kind, indistinguishable in the strip.
+    //
+    // Only `shell` is still minted (`ResourceMenu.tsx`). Logs and Port forward
+    // have real front doors now — `logsRoute` and §A.4's dialog — and the
+    // other two shapes survive here only so a tab a previous session
+    // persisted can still name itself in the strip.
     if (suffix === "logs") return { route, title: `${name} · logs`, sub, kind: "logs" };
     if (suffix === "shell") return { route, title: `${name} · shell`, sub, kind: "terminal" };
     if (suffix === "forward") return { route, title: `${name} · forward`, sub, kind: "forwards" };
@@ -137,6 +143,13 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // the same screen through `parseLogsRoute` in `screenFor` — one screen, two
   // shapes, because telling them apart is the screen's own job.
   "/logs": Logs,
+  // Cluster-scoped in the strip, but the screen lists every tunnel this
+  // process holds — the store behind it is module-level and does not partition
+  // by context, and a forward outlives the tab that started it.
+  "/forwards": Forwards,
+  // App-scoped: the managed kubectl, helm and krew are the machine's, and the
+  // exec-auth rail is the only part of it that looks at a context at all.
+  "/toolbox": Toolbox,
 });
 
 /**

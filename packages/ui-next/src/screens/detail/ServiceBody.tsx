@@ -8,6 +8,7 @@ import {
   type K8sObject,
 } from "@srelens/core";
 import { KV, PairList, Table, type Column } from "@srelens/ui-kit";
+import { ForwardAction } from "../forwards/ForwardAction";
 import { Section } from "./Section";
 import { StringList } from "./sections";
 
@@ -46,9 +47,22 @@ interface PortRow {
   key: string;
   name: string;
   port: string;
+  /**
+   * The Service port ITSELF, as a number — what a forward is pointed at.
+   *
+   * Separate from `port`, which folds the node port in for display
+   * ("80:30080") and cannot be parsed back, and deliberately not `target`:
+   * `kubectl port-forward svc/x <local>:<remote>` takes the SERVICE port and
+   * resolves the `targetPort` behind it on its own. `null` for a port that is
+   * not a number a socket could bind, which is nothing this table can forward.
+   */
+  forwardPort: number | null;
   target: string;
   protocol: string;
 }
+
+/** The highest port a TCP socket can bind. */
+const MAX_PORT = 65_535;
 
 const PORT_COLUMNS: Column<PortRow>[] = [
   { key: "name", header: "Name", render: (p) => p.name },
@@ -60,28 +74,71 @@ const PORT_COLUMNS: Column<PortRow>[] = [
 /**
  * The Service's own ports — classic's "Ports" table, shown only when the
  * Service declares any (an ExternalName service, for instance, has none).
- * "Port" folds in the node port the way classic does ("80:30080"). Classic
- * also offers an inline port-forward button on this table when the Service
- * has a selector; that is a WRITE affordance, and neither ui-next nor the
- * kit has a forward dialog yet — `PodBody`'s Containers pane made the same
- * call for a container's ports (see the task report).
+ * "Port" folds in the node port the way classic does ("80:30080").
+ *
+ * **Every row is a way into a forward**, which is the affordance classic
+ * offers inline here and ui-next could not, having had no forward dialog when
+ * this body was ported. It has one now (§A.4), and this is the obvious place
+ * for it: the row is already showing the reader the exact port they want.
+ * The row does not START anything — {@link ForwardAction} opens the dialog
+ * prefilled and the reader confirms there.
  */
-function PortsSection({ object }: { object: K8sObject }) {
+function PortsSection({ object, context }: { object: K8sObject; context: string }) {
   const spec = asRecord(object.spec);
+  const namespace = str(object.metadata?.namespace);
+  const name = str(object.metadata?.name);
   const ports: PortRow[] = asArray(spec.ports).map((p, i) => {
     const pr = asRecord(p);
+    const number = Number(str(pr.port));
     return {
       key: str(pr.name) || `port-${i}`,
       name: str(pr.name) || "—",
       port: str(pr.port) + (pr.nodePort ? `:${str(pr.nodePort)}` : ""),
+      forwardPort: Number.isInteger(number) && number > 0 && number <= MAX_PORT ? number : null,
       target: str(pr.targetPort),
       protocol: str(pr.protocol) || "TCP",
     };
   });
   if (ports.length === 0) return null;
+
+  // No cluster, or a Service the API server named neither — there is nothing
+  // to point a forward AT, and a control that opened a dialog which could not
+  // say what it was forwarding is worse than no control.
+  const canForward = Boolean(context && namespace && name);
+  const columns: Column<PortRow>[] = canForward
+    ? [
+        ...PORT_COLUMNS,
+        {
+          // §13's own unnamed trailing column, for the same reason: the header
+          // would name a verb the cells already say.
+          key: "forward",
+          header: "",
+          sortable: false,
+          filterable: false,
+          align: "end",
+          render: (p) =>
+            p.forwardPort === null ? null : (
+              <ForwardAction
+                context={context}
+                namespace={namespace}
+                kind="Service"
+                name={name}
+                remotePort={p.forwardPort}
+                // Named per row: a table of "Forward" names nothing. The PORT
+                // is what tells the rows apart, and the row shows it already —
+                // this is not a value hidden in an attribute.
+                label={`Forward port ${p.forwardPort}`}
+              >
+                Forward
+              </ForwardAction>
+            ),
+        },
+      ]
+    : PORT_COLUMNS;
+
   return (
     <Section title="Ports">
-      <Table columns={PORT_COLUMNS} data={ports} getRowKey={(p) => p.key} />
+      <Table columns={columns} data={ports} getRowKey={(p) => p.key} />
     </Section>
   );
 }
@@ -138,7 +195,7 @@ export function ServiceDetailsBody({ object, context }: { object: K8sObject; con
   return (
     <>
       <ConnectionSection object={object} />
-      <PortsSection object={object} />
+      <PortsSection object={object} context={context} />
       <EndpointSlicesSection context={context} object={object} />
     </>
   );

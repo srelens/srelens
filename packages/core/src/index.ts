@@ -56,6 +56,7 @@ export * from "./lib/namespaces";
 export * from "./lib/network";
 export * from "./lib/notify";
 export * from "./lib/onboarding";
+export * from "./lib/openExternal";
 export * from "./lib/openTabs";
 export * from "./lib/overviewSnapshot";
 export * from "./lib/paletteActions";

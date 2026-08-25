@@ -23,9 +23,10 @@ function ConfigEntry({ name, value }: { name: string; value: string }) {
 /**
  * A ConfigMap's Details pane: its `data` keys and values — classic's
  * `ConfigBody`, minus the inline edit/save affordance (`ConfigDataEditor`):
- * ui-next's Details panes are read-only, the same call `ServiceBody`'s Ports
- * table and `PodBody`'s Containers pane made for their own write affordances
- * (an inline port-forward button neither wires). `binaryData` is not read
+ * this pane is read-only. `ServiceBody`'s Ports table and `PodBody`'s
+ * Containers pane once made the same call about classic's inline port-forward
+ * button; both offer it now, into §A.4's dialog — editing a ConfigMap in place
+ * is a different question and still unanswered. `binaryData` is not read
  * here either — classic's own `ConfigBody` never read it.
  */
 export function ConfigDetailsBody({ object }: { object: K8sObject }) {

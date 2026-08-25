@@ -79,6 +79,37 @@ describe("Status", () => {
     expect(screen.getByRole("button", { name: "2 port-forwards" })).toBeDefined();
   });
 
+  it("counts only the tunnels that are still alive", () => {
+    setState(defaultState([ctx]));
+    // A tunnel that gave up is not a tunnel in use. Two rows, one of them
+    // dead — and the singular the remaining one calls for, which a count over
+    // both would get wrong twice.
+    forwards.list = [
+      { id: 1, status: "active" },
+      { id: 2, status: "failed" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 port-forward" })).toBeDefined();
+  });
+
+  it("says so on the strip when a tunnel has died", () => {
+    setState(defaultState([ctx]));
+    // The readout the reader actually had when a fifteen-minute-old forward
+    // died: `0 PORT-FORWARDS` and nothing else. The count alone still says
+    // nothing about the tunnel they are depending on.
+    forwards.list = [{ id: 1, status: "failed" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "0 port-forwards" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "1 forward failed" })).toBeDefined();
+  });
+
+  it("says nothing about failures when nothing has failed", () => {
+    setState(defaultState([ctx]));
+    forwards.list = [{ id: 1, status: "active" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByRole("button", { name: /failed/i })).toBeNull();
+  });
+
   it("opens the console from Ask", async () => {
     setState(defaultState([ctx]));
     mount(<Status contexts={[ctx]} />);

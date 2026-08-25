@@ -234,7 +234,10 @@ const METRICS_BODY: Record<string, PaneBody> = {};
  * table rather than a broken one, which is the same answer the peek gives for
  * a missing `CONTAINERS_BODY`.
  */
-const CONTAINERS_TABLE: Record<string, (props: { object: K8sObject }) => ReactNode> = {
+const CONTAINERS_TABLE: Record<
+  string,
+  (props: { object: K8sObject; context: string }) => ReactNode
+> = {
   Pod: PodContainersTable,
 };
 
@@ -433,7 +436,11 @@ export function useDetailSubject({
     ),
     containersPane: bodyProps && ContainersBody ? createElement(ContainersBody, bodyProps) : null,
     containersTable:
-      hasContainers && object && ContainersTable ? createElement(ContainersTable, { object }) : null,
+      hasContainers && object && ContainersTable
+        ? // The context travels with the object: the table's Ports cells open
+          // a forward, and a forward is made in ONE cluster.
+          createElement(ContainersTable, { object, context })
+        : null,
     metricsPane: bodyProps && MetricsBody ? createElement(MetricsBody, bodyProps) : null,
     labels: <LabelsSection labels={meta.labels ?? {}} />,
     annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,

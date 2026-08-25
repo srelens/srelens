@@ -15,6 +15,7 @@ const {
   connectCluster,
   listCrds,
   getForwards,
+  rehydrateForwards,
   subscribeForwards,
   isApplePlatform,
   isTauri,
@@ -31,6 +32,7 @@ const {
   connectCluster: vi.fn(),
   listCrds: vi.fn(),
   getForwards: vi.fn(() => []),
+  rehydrateForwards: vi.fn(async () => {}),
   subscribeForwards: vi.fn(() => () => {}),
   isApplePlatform: vi.fn(() => true),
   isTauri: vi.fn(() => true),
@@ -48,6 +50,7 @@ vi.mock("@srelens/core", async (importOriginal) => {
     connectCluster: (...a: unknown[]) => connectCluster(...a),
     listCrds: (...a: unknown[]) => listCrds(...a),
     getForwards: () => getForwards(),
+    rehydrateForwards: () => rehydrateForwards(),
     subscribeForwards: (...a: Parameters<typeof subscribeForwards>) => subscribeForwards(...a),
     isApplePlatform: () => isApplePlatform(),
     isTauri: () => isTauri(),
@@ -469,5 +472,17 @@ describe("Window contexts", () => {
   it("passes the configured kubeconfig files to listContexts", async () => {
     await booted();
     expect(listContexts).toHaveBeenCalledWith(["/home/u/.kube/config", "/home/u/.kube/other"]);
+  });
+});
+
+describe("Window — what boot has to ask for", () => {
+  it("asks the backend what is still forwarding, whatever route it opens on", async () => {
+    // The forwards store is module-level JavaScript and a browser reload
+    // empties it while the server keeps forwarding. Rehydrating only when
+    // `/forwards` mounts leaves the status bar reading `0 port-forwards`
+    // — on every other route — while tunnels are live and the `/pf/<id>/`
+    // proxies still answer. Boot is the only place that runs regardless.
+    await booted();
+    await waitFor(() => expect(rehydrateForwards).toHaveBeenCalled());
   });
 });

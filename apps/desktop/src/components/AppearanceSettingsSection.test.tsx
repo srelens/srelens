@@ -74,6 +74,23 @@ describe("AppearanceSettingsSection", () => {
     expect(items).toContain("Logs");
   });
 
+  it("lists port forwards, which run on regardless of which screen is open", () => {
+    // A tunnel outlives the tab that started it — someone weighing the toggle
+    // is weighing whether they can see and stop the ones they have running.
+    render(<AppearanceSettingsSection />);
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toContain("Port forwards");
+  });
+
+  it("lists the toolbox, the only screen that is about the machine and not a cluster", () => {
+    // The managed kubectl, helm and krew under ~/.srelens/bin, plus what a
+    // context's exec-auth needs. Nothing about it is cluster-scoped, so a
+    // reader who does not see it named assumes it did not come along.
+    render(<AppearanceSettingsSection />);
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toContain("Toolbox");
+  });
+
   it("introduces the list, so the names are not a bare list under the hint", () => {
     render(<AppearanceSettingsSection />);
     expect(screen.getByText(/in the new design so far/i)).toBeDefined();

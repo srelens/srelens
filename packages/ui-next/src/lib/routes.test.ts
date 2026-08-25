@@ -5,8 +5,10 @@ import { AppLog } from "../screens/AppLog";
 import { Events } from "../screens/Events";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { Overview } from "../screens/Overview";
+import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { Toolbox } from "../screens/Toolbox";
 import { Workloads } from "../screens/Workloads";
 
 suite("isBuiltInKind", () => {
@@ -70,10 +72,13 @@ suite("describe", () => {
     expect(describe("/k/Node/-/worker-1", "c")).toMatchObject({ title: "worker-1", kind: "resource", sub: "c" });
   });
 
-  it("titles the row menu's logs/shell/forward tabs distinctly from the bare resource tab and from each other", () => {
+  it("titles the /resources/<name>/logs|shell|forward shapes distinctly from the bare resource tab", () => {
     // Same prefix as the bare resource route, so without a distinct title and
     // kind for each suffix, opening a pod three ways (Open in new tab, Follow
     // logs, Open shell) produced three indistinguishable tabs in the strip.
+    // Only `shell` is still minted by the row menu; the other two are shapes a
+    // session persisted before Logs and Port forward got real front doors, and
+    // a restored tab still has to be able to name itself.
     expect(describe("/resources/web-1/logs", "c")).toMatchObject({ title: "web-1 · logs", kind: "logs", sub: "c" });
     expect(describe("/resources/web-1/shell", "c")).toMatchObject({
       title: "web-1 · shell",
@@ -157,6 +162,31 @@ suite("screenFor", () => {
     expect(screenFor("/logs")).toBe(Logs);
     expect(screenFor(logsRoute("Deployment", "checkout", "checkout-api"))).toBe(Logs);
     expect(screenFor(logsRoute("Pod", "kube-system", "weird/name"))).toBe(Logs);
+  });
+
+  it("resolves /forwards to the port forwards screen", () => {
+    // The route has parsed to `kind: "forwards"` since the tab strip was
+    // built; without an entry here it rendered the Placeholder while the
+    // screen sat there finished.
+    expect(screenFor("/forwards")).toBe(Forwards);
+  });
+
+  it("resolves /toolbox to the toolbox screen", () => {
+    // App-scoped, not cluster-scoped: the managed tools are the machine's,
+    // not any one cluster's.
+    expect(screenFor("/toolbox")).toBe(Toolbox);
+  });
+
+  it("leaves the retired /resources/<name>/forward shape on the Placeholder", () => {
+    // NOTHING MINTS THIS ANY MORE. `ResourceMenu.tsx`'s `Port forward` used to,
+    // and it carried neither a namespace nor a port — so it could not name a
+    // tunnel, and routing it to Forwards would have opened the whole-cluster
+    // list under a title claiming one resource. That entry opens §A.4's dialog
+    // on the row instead, so the only way to arrive here now is a tab
+    // persisted by an older session. It still parses (the strip has to be able
+    // to title a restored tab) and it still renders the Placeholder rather
+    // than the wrong screen.
+    expect(screenFor("/resources/web-1/forward")).toBeNull();
   });
 
   it("leaves the row menu's older /resources/<name>/logs shape on the Placeholder", () => {

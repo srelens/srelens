@@ -26,3 +26,27 @@
 export function groupNumber(n: number): string {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 }
+
+/**
+ * A size the way the design writes one — `512 B`, `312 KB`, `54.2 MB`.
+ *
+ * Decimal, not binary. §17 gives kubectl `54.2 MB`, which is what a download
+ * page says about a binary that a filesystem would call 51 MiB — the design
+ * is describing the number people quote, not the one `ls` prints.
+ *
+ * Megabytes and gigabytes keep one decimal even when it is zero, because
+ * these sit in a right-aligned tabular column and a row that drops its
+ * decimal shifts against every row above it. Bytes and kilobytes have none:
+ * `312.0 KB` implies a precision the figure does not carry.
+ *
+ * A missing size renders as nothing at all. `0 B` is a measurement, and a
+ * tool whose path cannot be read has not been measured — the same rule that
+ * makes an absent metrics-server read "No reading" rather than 0%.
+ */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return "";
+  if (bytes < 1_000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${Math.round(bytes / 1_000)} KB`;
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+}

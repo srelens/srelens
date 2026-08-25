@@ -216,6 +216,14 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // Its deeper `/logs/<kind>/<namespace>/<name>` shape is the same screen with
   // a subject in it, so "/logs" names both here.
   { route: "/logs", name: "Logs" },
+  // A tunnel outlives the tab that opened it, so this screen is where the ones
+  // already running are seen and stopped — not a view of a cluster's state but
+  // of this process's own.
+  { route: "/forwards", name: "Port forwards" },
+  // The only screen here that is about the machine rather than a cluster: the
+  // managed kubectl, helm and krew under ~/.srelens/bin, and what the active
+  // context's exec-auth needs on PATH.
+  { route: "/toolbox", name: "Toolbox" },
 ];
 
 /**

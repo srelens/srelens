@@ -400,6 +400,7 @@ const TITLES = {
   "/logs": ["Logs", "logs"],
   "/helm": ["Helm", "helm"],
   "/forwards": ["Port forwards", "forwards"],
+  "/toolbox": ["Toolbox", "toolbox"],
   "/topology": ["Topology", "topology"],
   "/incidents": ["Incidents", "incidents"],
 };
@@ -416,7 +417,10 @@ function tabFor(r, id) {
   const tab = { id, route: r, title, kind };
   if (r === "/") tab.pinned = true;
   const name = contexts.find((c) => c.stableId === activeCluster)?.name;
-  if (name && r !== "/applog" && r !== "/notes") tab.sub = name;
+  // App-scoped routes carry no cluster in their sub — `APP_SCOPED` in
+  // packages/ui-next/src/lib/routes.ts is the list, and the toolbox is on it:
+  // the managed tools are the machine's, not any one cluster's.
+  if (name && !["/applog", "/notes", "/toolbox"].includes(r)) tab.sub = name;
   return tab;
 }
 

@@ -26,6 +26,15 @@ const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspe
 // parameter to receive it. A bare reference is structurally assignable to
 // the real (many-parameter) core signature — a mock that ignores its
 // arguments is still a valid stand-in for a function that takes some.
+// What §A.4's forward dialog reaches for, once `Port forward` opens it rather
+// than minting a tab. `toKubectl` and `kindToForwardTarget` stay real.
+const forwardCore = vi.hoisted(() => ({
+  listNamespaces: vi.fn(async () => ({ namespaces: ["kube-system", "default"] })),
+  listServices: vi.fn(async () => ({ services: [] })),
+  listPods: vi.fn(async () => ({ pods: [{ name: "web-0", namespace: "kube-system" }] })),
+  startPortForward: vi.fn(async () => ({ id: 1, localPort: 9090 })),
+}));
+
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   deleteResource,
@@ -34,6 +43,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   evictPod,
   cronjobSetSuspend,
   cronjobTriggerNow,
+  ...forwardCore,
 }));
 
 import { useRowMenu, type UseRowMenuArgs } from "./ResourceMenu";
@@ -146,6 +156,61 @@ describe("useRowMenu", () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Follow logs" }));
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/logs/Pod/kube-system/web-0")).toBe(true);
+  });
+
+  /**
+   * `Port forward` used to mint `/resources/<name>/forward` — a route no
+   * screen is registered for, so the menu's own entry opened a Placeholder.
+   * That is the mistake the Logs entry above shipped with and had fixed later
+   * (#346); this is the same front door, on the same menu.
+   *
+   * The dialog goes through the hook's `dialog` slot, which every write action
+   * here already uses — so the peek's and the tab's action bars, which render
+   * that slot too, get the door for free rather than growing a second one.
+   */
+  it("opens §A.4's forward dialog on Port forward, rather than a placeholder tab", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    // Nothing is mounted until the entry is picked: a dialog that were always
+    // there would pass every assertion below.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Port forward" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("New port forward")).toBeDefined();
+    expect(store.currentWorkspace().tabs.some((t) => t.route.endsWith("/forward"))).toBe(false);
+  });
+
+  it("hands the dialog the row it was picked on — the kind, the name, the namespace", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Port forward" }));
+    await screen.findByRole("dialog");
+    // `pod/`, from the list's KIND through `kindToForwardTarget`.
+    await waitFor(() =>
+      expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("pod/web-0"),
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("Namespace") as HTMLSelectElement).value).toBe("kube-system"),
+    );
+    // A list row knows no ports, so BOTH are the reader's to name — and the
+    // dialog is where they name them.
+    expect((screen.getByLabelText("Remote port") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Local port") as HTMLInputElement).value).toBe("");
+  });
+
+  it("starts nothing on the pick, and closes on Cancel", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Port forward" }));
+    await screen.findByRole("dialog");
+    expect(forwardCore.startPortForward).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("still opens a shell in a tab — only the forward entry changed", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open shell" }));
+    expect(
+      store.currentWorkspace().tabs.some((t) => t.route === "/resources/web-0/shell"),
+    ).toBe(true);
   });
 
   it("opens a cluster-scoped resource with the placeholder namespace segment", async () => {

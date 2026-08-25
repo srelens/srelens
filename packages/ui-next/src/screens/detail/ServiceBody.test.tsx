@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { EndpointSliceSummary, K8sObject, PodMetric, PodSummary } from "@srelens/core";
 
 // The "Endpoint Slices" section reads live EndpointSlices for the Service's
@@ -17,11 +18,23 @@ const { listEndpointSlices, podsForSelector, podMetrics } = vi.hoisted(() => ({
   podMetrics: vi.fn(async (): Promise<{ metrics?: PodMetric[]; error?: string }> => ({ metrics: [] })),
 }));
 
+// What §A.4's dialog reaches for once a Ports row opens it. Stubbed for the
+// same reason as the three above: this file has no cluster. `toKubectl` and
+// `kindToForwardTarget` stay REAL — they are what decides that a Service reads
+// `svc/`, which is half of what these tests are about.
+const forwardCore = vi.hoisted(() => ({
+  listNamespaces: vi.fn(async () => ({ namespaces: ["default"] })),
+  listServices: vi.fn(async () => ({ services: [{ name: "checkout", namespace: "default" }] })),
+  listPods: vi.fn(async () => ({ pods: [] })),
+  startPortForward: vi.fn(async () => ({ id: 1, localPort: 9090 })),
+}));
+
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   listEndpointSlices,
   podsForSelector,
   podMetrics,
+  ...forwardCore,
 }));
 
 import { GenericBody } from "./GenericBody";
@@ -160,6 +173,90 @@ describe("ServiceDetailsBody", () => {
     it("omits the Ports section for a service with no ports", () => {
       render(<ServiceDetailsBody object={service({ type: "ExternalName" })} context="ctx" />);
       expect(screen.queryByText("Ports")).toBeNull();
+    });
+  });
+
+  /**
+   * The Ports table is where the reader is already looking at the exact port
+   * they want to forward, and until now it could only be read. Every row is a
+   * way into §A.4's dialog, prefilled with this Service and THAT row's port.
+   *
+   * Nothing starts here: the dialog is where the local port is named, the
+   * equivalent command is read and the browser switch lives.
+   */
+  describe("Ports — the way in to a forward", () => {
+    /** Two ports, neither of them the dialog's own placeholders (9090/8080),
+     *  so a prefill can only have come from the row that was clicked. */
+    const TWO_PORTS = service({
+      ports: [
+        { name: "postgres", port: 5432, targetPort: 9999, protocol: "TCP" },
+        { name: "redis", port: 6379, targetPort: 6380, protocol: "TCP" },
+      ],
+    });
+
+    const select = (name: string) => screen.getByLabelText(name) as HTMLSelectElement;
+    const input = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
+
+    it("offers a forward on every port row, and opens nothing until one is picked", () => {
+      render(<ServiceDetailsBody object={TWO_PORTS} context="ctx" />);
+      expect(screen.getByRole("button", { name: "Forward port 5432" })).toBeDefined();
+      expect(screen.getByRole("button", { name: "Forward port 6379" })).toBeDefined();
+      // The half that makes every assertion below mean something: a dialog
+      // that were always mounted would pass them all.
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("opens §A.4's dialog on this Service, in its namespace, on THAT row's port", async () => {
+      render(<ServiceDetailsBody object={TWO_PORTS} context="ctx" />);
+      // The SECOND row, so a table that always handed over its first port
+      // cannot pass.
+      await userEvent.click(screen.getByRole("button", { name: "Forward port 6379" }));
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByText("New port forward")).toBeDefined();
+      await waitFor(() => expect(select("Target").value).toBe("svc/checkout"));
+      await waitFor(() => expect(select("Namespace").value).toBe("default"));
+      expect(input("Remote port").value).toBe("6379");
+      // Offered, not demanded, and NOT the far end again: a free port drawn
+      // from a range nothing claims by convention. Asserted as the property
+      // rather than a number, so this test says what it means without
+      // pinning the draw.
+      const offered = Number(input("Local port").value);
+      expect(offered).toBeGreaterThanOrEqual(10000);
+      expect(offered).toBeLessThanOrEqual(32767);
+      expect(offered).not.toBe(6379);
+    });
+
+    it("forwards the service's port, not the targetPort behind it", async () => {
+      // `kubectl port-forward svc/x L:R` takes the SERVICE port and resolves
+      // the targetPort itself. 9999 is what a cell-reading mistake would grab.
+      render(<ServiceDetailsBody object={TWO_PORTS} context="ctx" />);
+      await userEvent.click(screen.getByRole("button", { name: "Forward port 5432" }));
+      await screen.findByRole("dialog");
+      expect(input("Remote port").value).toBe("5432");
+      expect(input("Remote port").value).not.toBe("9999");
+    });
+
+    it("names the Service as a Service — svc/, from its kind", async () => {
+      render(<ServiceDetailsBody object={TWO_PORTS} context="ctx" />);
+      await userEvent.click(screen.getByRole("button", { name: "Forward port 5432" }));
+      await screen.findByRole("dialog");
+      await userEvent.clear(screen.getByLabelText("Local port"));
+      await userEvent.type(screen.getByLabelText("Local port"), "9091");
+      await waitFor(() =>
+        expect(screen.getByText(/port-forward svc\/checkout 9091:5432/)).toBeDefined(),
+      );
+    });
+
+    it("puts no port or command in a title attribute", async () => {
+      render(<ServiceDetailsBody object={TWO_PORTS} context="ctx" />);
+      await userEvent.click(screen.getByRole("button", { name: "Forward port 5432" }));
+      await screen.findByRole("dialog");
+      const joined = Array.from(document.querySelectorAll("[title]"))
+        .map((el) => el.getAttribute("title") ?? "")
+        .join("\n");
+      for (const leak of ["5432", "9999", "port-forward", "--context"]) {
+        expect(joined).not.toContain(leak);
+      }
     });
   });
 

@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use srelens_streams::forward::{ForwardInfo, ForwardManager};
+use serde::Serialize;
+use srelens_streams::forward::{ForwardEntry, ForwardInfo, ForwardManager};
 use tauri::{AppHandle, Runtime, State};
 
 use crate::sink::TauriSink;
@@ -47,6 +48,25 @@ pub async fn stop_port_forward(id: u64, manager: State<'_, ForwardManager>) -> R
     Ok(())
 }
 
+/// The response shape for `list_forwards`, shared with the web command of
+/// the same name.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListForwardsResponse {
+    pub forwards: Vec<ForwardEntry>,
+}
+
+/// List every forward the manager currently holds. On desktop the process
+/// dies with the app, so this manager never outlives the frontend store —
+/// but the command exists here too so a client has exactly one way to ask,
+/// on both platforms, rather than a web-only special case.
+#[tauri::command]
+pub fn list_forwards(manager: State<'_, ForwardManager>) -> ListForwardsResponse {
+    ListForwardsResponse {
+        forwards: manager.list(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,8 +94,24 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(info.local_port, 0, "an ephemeral port must have been bound");
+        assert!(info.started_at > 0, "the start response must carry its stamp");
 
         stop_port_forward(info.id, app.state()).await.unwrap();
         stop_port_forward(info.id + 1, app.state()).await.unwrap();
+    }
+
+    /// list_forwards is what the frontend store rehydrates from, so it must
+    /// hand back exactly what the manager holds — not an empty stand-in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_forwards_returns_what_the_manager_holds() {
+        let app = tauri::test::mock_app();
+        app.manage(ForwardManager::new(ClientCache::new_many(vec![])));
+        let manager: State<ForwardManager> = app.state();
+        manager.insert_test_forward(7, 55555);
+
+        let resp = list_forwards(app.state());
+        assert_eq!(resp.forwards.len(), 1);
+        assert_eq!(resp.forwards[0].id, 7);
+        assert_eq!(resp.forwards[0].local_port, 55555);
     }
 }
