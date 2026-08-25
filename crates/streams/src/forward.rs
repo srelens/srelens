@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -25,6 +25,56 @@ struct Forward {
     /// byte total isn't among them, so `list` reads that from `traffic`
     /// rather than from a copy that goes stale the moment a packet crosses.
     fixed: FixedFacts,
+    /// This forward's terminal state, written once by its own task. See
+    /// [`Ended`].
+    ended: Ended,
+}
+
+/// Whether a forward's task has finished, and why.
+///
+/// Unset while the tunnel is running; set exactly once, by the task itself,
+/// at the moment it gives up — `None` for a loop that ended without an error,
+/// `Some(reason)` for one that exhausted its retries.
+///
+/// **This is what a reloading client has instead of the event it missed.** A
+/// forward that gives up emits `forward:closed:<id>` and then stays in the
+/// manager's map until someone calls `stop`, because only the client knows
+/// whether its reader has seen the bad news yet. A page that reloads after
+/// that event has no way to learn it happened: the event is gone and the
+/// frontend store that recorded it died with the page. Without this, `list`
+/// described a dead tunnel exactly like a live one and the reloaded page drew
+/// it green.
+///
+/// A `OnceLock` rather than a `Mutex<Option<..>>` because it is written once
+/// and read on every listing, and "set" is itself the fact being reported —
+/// `get()` returning `None` means still running, and there is no second flag
+/// that could disagree with it.
+type Ended = Arc<OnceLock<Option<String>>>;
+
+impl Forward {
+    /// True once this forward's own task has stopped for good.
+    fn has_ended(&self) -> bool {
+        self.ended.get().is_some()
+    }
+
+    /// This forward as `list` reports it, byte total and terminal state read
+    /// live rather than from copies taken at start.
+    fn entry(&self) -> ForwardEntry {
+        let ended = self.ended.get();
+        ForwardEntry {
+            id: self.fixed.id,
+            context: self.fixed.context.clone(),
+            namespace: self.fixed.namespace.clone(),
+            kind: self.fixed.kind.clone(),
+            name: self.fixed.name.clone(),
+            remote_port: self.fixed.remote_port,
+            local_port: self.fixed.local_port,
+            started_at: self.fixed.started_at,
+            bytes: self.traffic.total(),
+            ended: ended.is_some(),
+            error: ended.and_then(|reason| reason.clone()),
+        }
+    }
 }
 
 /// Reconnect policy: a handful of attempts with a short capped exponential
@@ -316,25 +366,9 @@ struct FixedFacts {
     started_at: u64,
 }
 
-impl FixedFacts {
-    fn with_bytes(&self, bytes: u64) -> ForwardEntry {
-        ForwardEntry {
-            id: self.id,
-            context: self.context.clone(),
-            namespace: self.namespace.clone(),
-            kind: self.kind.clone(),
-            name: self.name.clone(),
-            remote_port: self.remote_port,
-            local_port: self.local_port,
-            started_at: self.started_at,
-            bytes,
-        }
-    }
-}
-
-/// One forward the manager is currently running, as `list` reports it —
-/// everything a client needs to draw a row for a tunnel it did not start
-/// itself.
+/// One forward the manager is holding, as `list` reports it — everything a
+/// client needs to draw a row for a tunnel it did not start itself, including
+/// one that has already died (`ended`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForwardEntry {
@@ -353,6 +387,13 @@ pub struct ForwardEntry {
     pub started_at: u64,
     /// Bytes moved since the forward started, read live from its counter.
     pub bytes: u64,
+    /// True once this forward's task has given up — see [`Ended`]. The
+    /// manager still holds it, and still reports it, precisely so a client
+    /// that was not listening when it died can draw the row that says so.
+    pub ended: bool,
+    /// Why it gave up, when the loop had a reason to give. `None` both for a
+    /// forward that is still running and for one that ended without an error.
+    pub error: Option<String>,
 }
 
 impl ForwardManager {
@@ -414,6 +455,8 @@ impl ForwardManager {
         let attempt: Attempt = Box::new(move |traffic| Box::pin(serve_once(ctx.clone(), traffic)));
 
         let loop_traffic = traffic.clone();
+        let ended: Ended = Arc::new(OnceLock::new());
+        let task_ended = ended.clone();
         let handle = tokio::spawn(async move {
             let final_error = tokio::select! {
                 gave_up = reconnect_loop(
@@ -434,6 +477,10 @@ impl ForwardManager {
                 ) => None,
             };
 
+            // Recorded BEFORE the event goes out, so a client that reacts
+            // to `forward:closed` by listing cannot be told the forward is
+            // still live by the very call it made because it heard it wasn't.
+            let _ = task_ended.set(final_error.clone());
             sink.emit(
                 &closed_channel,
                 serde_json::to_value(final_error).unwrap_or(serde_json::Value::Null),
@@ -460,6 +507,7 @@ impl ForwardManager {
                     local_port: bound,
                     started_at,
                 },
+                ended,
             },
         );
         Ok(ForwardInfo {
@@ -476,40 +524,56 @@ impl ForwardManager {
         }
     }
 
-    /// What the manager is currently forwarding, oldest id first. This is
-    /// what closes the web leak: the frontend store is module-level and dies
-    /// with a browser reload, while this manager does not, so without it a
-    /// user reloads into an empty table with live tunnels behind it and no
-    /// way to stop them. Ordered because a HashMap hands out its values in
-    /// whatever order it likes, and a table that reshuffles on every poll is
-    /// unreadable.
+    /// What the manager is holding, oldest id first. This is what closes the
+    /// web leak: the frontend store is module-level and dies with a browser
+    /// reload, while this manager does not, so without it a user reloads into
+    /// an empty table with live tunnels behind it and no way to stop them.
+    /// Ordered because a HashMap hands out its values in whatever order it
+    /// likes, and a table that reshuffles on every poll is unreadable.
+    ///
+    /// **Holding, not running.** A forward that gave up is still listed, with
+    /// `ended` set and its reason attached, because the reload this exists
+    /// for is exactly the case that missed the `forward:closed` event — see
+    /// [`Ended`]. `local_port` and `active_count` answer the other
+    /// question, "is this tunnel carrying traffic", and both say no.
     pub fn list(&self) -> Vec<ForwardEntry> {
         let mut entries: Vec<ForwardEntry> = self
             .forwards
             .lock()
             .unwrap()
             .values()
-            .map(|f| f.fixed.with_bytes(f.traffic.total()))
+            .map(Forward::entry)
             .collect();
         entries.sort_by_key(|e| e.id);
         entries
     }
 
-    /// The bound loopback port for a live forward id (used by the web
-    /// reverse proxy), or None if the id is unknown or already stopped.
+    /// The bound loopback port for a LIVE forward id (used by the web
+    /// reverse proxy), or None if the id is unknown, already stopped, or has
+    /// given up. The last of those matters: the listener is dropped with the
+    /// task that owned it, so the port a dead forward was bound to is free
+    /// for anything on the machine to take — proxying to it is at best a
+    /// connection to nothing.
     pub fn local_port(&self, id: u64) -> Option<u16> {
         self.forwards
             .lock()
             .unwrap()
             .get(&id)
+            .filter(|f| !f.has_ended())
             .map(|f| f.fixed.local_port)
     }
 
     /// How many port-forwards are currently running. Used to keep a user's
     /// environment alive across a WebSocket disconnect while they still have
-    /// forwards in use (proxied over plain HTTP, not the WS).
+    /// forwards in use (proxied over plain HTTP, not the WS). One that gave
+    /// up is not in use, however long its row stays on someone's screen.
     pub fn active_count(&self) -> usize {
-        self.forwards.lock().unwrap().len()
+        self.forwards
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|f| !f.has_ended())
+            .count()
     }
 
     /// Register a forward id → local port directly (no live cluster).
@@ -536,6 +600,9 @@ impl ForwardManager {
                     local_port,
                     started_at: epoch_millis(),
                 },
+                // Never set: the stand-in handle above never completes, which
+                // is what a live forward looks like.
+                ended: Arc::new(OnceLock::new()),
             },
         );
         traffic
@@ -984,7 +1051,7 @@ mod tests {
         // A rehydrating store reads these keys by name, so the casing is a
         // contract rather than a detail of how the struct happens to be
         // written.
-        let entry = FixedFacts {
+        let entry = ForwardEntry {
             id: 4,
             context: "ctx".into(),
             namespace: "ns".into(),
@@ -993,8 +1060,10 @@ mod tests {
             remote_port: 8080,
             local_port: 51234,
             started_at: 1_700_000_000_000,
-        }
-        .with_bytes(2048);
+            bytes: 2048,
+            ended: false,
+            error: None,
+        };
         assert_eq!(
             serde_json::to_value(&entry).expect("a forward entry is serialisable"),
             serde_json::json!({
@@ -1007,8 +1076,21 @@ mod tests {
                 "localPort": 51234,
                 "startedAt": 1_700_000_000_000u64,
                 "bytes": 2048,
+                "ended": false,
+                "error": null,
             })
         );
+
+        // The dead form, whose two extra keys are the whole of what a
+        // reloading client has to go on.
+        let gone = ForwardEntry {
+            ended: true,
+            error: Some("pod web-1 not found".into()),
+            ..entry
+        };
+        let json = serde_json::to_value(&gone).expect("a forward entry is serialisable");
+        assert_eq!(json["ended"], serde_json::json!(true));
+        assert_eq!(json["error"], serde_json::json!("pod web-1 not found"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1148,5 +1230,129 @@ mod tests {
         }
         let ids: Vec<u64> = manager.list().iter().map(|e| e.id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+    /// Wait until a forward's `forward:closed:<id>` has fired — the moment
+    /// its task has given up for good. The task records the terminal state
+    /// BEFORE it emits, so once this returns the manager's own answers about
+    /// the forward are settled and nothing below is racing the loop.
+    async fn wait_for_close(sink: &TestSink, id: u64) {
+        let channel = format!("forward:closed:{id}");
+        for _ in 0..200 {
+            if !sink.payloads_for(&channel).is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("forward:closed:{id} never arrived");
+    }
+
+    async fn start_doomed(manager: &ForwardManager, sink: Arc<TestSink>) -> ForwardInfo {
+        // Empty cache: every connect attempt fails, so the loop walks its
+        // retries and gives up in a few hundred milliseconds.
+        manager
+            .start(
+                sink,
+                "nope".into(),
+                "ns".into(),
+                "Pod".into(),
+                "pod-a".into(),
+                8080,
+                None,
+            )
+            .await
+            .expect("bind succeeds locally")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_reports_a_forward_that_gave_up_as_ended_with_its_reason() {
+        // The half of the vanishing-tunnel defect that no amount of frontend
+        // bookkeeping can reach. A forward that exhausts its retries emits
+        // `forward:closed:<id>` and then STAYS in this map until someone
+        // calls `stop`. `list` used to describe it exactly like a live one,
+        // so a page that reloaded after that event had already fired adopted
+        // a dead tunnel as `active` — a green row for a tunnel that cannot
+        // carry a byte, and in web mode a `/pf/<id>/` URL that will never
+        // answer. The frontend's dropped-id set cannot help: it is
+        // module-level JavaScript that the reload wiped.
+        let manager = ForwardManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let info = start_doomed(&manager, sink.clone()).await;
+
+        // Said before AND after, because "ended" asserted only at the end
+        // passes just as well for a `list` that hardcodes it.
+        let trying = manager.list();
+        assert_eq!(trying.len(), 1);
+        assert!(!trying[0].ended, "a forward still retrying has not ended");
+        assert_eq!(trying[0].error, None);
+
+        wait_for_close(&sink, info.id).await;
+
+        let listed = manager.list();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the entry stays, so a client that reloaded still learns the tunnel died"
+        );
+        assert!(listed[0].ended, "a forward that gave up is listed as ended");
+        assert!(
+            listed[0].error.is_some(),
+            "and with the reason the loop gave up, so the row can say why"
+        );
+
+        manager.stop(info.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_forward_that_gave_up_is_neither_routable_nor_counted() {
+        // `list` keeps reporting a dead forward on purpose; the other two
+        // readers of the map must not. The web reverse proxy resolves
+        // `/pf/<id>/` through `local_port`, and the loopback port a dead
+        // forward was bound to is released the moment its task ends — so
+        // routing to it reaches nothing at best, and whatever took the port
+        // next at worst. `active_count` keeps a user's environment alive for
+        // forwards "in use", which a dead one is not.
+        let manager = ForwardManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let info = start_doomed(&manager, sink.clone()).await;
+
+        assert_eq!(manager.local_port(info.id), Some(info.local_port));
+        assert_eq!(manager.active_count(), 1);
+
+        wait_for_close(&sink, info.id).await;
+
+        assert_eq!(
+            manager.local_port(info.id),
+            None,
+            "the proxy must not route to a port nothing is listening on"
+        );
+        assert_eq!(
+            manager.active_count(),
+            0,
+            "a tunnel that gave up is not a tunnel in use"
+        );
+        // And it is still listed — the two answers are deliberately different.
+        assert_eq!(manager.list().len(), 1);
+
+        manager.stop(info.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_a_forward_that_gave_up_forgets_it_for_good() {
+        // How a reader gets a dead row off their screen permanently. The
+        // frontend dismisses it by calling `stop_port_forward`, because a
+        // dropped-id set in the page cannot survive the reload that would
+        // otherwise raise the row again from this listing.
+        let manager = ForwardManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let info = start_doomed(&manager, sink.clone()).await;
+        wait_for_close(&sink, info.id).await;
+        assert_eq!(manager.list().len(), 1);
+
+        manager.stop(info.id);
+
+        assert!(
+            manager.list().is_empty(),
+            "a dismissed tunnel does not come back on the next listing"
+        );
     }
 }

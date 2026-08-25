@@ -5,6 +5,7 @@ import {
   copyKubectlCommand,
   forwardAddress,
   getForwards,
+  isForwardEnded,
   kindToForwardTarget,
   notify,
   openExternal,
@@ -27,7 +28,7 @@ import {
   type StatusKind,
 } from "@srelens/ui-kit";
 import { useActiveContext } from "../lib/clusters";
-import { FailureAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureWord } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { formatBytes } from "../lib/numbers";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
@@ -50,9 +51,13 @@ import { NewForwardDialog } from "./forwards/NewForwardDialog";
  * §13's rule is "`active`→ok, else warn + bold". `failed` is shipped as
  * `danger` rather than `warning` on purpose: §13 draws only the first two
  * states and its "else" was written about `reconnecting`. A tunnel that is
- * reconnecting is coming back; one that has failed is gone, and the row's Stop
- * button is the only thing left to do about it. Amber for both would say the
+ * reconnecting is coming back; one that has failed is gone, and dismissing
+ * the row is the only thing left to do about it. Amber for both would say the
  * two are the same news.
+ *
+ * `failed` needed no new word for the dead row: it IS the dead state — core's
+ * `isForwardEnded` says so, and this table already had the word for it. A
+ * second entry saying "Ended" would have been the same news under two names.
  *
  * `tinted` follows the design's asymmetric colouring rule, which
  * {@link StatusPill} owns: the bad states colour and embolden the word, the
@@ -107,6 +112,16 @@ interface ForwardRow {
   address: string;
   remote: string;
   status: ActiveForward["status"];
+  /**
+   * This tunnel has given up: it is on the screen to be READ, not used. Core
+   * decides it — the status bar counts the same rows and must agree — and the
+   * row asks it here rather than spelling out a status comparison, which is
+   * the rule {@link FORWARD_VERDICT} states.
+   */
+  dead: boolean;
+  /** Why it gave up, raw, when the backend said. `describeError` turns it
+   *  into a sentence at the cell; see {@link forwardColumns}. */
+  error: string | undefined;
   traffic: string;
   bytesMoved: number;
   age: string;
@@ -118,9 +133,16 @@ interface ForwardRow {
  * `/forwards` — the design's Port forwards screen (§13).
  *
  * A port-forward pipes a local port to a Pod or a Service; this is the list of
- * the ones that are live, and the only place in the app that can stop one.
- * There is no fetch here: `packages/core`'s forwards store is module-level and
- * pushed to by the backend, so the table is a `useSyncExternalStore` over it.
+ * them, and the only place in the app that can stop one. There is no fetch
+ * here: `packages/core`'s forwards store is module-level and pushed to by the
+ * backend, so the table is a `useSyncExternalStore` over it.
+ *
+ * **A tunnel that dies stays listed.** One the reader stopped disappears at
+ * once — they did it, and it does not need reporting back — but one that gave
+ * up underneath them is news, and deleting the row left a forward that had
+ * been up for fifteen minutes gone with no trace and its reader still
+ * depending on it. Such a row reads `Failed`, says why, counts against
+ * neither of the two live counts, and offers a dismissal in place of a stop.
  *
  * **Two things §13 asks for are deliberately not shipped as written.**
  *
@@ -185,6 +207,8 @@ export function Forwards(_props: { route: string }) {
         // writes the far end of a forward and how kubectl's own output does.
         remote: `:${f.remotePort}`,
         status: f.status,
+        dead: isForwardEnded(f),
+        error: f.error,
         traffic: formatBytes(f.bytesMoved),
         bytesMoved: f.bytesMoved,
         // Core's compact age, from the backend's own start stamp. §13 writes
@@ -206,7 +230,22 @@ export function Forwards(_props: { route: string }) {
     [forwards, now],
   );
 
-  const clusters = useMemo(() => new Set(rows.map((r) => r.cluster)).size, [rows]);
+  /**
+   * The head counts LIVE tunnels, and says how many died apart from them.
+   *
+   * A dead row is on the screen so it can be read, not because anything is
+   * being forwarded through it — so "Active tunnels · 4" over three live ones
+   * and a corpse would be exactly the reassurance this screen exists to stop
+   * giving. The cluster count follows the same rows for the same reason: the
+   * sentence is about what is up, and a cluster whose only tunnel is dead has
+   * nothing up in it.
+   */
+  const live = useMemo(() => rows.filter((r) => !r.dead), [rows]);
+  const dead = rows.length - live.length;
+  const clusters = useMemo(() => new Set(live.map((r) => r.cluster)).size, [live]);
+  // Every row, including the dead ones: those bytes really crossed those
+  // tunnels, and a total that shrank when a forward died would read as data
+  // lost rather than as a tunnel gone.
   const moved = useMemo(() => rows.reduce((sum, r) => sum + r.bytesMoved, 0), [rows]);
 
   /**
@@ -229,6 +268,26 @@ export function Forwards(_props: { route: string }) {
       await stopPortForward(row.id);
     } catch (e) {
       setFailure({ title: `Could not stop ${row.target}`, error: e });
+    }
+  }
+
+  /**
+   * Take a dead row off the screen.
+   *
+   * The SAME command as a stop, and that is not laziness. A forward that gave
+   * up on its own stays in the backend's map — and in the listing this screen
+   * rehydrates from — until `stop` is called, so a dismissal that only
+   * dropped the row here would be undone by the reader's next reload. There
+   * is nothing left to abort; `stop` is what makes the backend forget it.
+   * Only the words differ, because only the words are different: the reader
+   * is not stopping anything, they are acknowledging news.
+   */
+  async function dismiss(row: ForwardRow) {
+    setFailure(null);
+    try {
+      await stopPortForward(row.id);
+    } catch (e) {
+      setFailure({ title: `Could not dismiss ${row.target}`, error: e });
     }
   }
 
@@ -293,12 +352,24 @@ export function Forwards(_props: { route: string }) {
             label={`Copy address for ${row.target}`}
             onClick={() => void copyAddress(row)}
           />
-          <IconButton
-            icon={Icons.close}
-            danger
-            label={`Stop forwarding ${row.target}`}
-            onClick={() => void stop(row)}
-          />
+          {/* A tunnel that died has nothing left to stop, and a Stop that
+              stops nothing is the kind of control this migration keeps
+              deleting. Not `danger` either: dismissing news is not a
+              destructive act, and the row is already red where it counts. */}
+          {row.dead ? (
+            <IconButton
+              icon={Icons.close}
+              label={`Dismiss ${row.target}`}
+              onClick={() => void dismiss(row)}
+            />
+          ) : (
+            <IconButton
+              icon={Icons.close}
+              danger
+              label={`Stop forwarding ${row.target}`}
+              onClick={() => void stop(row)}
+            />
+          )}
         </div>
       ),
     },
@@ -336,7 +407,12 @@ export function Forwards(_props: { route: string }) {
       ) : (
         <>
           <div className="pane-head">
-            <span>{`Active tunnels · ${rows.length} across ${plural(clusters, "cluster")}`}</span>
+            <span>
+              {`Active tunnels · ${live.length} across ${plural(clusters, "cluster")}` +
+                // Said only when there is one to say: a permanent `· 0 failed`
+                // is a readout nobody needs and one more thing to skip past.
+                (dead > 0 ? ` · ${dead} failed` : "")}
+            </span>
             {/* Pushes the badge to the far end without either side needing to
                 know how wide the other is. */}
             <span className="flex-1" />
@@ -431,15 +507,40 @@ function forwardColumns(openAddress: (row: ForwardRow) => void): Column<ForwardR
     {
       key: "state",
       header: "State",
+      // Room for the sentence under a dead tunnel's word. Without it the
+      // column sizes to "Reconnecting" and the reason wraps a word per line.
+      minWidth: 160,
       // Sorted and searched on the word the reader can see, not on the internal
       // status behind it.
       getValue: (row) => FORWARD_VERDICT[row.status].word,
+      /**
+       * The word, and under a dead tunnel the reason it gave.
+       *
+       * `FailureWord` is the kit's answer for a failure in a narrow place: it
+       * prints `describeError`'s CLASSIFICATION — "Not authorized", "Can't
+       * reach the cluster" — and folds the string the cluster actually sent
+       * away behind a disclosure. The raw form is `ApiError: Unauthorized
+       * (Status { metadata: Some(ListMeta { … })`, which is unreadable in a
+       * table cell and is exactly what a reader needs in a bug report; a
+       * `title` attribute would be neither, and is the rule a Secret leaked
+       * through.
+       *
+       * Only when the tunnel is dead AND said why. A reconnecting tunnel is
+       * coming back and a reason under it would read as gone, and a closure
+       * that carried no reason gets the one word it has rather than an
+       * invented sentence.
+       */
       render: (row) => (
-        <StatusPill
-          status={FORWARD_VERDICT[row.status].word}
-          kind={FORWARD_VERDICT[row.status].kind}
-          tinted
-        />
+        <div className="flex min-w-0 flex-col items-start">
+          <StatusPill
+            status={FORWARD_VERDICT[row.status].word}
+            kind={FORWARD_VERDICT[row.status].kind}
+            tinted
+          />
+          {row.dead && row.error !== undefined && (
+            <FailureWord error={row.error} className="mt-1 text-[0.75rem] text-muted" />
+          )}
+        </div>
       ),
     },
     {

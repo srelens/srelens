@@ -299,6 +299,136 @@ describe("Forwards — the state word", () => {
   });
 });
 
+/**
+ * A tunnel that gave up, as the backend leaves it: `failed`, with the raw
+ * string the cluster actually said attached. Row 4, so the fixture around it
+ * still has three live tunnels across two clusters to be counted apart from.
+ */
+const GAVE_UP = "ApiError: Unauthorized (Status { metadata: Some(ListMeta { .. }) })";
+
+function withDeadGateway(now: number): ActiveForward[] {
+  return fixture(now).map((f) =>
+    f.id === 4 ? { ...f, status: "failed" as const, error: GAVE_UP } : f,
+  );
+}
+
+describe("Forwards — a tunnel that died on its own", () => {
+  it("says why, in words rather than in Rust", () => {
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    const state = cell(rowFor("svc/identity-gateway"), 4);
+    expect(within(state).getByText("Failed")).toBeTruthy();
+    // `describeError`'s classification, not the struct the cluster sent.
+    expect(within(state).getByText("Not authorized")).toBeTruthy();
+    // The struct is offered, folded away — never printed at the reader and
+    // never in a title attribute, which is the rule a Secret leaked through.
+    const raw = state.querySelector('[data-slot="raw"]');
+    expect(raw?.textContent).toContain("ApiError");
+    // Said as "nowhere but inside the disclosure", because `textContent`
+    // reads a closed `details` too: a cell that printed the struct beside
+    // the word would satisfy any weaker form of this.
+    const outsideTheDisclosure = state.cloneNode(true) as HTMLElement;
+    outsideTheDisclosure.querySelector('[data-slot="raw"]')?.remove();
+    expect(outsideTheDisclosure.textContent).toContain("Not authorized");
+    expect(outsideTheDisclosure.textContent).not.toContain("ApiError");
+    expect(outsideTheDisclosure.textContent).not.toContain("Status { metadata");
+  });
+
+  it("says nothing about a tunnel that is merely flapping", () => {
+    // Row 4 is `reconnecting`, and it HAS a reason: the backend sends its
+    // error with every retry, and the store keeps the latest. Saying it
+    // matters — a fixture with no error on this row passes for a screen that
+    // prints the reason under any row that has one, which is a tunnel that
+    // is coming back captioned as one that is gone.
+    setForwardsBeforeMount(
+      fixture(NOW).map((f) => (f.id === 4 ? { ...f, error: "connection reset by peer" } : f)),
+    );
+    open();
+    const state = cell(rowFor("svc/identity-gateway"), 4);
+    expect(state.querySelector('[data-slot="raw"]')).toBeNull();
+    expect(state.textContent).toBe("Reconnecting");
+  });
+
+  it("keeps a reasonless failure to the one word it has", () => {
+    // `forward:closed` can arrive with nothing attached. "Failed" alone is
+    // the whole of what is known, and inventing a sentence under it would be
+    // worse than the silence.
+    setForwardsBeforeMount(
+      fixture(NOW).map((f) => (f.id === 4 ? { ...f, status: "failed" as const } : f)),
+    );
+    open();
+    const state = cell(rowFor("svc/identity-gateway"), 4);
+    expect(state.textContent).toBe("Failed");
+    expect(state.querySelector('[data-slot="raw"]')).toBeNull();
+  });
+
+  it("offers a dismissal, where a live tunnel is offered a stop", async () => {
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    const dead = within(rowFor("svc/identity-gateway"));
+    // Nothing left to stop: the tunnel already stopped itself.
+    expect(dead.queryByRole("button", { name: /stop forwarding/i })).toBeNull();
+    expect(dead.getByRole("button", { name: /dismiss/i })).toBeTruthy();
+
+    const live = within(rowFor("svc/checkout-api"));
+    expect(live.getByRole("button", { name: /stop forwarding/i })).toBeTruthy();
+    expect(live.queryByRole("button", { name: /dismiss/i })).toBeNull();
+  });
+
+  it("dismisses by id, telling the backend to forget the tunnel", async () => {
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    await userEvent.click(
+      within(rowFor("svc/identity-gateway")).getByRole("button", { name: /dismiss/i }),
+    );
+    // `stopPortForward`, not a local delete: the manager holds a gave-up
+    // forward until `stop` is called, and a set of dropped ids in the page
+    // cannot survive the reload that would raise the row again.
+    expect(core.stopPortForward).toHaveBeenCalledWith(4);
+    expect(core.stopPortForward).toHaveBeenCalledTimes(1);
+  });
+
+  it("says why a dismissal was refused, in words rather than in Rust", async () => {
+    core.stopPortForward.mockRejectedValue(new Error("handler error: no such forward"));
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    await userEvent.click(
+      within(rowFor("svc/identity-gateway")).getByRole("button", { name: /dismiss/i }),
+    );
+    const title = await screen.findByText(/Could not dismiss svc\/identity-gateway/i);
+    const alert = title.closest("[data-tone]") as HTMLElement;
+    expect(alert.textContent).toContain("no such forward");
+    expect(alert.textContent).not.toContain("handler error:");
+  });
+
+  it("counts the live tunnels, and the dead one apart from them", () => {
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    // Four rows, three live, across TWO live clusters — staging's only
+    // tunnel is the dead one. Every number here differs from the number a
+    // count over all four rows would give.
+    expect(screen.getByText(/Active tunnels · 3 across 2 clusters · 1 failed/i)).toBeTruthy();
+    expect(document.querySelectorAll("tbody tr")).toHaveLength(4);
+  });
+
+  it("keeps the dead tunnel's traffic in the total it moved", () => {
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    // 8.9 MB really crossed that tunnel before it died. A badge that dropped
+    // it would read as data loss on the way to reading as a smaller total.
+    expect(screen.getByText("54.5 MB moved")).toBeTruthy();
+  });
+
+  it("puts the reason in no title attribute", () => {
+    setForwardsBeforeMount(withDeadGateway(NOW));
+    open();
+    const titles = Array.from(document.querySelectorAll("[title]")).map(
+      (el) => el.getAttribute("title") ?? "",
+    );
+    expect(titles.join("\n")).not.toContain("ApiError");
+  });
+});
+
 describe("Forwards — the row's actions", () => {
   it("copies the kubectl command core writes, not one assembled here", async () => {
     const writeText = stubClipboard();

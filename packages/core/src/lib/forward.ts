@@ -13,8 +13,27 @@ export interface ActiveForward {
   name: string;
   remotePort: number;
   localPort: number;
-  /** Live state, driven by `forward:status:<id>` events from the backend. */
+  /**
+   * Live state, driven by `forward:status:<id>` events from the backend and
+   * by `forward:closed:<id>`.
+   *
+   * `failed` is the ENDED state: the tunnel exhausted its retries, or its
+   * serve loop stopped. `reconnecting` is not — that one is still coming
+   * back. See {@link isForwardEnded}, which is the only thing allowed to
+   * decide which of the two a row is.
+   */
   status: "active" | "reconnecting" | "failed";
+  /**
+   * Why the tunnel is in trouble, exactly as the backend said it — the raw
+   * `error` off a `forward:status` event or the reason on `forward:closed`.
+   * `undefined` while nothing has gone wrong, and cleared again when a
+   * tunnel comes back, so a live row cannot carry a stale excuse.
+   *
+   * Raw on purpose: it is a backend string, and the surface that shows it
+   * runs it through `describeError` rather than printing a Rust struct at
+   * the reader.
+   */
+  error?: string;
   /** Bytes moved since this forward started, as the backend counts them. A
    *  running total, not a delta: `forward:traffic:<id>` carries the whole
    *  number each time. */
@@ -46,6 +65,10 @@ interface ForwardEntry {
   localPort: number;
   startedAt: number;
   bytes: number;
+  /** True once the manager's own task has given up on this tunnel. */
+  ended?: boolean;
+  /** Why it gave up, when the loop had a reason to give. */
+  error?: string | null;
 }
 
 // Module-level store so active forwards survive component remounts and are
@@ -54,12 +77,21 @@ let forwards: ActiveForward[] = [];
 const listeners = new Set<() => void>();
 const closers = new Map<number, () => void>();
 
-// Ids this store has deliberately dropped. A forward that exhausts its retries
-// emits `forward:closed:<id>` — which drops the row — but stays in
-// `ForwardManager`'s map until `stop` is called, so `list_forwards` keeps
-// reporting it. Without this, a rehydrate landing after a give-up would raise a
-// dead tunnel back into the table it was just correctly removed from. It also
-// covers a `list_forwards` already in flight when a stop lands.
+/**
+ * Ids the READER has taken off the screen — a tunnel they stopped, or a dead
+ * row they dismissed. Both of those also tell the backend to forget the
+ * forward, so this set has exactly one job left: a `list_forwards` that was
+ * already in flight when the removal landed must not put the row back.
+ *
+ * It used to carry more, and it could not. A forward that gives up stays in
+ * `ForwardManager`'s map until `stop` is called, and this store used to drop
+ * such a row and remember the id so a rehydrate could not resurrect it — but
+ * this is module-level JavaScript that a browser reload wipes, and the
+ * `forward:closed` event that filled it fired before the reloaded page
+ * existed. A reload therefore adopted the dead tunnel as `active`. That case
+ * is answered where it can be: `list_forwards` now reports `ended` and the
+ * reason with it, and {@link fromEntry} reads them.
+ */
 const dropped = new Set<number>();
 
 function emit() {
@@ -72,12 +104,26 @@ export function subscribeForwards(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** Current active forwards (stable reference until the next change). */
+/** Current forwards, live and dead (stable reference until the next change). */
 export function getForwards(): ActiveForward[] {
   return forwards;
 }
 
-/** Start a port-forward and track it; auto-removes if the backend loop ends. */
+/**
+ * Has this tunnel given up?
+ *
+ * The one place the difference is decided, because more than one surface has
+ * to agree about it: the forwards table counts its live rows, the status bar
+ * counts port-forwards for the whole window, and a dead row's action is a
+ * dismissal rather than a stop. A tunnel that is `reconnecting` is still
+ * alive and still counts; only one that has stopped trying is dead.
+ */
+export function isForwardEnded(forward: Pick<ActiveForward, "status">): boolean {
+  return forward.status === "failed";
+}
+
+/** Start a port-forward and track it. A backend loop that ends leaves the row
+ *  behind, marked as ended — see {@link endForward}. */
 export async function startPortForward(req: ForwardRequest): Promise<ActiveForward> {
   const info = await invokeCommand<{ id: number; localPort: number; startedAt: number }>(
     "start_port_forward",
@@ -113,7 +159,15 @@ export async function startPortForward(req: ForwardRequest): Promise<ActiveForwa
   return fwd;
 }
 
-/** Stop a forward and drop it from the store. */
+/**
+ * Stop a forward and drop it from the store.
+ *
+ * Also how a reader DISMISSES a dead row, and deliberately so. A forward that
+ * gave up on its own stays in `ForwardManager`'s map — and in its listing —
+ * until `stop` is called, so a dismissal that only deleted the row here would
+ * be undone by the next reload. There is nothing left to abort in that case;
+ * `stop` is what makes the backend forget the tunnel.
+ */
 export async function stopPortForward(id: number): Promise<void> {
   await invokeCommand("stop_port_forward", { id });
   removeForward(id);
@@ -141,7 +195,9 @@ export async function rehydrateForwards(): Promise<void> {
   const added = entries.filter((e) => !known.has(e.id) && !dropped.has(e.id)).map(fromEntry);
   if (added.length === 0) return;
   forwards = [...forwards, ...added];
-  for (const f of added) watchForward(f.id);
+  // Only the live ones: a tunnel the backend already reports as ended has no
+  // further events to send, and its row is already saying so.
+  for (const f of added) if (!isForwardEnded(f)) watchForward(f.id);
   emit();
 }
 
@@ -166,9 +222,15 @@ async function listForwards(): Promise<ForwardEntry[]> {
   return res?.forwards ?? [];
 }
 
-/** A backend entry as a store row. A forward the manager still holds is being
- *  served, so it starts `active`; a `forward:status` event corrects that the
- *  moment the tunnel flaps. */
+/**
+ * A backend entry as a store row.
+ *
+ * The listing says whether the manager's own task is still trying, so a
+ * forward it reports as `ended` becomes a dead row here with the reason
+ * attached — which is the whole of what a page that reloaded after the
+ * `forward:closed` event has to go on. Anything else starts `active`; a
+ * `forward:status` event corrects that the moment the tunnel flaps.
+ */
 function fromEntry(e: ForwardEntry): ActiveForward {
   return {
     id: e.id,
@@ -178,21 +240,30 @@ function fromEntry(e: ForwardEntry): ActiveForward {
     name: e.name,
     remotePort: e.remotePort,
     localPort: e.localPort,
-    status: "active",
+    status: e.ended === true ? "failed" : "active",
+    error: reasonOf(e.error),
     bytesMoved: e.bytes,
     startedAt: e.startedAt,
   };
+}
+
+/** A reason worth keeping, or nothing. The backend says `null` for "no reason
+ *  to give", and an empty string is not a sentence either. */
+function reasonOf(error: unknown): string | undefined {
+  return typeof error === "string" && error !== "" ? error : undefined;
 }
 
 /** Listen for one forward's closure, status and traffic. Idempotent, so a
  *  rehydrate that re-meets a known forward doesn't subscribe twice. */
 function watchForward(id: number) {
   if (closers.has(id)) return;
-  const unsubClosed = on(`forward:closed:${id}`, () => removeForward(id));
+  // The payload is the loop's final error, or null for a clean end.
+  const unsubClosed = on(`forward:closed:${id}`, (payload) => endForward(id, reasonOf(payload)));
   const unsubStatus = on(`forward:status:${id}`, (payload) => {
-    const state = (payload as { state?: unknown } | null)?.state;
+    const event = payload as { state?: unknown; error?: unknown } | null;
+    const state = event?.state;
     if (state === "active" || state === "reconnecting" || state === "failed") {
-      setForwardStatus(id, state);
+      setForwardStatus(id, state, reasonOf(event?.error));
     }
   });
   const unsubTraffic = on(`forward:traffic:${id}`, (payload) => {
@@ -206,8 +277,48 @@ function watchForward(id: number) {
   });
 }
 
-function setForwardStatus(id: number, status: ActiveForward["status"]) {
-  const next = forwards.map((f) => (f.id === id && f.status !== status ? { ...f, status } : f));
+/** Record a forward's live state and the reason that came with it. The reason
+ *  is replaced rather than merged, so a tunnel that comes back does not keep
+ *  the excuse from the attempt before. */
+function setForwardStatus(id: number, status: ActiveForward["status"], error?: string) {
+  const next = forwards.map((f) =>
+    f.id === id && (f.status !== status || f.error !== error) ? { ...f, status, error } : f,
+  );
+  if (next.some((f, i) => f !== forwards[i])) {
+    forwards = next;
+    emit();
+  }
+}
+
+/**
+ * The backend has closed this tunnel. The row STAYS, marked as ended.
+ *
+ * A tunnel the reader stopped is gone from the screen at once, because they
+ * did it and do not need it reported back. One that died underneath them is
+ * news: this used to delete the row, so a forward that had been up for
+ * fifteen minutes vanished with no trace and the reader went on depending on
+ * a tunnel that was dead.
+ *
+ * `reason` is the closure's own; a reason already recorded by the `failed`
+ * status that preceded it survives a closure that carries none.
+ *
+ * Nothing is rebuilt when nothing changed, and that guard is reached on the
+ * ordinary path rather than a defensive one: the backend's give-up sequence
+ * is a `failed` status carrying the reason and THEN a closure saying the same
+ * thing, so the second event routinely tells this store nothing it does not
+ * hold. Rebuilding the row for it would wake every subscriber to
+ * `getForwards`, which is how `useSyncExternalStore` ends up looping.
+ */
+function endForward(id: number, reason: string | undefined) {
+  // Nothing further will be reported about a tunnel that has stopped.
+  closers.get(id)?.();
+  closers.delete(id);
+  const next = forwards.map((f) => {
+    if (f.id !== id) return f;
+    const error = reason ?? f.error;
+    if (f.status === "failed" && f.error === error) return f;
+    return { ...f, status: "failed" as const, error };
+  });
   if (next.some((f, i) => f !== forwards[i])) {
     forwards = next;
     emit();
