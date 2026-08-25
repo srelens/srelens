@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { isApplePlatform, isTauri, listContexts, loadKubeconfigFiles, type ClusterContext } from "@srelens/core";
+import {
+  isApplePlatform,
+  isTauri,
+  listContexts,
+  loadKubeconfigFiles,
+  rehydrateForwards,
+  type ClusterContext,
+} from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
 import { setContexts, setKubeconfigFiles, useContexts } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
@@ -140,6 +147,13 @@ export function Window({
       // the first subject followed then spreads over an empty list and erases
       // every earlier one, exactly as `loadMarks` above describes.
       loadRecentLogSubjects();
+      // And what the backend is still forwarding. The forwards store is
+      // module-level JavaScript: a browser reload empties it while the server
+      // keeps the tunnels up, so without this the status bar reads
+      // `0 port-forwards` on every route but `/forwards` — which is the one
+      // route that rehydrates itself, and the one a reader is least likely to
+      // reload onto. It never rejects, so it needs no guard of its own.
+      void rehydrateForwards();
       // Classic threads these through every call for a reason: a context that
       // came from an additional kubeconfig file cannot have a client built for
       // it until the backend has been told the file's path, and the list races

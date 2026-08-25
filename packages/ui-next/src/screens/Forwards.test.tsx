@@ -209,6 +209,26 @@ describe("Forwards — the table", () => {
     expect(within(pod).getByText("search")).toBeTruthy();
   });
 
+  it("stops offering to open a dead tunnel's address", async () => {
+    // The address of a tunnel that has given up answers nothing. Leaving it
+    // pressable is the #348 shape this branch keeps removing — a control that
+    // looks like it works and does not — and here it is worse than a no-op,
+    // because it would raise a browser tab onto a refused connection.
+    open();
+    expect(screen.getByRole("button", { name: "localhost:8080" })).toBeTruthy();
+
+    store.list = fixture(NOW).map((f) =>
+      f.id === 1 ? { ...f, status: "failed" as const } : f,
+    );
+    for (const l of store.listeners) l();
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "localhost:8080" })).toBeNull());
+    // Still readable — the reader has to see WHICH tunnel died.
+    expect(screen.getByText("localhost:8080")).toBeTruthy();
+    // And the live ones are untouched.
+    expect(screen.getByRole("button", { name: "localhost:9090" })).toBeTruthy();
+  });
+
   it("keeps a long context name inside its own cell", () => {
     // A kubeconfig context is user-chosen and routinely long. Seen against a
     // real cluster, `m01-1786968575165/kubernetes-admin@cluster.local` drew

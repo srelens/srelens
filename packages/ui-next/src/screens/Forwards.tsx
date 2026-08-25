@@ -480,20 +480,29 @@ function forwardColumns(openAddress: (row: ForwardRow) => void): Column<ForwardR
        * be. No `title`: the address is already on screen, and a value in a title
        * is the rule a Secret once leaked through.
        */
-      render: (row) => (
-        <Button
-          variant="ghost"
-          size="xs"
-          className="-mx-1 max-w-full text-[0.8125rem] text-accent"
-          onClick={() => openAddress(row)}
-        >
-          {/* `min-w-0` as well as `truncate`: a flex item's implicit
-              `min-width: auto` refuses to shrink below its content, so without
-              it a long proxy URL widens the button instead of ellipsing —
-              invisible in jsdom, which is why the class is asserted. */}
-          <span className="code min-w-0 truncate">{row.address}</span>
-        </Button>
-      ),
+      render: (row) =>
+        // A dead tunnel's address answers nothing, so it stops being a
+        // control — offering to open it is the #348 shape this screen exists
+        // to avoid, and worse than a no-op: it would raise a browser tab onto
+        // a refused connection. It stays readable, because the reader has to
+        // see WHICH tunnel died.
+        row.dead ? (
+          <span className="code block truncate text-muted">{row.address}</span>
+        ) : (
+          <Button
+            variant="ghost"
+            size="xs"
+            className="-mx-1 max-w-full text-[0.8125rem] text-accent"
+            onClick={() => openAddress(row)}
+          >
+            {/* `min-w-0` as well as `truncate`: a flex item's implicit
+                `min-width: auto` refuses to shrink below its content, so
+                without it a long proxy URL widens the button instead of
+                ellipsing — invisible in jsdom, which is why the class is
+                asserted. */}
+            <span className="code min-w-0 truncate">{row.address}</span>
+          </Button>
+        ),
     },
     {
       key: "remote",
