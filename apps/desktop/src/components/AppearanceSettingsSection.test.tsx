@@ -82,6 +82,15 @@ describe("AppearanceSettingsSection", () => {
     expect(items).toContain("Port forwards");
   });
 
+  it("lists terminals, whose sessions outlive the tab that started them", () => {
+    // `/terminals` is where a shell opened from a resource row lands, and its
+    // sessions keep running after the tab closes. A reader weighing the toggle
+    // is weighing whether they can get a shell at all.
+    render(<AppearanceSettingsSection />);
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toContain("Terminals");
+  });
+
   it("lists the toolbox, the only screen that is about the machine and not a cluster", () => {
     // The managed kubectl, helm and krew under ~/.srelens/bin, plus what a
     // context's exec-auth needs. Nothing about it is cluster-scoped, so a

@@ -220,6 +220,10 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // already running are seen and stopped — not a view of a cluster's state but
   // of this process's own.
   { route: "/forwards", name: "Port forwards" },
+  // The session rail and the live shell one of them is. Listed after forwards
+  // because it shares their shape — a session outlives the tab that started
+  // it, so this screen is where the ones already running are seen and ended.
+  { route: "/terminals", name: "Terminals" },
   // The only screen here that is about the machine rather than a cluster: the
   // managed kubectl, helm and krew under ~/.srelens/bin, and what the active
   // context's exec-auth needs on PATH.

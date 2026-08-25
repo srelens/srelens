@@ -63,6 +63,7 @@ describe("the list of ported screens", () => {
       "/overview",
       "/logs",
       "/forwards",
+      "/terminals",
       "/toolbox",
     ]);
   });
@@ -77,6 +78,7 @@ describe("the list of ported screens", () => {
       "Cluster overview",
       "Logs",
       "Port forwards",
+      "Terminals",
       "Toolbox",
     ]);
   });

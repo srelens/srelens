@@ -1,4 +1,7 @@
-// @vitest-environment node
+// jsdom, not node: this module's graph reaches the Terminals screen through
+// `screenFor`, and `@xterm/addon-fit` is a UMD bundle that reads `self` while
+// it evaluates. A route table that can name every screen necessarily imports
+// browser-only code, so the environment has to be one.
 import { describe as suite, it, expect } from "vitest";
 import { describe, isBuiltInKind, screenFor } from "./routes";
 import { AppLog } from "../screens/AppLog";
@@ -8,6 +11,7 @@ import { Overview } from "../screens/Overview";
 import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
 import { Workloads } from "../screens/Workloads";
 
@@ -76,9 +80,10 @@ suite("describe", () => {
     // Same prefix as the bare resource route, so without a distinct title and
     // kind for each suffix, opening a pod three ways (Open in new tab, Follow
     // logs, Open shell) produced three indistinguishable tabs in the strip.
-    // Only `shell` is still minted by the row menu; the other two are shapes a
-    // session persisted before Logs and Port forward got real front doors, and
-    // a restored tab still has to be able to name itself.
+    // NONE of the three is minted any more: Logs and Port forward got real
+    // front doors, and `Open shell` now starts a session and opens
+    // `/terminals` on it. All three survive here only so a tab a previous
+    // session persisted can still name itself in the strip.
     expect(describe("/resources/web-1/logs", "c")).toMatchObject({ title: "web-1 · logs", kind: "logs", sub: "c" });
     expect(describe("/resources/web-1/shell", "c")).toMatchObject({
       title: "web-1 · shell",
@@ -171,6 +176,13 @@ suite("screenFor", () => {
     expect(screenFor("/forwards")).toBe(Forwards);
   });
 
+  it("resolves /terminals to the terminals screen", () => {
+    // The row menu's `Open shell` starts a session and then opens this route.
+    // Without an entry here it landed the reader on the Placeholder with a
+    // live PTY running behind it and nothing on screen to attach to.
+    expect(screenFor("/terminals")).toBe(Terminals);
+  });
+
   it("resolves /toolbox to the toolbox screen", () => {
     // App-scoped, not cluster-scoped: the managed tools are the machine's,
     // not any one cluster's.
@@ -190,11 +202,12 @@ suite("screenFor", () => {
   });
 
   it("leaves the row menu's older /resources/<name>/logs shape on the Placeholder", () => {
-    // `ResourceMenu.tsx` still mints this shape, and it carries neither a kind
-    // nor a namespace — so it cannot resolve a subject and must NOT be routed
-    // to Logs, which would strand the reader on an unresolvable stream instead
-    // of the Placeholder that says the screen is not wired up. Reconciling the
-    // two shapes is its own step; this pins the dead end as a known one.
+    // NOTHING MINTS THIS ANY MORE either — `Follow logs` opens `logsRoute`.
+    // The shape carries neither a kind nor a namespace, so it cannot resolve a
+    // subject and must NOT be routed to Logs, which would strand the reader on
+    // an unresolvable stream instead of the Placeholder. A tab persisted by an
+    // older session is the only way to arrive here; this pins the dead end as
+    // a known one.
     expect(screenFor("/resources/web-1/logs")).toBeNull();
   });
 

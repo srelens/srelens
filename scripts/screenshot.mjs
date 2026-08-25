@@ -400,6 +400,9 @@ const TITLES = {
   "/logs": ["Logs", "logs"],
   "/helm": ["Helm", "helm"],
   "/forwards": ["Port forwards", "forwards"],
+  // "Shell", not "Terminals": the tab strip names what the tab IS, and the
+  // screen's own heading is the longer word. `CLUSTER_SCOPED` in routes.ts.
+  "/terminals": ["Shell", "terminal"],
   "/toolbox": ["Toolbox", "toolbox"],
   "/topology": ["Topology", "topology"],
   "/incidents": ["Incidents", "incidents"],
