@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ageFromTimestamp } from "@srelens/core";
 import { Button, EmptyState, Section, StatusPill, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
-import type { SessionState, TerminalSessionRow } from "../../lib/sessions";
+import type { SessionKind, SessionState, TerminalSessionRow } from "../../lib/sessions";
 
 /**
  * §14's rail width, and this screen's alone — see `SideRail`'s note on why the
@@ -54,6 +54,31 @@ export const SESSION_VERDICT: Record<SessionState, { word: string; kind: StatusK
   closed: { word: "Closed", kind: "neutral" },
 };
 
+/**
+ * §14's own prose for what a session IS — `pod exec`, `node shell`, `local`.
+ *
+ * **THIS IS NOT THE ELEVENTH HAND-PAIRED TABLE, and the difference is the
+ * tone.** The rule this migration keeps — the one that removed ten tables —
+ * is that every status WORD AND ITS SEVERITY comes from core: each of those
+ * ten paired a state with a meaning (healthy, degraded, failing), and a second
+ * copy of such a pairing is how a red dot ends up beside an amber word. A kind
+ * pairs with nothing. It says which of three things a session is, exactly the
+ * way a column header says what a column holds; there is no verdict in it, no
+ * tone to disagree with, and nothing core could ever be asked to decide —
+ * `SessionKind` is this store's own union, declared next to the emulator it
+ * belongs to. {@link SESSION_VERDICT} above is the table that carries tone,
+ * and it is the only one in this file.
+ *
+ * It exists at all because rendering the raw union member put `pod` on a row
+ * §14 writes as `pod exec` — and "pod" beside a pod's own name says nothing,
+ * where "pod exec" says what kind of shell the reader is looking at.
+ */
+export const SESSION_KIND_LABEL: Record<SessionKind, string> = {
+  pod: "pod exec",
+  node: "node shell",
+  local: "local",
+};
+
 /** How often the idle time recomputes. Same resolution `Forwards`' Age column
  *  ticks at, and for the same reason: a screen of live sessions is where a
  *  frozen idle time is a lie the reader would act on. */
@@ -94,7 +119,7 @@ function SessionRow({
       />
       <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{session.title}</span>
       <span className="shrink-0 text-[0.75rem] text-muted">
-        {session.kind} · {idleFor(session.lastOutputAt, now)}
+        {SESSION_KIND_LABEL[session.kind]} · {idleFor(session.lastOutputAt, now)}
       </span>
       <StatusPill status={verdict.word} kind={verdict.kind} tinted />
     </button>

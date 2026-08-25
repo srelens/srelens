@@ -40,8 +40,10 @@ describe("SessionRail", () => {
     expect(screen.getByText("checkout-api-5c8b7f2d9-mk3wl · api")).not.toBeNull();
     expect(screen.getByText("eu-w4-c3-standard-a1")).not.toBeNull();
     expect(screen.getByText("prod-eu context shell")).not.toBeNull();
-    expect(screen.getByText("pod · 12s")).not.toBeNull();
-    expect(screen.getByText("node · 4m")).not.toBeNull();
+    // §14's own prose for the kind, off `SESSION_KIND_LABEL` — `pod` beside a
+    // pod's own name says nothing that `pod exec` does not say better.
+    expect(screen.getByText("pod exec · 12s")).not.toBeNull();
+    expect(screen.getByText("node shell · 4m")).not.toBeNull();
     expect(screen.getByText("local · 22m")).not.toBeNull();
   });
 
