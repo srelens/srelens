@@ -311,6 +311,9 @@ importers:
       '@srelens/ui-kit':
         specifier: workspace:*
         version: link:../ui-kit
+      '@xterm/addon-fit':
+        specifier: ^0.10.0
+        version: 0.10.0(@xterm/xterm@5.5.0)
       '@xterm/xterm':
         specifier: ^5.5.0
         version: 5.5.0
