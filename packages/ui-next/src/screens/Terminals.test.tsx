@@ -163,6 +163,19 @@ afterEach(() => {
 });
 
 describe("Terminals", () => {
+  it("draws an ask control that is actually visible", () => {
+    // `AskChip` is the ROW chip: `.row-ask` is `opacity: 0` until a `.tbl
+    // tbody tr` is hovered, which is right for one of forty rows and
+    // invisible on a header, where there is no row to hover. `Events.tsx` and
+    // `Overview.tsx` already use a `Button` here and say why.
+    //
+    // jsdom does not apply the stylesheet, so this asserts the mechanism: the
+    // header's control is not the row chip.
+    draw();
+    const ask = screen.getByRole("button", { name: /Draft a command/i });
+    expect(ask.className).not.toContain("row-ask");
+  });
+
   it("shows the session the rail selected, neither the first nor the newest", async () => {
     const first = await openPod("checkout-api-5c8b7f2d9-mk3wl");
     const middle = await openPod("search-indexer-0", "search", "indexer");

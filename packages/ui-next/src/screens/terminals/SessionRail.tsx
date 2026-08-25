@@ -108,20 +108,31 @@ function SessionRow({
       type="button"
       onClick={onSelect}
       aria-current={active || undefined}
-      className="flex w-full items-center gap-1.5 rounded px-1 py-1.5 text-left"
+      className="flex w-full items-start gap-1.5 rounded px-1 py-1.5 text-left"
       style={{ background: active ? toneWash("accent") : undefined }}
     >
       <Icons.terminal
         size={14}
         aria-hidden="true"
-        className="shrink-0"
+        className="mt-0.5 shrink-0"
         style={{ color: active ? toneColor("accent") : toneColor("muted") }}
       />
-      <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{session.title}</span>
-      <span className="shrink-0 text-[0.75rem] text-muted">
-        {SESSION_KIND_LABEL[session.kind]} · {idleFor(session.lastOutputAt, now)}
+      {/* Stacked, because the rail is 230px and the row carries four things.
+          Laid out on one line the name got 44px of 229 — two pods from the
+          same namespace were told apart by four characters, which is no
+          telling apart at all. §14 draws these stacked and the widths are
+          why. `min-w-0` as well as `truncate`: a flex item's implicit
+          `min-width: auto` refuses to shrink below its content, so a long pod
+          name would widen the column rather than ellipsing. */}
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="truncate text-[0.8125rem] font-medium">{session.title}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="truncate text-[0.75rem] text-muted">
+            {SESSION_KIND_LABEL[session.kind]} · {idleFor(session.lastOutputAt, now)}
+          </span>
+          <StatusPill status={verdict.word} kind={verdict.kind} tinted />
+        </span>
       </span>
-      <StatusPill status={verdict.word} kind={verdict.kind} tinted />
     </button>
   );
 }

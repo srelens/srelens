@@ -236,7 +236,20 @@ export function Terminals(_props: { route: string }) {
       fill
       actions={
         <>
-          <AskChip label="Draft a command" question={askQuestion(active, context)} onAsk={ask} />
+          {/* A `Button`, not the row's `AskChip`, for the reason `Events.tsx`
+              and `Overview.tsx` both give: `.row-ask` is `opacity: 0` until a
+              `.tbl tbody tr` is hovered, which is right for one of forty rows
+              and invisible in a header, where there is no row to hover. The
+              visible word is the design's; the question it will actually send
+              goes in the accessible name — the same split the chip makes. */}
+          <Button
+            type="button"
+            size="sm"
+            aria-label={`Draft a command: ${askQuestion(active, context)}`}
+            onClick={() => ask(askQuestion(active, context))}
+          >
+            Draft a command
+          </Button>
           <Button variant="primary" size="sm" onClick={() => setMenuOpen(true)}>
             New session
           </Button>

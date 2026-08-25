@@ -47,6 +47,22 @@ describe("SessionRail", () => {
     expect(screen.getByText("local · 22m")).not.toBeNull();
   });
 
+  it("gives the session's name a line of its own", () => {
+    // The rail is 230px and a row carries four things: a glyph, the name, the
+    // kind and idle time, and a state pill. Laid out on ONE line the name got
+    // 44px of 229 — two pods from the same namespace were told apart by four
+    // characters. §14 shows these stacked, and the widths are why.
+    //
+    // jsdom lays nothing out, so this asserts the mechanism: the name is not a
+    // flex sibling of the kind and the pill. Fourth time on this migration a
+    // width problem has been invisible to the suite.
+    const only = row();
+    render(<SessionRail sessions={[only]} activeId={only.id} onSelect={() => {}} onNewSession={() => {}} />);
+    const name = screen.getByText(only.title);
+    const kind = screen.getByText(/pod exec ·/);
+    expect(name.parentElement).not.toBe(kind.parentElement);
+  });
+
   it("marks the active session and no other, with more than one row on screen", () => {
     const sessions = [
       row({ id: 1, title: "first" }),
