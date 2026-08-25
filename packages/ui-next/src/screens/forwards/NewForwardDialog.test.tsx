@@ -504,6 +504,40 @@ describe("NewForwardDialog — opened from the thing being forwarded", () => {
     expect(input("Local port").value).not.toBe(input("Remote port").value);
   });
 
+  it("lets a cleared local port mean 'any free one', which is what it promised", async () => {
+    // The offer is an offer. Clearing it asks the backend to choose, which is
+    // the only answer that cannot collide with something outside srelens —
+    // and it was the documented fallback while being impossible to reach:
+    // `portOf` returns null for blank AND for invalid, so a cleared field
+    // disabled Start exactly as "abc" did.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    openOn(POD_TARGET);
+    await screen.findByRole("dialog");
+    await userEvent.clear(field("Local port"));
+
+    // kubectl's own spelling for a random local port.
+    await waitFor(() =>
+      expect(screen.getByText(/port-forward pod\/checkout-api-5c8b7f2d9-mk3wl :9376$/)).toBeTruthy(),
+    );
+    await waitFor(() => expect(startButton().disabled).toBe(false));
+    await userEvent.click(startButton());
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
+    // No `localPort` key at all — not `undefined`, not 0.
+    expect(core.startPortForward.mock.calls[0][0]).not.toHaveProperty("localPort");
+  });
+
+  it("still refuses a number that is not a port", async () => {
+    // Blank and invalid must not collapse back together: an empty field is a
+    // decision, 99999 is a mistake. The field is `type="number"`, so letters
+    // cannot be entered at all — out of range is the invalid case that is
+    // actually reachable.
+    openOn(POD_TARGET);
+    await screen.findByRole("dialog");
+    await userEvent.clear(field("Local port"));
+    await userEvent.type(field("Local port"), "99999");
+    await waitFor(() => expect(startButton().disabled).toBe(true));
+  });
+
   it("draws only from the offer range", () => {
     // The unit, so the range is pinned without a component in the way. Below
     // 49152 the OS is not handing the same numbers out for outbound sockets;
@@ -531,9 +565,11 @@ describe("NewForwardDialog — opened from the thing being forwarded", () => {
     await screen.findByRole("dialog");
     expect(screen.queryByText(/Fill in/)).toBeNull();
 
-    // Clear the one field that can be cleared, and it names that field alone.
-    await userEvent.clear(field("Local port"));
-    expect(await screen.findByText("Fill in a local port to see it.")).toBeTruthy();
+    // Clearing the LOCAL port is not a gap — it asks for any free one. The
+    // remote port has no such fallback, so that is the one that can go
+    // missing, and it is named alone.
+    await userEvent.clear(field("Remote port"));
+    expect(await screen.findByText("Fill in a remote port to see it.")).toBeTruthy();
     expect(screen.queryByText(/a target/)).toBeNull();
   });
 

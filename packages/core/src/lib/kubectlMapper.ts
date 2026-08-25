@@ -139,7 +139,11 @@ export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): s
     if (ns) {
       parts.push("-n", shellQuote(ns, "namespace", windows));
     }
-    parts.push("port-forward", `${kindToForwardTarget(kind)}/${qName}`, `${localPort}:${remotePort}`);
+    // An omitted local port is `:<remote>` — kubectl's own spelling for "any
+    // free one", and exactly what omitting `localPort` asks the backend for.
+    // Rendering `undefined:8443` would be a command nobody could paste.
+    const ports = localPort == null ? `:${remotePort}` : `${localPort}:${remotePort}`;
+    parts.push("port-forward", `${kindToForwardTarget(kind)}/${qName}`, ports);
     return parts.join(" ");
   }
 

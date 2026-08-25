@@ -352,6 +352,15 @@ export function NewForwardDialog({
   );
   const localPort = portOf(localText);
   const remotePort = portOf(remoteText);
+  /**
+   * Blank is a DECISION, not a mistake — it asks the backend for any free
+   * port, which is the one answer that cannot collide with something outside
+   * srelens. `portOf` cannot tell the two apart: it answers null for an empty
+   * field and for "abc" alike, which is how the documented fallback ended up
+   * unreachable.
+   */
+  const localBlank = localText.trim() === "";
+  const localUsable = localBlank || localPort !== null;
 
   /** §A.4's one field error, decided against the live store. */
   const clash = localPort !== null && forwards.some((f) => f.localPort === localPort);
@@ -359,21 +368,21 @@ export function NewForwardDialog({
   /** The fields the equivalent command still wants, in the order they are read. */
   const missingForCommand = [
     target ? null : "a target",
-    localPort === null ? "a local port" : null,
+    localUsable ? null : "a local port",
     remotePort === null ? "a remote port" : null,
   ]
     .filter((f): f is string => f !== null)
     .join(" and ");
 
   const command =
-    chosen && localPort !== null && remotePort !== null
+    chosen && localUsable && remotePort !== null
       ? toKubectl({
           action: "port-forward",
           kind: chosen.kind,
           name: chosen.name,
           context,
           namespace,
-          localPort,
+          ...(localPort === null ? {} : { localPort }),
           remotePort,
         })
       : null;
@@ -381,7 +390,7 @@ export function NewForwardDialog({
   const ready = command !== null && !clash && !busy;
 
   async function start() {
-    if (!chosen || localPort === null || remotePort === null || clash) return;
+    if (!chosen || !localUsable || remotePort === null || clash) return;
     setFailure(null);
     setBusy(true);
     try {
@@ -390,7 +399,9 @@ export function NewForwardDialog({
         namespace,
         kind: chosen.kind,
         name: chosen.name,
-        localPort,
+        // Omitted entirely when the field is blank: `ForwardRequest.localPort`
+        // is optional and the backend binds a free port when it is absent.
+        ...(localPort === null ? {} : { localPort }),
         remotePort,
       });
       // The port the BACKEND bound, not the one that was typed: the two differ
@@ -507,9 +518,11 @@ export function NewForwardDialog({
           onChange={setInBrowser}
           label="Open in browser when it comes up"
           hint={
-            localPort === null
-              ? "Name a local port and this is where it opens."
-              : plannedAddress(localPort)
+            localBlank
+              ? "srelens picks a free port, and opens it when it comes up."
+              : localPort === null
+                ? "Name a local port and this is where it opens."
+                : plannedAddress(localPort)
           }
         />
 

@@ -238,6 +238,23 @@ describe("kubectlMapper", () => {
       ).toBe("kubectl --context prod -n prod port-forward svc/checkout-api 8080:80");
     });
 
+    it("writes a random local port the way kubectl does, as :<remote>", () => {
+      // `kubectl port-forward svc/x :8443` is kubectl's own spelling for "any
+      // free local port" — the same thing omitting `localPort` asks the
+      // backend for. Rendering `undefined:8443` would be a command that
+      // cannot be pasted.
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Service",
+          name: "checkout-api",
+          context: "prod",
+          namespace: "checkout",
+          remotePort: 8443,
+        }),
+      ).toBe("kubectl --context prod -n checkout port-forward svc/checkout-api :8443");
+    });
+
     it("maps a Pod to pod/<name>", () => {
       expect(
         toKubectl({
