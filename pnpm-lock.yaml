@@ -311,6 +311,9 @@ importers:
       '@srelens/ui-kit':
         specifier: workspace:*
         version: link:../ui-kit
+      '@xterm/xterm':
+        specifier: ^5.5.0
+        version: 5.5.0
       lucide-react:
         specifier: ^1.22.0
         version: 1.22.0(react@19.2.7)
