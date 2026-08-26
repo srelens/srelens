@@ -55,6 +55,13 @@ import { LINK_TONE, LINK_WORD, useWorkspaceView } from "../lib/workspace";
  * streaming helm operation prints often enough to make that a hang rather
  * than a waste. The stores promise a stable reference; the arithmetic below
  * is what keeps that promise useful.
+ *
+ * Each of those counts is scoped to whatever the screen it opens can show,
+ * which is not the same answer for all three: the forwards and terminals
+ * screens list every cluster's rows, and the Helm screen lists one cluster's.
+ * A segment that counted more than its destination could show would be a
+ * readout the reader cannot act on — worst of all in `sev`, where it reads as
+ * a summons.
  */
 export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const activeId = useActiveCluster();
@@ -83,13 +90,30 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   // rail to show what died and why; counting it here would say a shell is
   // alive when it is not, the same lesson the tunnel above already carries.
   const liveSessions = sessions.filter((s) => s.state !== "closed").length;
+  // Scoped to the cluster this strip is naming, which the two counts above are
+  // deliberately not. The rule both follow is the same one: a segment counts
+  // what the screen it opens can show. `/forwards` and `/terminals` list every
+  // cluster's rows, so their counts are whole; `/helm` asks for a context
+  // before it lists anything and then shows that one cluster's releases and
+  // that one cluster's operations, so an operation from elsewhere counted here
+  // would be a `sev` summons to a page that cannot hold it. Nothing is lost by
+  // narrowing: the row stays in the store until it is dismissed, and the
+  // segment comes back the moment the reader switches to its cluster.
+  //
+  // `ctx.name` rather than `activeId`: the store holds the context name helm
+  // was run against, and the id is the workspace's own handle for it. No
+  // active cluster means no Helm screen to open, so nothing is counted at all.
+  //
+  // Derived here, in the component body, and never inside a snapshot getter —
+  // see the note above about identity and "Maximum update depth exceeded".
+  const clusterOps = ctx ? helmOps.filter((o) => o.context === ctx.name) : [];
   // In flight means `running` and nothing else. A `done` operation has stopped
   // changing the cluster and a `failed` one has stopped trying; both stay
   // listed on the helm screen with their output, and counting either here
   // would report a finished mutation as one still under way — the distinction
   // the dead tunnel and the closed shell above are each already drawing.
-  const runningOps = helmOps.filter((o) => o.state === "running").length;
-  const failedOps = helmOps.filter((o) => o.state === "failed").length;
+  const runningOps = clusterOps.filter((o) => o.state === "running").length;
+  const failedOps = clusterOps.filter((o) => o.state === "failed").length;
 
   const segments: StatusSegment[] = [
     {
@@ -152,10 +176,10 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   }
   // The `pf-dead` exception again, and for a bigger stake than a tunnel. A
   // `helm upgrade` that failed is a cluster mutation that half-happened, and
-  // the dialog that would have said so has closed — this is the only surface
-  // left that reports it at all. The count beside it cannot: a failed
-  // operation leaves nothing in flight, which is exactly what a reader who
-  // started no operation sees.
+  // the dialog that would have said so has closed — for the cluster this strip
+  // names, this is the only surface left that reports it at all. The count
+  // beside it cannot: a failed operation leaves nothing in flight, which is
+  // exactly what a reader who started no operation sees.
   //
   // Neither of these labels is a status word, so neither wants one from core:
   // `helmStatus` tones the word Helm puts in a release Secret, and these are
