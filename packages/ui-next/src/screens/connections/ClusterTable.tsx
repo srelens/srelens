@@ -11,6 +11,7 @@ import {
 import { useMark } from "../../lib/marks";
 import { glyph } from "../../lib/tree";
 import type { Probe, ProbeState } from "../../lib/probe";
+import { joined, latencyLabel, viaOf } from "./clusterText";
 
 /**
  * One cluster as §6's table draws it: the context, what the last probe said,
@@ -54,41 +55,6 @@ const STATUS: Record<ProbeState, { word: string; tone: BadgeTone }> = {
 };
 
 /**
- * The one separator on this screen, and the only place parts are joined.
- *
- * Every caller has parts that may be missing — a cluster with no region, a
- * local cluster with no detected provider — so the filter is here rather than
- * at each site. `· ·` and a line that begins or ends with a separator tell a
- * reader nothing and look broken, and both are what an unconditional
- * `parts.join(" · ")` produces.
- *
- * An empty string means there was nothing to say; callers render NOTHING for
- * it rather than an empty line.
- */
-function joined(parts: readonly (string | undefined)[]): string {
-  return parts
-    .map((part) => part?.trim() ?? "")
-    .filter((part) => part.length > 0)
-    .join(" · ");
-}
-
-/**
- * The host a cluster answers on, for a local cluster's `Via`.
- *
- * `new URL` rather than a regexp, and the raw string when it will not parse: a
- * `server` srelens cannot read is still what the kubeconfig says, and printing
- * it verbatim is more use to a reader than an invented "unknown". Unix-socket
- * and non-URL servers arrive here too.
- */
-function hostOf(server: string): string {
-  try {
-    return new URL(server).host || server;
-  } catch {
-    return server;
-  }
-}
-
-/**
  * §6's `Source`, and the whole of its vocabulary.
  *
  * Two values, from `isLocal`. **`Team server` is never one of them** — §6's
@@ -101,39 +67,14 @@ function sourceOf(context: ClusterContext): string {
 }
 
 /**
- * §6's `Via`: what the cluster is actually reached THROUGH.
+ * The three helpers this file used to hold — `joined`, `viaOf` and
+ * `latencyLabel` — now live in `./clusterText`, because the Sources rail
+ * renders the same facts and a second latency formatter is how the
+ * absent-not-zero rule gets lost. `latencySort` below stays here: it is about
+ * how THIS table orders a column, which the rail has no opinion about.
  *
- * For a kubeconfig context that is the file it was declared in — the column's
- * whole reason for existing, and the field decision 1 added. For a local
- * cluster the file is beside the point (kind writes one for you); what
- * identifies it is the tool that made it and the endpoint it listens on.
+ * The number the `Latency` column SORTS on — never the text beside it.
  */
-function viaOf(context: ClusterContext): string {
-  return context.isLocal ? joined([context.provider, hostOf(context.server)]) : context.sourceFile;
-}
-
-/**
- * The round trip, or nothing.
- *
- * **Gated on the STATE as well as on the number.** `probe.ts` documents
- * `latencyMs` as absent unless the state is `reachable`, so the two gates
- * agree today — but the table is what a reader trusts, and `0 ms` on a cluster
- * that never answered reads as "instant", which is the exact opposite of the
- * truth (spec decision 4). One gate would leave that one drift away; two make
- * it structural.
- *
- * A reading under half a millisecond is a real reading of a cluster on this
- * laptop, and it is NOT discarded — it is drawn as `<1 ms`, because rounding it
- * to `0 ms` would put on screen the one string this column may never show.
- */
-function latencyLabel(probe: Probe): string | null {
-  if (probe.state !== "reachable") return null;
-  const ms = probe.latencyMs;
-  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
-  return ms < 0.5 ? "<1 ms" : `${Math.round(ms)} ms`;
-}
-
-/** The number the `Latency` column SORTS on — never the text beside it. */
 function latencySort(probe: Probe): number {
   // A cluster with no reading sorts last however the column is turned, rather
   // than ordering as the text "—" happens to collate.
