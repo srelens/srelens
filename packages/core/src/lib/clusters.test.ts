@@ -21,6 +21,19 @@ describe("listContexts", () => {
     expect(outcome.contexts?.[0].namespace).toBe("team-a");
   });
 
+  it("carries the source file and auth kind the backend reported", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      contexts: [{
+        name: "prod-eu", stableId: "prod-eu", cluster: "prod", server: "https://prod:6443",
+        namespace: "", isCurrent: true, isLocal: false,
+        sourceFile: "/home/dana/.kube/config", authKind: "exec plugin · gcloud",
+      }],
+    });
+    const out = await listContexts([], invoke);
+    expect(out.contexts?.[0].sourceFile).toBe("/home/dana/.kube/config");
+    expect(out.contexts?.[0].authKind).toBe("exec plugin · gcloud");
+  });
+
   it("returns a normalised error on failure", async () => {
     const outcome = await listContexts([], () =>
       Promise.reject(new Error("read kubeconfig: not found")),
