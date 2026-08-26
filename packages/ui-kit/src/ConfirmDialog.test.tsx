@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { PortalScopeProvider, usePortalHost } from "./portal";
 
 function open(props: Partial<Parameters<typeof ConfirmDialog>[0]> = {}) {
   return render(
@@ -241,5 +243,199 @@ describe("ConfirmDialog focus", () => {
     );
     const dialog = screen.getByRole("dialog");
     expect(dialog.contains(document.activeElement), "focus must stay in the modal").toBe(true);
+  });
+});
+
+/** A tab-sized surface that owns the layers opened inside it, as TabSurface does. */
+function Surface({ visible = true, children }: { visible?: boolean; children: ReactNode }) {
+  const { ref, layered, scope } = usePortalHost(visible);
+  return (
+    <div data-testid="surface" hidden={!visible}>
+      <PortalScopeProvider scope={scope}>
+        <div data-testid="content" inert={layered}>
+          {children}
+        </div>
+        <div data-testid="host" ref={ref} />
+      </PortalScopeProvider>
+    </div>
+  );
+}
+
+function openInSurface(props: Partial<Parameters<typeof ConfirmDialog>[0]> = {}, visible = true) {
+  return render(
+    <Surface visible={visible}>
+      <ConfirmDialog
+        title="Delete pod?"
+        message="This cannot be undone."
+        onConfirm={() => {}}
+        onCancel={() => {}}
+        {...props}
+      />
+    </Surface>,
+  );
+}
+
+/**
+ * The same question asked inside one tab of a window that holds several.
+ *
+ * A confirmation portalled to `document.body` covered the tab strip, the
+ * cluster rail and the status bar, and Radix's focus trap and `aria-hidden`
+ * isolation made every other tab unreachable until it was answered — and,
+ * because a portal escapes the `hidden` attribute an inactive tab is hidden
+ * with, it would have followed the reader to whatever tab they moved to. So it
+ * belongs to its tab: mounted in it, covering it and no more, and marking that
+ * tab's own content unreachable rather than the document's. (#357)
+ *
+ * `busy` is untouched by any of it. The action is in flight; every way out of
+ * *this* dialog is still closed. What is now open is the way out of the tab,
+ * which was never what `busy` was protecting.
+ */
+describe("ConfirmDialog inside a surface", () => {
+  it("mounts into the surface's own node, so hiding the tab hides it too", () => {
+    openInSurface();
+    expect(screen.getByRole("dialog").parentElement).toBe(screen.getByTestId("host"));
+  });
+
+  it("mounts into the document body when there is no surface", () => {
+    // The fallback the gallery, the window chrome and most of this kit's tests
+    // rely on. Asserted as the literal parent rather than "somewhere in the
+    // document": a container that was wrong but still attached would pass the
+    // looser check.
+    open();
+    expect(screen.getByRole("dialog").parentElement).toBe(document.body);
+  });
+
+  it("covers only its surface: the overlay is positioned against the tab, not the window", () => {
+    openInSurface();
+    expect(overlay().className).toContain("absolute");
+    expect(overlay().className).not.toContain("fixed");
+  });
+
+  it("centres itself in its surface rather than in the window", () => {
+    openInSurface();
+    expect(screen.getByRole("dialog").className).toContain("absolute");
+    expect(screen.getByRole("dialog").className).not.toContain("fixed");
+  });
+
+  it("still covers the whole window when there is no surface", () => {
+    open();
+    expect(overlay().className).toContain("fixed");
+    expect(overlay().className).not.toContain("absolute");
+    expect(screen.getByRole("dialog").className).toContain("fixed");
+  });
+
+  it("leaves the page outside its tab in the accessibility tree", () => {
+    // The inverse of the unscoped case above. Radix's `aria-hidden` isolation
+    // takes the *whole document* out of the accessibility tree, which is what
+    // made every other tab unreachable. Scoped, the isolation is the surface's
+    // own `inert` instead, and it stops at the tab.
+    const behind = document.createElement("div");
+    behind.innerHTML = "<button>the tab strip</button>";
+    document.body.appendChild(behind);
+    try {
+      openInSurface();
+      expect(behind.getAttribute("aria-hidden")).toBeNull();
+      expect(screen.getByRole("dialog").getAttribute("aria-modal")).toBeNull();
+    } finally {
+      behind.remove();
+    }
+  });
+
+  it("makes its own tab's content unreachable while it is open", () => {
+    openInSurface();
+    expect(screen.getByTestId("content").hasAttribute("inert")).toBe(true);
+  });
+
+  it("gives the tab's content back when it is answered", () => {
+    // Rerendered rather than remounted: a fresh surface would start clear
+    // whatever the dialog had done to the old one, so it would pass even if
+    // the hold were never released.
+    const { rerender } = render(
+      <Surface>
+        <ConfirmDialog title="Delete pod?" message="m" onConfirm={() => {}} onCancel={() => {}} />
+      </Surface>,
+    );
+    expect(screen.getByTestId("content").hasAttribute("inert")).toBe(true);
+    rerender(<Surface><p>the table</p></Surface>);
+    expect(screen.getByTestId("content").hasAttribute("inert")).toBe(false);
+  });
+
+  it("keeps the marker Drawer looks for", () => {
+    openInSurface();
+    expect(document.querySelector('[role="dialog"][data-state="open"]')).not.toBeNull();
+  });
+
+  it("cancels on Escape", () => {
+    const onCancel = vi.fn();
+    openInSurface({ onCancel });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels on a click on the overlay", async () => {
+    const onCancel = vi.fn();
+    openInSurface({ onCancel });
+    await userEvent.click(overlay());
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cancel when the click lands on the shell outside its tab", async () => {
+    // With the overlay no longer covering the tab strip, switching tabs became
+    // an outside pointer-down, and a non-modal Radix layer dismisses on any of
+    // those. Cancelling a destructive confirmation because the reader looked at
+    // another tab is the wrong answer to a question they never answered. (#357)
+    const strip = document.createElement("button");
+    strip.textContent = "another tab";
+    document.body.appendChild(strip);
+    try {
+      const onCancel = vi.fn();
+      openInSurface({ onCancel });
+      await userEvent.click(strip);
+      expect(onCancel).not.toHaveBeenCalled();
+    } finally {
+      strip.remove();
+    }
+  });
+
+  it("ignores Escape while its tab is hidden", () => {
+    // Radix routes Escape to the layer opened last, not to the one the reader
+    // can see. A hidden tab's question must not answer itself.
+    const onCancel = vi.fn();
+    openInSurface({ onCancel }, false);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel on a click inside the dialog", async () => {
+    const onCancel = vi.fn();
+    openInSurface({ onCancel });
+    await userEvent.click(screen.getByRole("dialog"));
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("still ignores Escape while the action is in flight", () => {
+    const onCancel = vi.fn();
+    openInSurface({ busy: true, onCancel });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("still ignores the overlay while the action is in flight", async () => {
+    const onCancel = vi.fn();
+    openInSurface({ busy: true, onCancel });
+    await userEvent.click(overlay());
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("still moves focus into itself, and back to the opener on close", async () => {
+    render(<button>Delete pod</button>);
+    const opener = screen.getByRole("button", { name: "Delete pod" });
+    opener.focus();
+
+    const { unmount } = openInSurface();
+    expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true);
+
+    unmount();
+    await waitFor(() => expect(document.activeElement).toBe(opener));
   });
 });

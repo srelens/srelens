@@ -8,7 +8,14 @@ describe("Gallery", () => {
     // Derived from the barrel rather than a hand-written list, which would
     // drift the first time someone was in a hurry. The catalogue is the only
     // visual review surface this design has.
-    const components = Object.keys(kit).filter((name) => /^[A-Z]/.test(name));
+    //
+    // One name is excused, and it is named rather than pattern-matched so that
+    // the next component someone finds inconvenient to draw cannot excuse
+    // itself: `PortalScopeProvider` renders no DOM at all. It is a context
+    // around a part of the window that owns the layers opened inside it, and a
+    // catalogue entry for it would be an empty heading. (#357)
+    const invisible = new Set(["PortalScopeProvider"]);
+    const components = Object.keys(kit).filter((name) => /^[A-Z]/.test(name) && !invisible.has(name));
     expect(components.length).toBeGreaterThan(0);
     render(<Gallery />);
     for (const name of components) {
