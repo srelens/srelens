@@ -64,6 +64,7 @@ describe("the list of ported screens", () => {
       "/logs",
       "/forwards",
       "/terminals",
+      "/helm",
       "/toolbox",
     ]);
   });
@@ -79,6 +80,7 @@ describe("the list of ported screens", () => {
       "Logs",
       "Port forwards",
       "Terminals",
+      "Helm",
       "Toolbox",
     ]);
   });

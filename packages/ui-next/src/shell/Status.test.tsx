@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Status } from "./Status";
 import { ConsoleProvider, useConsole } from "../console";
-import { setState } from "../lib/tabsStore";
+import { activeRoute, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { probeCluster, resetProbes } from "../lib/probe";
 import { resetView } from "../lib/workspace";
@@ -36,11 +36,26 @@ vi.mock("../lib/sessions", () => ({
   },
 }));
 
+// Helm operations are ui-next's own store too, and read the same way: a
+// module-level snapshot faked at the boundary rather than a real `helm
+// upgrade` stood up through the backend. The getter hands back the same array
+// until it is swapped, which is what `useSyncExternalStore` requires — and
+// what a component that filtered inside its snapshot would break.
+const helmOps = vi.hoisted(() => ({ list: [] as unknown[], notify: new Set<() => void>() }));
+vi.mock("../lib/helmOps", () => ({
+  getHelmOps: () => helmOps.list,
+  subscribeHelmOps: (l: () => void) => {
+    helmOps.notify.add(l);
+    return () => helmOps.notify.delete(l);
+  },
+}));
+
 const ctx = { name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false };
 
 beforeEach(() => {
   forwards.list = [];
   sessions.list = [];
+  helmOps.list = [];
   resetView();
   resetProbes();
 });
@@ -156,6 +171,138 @@ describe("Status", () => {
     sessions.list = [{ id: 1, state: "closed" }];
     mount(<Status contexts={[ctx]} />);
     expect(screen.queryByRole("button", { name: /shell/i })).toBeNull();
+  });
+
+  it("counts the helm operations still changing the cluster", () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [
+      { id: 1, state: "running", context: ctx.name },
+      { id: 2, state: "running", context: ctx.name },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "2 helm operations" })).toBeDefined();
+  });
+
+  it("counts only the operations still in flight", () => {
+    setState(defaultState([ctx]));
+    // A `done` upgrade has finished changing the cluster and a `failed` one
+    // has stopped trying; neither is in flight. Three rows, one running — and
+    // the singular that one calls for, which a count over all three would get
+    // wrong twice.
+    helmOps.list = [
+      { id: 1, state: "running", context: ctx.name },
+      { id: 2, state: "done", context: ctx.name },
+      { id: 3, state: "failed", context: ctx.name },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation" })).toBeDefined();
+    // And the `done` one is not folded into the failure either: "finished" and
+    // "failed" are two states, and a segment toned `sev` may only count one.
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeDefined();
+  });
+
+  it("says nothing about helm when nothing is in flight and nothing failed", () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [{ id: 1, state: "done", context: ctx.name }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByRole("button", { name: /helm/i })).toBeNull();
+    // Named as well as counted: `0 helm operations` is the exact readout the
+    // absent-at-zero rule exists to keep off a strip already carrying five.
+    expect(screen.queryByText(/0 helm operation/i)).toBeNull();
+  });
+
+  it("says so on the strip when a helm operation has failed", () => {
+    setState(defaultState([ctx]));
+    // The reader closed the dialog and the upgrade failed after it had gone.
+    // Nothing else on screen reports that, and the count cannot: an operation
+    // that fails leaves nothing in flight, which is what a reader who started
+    // no operation at all sees.
+    helmOps.list = [{ id: 1, state: "failed", context: ctx.name }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "0 helm operations" })).toBeNull();
+  });
+
+  it("tells a failed operation apart from the ones still running", () => {
+    setState(defaultState([ctx]));
+    // Both segments at once, and both saying "1": the fixture that catches an
+    // assertion which would pass for either one on its own.
+    helmOps.list = [
+      { id: 1, state: "running", context: ctx.name },
+      { id: 2, state: "failed", context: ctx.name },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeDefined();
+  });
+
+  it("opens the helm screen from either helm readout", async () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [{ id: 1, state: "running", context: ctx.name }];
+    mount(<Status contexts={[ctx]} />);
+    await userEvent.click(screen.getByRole("button", { name: "1 helm operation" }));
+    expect(activeRoute()).toBe("/helm");
+  });
+
+  it("opens the helm screen from the failed readout", async () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [{ id: 1, state: "failed", context: ctx.name }];
+    mount(<Status contexts={[ctx]} />);
+    await userEvent.click(screen.getByRole("button", { name: "1 helm operation failed" }));
+    expect(activeRoute()).toBe("/helm");
+  });
+
+  it("counts only the helm operations on the cluster the reader is looking at", () => {
+    setState(defaultState([ctx]));
+    // Two upgrades in flight, one of them on a cluster this window is not
+    // showing. The strip names `prod-eu` and the segment beside it opens the
+    // Helm screen, which lists `prod-eu` and nothing else — so a count of two
+    // would send the reader somewhere the second one cannot be seen.
+    helmOps.list = [
+      { id: 1, state: "running", context: ctx.name },
+      { id: 2, state: "running", context: "staging-us" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "2 helm operations" })).toBeNull();
+  });
+
+  it("does not report a failure from a cluster this window is not looking at", () => {
+    setState(defaultState([ctx]));
+    // The `sev` tone is a summons, and this one would lead nowhere: the Helm
+    // screen the segment opens lists `prod-eu`, so a `staging-us` failure
+    // shown here is an alarm with no page behind it. It comes back the moment
+    // the reader switches to that cluster; the row stays in the store until
+    // it is dismissed.
+    helmOps.list = [{ id: 1, state: "failed", context: "staging-us" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByRole("button", { name: /helm/i })).toBeNull();
+  });
+
+  it("says nothing about helm when no cluster is active", () => {
+    setState(defaultState([]));
+    // No cluster means no Helm screen to open — the screen asks for a context
+    // before it lists anything — so there is nothing to count towards.
+    helmOps.list = [
+      { id: 1, state: "running", context: ctx.name },
+      { id: 2, state: "failed", context: ctx.name },
+    ];
+    mount(<Status contexts={[]} />);
+    expect(screen.queryByRole("button", { name: /helm/i })).toBeNull();
+  });
+
+  it("still counts forwards and shells from every cluster, the way their screens list them", () => {
+    setState(defaultState([ctx]));
+    // The scoping above is not a rule about the strip, it is a rule about
+    // each segment agreeing with where it sends the reader. `/forwards` and
+    // `/terminals` list every cluster's rows, so these two counts stay whole
+    // — narrowing them to `prod-eu` would hide a tunnel the reader is
+    // depending on from the only surface that reports it.
+    forwards.list = [{ id: 1, status: "active", context: "staging-us" }];
+    sessions.list = [{ id: 1, state: "attached", context: "staging-us" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 port-forward" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "1 shell" })).toBeDefined();
   });
 
   it("opens the console from Ask", async () => {

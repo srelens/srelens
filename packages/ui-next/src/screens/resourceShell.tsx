@@ -1,6 +1,7 @@
-import { Alert, Button, EmptyState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
+import { Alert, Button, EmptyState, LoadingState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
+import { useContextsError, useContextsStatus } from "../lib/clusters";
 import { toggleColumn } from "../lib/columnPrefs";
-import { FailureAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { setTabView, useTabs, useTabView } from "../lib/tabsStore";
 
 /**
@@ -22,17 +23,55 @@ import { setTabView, useTabs, useTabView } from "../lib/tabsStore";
  * two screens' own module comments.
  */
 
-/** The guard both screens open with: no cluster in focus, so there is no
- *  context name to call core with, and a hook cannot be skipped — this is a
- *  `return` before any hook runs, not a branch inside a hook-calling body. */
+/**
+ * The guard every screen opens with: no cluster context to call core with, so
+ * there is nothing to list. At the call site it is a `return` before any hook
+ * runs, not a branch inside a hook-calling body — the hooks below are this
+ * component's own, which is a different component and so a different list.
+ *
+ * **Why this is three states and not one sentence.** `useActiveContext` is the
+ * intersection of the workspace's active cluster and the *loaded* context
+ * list, and it answers `undefined` when either half is missing. That collapsed
+ * three unrelated situations into "No cluster in focus — pick a cluster in the
+ * rail", including the one where a cluster plainly *is* in focus: every tab
+ * carrying its chip, the title bar carrying its name, and `listContexts`
+ * having refused underneath. The reader was being blamed for a backend
+ * failure srelens had already read and thrown away. It knew "I could not list
+ * the contexts" and said "you have not picked one" — the string asserting more
+ * than srelens knows, on six screens at once, because they all render this.
+ *
+ * So the copy follows the store's own three states and nothing else:
+ *
+ * - **listed, none picked** — the original sentence, which is right here and
+ *   is left exactly as it was.
+ * - **not listed yet** — a spinner. The reader has nothing to do about a
+ *   listing that has not come back, and an instruction they cannot act on is
+ *   worse than no instruction.
+ * - **refused** — the reason, classified by `describeError` like every other
+ *   failure in this app, with the backend's own words a disclosure away.
+ *
+ * There is deliberately no fourth state for "refused, but a cluster is
+ * selected". The failure is the same failure and the remedy is the same
+ * remedy; splitting it would only let the two halves drift.
+ */
 export function NoClusterScreen({ title, noun }: { title: string; noun: string }) {
+  const status = useContextsStatus();
+  const error = useContextsError();
   return (
     <Screen title={title} fill>
-      <EmptyState
-        title="No cluster in focus"
-        hint={`Pick a cluster in the rail to list its ${noun}.`}
-        className="flex-1"
-      />
+      {status === "loading" ? (
+        <LoadingState label="Loading clusters" className="flex-1" />
+      ) : status === "failed" ? (
+        // The contextual half of the message is this component's; the detail
+        // under it is the classification, per `errorCopy`'s rule.
+        <FailureState title="Clusters could not be listed" error={error} className="my-auto" />
+      ) : (
+        <EmptyState
+          title="No cluster in focus"
+          hint={`Pick a cluster in the rail to list its ${noun}.`}
+          className="flex-1"
+        />
+      )}
     </Screen>
   );
 }

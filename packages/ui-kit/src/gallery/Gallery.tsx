@@ -15,6 +15,7 @@ import { Combobox } from "../Combobox";
 import { Checkbox } from "../Checkbox";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Dialog } from "../Dialog";
+import { DiffLines, type DiffRow } from "../DiffLines";
 import { ConsoleDock } from "../ConsoleDock";
 import { ContextMenu } from "../ContextMenu";
 import { CopyCommand } from "../CopyCommand";
@@ -1301,6 +1302,34 @@ export function Gallery() {
           {/* A blank row in a stream is indistinguishable from a fault. */}
           <LogLine ts="14:02:15.001" source="checkout-api" level="debug" message="" />
         </div>
+      </section>
+
+      <section>
+        <h2>DiffLines</h2>
+        {/* §16's fixture: two lines changed between revision 118 and 119. Each
+            is one "replace" row carrying both sides — not a delete row and an
+            insert row rendered separately, which would double the hunk. */}
+        <div className="card overflow-hidden">
+          <DiffLines
+            rows={
+              [
+                { tag: "same", left: "replicaCount: 12", right: "replicaCount: 12" },
+                { tag: "same", left: "image:", right: "image:" },
+                {
+                  tag: "same",
+                  left: "  repository: acme/checkout-api",
+                  right: "  repository: acme/checkout-api",
+                },
+                { tag: "replace", left: '  tag: "118a7e"', right: '  tag: "4f2a1c"' },
+                { tag: "same", left: "env:", right: "env:" },
+                { tag: "replace", left: '  DB_POOL_MAX: "40"', right: '  DB_POOL_MAX: "5"' },
+                { tag: "same", left: '  DB_POOL_TIMEOUT: "30s"', right: '  DB_POOL_TIMEOUT: "30s"' },
+              ] satisfies DiffRow[]
+            }
+          />
+        </div>
+        {/* An empty list renders nothing — no empty frame left behind. */}
+        <DiffLines rows={[]} />
       </section>
 
       <section>

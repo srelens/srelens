@@ -86,3 +86,28 @@ describe("the toolbar's height", () => {
     expect(body).not.toMatch(/[^-]height:/);
   });
 });
+
+/**
+ * A live number must not move sideways when it changes.
+ *
+ * MEASURED in Chrome against `--font-sans` (system-ui → SF Pro Text on macOS) at
+ * the table's own 13px: the digit advances run from 5.954px for "1" to 8.290px
+ * for "4" — 2.3px of spread per digit. Every resource list refreshes CPU,
+ * MEMORY, RESTARTS and AGE on a poll while the reader is looking at it, and
+ * those columns are `text-align: end`, so a changed digit drags every digit
+ * before it along with it. Sampling one MEMORY cell across polls put its text's
+ * left edge at 1194.28, 1195.75, 1197.13 — 2.85px of wobble, on twenty-five rows
+ * at once. Proportional figures are the whole of it: nothing about the column
+ * widths moved.
+ *
+ * On `.tbl td` rather than only on the end-aligned ones: a pod name carries
+ * digits too, and one rule cannot drift from the other.
+ */
+describe("a table cell's figures", () => {
+  it("are tabular, so live values do not shift as they change", () => {
+    const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
+    const rule = css.slice(css.indexOf("  .tbl td {"));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain("font-variant-numeric: tabular-nums");
+  });
+});

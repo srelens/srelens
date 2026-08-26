@@ -8,6 +8,7 @@ import {
 } from "@srelens/core";
 import { StatusBar, type StatusSegment } from "@srelens/ui-kit";
 import { useConsole } from "../console";
+import { getHelmOps, subscribeHelmOps } from "../lib/helmOps";
 import { useInfo } from "../lib/probe";
 import { getSessions, subscribeSessions } from "../lib/sessions";
 import { openTab, useActiveCluster } from "../lib/tabsStore";
@@ -42,6 +43,25 @@ import { LINK_TONE, LINK_WORD, useWorkspaceView } from "../lib/workspace";
  * that one is ui-next's own rather than core's (it holds the xterm instance),
  * but read the same way: `useSyncExternalStore` over a module-level snapshot,
  * so a session outliving the Terminals screen keeps being counted here too.
+ *
+ * The helm readouts are the third of these, and the one with the least excuse
+ * for being anywhere else: a `helm upgrade --wait` runs for minutes and
+ * outlives the dialog that started it, so once that dialog closes this strip
+ * is the only surface reporting a cluster that is still being changed.
+ *
+ * All three snapshots are read raw and counted afterwards. Filtering inside a
+ * `useSyncExternalStore` getter would hand React a fresh array on every read,
+ * which it compares by identity — "Maximum update depth exceeded", and a
+ * streaming helm operation prints often enough to make that a hang rather
+ * than a waste. The stores promise a stable reference; the arithmetic below
+ * is what keeps that promise useful.
+ *
+ * Each of those counts is scoped to whatever the screen it opens can show,
+ * which is not the same answer for all three: the forwards and terminals
+ * screens list every cluster's rows, and the Helm screen lists one cluster's.
+ * A segment that counted more than its destination could show would be a
+ * readout the reader cannot act on — worst of all in `sev`, where it reads as
+ * a summons.
  */
 export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const activeId = useActiveCluster();
@@ -50,6 +70,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const { setOpen } = useConsole();
   const forwards = useSyncExternalStore(subscribeForwards, getForwards, getForwards);
   const sessions = useSyncExternalStore(subscribeSessions, getSessions, getSessions);
+  const helmOps = useSyncExternalStore(subscribeHelmOps, getHelmOps, getHelmOps);
 
   // Found rather than assumed: the active id is persisted and the context list
   // is whatever the machine has now, so an id can outlive the context it named.
@@ -69,6 +90,30 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   // rail to show what died and why; counting it here would say a shell is
   // alive when it is not, the same lesson the tunnel above already carries.
   const liveSessions = sessions.filter((s) => s.state !== "closed").length;
+  // Scoped to the cluster this strip is naming, which the two counts above are
+  // deliberately not. The rule both follow is the same one: a segment counts
+  // what the screen it opens can show. `/forwards` and `/terminals` list every
+  // cluster's rows, so their counts are whole; `/helm` asks for a context
+  // before it lists anything and then shows that one cluster's releases and
+  // that one cluster's operations, so an operation from elsewhere counted here
+  // would be a `sev` summons to a page that cannot hold it. Nothing is lost by
+  // narrowing: the row stays in the store until it is dismissed, and the
+  // segment comes back the moment the reader switches to its cluster.
+  //
+  // `ctx.name` rather than `activeId`: the store holds the context name helm
+  // was run against, and the id is the workspace's own handle for it. No
+  // active cluster means no Helm screen to open, so nothing is counted at all.
+  //
+  // Derived here, in the component body, and never inside a snapshot getter —
+  // see the note above about identity and "Maximum update depth exceeded".
+  const clusterOps = ctx ? helmOps.filter((o) => o.context === ctx.name) : [];
+  // In flight means `running` and nothing else. A `done` operation has stopped
+  // changing the cluster and a `failed` one has stopped trying; both stay
+  // listed on the helm screen with their output, and counting either here
+  // would report a finished mutation as one still under way — the distinction
+  // the dead tunnel and the closed shell above are each already drawing.
+  const runningOps = clusterOps.filter((o) => o.state === "running").length;
+  const failedOps = clusterOps.filter((o) => o.state === "failed").length;
 
   const segments: StatusSegment[] = [
     {
@@ -127,6 +172,39 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
       tone: "info",
       dot: true,
       onSelect: () => openTab("/terminals"),
+    });
+  }
+  // The `pf-dead` exception again, and for a bigger stake than a tunnel. A
+  // `helm upgrade` that failed is a cluster mutation that half-happened, and
+  // the dialog that would have said so has closed — for the cluster this strip
+  // names, this is the only surface left that reports it at all. The count
+  // beside it cannot: a failed operation leaves nothing in flight, which is
+  // exactly what a reader who started no operation sees.
+  //
+  // Neither of these labels is a status word, so neither wants one from core:
+  // `helmStatus` tones the word Helm puts in a release Secret, and these are
+  // counts of what this window is running. The tones are the strip's own,
+  // shared with the two readouts above — `sev` for news of a failure, `info`
+  // for a count of live work — rather than a helm vocabulary invented here.
+  if (failedOps > 0) {
+    end.push({
+      id: "helm-dead",
+      label: `${plural(failedOps, "helm operation")} failed`,
+      tone: "sev",
+      dot: true,
+      onSelect: () => openTab("/helm"),
+    });
+  }
+  // Absent at zero, following the shells segment rather than the forwards one:
+  // a reader with no helm operation has nothing to be sent to `/helm` for, and
+  // `0 helm operations` is the longest way yet of saying nothing.
+  if (runningOps > 0) {
+    end.push({
+      id: "helm",
+      label: plural(runningOps, "helm operation"),
+      tone: "info",
+      dot: true,
+      onSelect: () => openTab("/helm"),
     });
   }
   end.push({ id: "ask", label: "Ask", tone: "accent", onSelect: () => setOpen(true) });

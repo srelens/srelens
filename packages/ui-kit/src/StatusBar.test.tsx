@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { StatusBar, type StatusSegment } from "./StatusBar";
@@ -201,5 +203,42 @@ describe("StatusBar's quieter detail", () => {
     // caller makes it conditional, and that hands over `false` or `0`.
     setup({ segments: [{ id: "watch", label: "live", detail: "" }], end: [] });
     expect(seg("live").textContent).toBe("live");
+  });
+});
+
+describe("the strip at a narrow window", () => {
+  // MEASURED, not estimated. The worst-case set this strip can carry — a
+  // 20-character cluster name, a version, the link word, a dead forward, a
+  // plural forward count, live shells, a failed helm operation and a running
+  // one, and `Ask` — was rendered in the real app at the window's own 960px
+  // minimum (`minWidth` in apps/desktop/src-tauri/tauri.conf.json). The strip's
+  // `clientWidth` was 960 and its `scrollWidth` 1036: 76px over. `Ask` ran from
+  // 1005px to 1036px, entirely past the right edge, and `elementFromPoint` at
+  // its own midpoint did not find it — the way into the console was not merely
+  // ugly but unclickable.
+  //
+  // It could not be scrolled to either: `.statusbar` declared no overflow, so
+  // the overflow escaped to the document, where `body { overflow: hidden }`
+  // clipped it. So the strip carries its own overflow, the way `.tabstrip`
+  // already does for the same reason.
+  //
+  // Asserted on the stylesheet because that is where the policy lives and
+  // jsdom does no layout.
+  const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  // Matched to the rule's own closing brace at its own indentation, not to the
+  // first `}` in the text: the rule carries a comment that quotes CSS, and a
+  // `[^}]*` scan stops inside it and reports the whole declaration missing.
+  const body = /\n {2}\.statusbar \{[\s\S]*?\n {2}\}/.exec(css)?.[0] ?? "";
+
+  it("scrolls rather than clipping the segments it cannot fit", () => {
+    expect(body, "the .statusbar rule should exist").toBeTruthy();
+    expect(body).toContain("overflow-x: auto");
+  });
+
+  it("does not spend the strip's 22px height on a scrollbar", () => {
+    // Shorter than the tab strip's 33px, so a visible bar would leave less
+    // room for the readouts than the bar itself takes.
+    expect(body).toContain("scrollbar-width: none");
+    expect(css).toContain(".statusbar::-webkit-scrollbar");
   });
 });

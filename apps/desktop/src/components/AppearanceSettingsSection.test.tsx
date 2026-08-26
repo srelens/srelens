@@ -91,6 +91,15 @@ describe("AppearanceSettingsSection", () => {
     expect(items).toContain("Terminals");
   });
 
+  it("lists Helm, whose operations run on after the dialog that started them", () => {
+    // The release table, the diff pane and the four operations. An upgrade or
+    // a rollback outlives its dialog, so a reader weighing the toggle is
+    // weighing whether they can drive Helm at all in the new design.
+    render(<AppearanceSettingsSection />);
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toContain("Helm");
+  });
+
   it("lists the toolbox, the only screen that is about the machine and not a cluster", () => {
     // The managed kubectl, helm and krew under ~/.srelens/bin, plus what a
     // context's exec-auth needs. Nothing about it is cluster-scoped, so a
