@@ -22,6 +22,16 @@ import { type HelmOpRow, dismissHelmOp } from "../../lib/helmOps";
 /** §16's second pane, in px. */
 const WIDTH = 420;
 
+/**
+ * The default `ops`, hoisted.
+ *
+ * A `[]` written in the parameter list is a fresh array on every render, which
+ * is the one case where the `useMemo` below can never hit: the default caller
+ * — a screen with no operations in flight — would re-run `currentOp` for every
+ * keystroke anywhere above it.
+ */
+const NO_OPS: readonly HelmOpRow[] = [];
+
 /** The release the pane is looking at — one row of §16's release table. */
 export interface PaneRelease {
   name: string;
@@ -71,10 +81,22 @@ export interface ReleasePaneProps {
  * only place its reason exists, because nothing else on the screen carries it.
  * A diff of two revisions is true whenever it is asked for and can wait.
  *
- * **A `done` operation is not considered at all.** It succeeded, the release
- * moved on, and the diff of the revision it produced says more about it than
- * its own output does. It stays in the store, listed and dismissable
- * elsewhere; it just does not take this pane.
+ * **A `done` operation never takes the pane, but it does retire a failure.**
+ * Those are two different rules and collapsing them into one is a bug the
+ * reader cannot get out of. Who-wins: a success moved the release on, and the
+ * diff of the revision it produced says more than its own output does, so it
+ * yields. Retirement: an attempt that started AFTER a failure — `done` or
+ * `running` — is evidence that failure is spent, so it drops out of the pool
+ * rather than holding the pane forever. Without the second rule a 10:00
+ * upgrade that failed on an expired token keeps a red banner and its stale
+ * output over a release the 10:05 retry left `deployed`, with the diff of the
+ * revision that retry produced unreachable and Dismiss the only way out.
+ *
+ * **Retiring a failure here does not retire the ROW.** The store keeps it
+ * until the reader dismisses it and the status strip goes on counting it,
+ * deliberately: the strip answers "a failure happened and you have not
+ * acknowledged it", this pane answers "here is what is worth looking at right
+ * now". Dismissing clears both. Nothing in this function touches the store.
  *
  * Ties go to the newest start, then to the higher id — two operations started
  * inside the same millisecond are ordered by the sequence that registered
@@ -90,11 +112,25 @@ export function currentOp(
     (o) => o.context === context && o.namespace === release.namespace && o.release === release.name,
   );
   const running = mine.filter((o) => o.state === "running");
-  const pool = running.length > 0 ? running : mine.filter((o) => o.state === "failed");
-  if (pool.length === 0) return null;
-  return pool.reduce((best, o) =>
-    o.startedAt > best.startedAt || (o.startedAt === best.startedAt && o.id > best.id) ? o : best,
+  if (running.length > 0) return newest(running);
+  // Every attempt that is not itself a failure. A failure with one of these
+  // after it has been superseded and no longer holds the pane.
+  const attempts = mine.filter((o) => o.state !== "failed");
+  const unspent = mine.filter(
+    (o) => o.state === "failed" && !attempts.some((later) => startedAfter(later, o)),
   );
+  if (unspent.length === 0) return null;
+  return newest(unspent);
+}
+
+/** Did `a` start after `b`? The tie-break is the store's id, which only rises. */
+function startedAfter(a: HelmOpRow, b: HelmOpRow): boolean {
+  return a.startedAt > b.startedAt || (a.startedAt === b.startedAt && a.id > b.id);
+}
+
+/** The latest-started row of a non-empty list. */
+function newest(rows: readonly HelmOpRow[]): HelmOpRow {
+  return rows.reduce((best, o) => (startedAfter(o, best) ? o : best));
 }
 
 /** Where the diff stands. */
@@ -139,7 +175,7 @@ type DiffLoad =
 export function ReleasePane({
   context,
   release,
-  ops = [],
+  ops = NO_OPS,
   onDismiss = dismissHelmOp,
   onRollback,
   onValuesEditor,
@@ -182,7 +218,13 @@ export function ReleasePane({
         return;
       }
       if (!before.release || !after.release) {
-        setDiff({ status: "error", error: `helm returned no revision ${previous} of ${name}` });
+        // Name the side that actually came back empty. Blaming the left
+        // revision for the right one's absence sends the reader digging
+        // through history for a release that was uninstalled between the list
+        // refresh and this fetch. Both sides missing names the earlier one,
+        // which is the first thing to go looking for either way.
+        const missing = before.release ? revision : previous;
+        setDiff({ status: "error", error: `helm returned no revision ${missing} of ${name}` });
         return;
       }
       setDiff({

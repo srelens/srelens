@@ -113,6 +113,32 @@ describe("currentOp", () => {
     expect(currentOp([running, failed], CONTEXT, CHECKOUT)?.id).toBe(1);
   });
 
+  it("retires a failure that a later attempt has superseded", () => {
+    // 10:00 upgrade fails on an expired token; the reader refreshes their
+    // kubeconfig and the 10:05 retry succeeds. The failure is spent, and the
+    // pane must go back to diffing the revision the retry produced.
+    const failed = op({ id: 1, state: "failed", error: "expired token", startedAt: 1_000 });
+    const done = op({ id: 2, state: "done", startedAt: 9_000 });
+    expect(currentOp([failed, done], CONTEXT, CHECKOUT)).toBeNull();
+    expect(currentOp([done, failed], CONTEXT, CHECKOUT)).toBeNull();
+  });
+
+  it("keeps a failure that nothing has been attempted since", () => {
+    // The mirror of the case above, and the reason it is not simply "drop
+    // every failure that has a `done` beside it": the 10:00 success is not
+    // evidence about the 10:05 failure.
+    const done = op({ id: 1, state: "done", startedAt: 1_000 });
+    const failed = op({ id: 2, state: "failed", error: "expired token", startedAt: 9_000 });
+    expect(currentOp([done, failed], CONTEXT, CHECKOUT)?.id).toBe(2);
+    expect(currentOp([failed, done], CONTEXT, CHECKOUT)?.id).toBe(2);
+  });
+
+  it("retires a failure a running retry has superseded, without losing the retry", () => {
+    const failed = op({ id: 1, state: "failed", error: "expired token", startedAt: 1_000 });
+    const retry = op({ id: 2, state: "running", startedAt: 9_000 });
+    expect(currentOp([failed, retry], CONTEXT, CHECKOUT)?.id).toBe(2);
+  });
+
   it("takes the newest of several failures", () => {
     const older = op({ id: 1, state: "failed", error: "older", startedAt: 1_000 });
     const newer = op({ id: 2, state: "failed", error: "newer", startedAt: 2_000 });
@@ -191,6 +217,23 @@ describe("ReleasePane — an operation outranks the diff", () => {
     expect(screen.queryByText('tag: "4f2a1c"')).toBeNull();
   });
 
+  it("goes back to the diff once a later attempt has superseded the failure", async () => {
+    const { invoke } = mount({
+      ops: [
+        op({ id: 1, state: "failed", error: "expired token", startedAt: 1_000, output: ["gone stale"] }),
+        op({ id: 2, state: "done", startedAt: 9_000, output: ["Release has been upgraded."] }),
+      ],
+    });
+
+    // The effect must actually run: a retired failure that still set
+    // `held` would leave the pane stuck on "Rendering checkout" forever.
+    await waitFor(() => expect(screen.getByText('tag: "4f2a1c"')).toBeTruthy());
+    expect(screen.queryByText("expired token")).toBeNull();
+    expect(screen.queryByText("gone stale")).toBeNull();
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(head()).toContain("rendered diff");
+  });
+
   it("lets a failed operation be dismissed, and only then", async () => {
     const onDismiss = vi.fn();
     mount({ ops: [op({ id: 7, state: "failed", error: "no such release" })], onDismiss });
@@ -237,6 +280,11 @@ describe("ReleasePane — the diff", () => {
     expect(screen.queryByText(/render the same manifest/i)).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
     expect(document.querySelector('[data-slot="line"]')).toBeNull();
+    // The head must not collapse the two claims either: `fresh · 0 → 1 ·
+    // rendered diff` names a diff that does not exist and a revision 0 that
+    // never did, directly above a body saying there is nothing to compare.
+    expect(head()).not.toContain("rendered diff");
+    expect(head()).not.toContain("0 → 1");
   });
 
   it("says two identical revisions match, which is a different claim", async () => {
@@ -304,6 +352,45 @@ describe("ReleasePane — the diff", () => {
     await waitFor(() =>
       expect(screen.getByText(/The connection to the API server could not be made/)).toBeTruthy(),
     );
+  });
+
+  /** A `k8s.getHelmRelease` that answers with nothing at all for one revision. */
+  function hollow(at: number) {
+    return vi.fn(async (_id: string, input?: unknown) => {
+      const req = input as { name: string; revision?: number };
+      if (req.revision === at) return undefined;
+      return {
+        name: req.name,
+        namespace: req.name,
+        revision: req.revision,
+        status: "deployed",
+        chart: "acme-service",
+        chartVersion: "2.4.1",
+        appVersion: "4f2a1c",
+        updated: "2026-08-24",
+        valuesYaml: "",
+        manifest: MANIFESTS[req.name]?.[req.revision ?? -1] ?? "",
+        notes: "",
+        history: [],
+      };
+    }) as unknown as Invoker;
+  }
+
+  it("names the earlier revision when THAT is the side helm did not return", async () => {
+    mount({ invoke: hollow(118) });
+    await waitFor(() => expect(screen.getByText(/no revision 118 of checkout/)).toBeTruthy());
+    expect(screen.getByText("Could not diff checkout")).toBeTruthy();
+    // Not left on the spinner: an unguarded payload throws inside the async
+    // body and nothing ever resets the state.
+    expect(screen.queryByText(/Rendering checkout/)).toBeNull();
+  });
+
+  it("names the current revision when that is the side that vanished", async () => {
+    // The release was uninstalled between the list refresh and this fetch, so
+    // 119 is the one that is gone. Blaming 118 sends the reader to history.
+    mount({ invoke: hollow(119) });
+    await waitFor(() => expect(screen.getByText(/no revision 119 of checkout/)).toBeTruthy());
+    expect(screen.queryByText(/no revision 118 of checkout/)).toBeNull();
   });
 
   it("has nothing to show until a release is selected", () => {
