@@ -47,6 +47,7 @@ proto.scrollIntoView ??= () => {};
 
 import type { ClusterContext, HelmReleaseSummary, HelmRevision } from "@srelens/core";
 import { Helm } from "./Helm";
+import { Status } from "../shell/Status";
 import { ConsoleProvider } from "../console";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { __resetHelmOpsForTests, startHelmOperation } from "../lib/helmOps";
@@ -1239,5 +1240,203 @@ describe("Helm — the namespace selector", () => {
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
     await waitFor(() => expect(getView().namespaces.prod).toBeUndefined());
     await waitFor(() => expect(drawn()).toHaveLength(5));
+  });
+});
+
+/**
+ * **A failure the reader cannot select is a failure they cannot read.**
+ *
+ * `Install chart` with a typo in the chart name: helm refuses before it
+ * creates anything, so `listHelmReleases` never returns that release, no row
+ * exists to click, and the pane — which is gated on the selection and then on
+ * an exact context/namespace/release match — has nothing to show. The strip
+ * meanwhile counts the failure for the life of the window and offers to open
+ * `/helm` for it, which is a summons to a screen that cannot hold it.
+ *
+ * The register below is scoped exactly the way the strip's segment is: every
+ * `failed` row on THIS cluster, whatever the table is listing and whatever the
+ * reader has selected. Anything narrower reintroduces the gap through a
+ * different door — a namespace filter, a text filter, or a selection on some
+ * other release.
+ */
+describe("Helm — failures the table cannot show", () => {
+  /** `helm install` refusing a mistyped chart, which never reaches the cluster. */
+  const TYPO = 'Error: chart "bitnmai/redis" not found';
+  /**
+   * The same reason as the store holds it: core stripped helm's `Error:`
+   * wrapper on the way in and classified it once. Asserting on THIS is what
+   * pins that the screen prints the row verbatim rather than describing an
+   * already-described sentence a second time.
+   */
+  const REASON = 'chart "bitnmai/redis" not found';
+
+  /** Start an operation through the store and fail it with `reason`. */
+  async function failOperation(
+    over: Partial<Parameters<typeof startHelmOperation>[0]> = {},
+    reason: unknown = TYPO,
+  ) {
+    const armed = armOperation();
+    await startHelmOperation({
+      kind: "install",
+      release: "cache",
+      namespace: "platform",
+      context: CTX.name,
+      args: ["install", "cache", "bitnmai/redis"],
+      ...over,
+    });
+    await armed.fire(reason);
+  }
+
+  /** The screen with the shell's strip beside it, reading the same store. */
+  function openWithStrip() {
+    store.openTab(ROUTE);
+    return render(
+      <ConsoleProvider>
+        <Helm route={ROUTE} />
+        <Status contexts={[CTX]} />
+      </ConsoleProvider>,
+    );
+  }
+
+  /** Every failure the register is offering to dismiss. */
+  const dismissals = () =>
+    screen
+      .queryAllByRole("button", { name: /^Dismiss the failed / })
+      .map((b) => b.getAttribute("aria-label") ?? "");
+
+  it("shows the reason for a failure whose release was never created", async () => {
+    open();
+    await ready();
+    await failOperation();
+
+    // There is no row to click: helm refused before any release existed.
+    expect(rowFor("cache")).toBeUndefined();
+    expect(await screen.findByText("install of cache in platform failed")).toBeTruthy();
+    // The reason itself, verbatim — `helmOps` already described it.
+    expect(screen.getByText(REASON)).toBeTruthy();
+    // And the pane is untouched: nothing is selected, so it still says so.
+    expect(railHead()).toBe("Release");
+    expect(screen.getByText(/No release selected/i)).toBeTruthy();
+  });
+
+  /**
+   * The reason is one sentence; the lines helm printed before it gave up are
+   * usually the only description of what it was doing, and for a release the
+   * table cannot list there is no other surface carrying them. Folded away
+   * behind a word — the kit's own {@link RawError}, which is where every other
+   * screen puts machine output — so five failures do not bury the table.
+   */
+  it("keeps helm's own output reachable behind the reason", async () => {
+    open();
+    await ready();
+    const armed = armOperation();
+    await startHelmOperation({
+      kind: "upgrade",
+      release: "cache",
+      namespace: "platform",
+      context: CTX.name,
+      args: ["upgrade", "cache", "bitnami/redis"],
+    });
+    const onData = core.startHelmOp.mock.calls[0][2] as (line: string) => void;
+    await act(async () => {
+      onData('Release "cache" does not exist. Run helm install.');
+      onData("Error: UPGRADE FAILED: release: not found");
+    });
+    await armed.fire("UPGRADE FAILED: release: not found");
+
+    expect(await screen.findByText("2 lines from helm")).toBeTruthy();
+    const raw = document.querySelector('[data-slot="helm-failures"] [data-slot="raw"]');
+    expect(raw?.textContent).toContain('Release "cache" does not exist. Run helm install.');
+    expect(raw?.textContent).toContain("Error: UPGRADE FAILED: release: not found");
+  });
+
+  it("dismisses it, and the strip's summons goes with it", async () => {
+    openWithStrip();
+    await ready();
+    await failOperation();
+
+    expect(await screen.findByRole("button", { name: "1 helm operation failed" })).toBeTruthy();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss the failed install of cache" }),
+    );
+
+    expect(screen.queryByText(REASON)).toBeNull();
+    expect(dismissals()).toEqual([]);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /helm operation.* failed/ })).toBeNull(),
+    );
+  });
+
+  it("surfaces every failure the strip counts, and no other cluster's", async () => {
+    openWithStrip();
+    await ready();
+    // One whose release the table HAS, one it never will, and one belonging to
+    // a cluster this strip is not naming.
+    await failOperation(
+      { kind: "upgrade", release: "checkout", namespace: "checkout" },
+      "timed out waiting for the condition",
+    );
+    await failOperation();
+    await failOperation({ context: "edge-apac", release: "sensors", namespace: "edge" });
+
+    expect(await screen.findByRole("button", { name: "2 helm operations failed" })).toBeTruthy();
+    await waitFor(() => expect(dismissals()).toHaveLength(2));
+    expect(dismissals()).toEqual([
+      "Dismiss the failed install of cache",
+      "Dismiss the failed upgrade of checkout",
+    ]);
+    expect(screen.queryByText(/sensors/)).toBeNull();
+  });
+
+  /**
+   * The pane retires a failure a later attempt superseded; the strip does not,
+   * and neither does this. The two answer different questions — "what is worth
+   * looking at now" against "what has happened that you have not acknowledged"
+   * — and a register that retired would leave the strip counting a failure the
+   * screen had quietly dropped, which is this defect again.
+   */
+  it("keeps a failure a later attempt has retired from the pane", async () => {
+    openWithStrip();
+    await ready();
+    await failOperation(
+      { kind: "upgrade", release: "checkout", namespace: "checkout" },
+      "expired token",
+    );
+    const armed = armOperation();
+    await startHelmOperation({
+      kind: "upgrade",
+      release: "checkout",
+      namespace: "checkout",
+      context: CTX.name,
+      args: ["upgrade", "checkout"],
+    });
+    await armed.fire(null);
+
+    await select("checkout", "checkout");
+    // The pane has moved on to the diff, exactly as before.
+    await waitFor(() => expect(railHead()).toContain("rendered diff"));
+    // The register has not, because the strip has not.
+    expect(dismissals()).toEqual(["Dismiss the failed upgrade of checkout"]);
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeTruthy();
+  });
+
+  it("offers nothing to dismiss for an operation still running", async () => {
+    openWithStrip();
+    await ready();
+    armOperation();
+    await startHelmOperation({
+      kind: "upgrade",
+      release: "cache",
+      namespace: "platform",
+      context: CTX.name,
+      args: ["upgrade", "cache"],
+    });
+
+    // The strip says one operation is in flight, and the screen shows no way
+    // to put it away: `dismissHelmOp` declines a `running` row by design, and
+    // a control that looked like a cancel would be worse than none.
+    expect(await screen.findByRole("button", { name: "1 helm operation" })).toBeTruthy();
+    expect(dismissals()).toEqual([]);
+    expect(document.querySelector('[data-slot="helm-failures"]')).toBeNull();
   });
 });

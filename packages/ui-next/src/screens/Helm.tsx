@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   ageFromTimestamp,
   getHelmRelease,
@@ -13,9 +21,11 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
+  Alert,
   Button,
   FilterBar,
   LoadingState,
+  RawError,
   Screen,
   StatusPill,
   Table,
@@ -25,7 +35,13 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { FailureState, friendly } from "../lib/errorCopy";
-import { getHelmOps, subscribeHelmOps, type HelmOpKind } from "../lib/helmOps";
+import {
+  dismissHelmOp,
+  getHelmOps,
+  subscribeHelmOps,
+  type HelmOpKind,
+  type HelmOpRow,
+} from "../lib/helmOps";
 import { Icons } from "../lib/icons";
 import { describe } from "../lib/routes";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
@@ -94,6 +110,105 @@ interface Pending {
    * field. See {@link HelmReleases}.
    */
   history?: readonly HelmRevision[];
+}
+
+/**
+ * **Every operation this cluster has failed, whatever the table is listing.**
+ *
+ * The status strip counts `failed` rows for the active cluster and offers to
+ * open `/helm` for them, on the rule that a segment counts what the screen it
+ * opens can show. Until this existed the screen could not: the pane is the
+ * only view of an operation, and it is gated first on a selection and then on
+ * an exact context/namespace/release match. An `Install chart` with a typo in
+ * the chart name is refused by helm before any release exists, so
+ * `listHelmReleases` never returns one, no row can be clicked, and the reason
+ * — the only place it exists — had nowhere to be read. The strip went on
+ * saying `1 helm operation failed` for the life of the window and its segment
+ * led to a screen that could not hold it.
+ *
+ * **Scoped exactly the way that segment is: `failed`, on this context, all of
+ * them.** Not the selection, not the namespace picker, not the text filter,
+ * and — deliberately — not `currentOp`'s retirement rule
+ * (`helm/ReleasePane`). Every one of
+ * those would reopen the same gap through a different door, and the last would
+ * reopen it invisibly: the pane retires a failure a later attempt superseded
+ * because it answers "what is worth looking at now", while the strip and this
+ * answer "what has happened that you have not acknowledged". A row leaves both
+ * at the same moment and only one way — the reader dismisses it.
+ *
+ * **Nothing here removes a row on its own initiative, and `running` is not
+ * offered at all.** A failure that vanished by itself is how a reader comes to
+ * assume a half-finished mutation was fine (#349's port-forward), and
+ * `dismissHelmOp` declines a `running` row by design because there is no
+ * cancel to offer — see `lib/helmOps`'s header for what stopping the watch
+ * would actually do to helm.
+ *
+ * The tone is `sev`, the same one the strip gives the news and the same one
+ * the pane's own banner uses. It is not a status word and wants none from
+ * core: `helmStatus` tones the word Helm writes in a release Secret, and this
+ * is srelens's own record of what this window ran.
+ */
+function FailedOps({
+  ops,
+  onDismiss,
+}: {
+  ops: readonly HelmOpRow[];
+  onDismiss: (id: number) => void;
+}) {
+  const headId = useId();
+  if (ops.length === 0) return null;
+  return (
+    <section
+      aria-labelledby={headId}
+      data-slot="helm-failures"
+      // `shrink-0` so a tall table cannot squeeze this to nothing, and the cap
+      // below is what keeps that honest: five failures scroll inside the box
+      // rather than pushing the releases off the screen. `min-w-0` and
+      // `break-words` for the same reason every box on this screen has them —
+      // a helm error is an unbounded string, and a flex child's
+      // `min-width: auto` floor turns one into a sideways scroll of the whole
+      // window.
+      className="flex min-w-0 shrink-0 flex-col gap-1.5 border-b border-rule bg-sunk px-3 py-2"
+    >
+      <div id={headId} className="min-w-0 truncate text-[0.75rem] font-medium text-muted">
+        {/* The strip's own words, so the reader arriving from its segment can
+            see that this is what they were sent for. */}
+        {`${plural(ops.length, "helm operation")} failed`}
+      </div>
+      <div className="scroll flex max-h-40 min-w-0 flex-col gap-1.5">
+        {ops.map((o) => (
+          <Alert
+            key={o.id}
+            tone="sev"
+            className="min-w-0"
+            // Named per operation, the way the row actions are: four alerts
+            // all offering "Dismiss" name nothing, and this is the control
+            // that makes the strip's count go down.
+            title={`${o.kind} of ${o.release} in ${o.namespace} failed`}
+            dismissLabel={`Dismiss the failed ${o.kind} of ${o.release}`}
+            onDismiss={() => onDismiss(o.id)}
+          >
+            <span className="block min-w-0 break-words">
+              {/* `o.error` verbatim. `helmOps` described it already, and a
+                  described sentence run through `describeError` again is
+                  classified on its own wording. */}
+              {o.error ?? "helm gave no reason."}
+            </span>
+            {/* The lines helm printed before it gave up — usually the only
+                description of what it was doing, and for a release the table
+                cannot list there is no other surface carrying them. Folded
+                away behind a word, where every other screen puts machine
+                output; `RawError` renders nothing when there is none. */}
+            <RawError
+              text={o.output.join("\n")}
+              label={`${plural(o.output.length, "line")} from helm`}
+              className="mt-1"
+            />
+          </Alert>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 /** Where the release listing stands. */
@@ -292,6 +407,28 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
     for (const o of settled) seen.ids.add(o.id);
     void reload();
   }, [ops, name, reload]);
+
+  /**
+   * The failures this cluster is carrying, newest first — see {@link FailedOps}.
+   *
+   * Derived here in the component body, and never inside the snapshot getter:
+   * a `.filter()` in there hands `useSyncExternalStore` a fresh array on every
+   * read, which it compares by identity, and this screen re-renders for every
+   * line a running upgrade prints.
+   *
+   * Newest first because a failure that has just happened is the news, and the
+   * store appends — its own order buries a fresh one under every older one
+   * inside a box that scrolls. Ties go to the higher id: two operations
+   * started inside the same millisecond are ordered by the sequence that
+   * registered them rather than by whatever the array happens to hold.
+   */
+  const failedOps = useMemo(
+    () =>
+      ops
+        .filter((o) => o.context === name && o.state === "failed")
+        .sort((a, b) => b.startedAt - a.startedAt || b.id - a.id),
+    [ops, name],
+  );
 
   const releases = list.status === "ready" ? list.releases : [];
   const at = list.status === "ready" ? list.at : 0;
@@ -729,6 +866,12 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
         namespaces={namespaces}
         onReset={() => setNamespaces(context.stableId, [])}
       />
+
+      {/* Above both panes, because it is about neither: a failure listed here
+          may have no release in the table and no revision to diff. The store's
+          own `dismissHelmOp` is handed over directly — it is module-level and
+          stable, and it is the only thing that takes a row off the strip. */}
+      <FailedOps ops={failedOps} onDismiss={dismissHelmOp} />
 
       <div className="flex min-h-0 flex-1">
         {/* `min-w-0`, and it is load-bearing. A flex item's implicit
