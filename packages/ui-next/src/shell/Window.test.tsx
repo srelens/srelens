@@ -100,7 +100,7 @@ import { resetProbes } from "../lib/probe";
 import { resetView } from "../lib/workspace";
 import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
-import { contextFor, resetContexts } from "../lib/clusters";
+import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
 
 const ctx = (stableId: string, name = stableId) => ({ name, stableId, cluster: name, server: "", isCurrent: false });
 
@@ -272,6 +272,33 @@ describe("Window cluster list error", () => {
     listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
     await booted();
     expect(screen.getByRole("img", { name: "kubeconfig unreadable" })).toBeDefined();
+  });
+
+  it("hands the reason to the store, so the screens can say it too and not blame the reader", async () => {
+    listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
+    await booted();
+    expect(getContextsStatus()).toBe("failed");
+    expect(getContextsError()).toBe("kubeconfig unreadable");
+  });
+
+  it("treats a listing that rejects as a failed listing, not as a cluster-less kubeconfig", async () => {
+    // The `outcome.error` path was the only one being reported. A rejection
+    // left the store reading "listed, and there are none" — which is the
+    // reader's-fault sentence again, for a failure they cannot act on.
+    listContexts.mockRejectedValue(new Error("kubeconfig unreadable"));
+    await booted();
+    expect(getContextsStatus()).toBe("failed");
+    expect(getContextsError()).toContain("kubeconfig unreadable");
+    expect(screen.getByRole("img", { name: /kubeconfig unreadable/ })).toBeDefined();
+  });
+
+  it("keeps a listing that worked out of the failed state when the workspaces are what fail", async () => {
+    loadTabsState.mockImplementation(() => {
+      throw new Error("storage refuses reads");
+    });
+    await booted();
+    expect(getContextsStatus()).toBe("loaded");
+    expect(getContextsError()).toBe("");
   });
 });
 

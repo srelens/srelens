@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  cleanErrorMessage,
   isApplePlatform,
   isTauri,
   listContexts,
@@ -8,7 +9,7 @@ import {
   type ClusterContext,
 } from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
-import { setContexts, setKubeconfigFiles, useContexts } from "../lib/clusters";
+import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
 import { loadMarks } from "../lib/marks";
@@ -95,7 +96,14 @@ export function Window({
   // Kept rather than dropped once read: a failed list still preserves the
   // saved cluster ids (see below), and the rail has to say why it cannot draw
   // them rather than leaving the user to guess.
-  const [contextsError, setContextsError] = useState<string | undefined>(undefined);
+  //
+  // In the store rather than in local state, and for the same reason the list
+  // itself moved there: the rail is not the only surface that has to explain
+  // this. Every screen's no-cluster guard was blaming the reader for it —
+  // "pick a cluster in the rail", for clusters the rail could not draw either
+  // — and a screen receives only `{ route }`, so a copy held here can never
+  // reach one. See `NoClusterScreen`.
+  const contextsError = useContextsError();
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -161,13 +169,23 @@ export function Window({
       const files = isTauri() ? loadKubeconfigFiles() : [];
       setKubeconfigFiles(files);
       let found: ClusterContext[] = [];
+      // Held next to `found` and installed with it: the list and the reason it
+      // is short are one fact, and the store takes them together so no render
+      // can catch one without the other.
+      let failure = "";
+      // Which half of this `try` a throw came out of. The two are not
+      // interchangeable: `listContexts` rejecting means there are no contexts
+      // and this is why, while anything thrown after it means the workspaces
+      // could not be restored and the contexts are fine.
+      let listed = false;
       try {
         const outcome = await listContexts(files);
         if (cancelled) return;
         found = outcome.contexts ?? [];
-        if (outcome.error) setContextsError(outcome.error);
+        failure = outcome.error ?? "";
+        listed = true;
         const saved = loadTabsState();
-        if (saved && outcome.error) {
+        if (saved && failure !== "") {
           // The list failed, not the clusters: reconciling against nothing would
           // strip every workspace's cluster ids and the next change would persist
           // that. Trust the disk until the backend answers — unless there is
@@ -183,10 +201,11 @@ export function Window({
         }
       } catch (error) {
         if (cancelled) return;
-        console.error("could not restore the workspaces", error);
+        if (!listed) failure = cleanErrorMessage(error);
+        console.error(listed ? "could not restore the workspaces" : "could not list the contexts", error);
         setState(defaultState(found));
       }
-      setContexts(found);
+      setContexts(found, failure);
       setBooted(true);
     })();
     return () => {
@@ -333,7 +352,9 @@ export function Window({
         />
       )}
       <div className="flex min-h-0 flex-1">
-        {active && <Rail contexts={contexts} error={contextsError} onConnect={() => openTab("/connect")} />}
+        {active && (
+          <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
+        )}
         {active && <Nav contexts={contexts} />}
         {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
             and the screen, and a flex item's implicit `min-width: auto`

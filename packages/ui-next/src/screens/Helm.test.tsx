@@ -928,7 +928,11 @@ describe("Helm — the three states §16 leaves out", () => {
   });
 
   it("has nothing to list without a cluster in focus", () => {
+    // Listed, and there genuinely are none — which is the one state where
+    // "pick a cluster in the rail" is true. `resetContexts` alone means "not
+    // listed yet", and that renders the spinner rather than the sentence.
     resetContexts();
+    setContexts([]);
     store.setState(defaultState([]));
     open();
     expect(screen.getByText("No cluster in focus")).toBeTruthy();
