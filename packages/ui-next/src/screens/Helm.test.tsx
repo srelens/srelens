@@ -21,6 +21,18 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
+/**
+ * The namespace options, doubled the way `Workloads.test.tsx` and
+ * `Resources.test.tsx` double them: this screen must ask the SHARED hook for
+ * them rather than growing a Helm-local list, and a stub is what makes the
+ * loading, forbidden and failed branches reachable from a test at all.
+ */
+const { useNamespaceOptions } = vi.hoisted(() => ({ useNamespaceOptions: vi.fn() }));
+vi.mock("@srelens/core/react", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core/react")>()),
+  useNamespaceOptions: (...a: unknown[]) => useNamespaceOptions(...a),
+}));
+
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
     observe() {}
@@ -28,15 +40,19 @@ if (!("ResizeObserver" in globalThis)) {
     disconnect() {}
   };
 }
+// The picker's popover keeps its highlighted row in view, and jsdom has no
+// such method — the same stand-in `Workloads.test.tsx` installs.
+const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+proto.scrollIntoView ??= () => {};
 
 import type { ClusterContext, HelmReleaseSummary, HelmRevision } from "@srelens/core";
 import { Helm } from "./Helm";
 import { ConsoleProvider } from "../console";
-import { resetContexts, setContexts } from "../lib/clusters";
+import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { __resetHelmOpsForTests, startHelmOperation } from "../lib/helmOps";
 import { defaultState } from "../lib/tabs";
 import * as store from "../lib/tabsStore";
-import { resetView } from "../lib/workspace";
+import { getView, resetView, setNamespaces } from "../lib/workspace";
 
 const ROUTE = "/helm";
 
@@ -132,6 +148,18 @@ const STAGING_CHECKOUT: HelmReleaseSummary = {
 
 const RELEASES = [INGRESS, CHECKOUT, PAYMENTS, REDIS, STAGING_CHECKOUT];
 
+/** The namespaces the cluster has, as the shared hook answers with them. */
+const NAMESPACES = ["checkout", "payments", "platform", "staging"];
+
+/**
+ * The kubeconfigs this window was started with.
+ *
+ * Two of them, and neither is `~/.kube/config`: a machine whose contexts came
+ * from srelens-imported files or from `KUBECONFIG` is exactly the machine on
+ * which an operation started without these fails to build a client at all.
+ */
+const FILES = ["/home/u/.config/srelens/imported.yaml", "/home/u/work/kubeconfig.yaml"];
+
 /**
  * Two rendered manifests per release, keyed the way helm scopes a release:
  * `<namespace>/<name>`. Production's `checkout` and staging's have different
@@ -186,7 +214,17 @@ const HISTORIES: Record<string, HelmRevision[]> = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  core.listHelmReleases.mockResolvedValue({ releases: RELEASES });
+  // **The backend honours the namespace it is given**, the way the real one
+  // does. A screen that fetched every namespace and threw most of it away
+  // would still draw the right rows against a stub that ignored the argument,
+  // which is precisely the escape this implementation has to be denied: on a
+  // cluster with 383 releases, listing all of them to draw six is the common
+  // case rather than the edge one.
+  core.listHelmReleases.mockImplementation(
+    async (_ctx: string, namespace?: string | null) => ({
+      releases: namespace ? RELEASES.filter((r) => r.namespace === namespace) : RELEASES,
+    }),
+  );
   core.getHelmRelease.mockImplementation(
     async (_ctx: string, ns: string, name: string, _invoke?: unknown, revision?: number) => {
       const key = `${ns}/${name}`;
@@ -202,9 +240,12 @@ beforeEach(() => {
     },
   );
   core.startHelmOp.mockResolvedValue({ close: vi.fn() });
+  useNamespaceOptions.mockReturnValue({ namespaces: NAMESPACES, scope: "", error: "" });
   __resetHelmOpsForTests();
   resetContexts();
   setContexts([CTX]);
+  // After `resetContexts`, which clears them.
+  setKubeconfigFiles(FILES);
   store.setState(defaultState([CTX]));
   resetView();
 });
@@ -239,6 +280,29 @@ const select = (name: string, namespace?: string) =>
 const cells = (row: HTMLElement) =>
   Array.from(row.querySelectorAll("td")).map((td) => td.textContent?.trim() ?? "");
 const cell = (row: HTMLElement, column: string) => cells(row)[headers().indexOf(column)];
+
+/**
+ * Every release on screen as `<namespace>/<name>` — helm's own identity for a
+ * release, and the only way to tell production's `checkout` from staging's.
+ */
+const drawn = () =>
+  Array.from(document.querySelectorAll("tbody tr.tbl-row")).map((tr) => {
+    const td = Array.from(tr.querySelectorAll("td")).map((c) => c.textContent?.trim() ?? "");
+    return `${td[1]}/${td[0]}`;
+  });
+
+/** The namespace picker's trigger. */
+const picker = () => screen.getByRole("combobox", { name: "Namespaces" });
+
+/** Narrow to one namespace the way the reader does: the row's own `only`. */
+async function pickOnly(namespace: string) {
+  await userEvent.click(picker());
+  await userEvent.click(await screen.findByRole("button", { name: `Only ${namespace}` }));
+}
+
+/** The namespaces the last listing was scoped to — `null` for every namespace. */
+const listedNamespaces = () =>
+  core.listHelmReleases.mock.calls.map((call) => (call[1] as string | null) ?? null);
 
 /**
  * A field whose `Field` carries a hint.
@@ -439,6 +503,37 @@ describe("Helm — the release table", () => {
     expect(chart?.className).toContain("max-w-[200px]");
   });
 
+  /**
+   * **The eighth `min-width: auto`-family defect, seen on a real cluster.**
+   *
+   * A screenshot of `K8SM01-ADMIN` shows every row ending in a clipped `U`
+   * where the 420px pane begins: `Uninstall` — the one destructive control on
+   * this screen — reduced to a sliver of a letter, and mistakable for part of
+   * `Roll back`'s group. Release names there are `cnips-abena-…` long and the
+   * namespaces `m01-cnips-01-dataservices` long, so the two text columns take
+   * the width and the action group is what falls off the end.
+   *
+   * The two text columns absorb the loss instead: they are the ones a reader
+   * can recover by widening the column or reading the pane, and a truncated
+   * name is not a control they cannot press. The group itself refuses to
+   * shrink at all, so nothing inside the cell can be clipped either.
+   */
+  it("caps the wide text columns rather than letting the action group be clipped", async () => {
+    const { container } = open();
+    await ready();
+    const release = container.querySelector('[data-slot="release-name"]');
+    expect(release?.className).toContain("truncate");
+    expect(release?.className).toMatch(/max-w-\[\d+px\]/);
+    const namespace = container.querySelector('[data-slot="release-namespace"]');
+    expect(namespace?.className).toContain("truncate");
+    expect(namespace?.className).toMatch(/max-w-\[\d+px\]/);
+    // `flex` items shrink by default, and these three carry the only
+    // irreversible action on the screen.
+    const actions = container.querySelector('[data-slot="release-actions"]');
+    expect(actions?.className).toContain("shrink-0");
+    expect(actions?.className).toContain("whitespace-nowrap");
+  });
+
   it("offers §16's three operations on every row, with the release named", async () => {
     open();
     await ready();
@@ -596,6 +691,48 @@ describe("Helm — the operations", () => {
     // core's classification, not the raw Rust string.
     expect(within(dialog).getByText(/rejected your credentials/i)).toBeTruthy();
     expect(document.querySelector(".copy-command-text")?.textContent).toContain("--reuse-values");
+  });
+
+  /**
+   * **A verified escape: deleting `extraKubeconfigs` from this screen left all
+   * 31 tests passing.**
+   *
+   * The store's own suite proves the store forwards them to core; nothing
+   * proved the SCREEN supplied them. On a machine whose contexts come from
+   * srelens-imported files or from `KUBECONFIG` rather than `~/.kube/config`,
+   * every operation started here would fail to build a client — and every
+   * assertion in this file would still be green.
+   *
+   * The argv is pinned in the same breath, and against the command the dialog
+   * SHOWED the reader rather than against a copy of the dialog's own format:
+   * a copy button that prints one command while srelens runs another is the
+   * defect worth catching, and this cannot pass unless the two agree.
+   */
+  it("runs the argv it showed the reader, with this window's kubeconfigs", async () => {
+    open();
+    await ready();
+    await userEvent.click(
+      within(rowFor("checkout", "checkout")).getByRole("button", { name: "Uninstall checkout" }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Type checkout to confirm"), "checkout");
+    const shown = document.querySelector(".copy-command-text")?.textContent ?? "";
+    expect(shown).toContain("uninstall checkout");
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Uninstall" }));
+    await waitFor(() => expect(core.startHelmOp).toHaveBeenCalled());
+
+    const [context, args, , , extraKubeconfigs] = core.startHelmOp.mock.calls[0] as [
+      string,
+      string[],
+      unknown,
+      unknown,
+      string[],
+    ];
+    expect(context).toBe("prod-eu");
+    expect(`helm ${args.join(" ")}`).toBe(shown);
+    expect(extraKubeconfigs).toEqual(FILES);
   });
 
   it("opens the values editor as an upgrade of the selected release", async () => {
@@ -827,5 +964,276 @@ describe("Helm — when to list again", () => {
     // This one's does.
     await settleElsewhere(CTX.name);
     await waitFor(() => expect(core.listHelmReleases).toHaveBeenCalledTimes(1));
+  });
+
+  /**
+   * The re-list guard is keyed on the CLUSTER, and a namespace change must not
+   * re-arm it: an operation that settles after the reader has narrowed the
+   * view still has to refresh the list — once, scoped to what they are now
+   * looking at.
+   */
+  it("keeps refreshing on a settled operation after the namespace moved", async () => {
+    open();
+    await ready();
+    await pickOnly("checkout");
+    await waitFor(() => expect(drawn()).toEqual(["checkout/checkout", "checkout/redis-session"]));
+    core.listHelmReleases.mockClear();
+
+    await settleElsewhere(CTX.name);
+    await waitFor(() => expect(core.listHelmReleases).toHaveBeenCalledTimes(1));
+    // Scoped to the namespace on screen, not back to the whole cluster.
+    expect(listedNamespaces()).toEqual(["checkout"]);
+  });
+});
+
+/**
+ * **The defect the user reported: "namespace selector is missing in helm
+ * releases".**
+ *
+ * This screen listed every namespace with a Namespace column and no way to
+ * filter — a regression against classic, and the one ported screen without the
+ * control. On the reporter's own cluster that is 383 releases across dozens of
+ * namespaces in one undifferentiated list.
+ *
+ * The selection is the SHARED, per-cluster one every other screen uses, not a
+ * Helm-local filter: a namespace picked on Workloads carries to Helm and back.
+ */
+describe("Helm — the namespace selector", () => {
+  it("offers the cluster's namespaces in the filter bar above the table", async () => {
+    open();
+    await ready();
+    const bar = screen.getByRole("search", { name: /Filter/ });
+    expect(within(bar).getByRole("combobox", { name: "Namespaces" })).toBeTruthy();
+  });
+
+  /**
+   * **The backend call is scoped, not just the render.** Fetching 383 releases
+   * to draw two is what this screen did on every keystroke of the reader's
+   * attention; classic has always scoped the call for a single selection.
+   */
+  it("scopes the listing to a single selected namespace", async () => {
+    open();
+    await ready();
+    core.listHelmReleases.mockClear();
+
+    await pickOnly("checkout");
+
+    await waitFor(() => expect(listedNamespaces()).toEqual(["checkout"]));
+    expect(drawn()).toEqual(["checkout/checkout", "checkout/redis-session"]);
+  });
+
+  /**
+   * The multi-select case, which is the one helm itself cannot answer: `helm
+   * list --namespace` takes one namespace, so several means fetching every
+   * namespace and narrowing here — classic's own rule.
+   */
+  it("fetches every namespace and narrows here when several are selected", async () => {
+    open();
+    await ready();
+    await pickOnly("checkout");
+    await waitFor(() => expect(drawn()).toEqual(["checkout/checkout", "checkout/redis-session"]));
+    core.listHelmReleases.mockClear();
+
+    act(() => setNamespaces(CTX.stableId, ["checkout", "staging"]));
+
+    await waitFor(() =>
+      expect(drawn()).toEqual([
+        "checkout/checkout",
+        "checkout/redis-session",
+        "staging/checkout",
+      ]),
+    );
+    // One listing, unscoped — and the platform and payments releases it
+    // returned are gone from the table.
+    expect(listedNamespaces()).toEqual([null]);
+    expect(rowFor("ingress-nginx")).toBeUndefined();
+  });
+
+  /**
+   * The other half of that rule: narrowing a whole-cluster listing to several
+   * namespaces asks helm for nothing new. The releases are already here — the
+   * only thing that changed is how many of them are drawn.
+   */
+  it("does not re-list when the listing it already has covers the new selection", async () => {
+    open();
+    await ready();
+    core.listHelmReleases.mockClear();
+
+    act(() => setNamespaces(CTX.stableId, ["checkout", "staging"]));
+
+    await waitFor(() => expect(drawn()).toHaveLength(3));
+    expect(core.listHelmReleases).not.toHaveBeenCalled();
+  });
+
+  /**
+   * **Per cluster, in the shared store — not per screen.** Local state here
+   * would pass every assertion above and lose the reader's namespace the
+   * moment they walked to Workloads and back.
+   */
+  it("writes the pick to the cluster's shared selection", async () => {
+    open();
+    await ready();
+
+    await pickOnly("payments");
+
+    await waitFor(() => expect(getView().namespaces.prod).toEqual(["payments"]));
+  });
+
+  it("opens on the namespace another screen on this cluster already chose", async () => {
+    setNamespaces(CTX.stableId, ["payments"]);
+
+    open();
+
+    // The FIRST listing is already scoped: the remembered selection is read
+    // before anything is fetched, not applied to rows that arrived unscoped.
+    await waitFor(() => expect(drawn()).toEqual(["payments/payments"]));
+    expect(listedNamespaces()).toEqual(["payments"]);
+  });
+
+  /** One listing per change of mind — not the mount's racing the re-list. */
+  it("lists exactly once when the namespace changes", async () => {
+    open();
+    await ready();
+    core.listHelmReleases.mockClear();
+
+    await pickOnly("platform");
+    await waitFor(() => expect(drawn()).toEqual(["platform/ingress-nginx"]));
+    await act(async () => {});
+
+    expect(core.listHelmReleases).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * **A late answer must not paint over a fresh one.** The reader narrows to
+   * `checkout`, the cluster is slow, they widen back to everything — and the
+   * two-row answer for `checkout` lands after the five-row answer for the
+   * whole cluster. Without the sequence guard the table ends up showing two
+   * rows under a head that says the cluster has two.
+   */
+  it("discards a listing that arrives after the reader moved on", async () => {
+    const pending = new Map<string, (value: { releases: HelmReleaseSummary[] }) => void>();
+    core.listHelmReleases.mockImplementation(
+      (_ctx: string, namespace?: string | null) =>
+        new Promise<{ releases: HelmReleaseSummary[] }>((resolve) => {
+          pending.set(namespace ?? "", resolve);
+        }),
+    );
+
+    setNamespaces(CTX.stableId, ["checkout"]);
+    open();
+    await waitFor(() => expect(pending.has("checkout")).toBe(true));
+
+    act(() => setNamespaces(CTX.stableId, []));
+    await waitFor(() => expect(pending.has("")).toBe(true));
+
+    // The fresh answer first…
+    await act(async () => {
+      pending.get("")?.({ releases: RELEASES });
+    });
+    await ready();
+
+    // …then the stale one, for a namespace nobody is looking at any more.
+    await act(async () => {
+      pending.get("checkout")?.({ releases: [CHECKOUT, REDIS] });
+    });
+
+    expect(drawn()).toHaveLength(5);
+    expect(rowFor("ingress-nginx")).toBeTruthy();
+    expect(heads()[0]).toBe("Releases · 5 in this cluster");
+  });
+
+  /**
+   * A head that counts the whole cluster above a table showing one namespace
+   * is a string asserting more than the view holds — the same class of defect
+   * this branch keeps finding.
+   */
+  it("heads the pane with what the reader is looking at, not with the cluster's total", async () => {
+    open();
+    await ready();
+    expect(heads()[0]).toBe("Releases · 5 in this cluster");
+
+    await pickOnly("checkout");
+    await waitFor(() => expect(heads()[0]).toBe("Releases · 2 in checkout"));
+
+    act(() => setNamespaces(CTX.stableId, ["checkout", "staging"]));
+    await waitFor(() => expect(heads()[0]).toBe("Releases · 3 in 2 namespaces"));
+  });
+
+  it("says a namespace has no releases without blaming a failure", async () => {
+    setNamespaces(CTX.stableId, ["platform"]);
+    core.listHelmReleases.mockResolvedValue({ releases: [] });
+
+    open();
+
+    expect(await screen.findByText("No Helm releases")).toBeTruthy();
+    expect(
+      screen.getByText("prod-eu has no Helm releases in the namespaces you are looking at."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Could not list/)).toBeNull();
+  });
+
+  it("filters the releases on screen by text, and says which filter is hiding them", async () => {
+    open();
+    await ready();
+
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter releases" }), "redis");
+    await waitFor(() => expect(drawn()).toEqual(["checkout/redis-session"]));
+
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Filter releases" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter releases" }), "zzz");
+    expect(await screen.findByText("No Helm releases match this filter")).toBeTruthy();
+    expect(screen.getByText("Clear the filter to see all 5.")).toBeTruthy();
+  });
+
+  it("follows the namespace a restricted credential is scoped to", async () => {
+    useNamespaceOptions.mockReturnValue({ namespaces: ["payments"], scope: "payments", error: "" });
+
+    open();
+
+    // Written to the shared store, so every screen on this cluster follows.
+    await waitFor(() => expect(getView().namespaces.prod).toEqual(["payments"]));
+    await waitFor(() => expect(drawn()).toEqual(["payments/payments"]));
+    expect(listedNamespaces()).toContain("payments");
+  });
+
+  it("shows the picker as loading rather than empty before the namespaces arrive", async () => {
+    useNamespaceOptions.mockReturnValue({ namespaces: null, scope: "", error: "" });
+
+    open();
+    await ready();
+
+    expect(screen.queryByRole("combobox", { name: "Namespaces" })).toBeNull();
+    const placeholder = screen.getByRole("button", { name: "Namespaces" }) as HTMLButtonElement;
+    expect(placeholder.disabled).toBe(true);
+    expect(within(placeholder).getByRole("status", { name: "Loading namespaces" })).toBeTruthy();
+  });
+
+  it("warns when the namespaces cannot be listed, without hiding the picker or the releases", async () => {
+    useNamespaceOptions.mockReturnValue({
+      namespaces: NAMESPACES,
+      scope: "",
+      error: "namespaces: etcd timeout",
+    });
+
+    open();
+
+    expect(await screen.findByText("Namespaces could not be listed")).toBeTruthy();
+    // core's classification, not the apiserver's own words.
+    expect(screen.getByText(/didn't respond in time/)).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Namespaces" })).toBeTruthy();
+    await waitFor(() => expect(drawn()).toHaveLength(5));
+  });
+
+  it("explains a remembered namespace that is gone, and offers the way back", async () => {
+    setNamespaces(CTX.stableId, ["deleted-ns"]);
+
+    open();
+
+    expect(await screen.findByText("Remembered namespaces are gone")).toBeTruthy();
+    expect(screen.getByText("deleted-ns no longer exist on this cluster.")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
+    await waitFor(() => expect(getView().namespaces.prod).toBeUndefined());
+    await waitFor(() => expect(drawn()).toHaveLength(5));
   });
 });

@@ -4,20 +4,40 @@ import {
   getHelmRelease,
   helmStatus,
   listHelmReleases,
+  plural,
+  rowInSelection,
+  watchNamespaceForSelection,
   type ClusterContext,
   type HelmReleaseSummary,
   type HelmRevision,
 } from "@srelens/core";
-import { Button, LoadingState, Screen, StatusPill, Table, type Column } from "@srelens/ui-kit";
+import { useNamespaceOptions } from "@srelens/core/react";
+import {
+  Button,
+  FilterBar,
+  LoadingState,
+  Screen,
+  StatusPill,
+  Table,
+  filterTableData,
+  type Column,
+} from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { FailureState, friendly } from "../lib/errorCopy";
 import { getHelmOps, subscribeHelmOps, type HelmOpKind } from "../lib/helmOps";
 import { Icons } from "../lib/icons";
 import { describe } from "../lib/routes";
+import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { HelmOpDialog } from "./helm/HelmOpDialog";
 import { ReleasePane, type PaneRelease } from "./helm/ReleasePane";
-import { NoClusterScreen } from "./resourceShell";
+import {
+  NamespaceErrorAlert,
+  NamespacePicker,
+  NoClusterScreen,
+  StaleSelectionAlert,
+  emptyTableCopy,
+} from "./resourceShell";
 
 /**
  * §16's header ask: the visible word, and the question actually sent.
@@ -130,23 +150,83 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
   const [list, setList] = useState<ListLoad>({ status: "loading" });
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [filter, setFilter] = useState("");
 
   /**
-   * List the cluster's releases.
+   * **The namespace selection is the cluster's, not this screen's.**
    *
-   * Stable across renders — this screen re-renders on every line a running
-   * `helm upgrade` prints, and a handler rebuilt each time would re-fire the
-   * effects that depend on it.
+   * §16 draws no namespace control, which is why neither the spec nor the plan
+   * asked for one — the mock is a single tidy screenful. The reporter's own
+   * cluster has 383 releases across dozens of namespaces, which is the shape
+   * this screen actually meets, and listing all of them under a Namespace
+   * column with no way to filter is both a regression against classic and the
+   * one ported screen without the control.
+   *
+   * Read from and written to the shared workspace store — the same record
+   * `Workloads`, `Resources` and `Events` read — so a namespace chosen on one
+   * screen carries to this one and back. A Helm-local filter would be a fifth
+   * place to choose a namespace and the only one nothing else can see.
+   */
+  const selection = useNamespaces(context.stableId);
+  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+
+  /**
+   * The namespace the BACKEND is asked for: one selected namespace scopes the
+   * call, none or many fetch everything and are narrowed below.
+   *
+   * `helm list --namespace` takes exactly one, so this is not a choice about
+   * tidiness — it is the only scoping helm itself offers, and it is classic's
+   * own rule (`HelmReleasesView.tsx:195-198`). Fetching 383 releases to draw
+   * six is the common case on the cluster this defect was reported from.
+   */
+  const listNamespace = watchNamespaceForSelection(selection);
+
+  // A namespace-restricted credential has one namespace and no way to ask for
+  // another — the same rule every other screen follows, written to the shared
+  // store so they all agree about it.
+  useEffect(() => {
+    if (scope) setNamespaces(context.stableId, [scope]);
+  }, [scope, context.stableId]);
+
+  /**
+   * Which listing is the current one.
+   *
+   * The same idiom as {@link openSeq} below, for the same reason: a reader who
+   * narrows to a namespace and widens again while the cluster is slow must not
+   * have the fresh, whole-cluster answer painted over by the late answer for a
+   * namespace they have left. The table would end up showing that namespace's
+   * rows under a head counting them as the cluster's.
+   */
+  const listSeq = useRef(0);
+
+  /**
+   * List the releases in scope.
+   *
+   * Stable except for what it asks for — this screen re-renders on every line
+   * a running `helm upgrade` prints, and a handler rebuilt each time would
+   * re-fire the effects that depend on it. `listNamespace` is in the deps
+   * BECAUSE changing it must re-list: that is what makes the picker fetch
+   * again rather than merely re-render the rows it already has.
    */
   const reload = useCallback(async () => {
-    const out = await listHelmReleases(name);
+    const seq = ++listSeq.current;
+    const out = await listHelmReleases(name, listNamespace || null);
+    if (seq !== listSeq.current) return;
     if (out.error !== undefined || !out.releases) {
       setList({ status: "error", error: out.error ?? "helm returned no releases" });
       return;
     }
     setList({ status: "ready", releases: out.releases, at: Date.now() });
-  }, [name]);
+  }, [name, listNamespace]);
 
+  /**
+   * The mount's listing — and every re-listing a change of scope asks for,
+   * because `reload`'s identity carries the namespace it fetches.
+   *
+   * The selection is dropped with it: a release the reader had selected may be
+   * in a namespace they have just looked away from, and a pane diffing a row
+   * the table no longer has is a pane about nothing.
+   */
   useEffect(() => {
     setList({ status: "loading" });
     setSelectedKey(null);
@@ -173,6 +253,14 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
    * round trip nobody asked for.
    */
   const relisted = useRef<{ context: string; ids: Set<number> } | null>(null);
+  // **Keyed on the cluster, and NOT on the namespace.** An operation that
+  // settled while the reader was looking at one namespace is still news when
+  // they narrow to another — re-seeding this on a namespace change would mark
+  // it seen without ever having listed for it. Nothing below fires twice for
+  // it either: every settled id is added to `ids` as it is handled, so the
+  // effect's re-run under a new `reload` finds nothing left to act on and the
+  // scope change's own listing above is the only one.
+  //
   // Seeded during render, and re-seeded whenever the cluster changes. The ops
   // store is module-level and outlives this screen, so a mount that started
   // with settled operations in it would fire the effect below for news it never
@@ -210,25 +298,30 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
 
   const rows = useMemo<ReleaseRow[]>(
     () =>
-      releases.map((r) => {
-        const age = ageFromTimestamp(r.updated, at);
-        return {
-          key: `${r.namespace}/${r.name}`,
-          name: r.name,
-          namespace: r.namespace,
-          // §16's cell, and what classic's Helm list has always shown.
-          chart: `${r.chart}-${r.chartVersion}`,
-          chartName: r.chart,
-          chartVersion: r.chartVersion,
-          revision: r.revision,
-          status: r.status,
-          // `— ago` is not a sentence: a release with no timestamp has an
-          // unknown age, not an age of nothing.
-          updated: age === "—" ? age : `${age} ago`,
-          updatedAt: r.updated,
-        };
-      }),
-    [releases, at],
+      releases
+        // A no-op for the single-namespace case — the backend already scoped
+        // that one — and the whole of the narrowing for the multi-select case,
+        // where helm's own `--namespace` cannot express what was asked for.
+        .filter((r) => rowInSelection(r.namespace, selection))
+        .map((r) => {
+          const age = ageFromTimestamp(r.updated, at);
+          return {
+            key: `${r.namespace}/${r.name}`,
+            name: r.name,
+            namespace: r.namespace,
+            // §16's cell, and what classic's Helm list has always shown.
+            chart: `${r.chart}-${r.chartVersion}`,
+            chartName: r.chart,
+            chartVersion: r.chartVersion,
+            revision: r.revision,
+            status: r.status,
+            // `— ago` is not a sentence: a release with no timestamp has an
+            // unknown age, not an age of nothing.
+            updated: age === "—" ? age : `${age} ago`,
+            updatedAt: r.updated,
+          };
+        }),
+    [releases, at, selection],
   );
 
   /**
@@ -378,12 +471,29 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
     {
       key: "name",
       header: "Release",
-      render: (row) => <span className="block truncate font-medium">{row.name}</span>,
+      /**
+       * Capped for the same reason the Chart cell is, and with the same
+       * mechanism — see that cell's note. The cap is what stops a table of
+       * `cnips-abena-…`-length release names growing wider than the space
+       * beside the 420px pane and pushing the action column off the end of it.
+       */
+      render: (row) => (
+        <span data-slot="release-name" className="block max-w-[220px] truncate font-medium">
+          {row.name}
+        </span>
+      ),
     },
     {
       key: "namespace",
       header: "Namespace",
-      render: (row) => <span className="path block truncate">{row.namespace}</span>,
+      // `m01-cnips-01-dataservices` is a real namespace on the cluster this
+      // was reported from, and it is already truncating — capped so it does so
+      // by design rather than by whatever width was left over.
+      render: (row) => (
+        <span data-slot="release-namespace" className="path block max-w-[180px] truncate">
+          {row.namespace}
+        </span>
+      ),
     },
     {
       key: "chart",
@@ -444,8 +554,23 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
       filterable: false,
       align: "end",
       minWidth: 210,
+      /**
+       * **The action group is the one thing here that may not be clipped.**
+       *
+       * On a real cluster every row ended in a cut-off `U` where the pane
+       * begins: `Uninstall` — the only irreversible control on this screen —
+       * reduced to a sliver, and readable as part of `Roll back`'s group. Flex
+       * items shrink by default, so `shrink-0` is what refuses the loss inside
+       * the cell; the capped Release, Namespace and Chart cells above are what
+       * absorb it instead, because a truncated name is recoverable by widening
+       * a column and a clipped button is not. jsdom sees none of this, hence
+       * the class assertion in the suite.
+       */
       render: (row) => (
-        <div className="flex items-center justify-end gap-1">
+        <div
+          data-slot="release-actions"
+          className="flex shrink-0 items-center justify-end gap-1 whitespace-nowrap"
+        >
           {/* Named per row. Six rows all offering "Upgrade" name nothing at
               all; the accessible name carries the release, which the row
               already shows, so nothing is hidden in it. */}
@@ -477,6 +602,30 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
       ),
     },
   ];
+
+  /**
+   * What the table actually draws: the namespace scope, then the text filter.
+   *
+   * Not memoized, because `columns` is rebuilt every render anyway and a
+   * `useMemo` keyed on it would recompute every time regardless — an honest
+   * call is cheaper than a cache that never hits.
+   */
+  const visible = filterTableData(rows, columns, filter, null);
+
+  /**
+   * §16's pane head, made to describe what the reader is looking at.
+   *
+   * `383 in this cluster` over a table showing six releases in one namespace
+   * is a string asserting more than the view holds — the class of defect this
+   * migration keeps finding — so the count is what is drawn and the words say
+   * what it was drawn from.
+   */
+  const scopeWord =
+    selection.length === 0
+      ? "this cluster"
+      : selection.length === 1
+        ? selection[0]
+        : plural(selection.length, "namespace");
 
   const Sparkle = Icons.ask;
 
@@ -554,6 +703,33 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
         />
       )}
 
+      {/* Above both panes rather than inside the table's, the way
+          `Resources.tsx` composes its own: the bar filters the list, and the
+          rail beside it is about whatever the list is showing. */}
+      <FilterBar
+        value={filter}
+        onValueChange={setFilter}
+        label="Filter releases"
+        placeholder="Filter releases…"
+      >
+        <NamespacePicker
+          namespaces={namespaces}
+          selection={selection}
+          onChange={(next) => setNamespaces(context.stableId, next)}
+        />
+      </FilterBar>
+
+      {/* Non-fatal: the picker keeps whatever namespaces it had, and the
+          releases below it are unaffected — this only says the list behind the
+          control may be short. */}
+      <NamespaceErrorAlert error={namespaceError} />
+
+      <StaleSelectionAlert
+        selection={selection}
+        namespaces={namespaces}
+        onReset={() => setNamespaces(context.stableId, [])}
+      />
+
       <div className="flex min-h-0 flex-1">
         {/* `min-w-0`, and it is load-bearing. A flex item's implicit
             `min-width: auto` refuses to shrink below its content, so without
@@ -564,7 +740,7 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
           <div className="pane-head">
             <span className="min-w-0 truncate">
               {list.status === "ready"
-                ? `Releases · ${rows.length} in this cluster`
+                ? `Releases · ${visible.length} in ${scopeWord}`
                 : "Releases"}
             </span>
           </div>
@@ -580,7 +756,7 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
             ) : (
               <Table
                 columns={columns}
-                data={rows}
+                data={visible}
                 getRowKey={(row) => row.key}
                 selectedKey={selectedKey ?? undefined}
                 // §16's own pane is hard-wired to one release and says a row
@@ -589,10 +765,17 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
                 // the release the reader is asking about.
                 onRowClick={(row) => setSelectedKey(row.key)}
                 onRowActivate={(row) => setSelectedKey(row.key)}
-                // A cluster with no releases is ordinary, not a failure: there
-                // is no filter on this screen to blame and nothing to clear.
-                emptyText="No Helm releases"
-                emptyHint={`${name} has no Helm releases.`}
+                // Nothing here is ever "no releases, and no reason": a scope
+                // with none is ordinary and says which scope, a filter that
+                // matches none says how many it is hiding. The screen now HAS
+                // filters to blame, which is why this is no longer one fixed
+                // sentence.
+                {...emptyTableCopy(
+                  rows.length,
+                  "Helm releases",
+                  name,
+                  selection.length === 0 ? "" : " in the namespaces you are looking at",
+                )}
               />
             )}
           </div>
