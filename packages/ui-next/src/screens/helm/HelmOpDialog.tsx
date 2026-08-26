@@ -38,6 +38,17 @@ export interface HelmPlan {
   revision: number | null;
   atomic: boolean;
   wait: boolean;
+  /**
+   * `--reuse-values`, and upgrade's alone.
+   *
+   * **Helm's default is not "keep what is there".** `helm upgrade <rel>
+   * <chart>` with no values body applies the CHART's defaults over the release,
+   * which silently throws away every value it was installed with. Whenever
+   * srelens could not read those values back, this is what stops that: helm
+   * keeps the release's own values and merges anything sent with `--values`
+   * over them. It rides WITH a body rather than instead of one.
+   */
+  reuseValues: boolean;
 }
 
 /**
@@ -75,7 +86,16 @@ export function helmArgv(plan: HelmPlan): string[] {
     case "install":
       return ["install", plan.release, plan.chart.trim(), ...scope, ...flags];
     case "upgrade":
-      return ["upgrade", plan.release, plan.chart.trim(), ...scope, ...flags];
+      return [
+        "upgrade",
+        plan.release,
+        plan.chart.trim(),
+        ...scope,
+        // Only upgrade: an install has no earlier values to reuse, and helm
+        // rejects the flag outright.
+        ...(plan.reuseValues ? ["--reuse-values"] : []),
+        ...flags,
+      ];
     case "rollback":
       return [
         "rollback",
@@ -152,6 +172,18 @@ export interface HelmOpDialogProps {
   chartVersion?: string;
   /** The values body the editor opens on. Sent only for install and upgrade. */
   values?: string;
+  /**
+   * Why the caller has no current values to open on — already through
+   * `describeError`, because it is shown to the reader as it arrives.
+   *
+   * Present means "this release HAS values and srelens could not read them",
+   * which is a different fact from an empty body and must never be rendered as
+   * one: an upgrade with no values body applies the chart's defaults over
+   * whatever the release was installed with. Set, an upgrade says so and adds
+   * `--reuse-values` so helm keeps them. Absent — the ordinary case — the
+   * editor's contents are the whole of what will be applied.
+   */
+  valuesUnavailable?: string;
   /** The release's revisions — rollback's target and the hint under it. */
   history?: readonly HelmRevision[];
   /** The revision running now: the one a rollback moves away from. */
@@ -211,6 +243,7 @@ export function HelmOpDialog({
   chart: initialChart = "",
   chartVersion: initialVersion = "",
   values: initialValues = "",
+  valuesUnavailable,
   history = [],
   revision: current,
   diff,
@@ -262,6 +295,17 @@ export function HelmOpDialog({
 
   const target = revisionOf(targetText);
 
+  /**
+   * Ask helm to keep what the release already has.
+   *
+   * Upgrade only, and only when the caller says the current values could not
+   * be read: with them in hand the editor IS the answer, and adding the flag
+   * would merge the release's values under an editor the reader can see and
+   * trust — including a line they deliberately deleted, which would then not
+   * go away.
+   */
+  const reuseValues = kind === "upgrade" && valuesUnavailable !== undefined;
+
   const plan: HelmPlan = {
     kind,
     release,
@@ -271,6 +315,7 @@ export function HelmOpDialog({
     revision: target,
     atomic,
     wait,
+    reuseValues,
   };
 
   /** Does the argv have everything it needs to be a command at all? */
@@ -335,6 +380,19 @@ export function HelmOpDialog({
             The target revision's chart and values are applied over the current
             one, which stays in the release's history — so you can roll forward
             again.
+          </Alert>
+        )}
+
+        {reuseValues && (
+          <Alert tone="warn" title="srelens could not read this release's current values">
+            {/* The one thing that must not happen here is a blank editor with
+                no explanation: an upgrade sending no values applies the
+                CHART's defaults over the release. `--reuse-values` is on the
+                command below, so helm keeps what the release has. */}
+            {valuesUnavailable} The editor below therefore starts empty and
+            helm is told <code className="code">--reuse-values</code>: the
+            release keeps the values it has, and anything typed here is merged
+            over them.
           </Alert>
         )}
 

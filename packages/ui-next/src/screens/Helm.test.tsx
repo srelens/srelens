@@ -151,6 +151,18 @@ const MANIFESTS: Record<string, Record<number, string>> = {
 };
 
 /**
+ * The values each release was actually installed with — what `helm get values`
+ * answers, and what an upgrade must not throw away.
+ *
+ * `checkout` carries a body no chart default would produce, so a dialog that
+ * opened on the chart's defaults instead cannot look right by accident.
+ */
+const VALUES: Record<string, string> = {
+  "checkout/checkout": "replicaCount: 12\nimage:\n  tag: \"4f2a1c\"\nresources:\n  limits:\n    cpu: 500m",
+  "payments/payments": "replicas: 4",
+};
+
+/**
  * What helm reports about each release's revisions — what `lastGoodRevision`
  * reads, and the only thing that stops the rollback dialog opening blank.
  *
@@ -181,7 +193,9 @@ beforeEach(() => {
       const history = HISTORIES[key] ?? [];
       // No revision named: the screen asking what this release's revisions are,
       // which is what a rollback dialog opens on.
-      if (revision === undefined) return { release: { name, manifest: "", history } };
+      if (revision === undefined) {
+        return { release: { name, manifest: "", history, valuesYaml: VALUES[key] ?? "" } };
+      }
       const manifest = MANIFESTS[key]?.[revision];
       if (manifest === undefined) return { error: `no revision ${revision} of ${name}` };
       return { release: { name, manifest, history } };
@@ -523,6 +537,49 @@ describe("Helm — the operations", () => {
     expect((hintedField("Target revision") as HTMLInputElement).value).toBe("");
   });
 
+  /**
+   * **The defect.** `helm upgrade <rel> <chart>` with neither `-f` nor
+   * `--reuse-values` applies the chart's DEFAULTS: every value the release was
+   * installed with is discarded. A dialog opened on an empty editor is that
+   * command, one click away, with nothing on screen saying so.
+   */
+  it("opens the upgrade dialog on the values the release is actually running", async () => {
+    open();
+    await ready();
+    await userEvent.click(
+      within(rowFor("checkout", "checkout")).getByRole("button", { name: "Upgrade checkout" }),
+    );
+
+    await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(document.querySelector(".cm-content")?.textContent).toContain("replicaCount: 12"),
+    );
+    expect(document.querySelector(".cm-content")?.textContent).toContain("cpu: 500m");
+  });
+
+  /**
+   * The degrade, and the whole point of the fix: a refused `helm get values`
+   * must NOT fall through to an empty editor, because an empty editor is the
+   * defect. `--reuse-values` keeps what is on the release, and the reader is
+   * told why the box is empty.
+   */
+  it("tells helm to reuse the release's values when srelens cannot read them", async () => {
+    core.getHelmRelease.mockResolvedValue({
+      error: "ApiError: Unauthorized (Status { code: 401 })",
+    });
+    open();
+    await ready();
+    await userEvent.click(
+      within(rowFor("checkout", "checkout")).getByRole("button", { name: "Upgrade checkout" }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/could not read/i)).toBeTruthy();
+    // core's classification, not the raw Rust string.
+    expect(within(dialog).getByText(/rejected your credentials/i)).toBeTruthy();
+    expect(document.querySelector(".copy-command-text")?.textContent).toContain("--reuse-values");
+  });
+
   it("opens the values editor as an upgrade of the selected release", async () => {
     open();
     await ready();
@@ -532,6 +589,11 @@ describe("Helm — the operations", () => {
     await userEvent.click(screen.getByRole("button", { name: "Values editor" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Upgrade payments")).toBeTruthy();
+    // The footer button is named for the editor, so it had better open on the
+    // release's own values — it is the same upgrade path as the row action.
+    await waitFor(() =>
+      expect(document.querySelector(".cm-content")?.textContent).toContain("replicas: 4"),
+    );
   });
 });
 

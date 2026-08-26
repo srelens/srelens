@@ -11,7 +11,7 @@ import {
 import { Button, LoadingState, Screen, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
-import { FailureState } from "../lib/errorCopy";
+import { FailureState, friendly } from "../lib/errorCopy";
 import { getHelmOps, subscribeHelmOps, type HelmOpKind } from "../lib/helmOps";
 import { Icons } from "../lib/icons";
 import { describe } from "../lib/routes";
@@ -71,6 +71,13 @@ interface Pending {
   /** The revision running now, for rollback's own arithmetic. */
   revision?: number;
   /**
+   * The values the release is running, fetched before an upgrade dialog is
+   * opened — see {@link HelmReleases}.
+   */
+  values?: string;
+  /** Why those values could not be read, when they could not be. */
+  valuesUnavailable?: string;
+  /**
    * The release's revisions, fetched before a rollback dialog is opened.
    *
    * Only rollback carries one: it is the only mode with a target to default,
@@ -109,9 +116,10 @@ export function Helm({ route }: { route: string }) {
  *
  * **The table is `listHelmReleases` and nothing else.** The pane makes the two
  * `getHelmRelease` calls its diff needs; this screen makes exactly one of its
- * own, and only when a rollback dialog is opened — see {@link operate}. Not
- * per selection, and never for the table: a release's revisions are what
- * rollback's target defaults from, and nothing else on this screen wants them.
+ * own, and only when an upgrade or a rollback dialog is opened — see
+ * {@link operate}. Not per selection, and never for the table: the two
+ * mutations that need the release itself are the two that ask for it, and
+ * nothing else on this screen wants either answer.
  *
  * **No status word or tone is invented here.** `helmStatus` is the only thing
  * that turns Helm's word into a tone, on the rows and in the pane's badge
@@ -259,13 +267,13 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
     : `Which Helm releases on ${name} need attention?`;
 
   /**
-   * Which rollback request is the current one.
+   * Which dialog request is the current one.
    *
-   * A rollback waits on a round trip before its dialog can open, and a reader
-   * who clicks `Roll back` on two rows in quick succession must get the second
-   * one — not whichever history answered first.
+   * Both upgrade and rollback wait on a round trip before their dialog can
+   * open, and a reader who clicks on two rows in quick succession must get the
+   * second one — not whichever release answered first.
    */
-  const rollbackSeq = useRef(0);
+  const openSeq = useRef(0);
 
   /** Open the dialog on a row, and follow that row in the pane. */
   function operate(kind: HelmOpKind, row: ReleaseRow) {
@@ -282,15 +290,36 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
       chartVersion: row.chartVersion,
       revision: row.revision,
     };
-    if (kind !== "rollback") {
+    if (kind === "install" || kind === "uninstall") {
       setPending(base);
       return;
     }
     /**
-     * **Rollback reads the release's revisions first, and opens on the answer.**
+     * **Upgrade and rollback read the release first, and open on the answer.**
      *
-     * This is the one round trip this screen makes for itself, and it is what
-     * stops a control lying about its own label. §16's pane footer reads
+     * Upgrade wants its values; rollback wants its revisions. One
+     * `getHelmRelease` carries both, and both are things the dialog fixes on
+     * mount — so the answer has to arrive before it opens, not after.
+     *
+     * **Why upgrade cannot skip this.** `helm upgrade <rel> <chart>` with
+     * neither `--values` nor `--reuse-values` does not keep the release's
+     * values: helm applies the CHART's defaults over them. A dialog that
+     * opened on an empty editor was therefore one click from discarding every
+     * value the release was installed with, with nothing on screen saying so.
+     * The editor opens on what the release is actually running, so the reader
+     * changes a chart version while LOOKING at the values that will be
+     * reapplied.
+     *
+     * **A refused read is not an empty one.** `values: ""` would be the defect
+     * again, wearing the degrade's clothes, so the two are kept apart: no
+     * release back means the values are unknown, and the dialog is told why —
+     * it says so and adds `--reuse-values`, which is helm's own answer to
+     * "keep what is there". `describeError` runs here rather than in the
+     * dialog, so what crosses the boundary is a sentence rather than a Rust
+     * string.
+     *
+     * **Why rollback cannot skip it either.** It is what stops a control
+     * lying about its own label. §16's pane footer reads
      * `Roll back to 118`; with no history the dialog's `lastGoodRevision` has
      * nothing to work from, so it opened on a blank field over "srelens has no
      * history for this release" — the reader clicked a button naming a number
@@ -310,11 +339,25 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
      * the reader never sees. A refused fetch opens on no history, which is the
      * degrade the dialog was built with.
      */
-    const seq = ++rollbackSeq.current;
+    const seq = ++openSeq.current;
     void (async () => {
       const out = await getHelmRelease(name, row.namespace, row.name);
-      if (seq !== rollbackSeq.current) return;
-      setPending({ ...base, history: out.release?.history ?? [] });
+      if (seq !== openSeq.current) return;
+      if (kind === "rollback") {
+        setPending({ ...base, history: out.release?.history ?? [] });
+        return;
+      }
+      setPending(
+        out.release
+          ? // An empty body here is a real answer: a release installed with no
+            // values of its own has none to keep, and the editor says so by
+            // being empty.
+            { ...base, values: out.release.valuesYaml ?? "" }
+          : {
+              ...base,
+              valuesUnavailable: friendly(out.error ?? "helm returned no release").detail,
+            },
+      );
     })();
   }
 
@@ -503,6 +546,8 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
           release={pending.release}
           chart={pending.chart}
           chartVersion={pending.chartVersion}
+          values={pending.values}
+          valuesUnavailable={pending.valuesUnavailable}
           history={pending.history}
           revision={pending.revision}
           extraKubeconfigs={files}

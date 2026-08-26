@@ -130,16 +130,22 @@ describe("HelmOpDialog — §A.5's frame", () => {
 
 describe("HelmOpDialog — the equivalent command", () => {
   it("reads the argv helm will be given, for each of the four", () => {
-    expect(helmCommand({ kind: "install", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "", revision: null, atomic: false, wait: false })).toBe(
+    expect(helmCommand({ kind: "install", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "", revision: null, atomic: false, wait: false, reuseValues: false })).toBe(
       `helm install ${RELEASE} ${CHART} --namespace ${NAMESPACE}`,
     );
-    expect(helmCommand({ kind: "upgrade", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "18.3.0", revision: null, atomic: true, wait: true })).toBe(
+    expect(helmCommand({ kind: "upgrade", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "18.3.0", revision: null, atomic: true, wait: true, reuseValues: false })).toBe(
       `helm upgrade ${RELEASE} ${CHART} --namespace ${NAMESPACE} --version 18.3.0 --atomic --wait`,
     );
-    expect(helmCommand({ kind: "rollback", release: RELEASE, namespace: NAMESPACE, chart: "", chartVersion: "", revision: 3, atomic: false, wait: false })).toBe(
+    // `--reuse-values` is upgrade's alone, and it rides WITH a values body
+    // rather than instead of one: helm merges `--values` over what it reused,
+    // so an override the reader types lands on top of the release's values.
+    expect(helmCommand({ kind: "upgrade", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "", revision: null, atomic: false, wait: false, reuseValues: true })).toBe(
+      `helm upgrade ${RELEASE} ${CHART} --namespace ${NAMESPACE} --reuse-values`,
+    );
+    expect(helmCommand({ kind: "rollback", release: RELEASE, namespace: NAMESPACE, chart: "", chartVersion: "", revision: 3, atomic: false, wait: false, reuseValues: false })).toBe(
       `helm rollback ${RELEASE} 3 --namespace ${NAMESPACE}`,
     );
-    expect(helmCommand({ kind: "uninstall", release: RELEASE, namespace: NAMESPACE, chart: "", chartVersion: "", revision: null, atomic: false, wait: false })).toBe(
+    expect(helmCommand({ kind: "uninstall", release: RELEASE, namespace: NAMESPACE, chart: "", chartVersion: "", revision: null, atomic: false, wait: false, reuseValues: false })).toBe(
       `helm uninstall ${RELEASE} --namespace ${NAMESPACE}`,
     );
   });
@@ -204,6 +210,59 @@ describe("HelmOpDialog — the equivalent command", () => {
     await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
     const { args } = store.startHelmOperation.mock.calls[0][0];
     expect(["helm", ...args].join(" ")).toBe(displayed);
+  });
+});
+
+describe("HelmOpDialog — the release's current values", () => {
+  /**
+   * **The defect this block exists for.** `helm upgrade <rel> <chart>` with no
+   * `-f` and no `--reuse-values` does not keep the release's values: it applies
+   * the chart's defaults over them. A dialog that opens on an empty editor and
+   * sends no body is therefore an upgrade that silently discards every value
+   * the release was installed with — 200 lines of them, with nothing on screen
+   * saying so.
+   */
+  it("opens the editor on the values it was handed, and sends them back", async () => {
+    open({ kind: "upgrade", values: "replicaCount: 12\nimage:\n  tag: 4f2a1c" });
+    await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(document.querySelector(".cm-content")?.textContent).toContain("replicaCount: 12"),
+    );
+    await userEvent.click(button("Upgrade"));
+    await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
+    const call = store.startHelmOperation.mock.calls[0][0];
+    expect(call.values).toContain("replicaCount: 12");
+    // Seeded values are the body; there is nothing for helm to reuse.
+    expect(call.args).not.toContain("--reuse-values");
+  });
+
+  /**
+   * The degrade, and it is a LOUD one. A refused `helm get values` is exactly
+   * the case that must not fall through to "no values", because "no values" IS
+   * the defect. `--reuse-values` is the flag helm has for precisely this: keep
+   * what is on the release and merge anything given here over it.
+   */
+  it("keeps the release's values with --reuse-values when they could not be read", async () => {
+    open({ kind: "upgrade", valuesUnavailable: "The cluster rejected your credentials." });
+    await screen.findByRole("dialog");
+    expect(screen.getByText(/could not read/i)).toBeTruthy();
+    // The reason travels: the reader is told WHY, in the caller's words.
+    expect(screen.getByText(/rejected your credentials/i)).toBeTruthy();
+    expect(shown()).toBe(
+      `helm upgrade ${RELEASE} ${CHART} --namespace ${NAMESPACE} --reuse-values`,
+    );
+    await userEvent.click(button("Upgrade"));
+    await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
+    const call = store.startHelmOperation.mock.calls[0][0];
+    expect(call.args).toContain("--reuse-values");
+    expect(call.values).toBeUndefined();
+  });
+
+  it("never offers to reuse values on an install, which has none to reuse", async () => {
+    open({ kind: "install", valuesUnavailable: "boom" });
+    await screen.findByRole("dialog");
+    expect(shown()).toBe(`helm install ${RELEASE} ${CHART} --namespace ${NAMESPACE}`);
+    expect(screen.queryByText(/could not read/i)).toBeNull();
   });
 });
 
@@ -429,6 +488,7 @@ describe("HelmOpDialog — submitting", () => {
         revision: null,
         atomic: false,
         wait: false,
+        reuseValues: false,
       }),
     });
   });
