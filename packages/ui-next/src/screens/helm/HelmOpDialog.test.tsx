@@ -261,12 +261,16 @@ describe("HelmOpDialog — uninstall's gate", () => {
     // words — and that no object is named as being in this particular release.
     // Pinning only the fixture's own tokens would let "three pods and a
     // Service" through, which is the same lie in different words.
-    const counted =
-      /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a few|several|dozens?)\b/i;
-    expect(alert.textContent).not.toMatch(counted);
-    const named =
-      /\b(pods?|services?|ingress(es)?|configmaps?|secrets?|deployments?|statefulsets?|jobs?)\b/i;
-    expect(alert.textContent).not.toMatch(named);
+    // Digits, and the objects a count would have to be OF. The object half is
+    // the load-bearing one: a fabricated count cannot avoid naming the things
+    // it counts, so this catches §A.5's sentence and every rewrite of it. A
+    // spelled-out-number alternation was tried here and taken out again — it
+    // caught nothing this does not, and it forbade ordinary prose ("in one
+    // pass", "one click", "at once") in a sentence nobody had written yet.
+    expect(alert.textContent).not.toMatch(/\d/);
+    expect(alert.textContent).not.toMatch(
+      /\b(pods?|services?|ingress(es)?|configmaps?|secrets?|deployments?|statefulsets?|jobs?)\b/i,
+    );
   });
 });
 
@@ -320,6 +324,54 @@ describe("HelmOpDialog — rollback's gate", () => {
     });
     await screen.findByRole("dialog");
     expect(button("Roll back to 2")).toBeTruthy();
+  });
+
+  it("says which of the three reasons it has no revision to offer", async () => {
+    // No history at all.
+    const first = render(
+      <HelmOpDialog kind="rollback" context={CONTEXT} namespace={NAMESPACE} release={RELEASE} onClose={vi.fn()} />,
+    );
+    expect(screen.getByText(/no history for this release/i)).toBeTruthy();
+    first.unmount();
+
+    // A history with nothing in it but the revision running now: true, and a
+    // different fact from having no history.
+    const second = render(
+      <HelmOpDialog
+        kind="rollback"
+        context={CONTEXT}
+        namespace={NAMESPACE}
+        release={RELEASE}
+        revision={1}
+        history={[HISTORY[0]].map((r) => ({ ...r, revision: 1, status: "deployed" }))}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/only the revision running now/i)).toBeTruthy();
+    expect(screen.queryByText(/no history for this release/i)).toBeNull();
+    second.unmount();
+
+    // A history of earlier revisions, none of them safe to offer. This is the
+    // case the old single sentence lied about, and the one where the reader
+    // most needs to be told the truth: the release HAS history, and none of it
+    // is a way out.
+    open({
+      kind: "rollback",
+      revision: 3,
+      history: [
+        { revision: 1, status: "failed", updated: "2026-08-01", chartVersion: "18.0.0", description: "Install failed" },
+        { revision: 2, status: "quiesced", updated: "2026-08-10", chartVersion: "18.1.0", description: "Something new" },
+        { revision: 3, status: "failed", updated: "2026-08-20", chartVersion: "18.2.0", description: "Upgrade failed" },
+      ],
+    });
+    await screen.findByRole("dialog");
+    expect(screen.getByText(/no earlier revision is safe to offer/i)).toBeTruthy();
+    expect(screen.queryByText(/no history for this release/i)).toBeNull();
+    // The rest of the degrade path stays as it was: nothing filled in, no
+    // command printed, and the button dead.
+    expect((hintedField("Target revision") as HTMLInputElement).value).toBe("");
+    expect(screen.getByText("Name a revision to see it.")).toBeTruthy();
+    expect(button("Roll back").disabled).toBe(true);
   });
 
   it("takes another revision when the reader names one", async () => {

@@ -221,6 +221,26 @@ export function HelmOpDialog({
   const takesChart = kind === "install" || kind === "upgrade";
 
   const suggested = useMemo(() => lastGoodRevision(history, current), [history, current]);
+  /**
+   * What the hint says when {@link lastGoodRevision} offers nothing.
+   *
+   * Three different facts, and only one of them is "srelens has no history".
+   * Saying that one for all three was false in the two cases that matter most:
+   * a release whose history is entirely failed revisions HAS a history, and
+   * telling the reader otherwise hides the very thing they came to find out.
+   * The rest of the degrade path is already honest and stays — no target is
+   * filled in, and the command area says there is nothing to show rather than
+   * printing a command nobody asked for.
+   */
+  const noDefault = useMemo(() => {
+    if (history.length === 0) {
+      return "srelens has no history for this release, so name the revision yourself.";
+    }
+    if (history.every((r) => r.revision === current)) {
+      return "This release has only the revision running now, so there is nothing earlier to return to.";
+    }
+    return "No earlier revision is safe to offer: each one is failed, unfinished, gone, or in a state this build does not recognise. Name the revision yourself.";
+  }, [history, current]);
 
   const [chart, setChart] = useState(initialChart);
   const [chartVersion, setChartVersion] = useState(initialVersion);
@@ -391,7 +411,7 @@ export function HelmOpDialog({
               hint={
                 suggested
                   ? `Revision ${suggested.revision} is the newest one helm does not report failed; it reads ${helmStatus(suggested.status).word}.`
-                  : "srelens has no history for this release, so name the revision yourself."
+                  : noDefault
               }
             >
               <TextInput value={targetText} onValueChange={setTargetText} type="number" />
