@@ -333,3 +333,163 @@ describe("ResourceBulk", () => {
     expect(rolloutRestart).toHaveBeenCalledWith("prod", "Deployment", "prod", "api-1");
   });
 });
+
+/**
+ * **A batch runs on the cluster it was opened on.**
+ *
+ * `Pending` was always a snapshot of the ROWS, so a selection change under an
+ * open dialog could not retarget it. It was never a snapshot of the CLUSTER,
+ * and since #357 the cluster rail is live behind a dialog: `setActiveCluster`
+ * switches the active cluster in place, nothing here remounts, and
+ * `Resources.tsx` keeps this bar mounted across the switch whenever the
+ * cluster being moved TO already has that kind in the row cache — which is the
+ * ordinary case for a reader moving between two clusters they have both looked
+ * at.
+ *
+ * Established by execution against the real `Resources` screen before this
+ * suite existed: the dialog stayed open across `setActiveCluster`, and the
+ * confirmed delete went out as `[ 'stage-eu', 'Pod', 'default', 'web-1' ]` —
+ * production's row name, staging's cluster. The `showRows` flip that was
+ * assumed to save this saves nothing once the target view is cached, and it
+ * was never designed to save it.
+ *
+ * The rule is `lib/clusterMoved`'s: pin at open, run against the pinned
+ * cluster, state the divergence, and re-arm the confirmation. This dialog has
+ * no typed input at all, so the tick costs nothing — and it is the one confirm
+ * here where a silent retarget takes out forty objects rather than one.
+ */
+describe("ResourceBulk — the cluster the batch was opened on", () => {
+  const PINNED = "prod-eu";
+  const MOVED = "stage-eu";
+  const ROWS: ListRow[] = [
+    { name: "web-0", namespace: "kube-system" },
+    { name: "api-1", namespace: "prod" },
+  ];
+  const SELECTED = new Set(ROWS.map(keyOf));
+
+  const bar = (context: string) => (
+    <ResourceBulk
+      selected={SELECTED}
+      kind="pods"
+      descriptor={POD_DESCRIPTOR}
+      context={context}
+      rows={ROWS}
+      onDone={() => {}}
+    />
+  );
+
+  const box = () => within(screen.getByRole("dialog"));
+  const tick = (verb: string) =>
+    screen.getByRole("checkbox", { name: `Yes, still ${verb} on ${PINNED}.` }) as HTMLInputElement;
+  const REFUSAL = `This runs on ${PINNED}, not ${MOVED}. Confirm the cluster above, or cancel.`;
+
+  /** The cluster every call in a batch went to. The mocks above declare no
+   *  parameters, so the argument list is read structurally. */
+  const targetsOf = (calls: unknown[][]) => calls.map((call) => call[0]);
+
+  /** Open a batch on `prod-eu`, then move the rail to `stage-eu` under it. */
+  async function openThenMove(label: string) {
+    const view = render(bar(PINNED));
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    await screen.findByRole("dialog");
+    view.rerender(bar(MOVED));
+    return view;
+  }
+
+  it("deletes on the cluster the batch was opened on, not the one the rail moved to", async () => {
+    await openThenMove("Delete");
+    await userEvent.click(tick("delete"));
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(2));
+    for (const row of ROWS) {
+      expect(deleteResource).toHaveBeenCalledWith(PINNED, "Pod", row.namespace, row.name);
+    }
+    expect(targetsOf(deleteResource.mock.calls)).toEqual([PINNED, PINNED]);
+  });
+
+  it("refuses the run until the reader confirms which cluster, and says why", async () => {
+    await openThenMove("Delete");
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+
+    // Not one row went out, and the dialog is still up with the reason in it.
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(box().getByText(REFUSAL)).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await userEvent.click(tick("delete"));
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(2));
+  });
+
+  it("evicts on the cluster the batch was opened on", async () => {
+    // A second core call behind the same confirm: a fix applied to Delete
+    // alone would still retarget this one.
+    await openThenMove("Evict");
+    await userEvent.click(tick("evict"));
+    await userEvent.click(box().getByRole("button", { name: "Evict" }));
+    await waitFor(() => expect(evictPod).toHaveBeenCalledTimes(2));
+    expect(targetsOf(evictPod.mock.calls)).toEqual([PINNED, PINNED]);
+  });
+
+  it("says the rail moved, first, above the list of rows", async () => {
+    await openThenMove("Delete");
+    const alert = screen.getByText(`This still runs against ${PINNED}, not ${MOVED}`).closest("[data-tone]");
+    expect(alert).toBeTruthy();
+    expect(alert?.getAttribute("data-tone")).toBe("warn");
+    expect(alert?.getAttribute("role")).toBe("status");
+    expect(alert?.textContent?.replace(/\s+/g, " ")).toContain(
+      `the same names on ${MOVED} are different objects`,
+    );
+
+    // Above `This will delete 2 pods`: the alert changes what every name in
+    // the list under it refers to.
+    const message = alert?.parentElement;
+    expect(message?.firstElementChild).toBe(alert);
+    expect(message?.textContent).toContain("This will delete 2 pods");
+  });
+
+  it("says nothing, and asks nothing, while the rail has not moved", async () => {
+    render(bar(PINNED));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByRole("dialog");
+
+    expect(document.querySelector('[role="dialog"] [data-tone]')).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(2));
+    expect(targetsOf(deleteResource.mock.calls)).toEqual([PINNED, PINNED]);
+  });
+
+  /**
+   * Caught by mutation testing: making the gate's `reset` a no-op left every
+   * assertion above green. An acknowledgement is about ONE open question.
+   */
+  it("forgets an acknowledgement when the dialog it was given for closes", async () => {
+    const view = await openThenMove("Delete");
+    await userEvent.click(tick("delete"));
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    view.rerender(bar(PINNED));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByRole("dialog");
+    view.rerender(bar(MOVED));
+
+    expect(tick("delete").checked).toBe(false);
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(box().getByText(REFUSAL)).toBeTruthy();
+  });
+
+  it("re-arms when the rail moves on again, rather than carrying the tick over", async () => {
+    const view = await openThenMove("Delete");
+    await userEvent.click(tick("delete"));
+    expect(tick("delete").checked).toBe(true);
+
+    view.rerender(bar("dev-eu"));
+    expect(tick("delete").checked).toBe(false);
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+  });
+});

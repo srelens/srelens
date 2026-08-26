@@ -43,6 +43,7 @@ import {
   type Tone,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
+import { useClusterGate } from "../lib/clusterMoved";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { FailureLine, FailureState, FailureWord, summarise } from "../lib/errorCopy";
@@ -713,17 +714,40 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
   // capacity tiles, which count off it.
   const rows = [...all].sort(worstFirst).slice(0, NODE_ROWS);
 
+  /**
+   * The divergence banner, its acknowledgement and the refusal behind it.
+   *
+   * `pending.context` is the cluster the action runs against; `context` is
+   * what the reader has in FOCUS, which is the only thing a rail switch may
+   * change. See `lib/clusterMoved` for why the gate re-arms here rather than
+   * only stating the divergence: a drain confirm's whole input is one click,
+   * so asking again costs nothing.
+   */
+  const gate = useClusterGate({
+    pinned: pending?.context ?? null,
+    live: context,
+    verb: pending ? (pending.type === "drain" ? "drain" : pending.unschedulable ? "cordon" : "uncordon") : "act",
+  });
+  const reset = gate.reset;
+
   // Stable, so the column set below is built once per context rather than per
-  // render — `Table` re-sorts whenever its `columns` identity changes.
-  const open = useCallback((next: Pending) => {
-    setError("");
-    setPending(next);
-  }, []);
+  // render — `Table` re-sorts whenever its `columns` identity changes. The
+  // cluster each action was picked on rides IN the pending record (see
+  // `Pending`), captured by the row's own action rather than read here.
+  const open = useCallback(
+    (next: Pending) => {
+      setError("");
+      reset();
+      setPending(next);
+    },
+    [reset],
+  );
   const columns = useMemo(() => nodeColumns(context, open), [context, open]);
 
   function close() {
     setPending(null);
     setError("");
+    gate.reset();
   }
 
   /**
@@ -738,11 +762,21 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
    */
   async function confirm() {
     if (!pending) return;
+    // Asked before anything else: it is the only question on screen whose
+    // answer changes which machine the name below refers to. The write still
+    // goes to `pending.context` either way — this re-arms the confirmation, it
+    // does not retarget it.
+    if (gate.refusal) {
+      setError(gate.refusal);
+      return;
+    }
+
     setBusy(true);
     setError("");
 
     if (pending.type === "drain") {
-      const out = await drainNode(context, pending.name);
+      // `pending.context`, never the live prop. See {@link Pending}.
+      const out = await drainNode(pending.context, pending.name);
       setBusy(false);
       // A refused write leaves the dialog up with the reason in it, rather
       // than closing as if the node had been drained.
@@ -752,7 +786,7 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
       }
       notify.success(`Drained ${pending.name}`, `${out.evicted ?? 0} evicted, ${out.skipped ?? 0} skipped`);
     } else {
-      const out = await cordonNode(context, pending.name, pending.unschedulable);
+      const out = await cordonNode(pending.context, pending.name, pending.unschedulable);
       setBusy(false);
       if (out.error) {
         setError(out.error);
@@ -814,7 +848,10 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
       {pending && (
         <NodeConfirm
           pending={pending}
-          context={context}
+          // Captured, not current: the kubectl line under the message names
+          // the cluster the write will actually reach.
+          context={pending.context}
+          moved={gate.alert}
           busy={busy}
           error={error}
           onConfirm={() => void confirm()}
@@ -990,14 +1027,14 @@ function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => 
           // label is what says which way it is being thrown, and a second
           // picture for the reverse of one action is a second thing to read.
           icon: Icons.cordon,
-          onSelect: () => open({ type: "cordon", name: row.name, unschedulable: false }),
+          onSelect: () => open({ type: "cordon", name: row.name, unschedulable: false, context }),
         }
       : {
           id: "cordon",
           // The design's crossed circle — nothing new gets scheduled here.
           label: NODE_ACTION_LABEL.cordon,
           icon: Icons.cordon,
-          onSelect: () => open({ type: "cordon", name: row.name, unschedulable: true }),
+          onSelect: () => open({ type: "cordon", name: row.name, unschedulable: true, context }),
         },
     {
       id: "drain",
@@ -1006,7 +1043,7 @@ function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => 
       icon: Icons.drain,
       // Danger-toned because it is: every pod on the node is evicted.
       danger: true,
-      onSelect: () => open({ type: "drain", name: row.name }),
+      onSelect: () => open({ type: "drain", name: row.name, context }),
     },
     {
       id: "open",
@@ -1245,21 +1282,37 @@ function NotReady({ context, overview }: { context: string; overview: OverviewDa
 
 /* ---------------------------------------------------------------- confirms */
 
-/** What a picked action is waiting to do, once the confirm is taken. */
-type Pending =
+/**
+ * What a picked action is waiting to do, once the confirm is taken — and the
+ * cluster it was picked ON.
+ *
+ * **`context` is captured when the reader picks the action, not when the
+ * dialog renders.** Since #357 a dialog covers only its own tab, so the
+ * cluster rail is live behind this one; `setActiveCluster` switches the active
+ * cluster in place and nothing on this screen remounts, so `pending` survives
+ * the switch while every prop around it becomes another cluster's. A drain
+ * opened on production, confirmed after a rail click, would otherwise evict
+ * every pod on staging's node of the same name. See `lib/clusterMoved`.
+ */
+type Pending = { context: string } & (
   | { type: "cordon"; name: string; unschedulable: boolean }
-  | { type: "drain"; name: string };
+  | { type: "drain"; name: string }
+);
 
 function NodeConfirm({
   pending,
   context,
+  moved,
   busy,
   error,
   onConfirm,
   onCancel,
 }: {
   pending: Pending;
+  /** The cluster this runs against — `pending.context`, never the live prop. */
   context: string;
+  /** The cluster-moved banner and its tick, or `null` when the rail has not moved. */
+  moved: ReactNode;
   busy: boolean;
   error: string;
   onConfirm: () => void;
@@ -1292,6 +1345,9 @@ function NodeConfirm({
       onCancel={onCancel}
       message={
         <>
+          {/* First, above the node's own name: it changes which machine that
+              name refers to. */}
+          {moved}
           <p style={{ marginTop: 0 }}>
             {drain ? (
               <>

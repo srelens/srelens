@@ -8,7 +8,8 @@ import {
   type BulkOutcome,
 } from "@srelens/core";
 import { ActionBar, ConfirmDialog, type ActionBarAction } from "@srelens/ui-kit";
-import { FailureWord } from "../lib/errorCopy";
+import { useClusterGate } from "../lib/clusterMoved";
+import { FailureLine, FailureWord } from "../lib/errorCopy";
 import type { KindDescriptor, ListRow } from "../lib/kinds/types";
 
 export interface ResourceBulkProps {
@@ -51,6 +52,21 @@ const PAST: Record<ActionType, string> = { delete: "deleted", evict: "evicted", 
 interface Pending {
   type: ActionType;
   rows: ListRow[];
+  /**
+   * The cluster the batch was opened on, captured with the rows rather than
+   * read live at confirm time.
+   *
+   * **The snapshot above was only half a snapshot.** Since #357 a dialog covers
+   * only its own tab, so the cluster rail is live behind it;
+   * `setActiveCluster` switches the active cluster in place and nothing
+   * remounts. `Resources.tsx` keeps this bar mounted across the switch
+   * whenever the cluster being moved TO already has that kind in the row cache
+   * — which is the ordinary case for a reader moving between two clusters —
+   * so `pending` survived with one cluster's rows in it while `context`
+   * became another's. A confirmed bulk delete then ran production's row names
+   * against staging. Executed, not theorised: see this task's report.
+   */
+  context: string;
 }
 
 /** The finished run's per-row detail, once at least one row failed. A full
@@ -90,6 +106,28 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
   const [pending, setPending] = useState<Pending | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Why the run did not start. The only thing that reaches it today is the
+   * cluster gate below — a partial failure is the report dialog's job, and a
+   * refused row carries its own words there.
+   */
+  const [refused, setRefused] = useState("");
+
+  /**
+   * The divergence banner, its acknowledgement and the refusal behind it.
+   *
+   * `pending.context` is the cluster the batch runs against; `context` is what
+   * the reader has in FOCUS, which is the only thing a rail switch may change.
+   * The gate re-arms rather than only stating the divergence: this confirm's
+   * whole input is one click, so asking again costs the reader a tick — and a
+   * batch is the one dialog here where a silent retarget takes out forty
+   * objects rather than one.
+   */
+  const gate = useClusterGate({
+    pinned: pending?.context ?? null,
+    live: context,
+    verb: pending ? VERB[pending.type].toLowerCase() : "act",
+  });
 
   // Resolved against `rows` first, and counted from the result — `Table`
   // never prunes `selection.selected` when its data changes, so a key that
@@ -103,18 +141,34 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
 
   function open(type: ActionType) {
     setReport(null);
-    setPending({ type, rows: selectedRows });
+    setRefused("");
+    gate.reset();
+    // The cluster these rows are rows OF, read once, here — with them, not
+    // after them. See {@link Pending.context}.
+    setPending({ type, rows: selectedRows, context });
   }
 
   function close() {
     setPending(null);
     setReport(null);
+    setRefused("");
+    gate.reset();
   }
 
   async function confirm() {
     if (!pending) return;
+    // Asked before the run starts: it is the only question on screen whose
+    // answer changes what every name in the list below refers to. The run
+    // still goes to `pending.context` either way — this re-arms the
+    // confirmation, it does not retarget it.
+    if (gate.refusal) {
+      setRefused(gate.refusal);
+      return;
+    }
+    setRefused("");
     setBusy(true);
-    const outcomes = await runBulk(pending.rows, opFor(pending.type, context, descriptor.k8sKind));
+    // `pending.context`, never the live prop. See {@link Pending.context}.
+    const outcomes = await runBulk(pending.rows, opFor(pending.type, pending.context, descriptor.k8sKind));
     setBusy(false);
     const { failed } = summarize(outcomes);
     const { type } = pending;
@@ -159,6 +213,10 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
           onCancel={close}
           message={
             <>
+              {/* First, above the list: it changes what every name in it
+                  refers to, and it is the only thing here the reader does not
+                  already know. */}
+              {gate.alert}
               <p style={{ marginTop: 0 }}>
                 This will {VERB[pending.type].toLowerCase()} {pending.rows.length} {kind}
                 {pending.type === "delete" ? " — this cannot be undone" : ""}:
@@ -170,6 +228,10 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
                   </li>
                 ))}
               </ul>
+              {/* The dialog stays open on a refusal rather than closing as if
+                  the run had happened, so this line is the whole of what the
+                  reader is told about why. */}
+              {refused && <FailureLine error={refused} className="text-sev" />}
             </>
           }
         />
