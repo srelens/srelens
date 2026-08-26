@@ -8,8 +8,10 @@ use srelens_capability::{Annotations, Capability, CapabilityError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use kube::config::{AuthInfo, Kubeconfig};
+
 use crate::client_cache::ClientCache;
-use crate::context_resolve::{resolve_context, resolve_contexts};
+use crate::context_resolve::{resolve_context, resolve_contexts, ResolvedContext};
 use crate::local_cluster::classify;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -46,6 +48,19 @@ pub struct ContextDto {
     /// The detected local provider (e.g. `"kind"`, `"vind"`), when `isLocal`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The kubeconfig this context was declared in. Taken from the same place
+    /// `stable_id` takes it — NOT parsed back out of `stable_id`, whose
+    /// `file/` prefix appears only on a name collision (#265), so a unique
+    /// name would yield nothing.
+    #[serde(rename = "sourceFile")]
+    pub source_file: String,
+    /// The credential MECHANISM, never the credential. One of `client
+    /// certificate`, `token`, `basic`, `exec plugin · <command>`, `oidc`,
+    /// `impersonation`, `none`. Exec ARGUMENTS are deliberately excluded:
+    /// they routinely carry client IDs and sometimes secrets, and this string
+    /// is rendered in a table.
+    #[serde(rename = "authKind")]
+    pub auth_kind: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -129,31 +144,90 @@ pub fn list_contexts_capability(
                         "no kubeconfig contexts could be read".to_string(),
                     ));
                 }
-                let contexts = resolved.into_iter().map(|rc| {
-                    // Classify on the raw in-file name (the disambiguating prefix
-                    // is a file stem, not a signal of local/remote).
-                    let class = classify(
-                        &rc.original_name,
-                        &rc.cluster,
-                        &rc.server,
-                        rc.exec_command.as_deref(),
-                        rc.auth_provider.as_deref(),
-                    );
-                    ContextDto {
-                        is_current: rc.is_current,
-                        stable_id: rc.stable_id(),
-                        name: rc.display_name,
-                        cluster: rc.cluster,
-                        server: rc.server,
-                        namespace: rc.namespace,
-                        is_local: class.is_local,
-                        provider: class.provider.map(|provider| provider.as_str().to_string()),
-                    }
-                }).collect();
+                let contexts = resolved.into_iter().map(build_context_dto).collect();
                 Ok(ListContextsOut { contexts })
             }
         },
     )
+}
+
+/// Build the DTO for one resolved context. Shared by the capability above and
+/// by `dto_for` in tests, so the fixture exercises the exact same mapping
+/// rather than a hand-rolled duplicate of it.
+fn build_context_dto(rc: ResolvedContext) -> ContextDto {
+    // Classify on the raw in-file name (the disambiguating prefix is a file
+    // stem, not a signal of local/remote).
+    let class = classify(
+        &rc.original_name,
+        &rc.cluster,
+        &rc.server,
+        rc.exec_command.as_deref(),
+        rc.auth_provider.as_deref(),
+    );
+    let auth_kind = auth_info_for(&rc)
+        .map(|info| auth_kind_of(&info))
+        .unwrap_or_else(|| "none".to_string());
+    ContextDto {
+        is_current: rc.is_current,
+        stable_id: rc.stable_id(),
+        source_file: rc.source.display().to_string(),
+        name: rc.display_name,
+        cluster: rc.cluster,
+        server: rc.server,
+        namespace: rc.namespace,
+        is_local: class.is_local,
+        provider: class.provider.map(|provider| provider.as_str().to_string()),
+        auth_kind,
+    }
+}
+
+/// Look up the full `AuthInfo` a resolved context uses, by re-reading its
+/// declaring file. `ResolvedContext` only carries the pieces `local_cluster`
+/// classification needs (`exec_command`, `auth_provider` name) — not the full
+/// auth block — so the auth kind is derived here, straight from the
+/// kubeconfig, rather than by widening `ResolvedContext` for this alone.
+fn auth_info_for(rc: &ResolvedContext) -> Option<AuthInfo> {
+    let config = Kubeconfig::read_from(&rc.source).ok()?;
+    config
+        .auth_infos
+        .into_iter()
+        .find(|entry| entry.name == rc.user)
+        .and_then(|entry| entry.auth_info)
+}
+
+/// Map a kubeconfig's `auth-info` to the credential MECHANISM it names —
+/// never the credential. Exec ARGUMENTS are deliberately dropped: they
+/// routinely carry client IDs and, in bad kubeconfigs, secrets, and this
+/// string ends up rendered in a table.
+fn auth_kind_of(auth: &AuthInfo) -> String {
+    if let Some(exec) = &auth.exec {
+        let command = exec.command.as_deref().unwrap_or("unknown");
+        return format!("exec plugin · {command}");
+    }
+    if let Some(provider) = &auth.auth_provider {
+        // The legacy `auth-provider` block (oidc, and the now-deprecated gcp
+        // and azure plugins) is a provider-driven mechanism like exec, not a
+        // bare credential — bucketed here as `oidc`. Only a plain-text field
+        // the kubeconfig already carries (e.g. an email) is ever appended;
+        // nothing from `provider.config` that could be a token or secret is.
+        return match provider.config.get("email") {
+            Some(account) => format!("oidc · {account}"),
+            None => "oidc".to_string(),
+        };
+    }
+    if auth.client_certificate.is_some() || auth.client_certificate_data.is_some() {
+        return "client certificate".to_string();
+    }
+    if auth.token.is_some() || auth.token_file.is_some() {
+        return "token".to_string();
+    }
+    if auth.username.is_some() || auth.password.is_some() {
+        return "basic".to_string();
+    }
+    if auth.impersonate.is_some() {
+        return "impersonation".to_string();
+    }
+    "none".to_string()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -335,6 +409,92 @@ mod tests {
     use super::*;
     use srelens_capability::Registry;
     use serde_json::json;
+
+    /// Build the DTO for a context declared in `file`, with no cluster/auth
+    /// details — enough to exercise `build_context_dto`'s file/id handling
+    /// without touching disk (`auth_info_for` fails closed to `None` for a
+    /// file that doesn't exist, which is fine: these tests don't assert on
+    /// `auth_kind`).
+    fn dto_for(name: &str, file: &str) -> ContextDto {
+        build_context_dto(ResolvedContext {
+            display_name: name.to_string(),
+            original_name: name.to_string(),
+            source: PathBuf::from(file),
+            cluster: String::new(),
+            server: String::new(),
+            user: String::new(),
+            namespace: String::new(),
+            is_current: false,
+            exec_command: None,
+            auth_provider: None,
+        })
+    }
+
+    /// An exec-plugin `AuthInfo` naming `command`, with `args` attached the
+    /// way a real exec plugin's arguments would be — so the leak test has
+    /// something to actually catch if `auth_kind_of` ever started including
+    /// them.
+    fn exec_auth(command: &str, args: &[&str]) -> AuthInfo {
+        AuthInfo {
+            exec: Some(kube::config::ExecConfig {
+                command: Some(command.to_string()),
+                args: Some(args.iter().map(|a| a.to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn token_auth(token: &str) -> AuthInfo {
+        serde_yaml::from_str(&format!("token: \"{token}\"\n")).expect("valid auth-info fixture")
+    }
+
+    fn client_cert_auth() -> AuthInfo {
+        AuthInfo {
+            client_certificate_data: Some("c2VjcmV0LWNlcnQ=".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn empty_auth() -> AuthInfo {
+        AuthInfo::default()
+    }
+
+    #[test]
+    fn context_dto_names_the_file_it_was_declared_in() {
+        let dto = dto_for("prod-eu", "/home/dana/.kube/config");
+        assert_eq!(dto.source_file, "/home/dana/.kube/config");
+    }
+
+    #[test]
+    fn a_unique_context_name_still_carries_its_file() {
+        // `display_name` (the DTO's `name`) gains a `stem/` prefix only on a
+        // cross-file collision (#265); a unique name carries none. `stable_id`
+        // itself is unconditionally `{source}#{original_name}` — it always
+        // embeds the path, collision or not — so it can't be what
+        // distinguishes this case. The point stands regardless: `source_file`
+        // must come from `ResolvedContext.source` directly, the same place
+        // `stable_id` takes it, not by parsing either string back apart.
+        let dto = dto_for("only-one", "/home/dana/.kube/edge.yaml");
+        assert_eq!(dto.name, "only-one", "unique name carries no collision prefix");
+        assert_eq!(dto.source_file, "/home/dana/.kube/edge.yaml");
+    }
+
+    #[test]
+    fn auth_kind_names_the_mechanism_and_never_the_secret() {
+        assert_eq!(auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"])), "exec plugin · gcloud");
+        assert_eq!(auth_kind_of(&token_auth("eyJhbGciOi.very.secret")), "token");
+        assert_eq!(auth_kind_of(&client_cert_auth()), "client certificate");
+        assert_eq!(auth_kind_of(&empty_auth()), "none");
+    }
+
+    #[test]
+    fn auth_kind_leaks_no_credential_material() {
+        let kind = auth_kind_of(&token_auth("eyJhbGciOi.very.secret"));
+        assert!(!kind.contains("eyJ"), "auth kind must not carry the token: {kind}");
+        let exec = auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"]));
+        assert!(!exec.contains("s3cr3t"), "auth kind must not carry exec args: {exec}");
+    }
 
     #[test]
     fn capability_has_expected_id_and_annotations() {
