@@ -13,11 +13,36 @@ import { describeError, startHelmOp } from "@srelens/core";
  * **Nothing here cancels anything, and no name in this file may suggest it.**
  * A shell dies with its process and a tunnel dies with its socket, so their
  * stores can honestly offer to end one. A `helm upgrade` is a cluster mutation
- * that continues whether srelens watches or not: core's `close()` unsubscribes
- * this window from the stream and touches the release not at all. That is why
- * {@link dismissHelmOp} declines to remove a `running` row — a row that
+ * partway through, and there is no honest way to take it back — which is why
+ * {@link dismissHelmOp} declines to remove a `running` row: a row that
  * disappeared under a dismiss button would read as a cancel, and it is not
  * one.
+ *
+ * **`close()` is not a quiet unsubscribe. It kills helm.** The handle core
+ * hands back invokes `helm_op_close`, which aborts the tokio task owning the
+ * `tokio::process::Child` — and that child is spawned `kill_on_drop(true)`, so
+ * dropping the aborted future SIGKILLs helm wherever it had reached. A release
+ * left half-upgraded, its Secret mid-write, and no output saying why, because
+ * the process that would have said it is gone. `crates/streams/src/helm.rs`
+ * calls it "best-effort abort" and means exactly that.
+ *
+ * **So the rule this module keeps: never close a handle whose row is still
+ * `running`.** Every call obeys it today — {@link settle} closes after the
+ * process has already exited, {@link dismissHelmOp} declines a `running` row
+ * outright, the late-handle guard in {@link startHelmOperation} closes only a
+ * row that has already settled, and `__resetHelmOpsForTests` runs under vitest
+ * alone. Nothing in a running app reaches {@link forget} while an operation is
+ * in flight, and that is a property to keep rather than one to rely on
+ * accidentally: a new caller of `forget`, or a new export of any kind, must
+ * check the row's state and leave a `running` one watching. There is no "just
+ * stop listening" to reach for here — from this side, stopping listening IS
+ * the kill. `helmOps.test.ts` pins both halves: that no live entry point
+ * closes a running handle, and that the export list is the one that claim was
+ * traced across.
+ *
+ * (The backend's `HelmManager::shutdown_all` aborts the same way when a user's
+ * environment is dropped. That is out of this module's hands and deliberate
+ * there; it is not licence to do it from here.)
  *
  * **No status word or tone lives here.** This module holds state; the words
  * for it come from core, the same way every other screen in this migration
@@ -154,8 +179,10 @@ export async function startHelmOperation(req: HelmOpRequest): Promise<number> {
   // handle to close, so storing this one would park a subscription nothing
   // ever closes. (A row that has left entirely is the test reset's doing:
   // `dismissHelmOp` declines every `running` row, and the row is `running` for
-  // this whole window.) Stop watching what just opened. The operation itself
-  // carries on regardless; nothing here could stop it.
+  // this whole window.) Closing here is safe for the one reason closing is
+  // ever safe in this module: the guard runs only when the row has already
+  // settled, so the helm process this would kill has already exited. A
+  // `running` row keeps its handle and falls through.
   const row = ops.find((o) => o.id === id);
   if (!row || row.state !== "running") {
     handle.close();
@@ -184,7 +211,15 @@ export function dismissHelmOp(id: number): void {
   commit(ops.filter((o) => o.id !== id));
 }
 
-/** Reset the module-level store between tests. */
+/**
+ * Reset the module-level store between tests.
+ *
+ * The one place that closes a `running` operation's handle, and therefore the
+ * one exception to this module's rule. It is safe only because it never runs
+ * outside vitest, where the handle is a double and no helm process exists to
+ * kill. Do not call it from app code, and do not copy its shape into a
+ * "clear everything" the shell could reach.
+ */
 export function __resetHelmOpsForTests(): void {
   for (const id of [...handles.keys()]) forget(id);
   for (const id of [...flushTimers.keys()]) forget(id);
@@ -298,6 +333,8 @@ function flush(id: number, second: number = wholeSecond(Date.now())) {
  */
 function settle(id: number, reason: unknown) {
   flush(id);
+  // Safe to close here, and only here by default: `onExit` fired, so the helm
+  // process is gone and there is nothing left for the abort to kill.
   forget(id);
   const error = describedReason(reason);
   commit(
@@ -311,10 +348,14 @@ function settle(id: number, reason: unknown) {
 }
 
 /**
- * Stop watching this operation and drop its buffers. Idempotent.
+ * Let go of this operation: drop its buffers and close its stream handle.
+ * Idempotent.
  *
- * Watching is all this ends. `close()` unsubscribes from the stream; the helm
- * process and the cluster mutation behind it are entirely unaffected.
+ * **Callers must have established that the operation is no longer `running`.**
+ * `close()` kills the helm process — see the rule in this module's header —
+ * so this is a function for an operation that has already ended, not a way to
+ * stop caring about one that has not. The three callers that reach a live row
+ * each check first, and the fourth is the test reset.
  */
 function forget(id: number) {
   clearTimeout(flushTimers.get(id));

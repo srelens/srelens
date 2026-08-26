@@ -170,8 +170,9 @@ describe("how an operation ends", () => {
 
     expect(getHelmOps()[0].state).toBe("done");
     expect(getHelmOps()[0].error).toBeUndefined();
-    // `close()` unsubscribes this window from the stream. The cluster
-    // mutation, clean or not, was over before this ran.
+    // Closing is what the store does with an operation that is over, and it
+    // is safe here for the reason it is only ever safe: `onExit` has fired, so
+    // the helm process this abort would have killed has already exited.
     expect(helm.handle.close).toHaveBeenCalledTimes(1);
   });
 
@@ -232,6 +233,63 @@ describe("an operation in flight", () => {
     const named = Object.keys(helmOps);
     expect(named).not.toHaveLength(0);
     expect(named.filter((n) => /cancel|abort|kill|terminate/i.test(n))).toEqual([]);
+  });
+
+  it("is left watching by every live way into this module", async () => {
+    const helm = fakeHelm();
+    const id = await startHelmOperation(upgrade);
+    const other = fakeHelm();
+    const otherId = await startHelmOperation({ ...upgrade, release: "web", kind: "install" });
+
+    // Every entry point this module offers a caller, aimed at operations that
+    // are still running: a start that resolved, output arriving, a reader
+    // subscribing and reading, a dismiss on a running row, and a dismiss on an
+    // id that is not here at all.
+    helm.out("Waiting for deployment rollout to finish");
+    const unsubscribe = subscribeHelmOps(() => {});
+    getHelmOps();
+    dismissHelmOp(id);
+    dismissHelmOp(otherId);
+    dismissHelmOp(9999);
+    unsubscribe();
+
+    // Not one of them may have closed a handle. `close()` is not a quiet
+    // unsubscribe: it reaches `helm_op_close`, which aborts the task that owns
+    // the `tokio::process::Child`, and that child was spawned
+    // `kill_on_drop(true)` — so closing SIGKILLs helm in the middle of a
+    // cluster mutation. See the note in `helmOps.ts`.
+    expect(getHelmOps().map((o) => o.state)).toEqual(["running", "running"]);
+    expect(helm.handle.close).not.toHaveBeenCalled();
+    expect(other.handle.close).not.toHaveBeenCalled();
+  });
+
+  it("offers exactly the five names that were traced against that rule", () => {
+    // A surface pin, not a style rule. The claim in `helmOps.ts` is that NO
+    // live path closes a running operation's handle, and that claim was
+    // established by walking these five exports. A sixth cannot be added
+    // without this failing, which is the point: whoever adds it has to come
+    // here, read why, and check their own path before the list grows.
+    expect(Object.keys(helmOps).sort()).toEqual([
+      "__resetHelmOpsForTests",
+      "dismissHelmOp",
+      "getHelmOps",
+      "startHelmOperation",
+      "subscribeHelmOps",
+    ]);
+  });
+
+  it("is closed only by the test reset, which no running app reaches", async () => {
+    const helm = fakeHelm();
+    await startHelmOperation(upgrade);
+    expect(helm.handle.close).not.toHaveBeenCalled();
+
+    __resetHelmOpsForTests();
+
+    // Named rather than hidden: this is the one path in the module that closes
+    // a handle while its operation is running, and it exists so a suite does
+    // not leak subscriptions between cases. Under vitest the handle is a
+    // double and nothing dies. It must not gain a caller outside a test.
+    expect(helm.handle.close).toHaveBeenCalledTimes(1);
   });
 });
 
