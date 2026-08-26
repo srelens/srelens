@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Status } from "./Status";
 import { ConsoleProvider, useConsole } from "../console";
-import { setState } from "../lib/tabsStore";
+import { activeRoute, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { probeCluster, resetProbes } from "../lib/probe";
 import { resetView } from "../lib/workspace";
@@ -36,11 +36,26 @@ vi.mock("../lib/sessions", () => ({
   },
 }));
 
+// Helm operations are ui-next's own store too, and read the same way: a
+// module-level snapshot faked at the boundary rather than a real `helm
+// upgrade` stood up through the backend. The getter hands back the same array
+// until it is swapped, which is what `useSyncExternalStore` requires — and
+// what a component that filtered inside its snapshot would break.
+const helmOps = vi.hoisted(() => ({ list: [] as unknown[], notify: new Set<() => void>() }));
+vi.mock("../lib/helmOps", () => ({
+  getHelmOps: () => helmOps.list,
+  subscribeHelmOps: (l: () => void) => {
+    helmOps.notify.add(l);
+    return () => helmOps.notify.delete(l);
+  },
+}));
+
 const ctx = { name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false };
 
 beforeEach(() => {
   forwards.list = [];
   sessions.list = [];
+  helmOps.list = [];
   resetView();
   resetProbes();
 });
@@ -156,6 +171,85 @@ describe("Status", () => {
     sessions.list = [{ id: 1, state: "closed" }];
     mount(<Status contexts={[ctx]} />);
     expect(screen.queryByRole("button", { name: /shell/i })).toBeNull();
+  });
+
+  it("counts the helm operations still changing the cluster", () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [
+      { id: 1, state: "running" },
+      { id: 2, state: "running" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "2 helm operations" })).toBeDefined();
+  });
+
+  it("counts only the operations still in flight", () => {
+    setState(defaultState([ctx]));
+    // A `done` upgrade has finished changing the cluster and a `failed` one
+    // has stopped trying; neither is in flight. Three rows, one running — and
+    // the singular that one calls for, which a count over all three would get
+    // wrong twice.
+    helmOps.list = [
+      { id: 1, state: "running" },
+      { id: 2, state: "done" },
+      { id: 3, state: "failed" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation" })).toBeDefined();
+    // And the `done` one is not folded into the failure either: "finished" and
+    // "failed" are two states, and a segment toned `sev` may only count one.
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeDefined();
+  });
+
+  it("says nothing about helm when nothing is in flight and nothing failed", () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [{ id: 1, state: "done" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByRole("button", { name: /helm/i })).toBeNull();
+    // Named as well as counted: `0 helm operations` is the exact readout the
+    // absent-at-zero rule exists to keep off a strip already carrying five.
+    expect(screen.queryByText(/0 helm operation/i)).toBeNull();
+  });
+
+  it("says so on the strip when a helm operation has failed", () => {
+    setState(defaultState([ctx]));
+    // The reader closed the dialog and the upgrade failed after it had gone.
+    // Nothing else on screen reports that, and the count cannot: an operation
+    // that fails leaves nothing in flight, which is what a reader who started
+    // no operation at all sees.
+    helmOps.list = [{ id: 1, state: "failed" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "0 helm operations" })).toBeNull();
+  });
+
+  it("tells a failed operation apart from the ones still running", () => {
+    setState(defaultState([ctx]));
+    // Both segments at once, and both saying "1": the fixture that catches an
+    // assertion which would pass for either one on its own.
+    helmOps.list = [
+      { id: 1, state: "running" },
+      { id: 2, state: "failed" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "1 helm operation" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "1 helm operation failed" })).toBeDefined();
+  });
+
+  it("opens the helm screen from either helm readout", async () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [{ id: 1, state: "running" }];
+    mount(<Status contexts={[ctx]} />);
+    await userEvent.click(screen.getByRole("button", { name: "1 helm operation" }));
+    expect(activeRoute()).toBe("/helm");
+  });
+
+  it("opens the helm screen from the failed readout", async () => {
+    setState(defaultState([ctx]));
+    helmOps.list = [{ id: 1, state: "failed" }];
+    mount(<Status contexts={[ctx]} />);
+    await userEvent.click(screen.getByRole("button", { name: "1 helm operation failed" }));
+    expect(activeRoute()).toBe("/helm");
   });
 
   it("opens the console from Ask", async () => {
