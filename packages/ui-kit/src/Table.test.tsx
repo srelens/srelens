@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Table, filterTableData, computeVisibleRange, type Column } from "./Table";
+import { Table, filterTableData, computeVisibleRange, rowPitch, type Column } from "./Table";
 
 /**
  * Compact ages as seconds, standing in for core's `ageSeconds`, which the kit
@@ -151,6 +151,133 @@ describe("Table virtualization", () => {
   });
 });
 
+/**
+ * MEASURED in Chrome, 1500 rows, dpr 1, against `packages/ui-kit/src/styles/kit.css`:
+ * every rendered row reports `getBoundingClientRect().height` 27.375 EXCEPT the
+ * one sitting directly under the top spacer, which reports 27.000. The table is
+ * `border-collapse: collapse` and `.tbl-spacer` declares `border: 0 !important`,
+ * so the boundary row has no rule to share with the row above it and comes out a
+ * fraction of a pixel shorter than every other row in the list.
+ *
+ * That is the row the virtualizer used to sample, and the sample is multiplied by
+ * the number of rows the window skips. Measured consequence: the scroll
+ * container's `scrollHeight` flipped between 41089 and 40544 — 545px — as the
+ * sampled row moved in and out of the spacer's shadow, on every scroll, which is
+ * the scrollbar resizing under the reader's thumb.
+ *
+ * The mock below reproduces exactly that geometry: heights, and the tops that
+ * follow from them.
+ */
+function mockCollapsedBorderLayout() {
+  const BOUNDARY = 27;
+  const INTERIOR = 27.375;
+  vi.spyOn(HTMLTableRowElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLTableRowElement) {
+      const rows = Array.from(this.parentElement?.querySelectorAll("tr.tbl-row") ?? []);
+      const index = rows.indexOf(this);
+      // Only the row under a spacer is short; without one, every row is interior.
+      const shortFirst = Boolean(
+        (rows[0] as HTMLElement | undefined)?.previousElementSibling?.classList.contains(
+          "tbl-spacer",
+        ),
+      );
+      const height = index === 0 && shortFirst ? BOUNDARY : INTERIOR;
+      const top =
+        index <= 0 ? 0 : (shortFirst ? BOUNDARY : INTERIOR) + (index - 1) * INTERIOR;
+      return { height, top, width: 140 } as DOMRect;
+    },
+  );
+  vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 140,
+  } as DOMRect);
+}
+
+/** Every `<td style="height: …">` a spacer row reserves, in pixels. */
+function padHeight(container: HTMLElement): number {
+  return Array.from(container.querySelectorAll("tr.tbl-spacer td")).reduce(
+    (total, td) => total + parseFloat((td as HTMLTableCellElement).style.height || "0"),
+    0,
+  );
+}
+
+/** The whole list's height as the DOM reports it: the pads, plus the real rows. */
+function scrollExtent(container: HTMLElement): number {
+  const rows = Array.from(container.querySelectorAll("tbody tr.tbl-row")).reduce(
+    (total, row) => total + row.getBoundingClientRect().height,
+    0,
+  );
+  return padHeight(container) + rows;
+}
+
+describe("Table virtual scroll extent", () => {
+  const cols: Column<{ name: string; phase: string }>[] = [
+    { key: "name", header: "Name" },
+    { key: "phase", header: "Phase" },
+  ];
+  const data = Array.from({ length: 1000 }, (_, i) => ({ name: `row-${i}`, phase: "x" }));
+
+  function scrolled(to: number) {
+    const utils = render(
+      <div data-testid="scroll" style={{ overflowY: "auto" }}>
+        <Table columns={cols} data={data} getRowKey={(r) => r.name} />
+      </div>,
+    );
+    const sp = screen.getByTestId("scroll");
+    Object.defineProperty(sp, "clientHeight", { value: 200, configurable: true });
+    Object.defineProperty(sp, "scrollTop", { value: 0, writable: true, configurable: true });
+    fireEvent.scroll(sp);
+    Object.defineProperty(sp, "scrollTop", { value: to, writable: true, configurable: true });
+    // Twice: `measure` reads the DOM the *previous* render left behind, so the
+    // first scroll to a new position still sees the window it is replacing. The
+    // second is the one that samples a row under a spacer — which is exactly the
+    // steady state a reader scrolling a long list is in.
+    fireEvent.scroll(sp);
+    fireEvent.scroll(sp);
+    return { ...utils, sp };
+  }
+
+  it("reserves the interior row pitch per skipped row, not the boundary row's height", () => {
+    mockCollapsedBorderLayout();
+    const { container } = scrolled(4000);
+    const { start } = computeVisibleRange({
+      scrollTop: 4000,
+      viewportHeight: 200,
+      rowHeight: 27.375,
+      total: 1000,
+      overscan: 8,
+    });
+    const top = parseFloat(
+      (container.querySelector("tr.tbl-spacer td") as HTMLTableCellElement).style.height,
+    );
+    expect(top).toBeCloseTo(start * 27.375, 3);
+    // Guard: the two units really do disagree, so this is not vacuously true.
+    expect(start * 27.375).not.toBeCloseTo(
+      computeVisibleRange({
+        scrollTop: 4000,
+        viewportHeight: 200,
+        rowHeight: 27,
+        total: 1000,
+        overscan: 8,
+      }).start * 27,
+      3,
+    );
+  });
+
+  it("keeps the scroll extent steady as the list scrolls", () => {
+    mockCollapsedBorderLayout();
+    const { container, sp } = scrolled(0);
+    const atTop = scrollExtent(container);
+    expect(atTop).toBeGreaterThan(20000); // guard: a real extent, not zero
+    Object.defineProperty(sp, "scrollTop", { value: 4000, writable: true, configurable: true });
+    fireEvent.scroll(sp);
+    fireEvent.scroll(sp);
+    // 1px of slack: the boundary row genuinely is 0.375px shorter than the rest.
+    // The defect this pins moved the extent by 375px on this list, and by a
+    // measured 545px on the 1500-row list it was found on.
+    expect(scrollExtent(container)).toBeCloseTo(atTop, 0);
+  });
+});
+
 describe("Table sorting", () => {
   it("orders 64-bit integers exactly, beyond Number's safe range", () => {
     // Number() collapses these two to the same value, so a numeric sort key
@@ -190,6 +317,26 @@ describe("Table sorting", () => {
       (tr) => tr.textContent?.slice(0, 5),
     );
     expect(order?.[0]).toContain("none");
+  });
+});
+
+describe("rowPitch", () => {
+  it("takes the distance between two interior rows, not the first gap", () => {
+    // Chrome's own numbers: a 27.000 boundary row, then 27.375 all the way down.
+    expect(rowPitch([0, 27, 54.375, 81.75], 27)).toBeCloseTo(27.375, 5);
+  });
+
+  it("falls back to the row's own height when there is no interior gap to read", () => {
+    expect(rowPitch([0, 27], 27)).toBe(27);
+    expect(rowPitch([0], 27)).toBe(27);
+    expect(rowPitch([], 27)).toBe(27);
+  });
+
+  it("falls back when the tops are not measurable, which is jsdom", () => {
+    // Every rect is zeroed there, so the distance is 0 and the table renders
+    // every row rather than dividing the list up by nothing.
+    expect(rowPitch([0, 0, 0], 0)).toBe(0);
+    expect(rowPitch([NaN, NaN, NaN], 20)).toBe(20);
   });
 });
 

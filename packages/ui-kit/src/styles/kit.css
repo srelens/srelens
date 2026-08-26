@@ -244,12 +244,21 @@
   .tbl tbody tr:hover { background: var(--surface-sunk); }
   .tbl tbody tr:hover .row-ask { opacity: 1; }
   .tbl tbody tr[data-selected="true"] { background: var(--accent-wash); }
+  /* Tabular figures, because these cells hold live numbers. CPU, MEMORY,
+     RESTARTS and AGE refresh on a poll while the reader is looking at the list,
+     and `--font-sans` (system-ui) spaces its digits proportionally: measured at
+     13px, the advances run 5.954px for "1" to 8.290px for "4". End-aligned, a
+     single changed digit drags every digit before it along — one MEMORY cell's
+     text sat at 1194.28, 1195.75 and 1197.13 across three polls. Twenty-five
+     rows doing that at once is a table that will not hold still. */
   .tbl td {
     padding: var(--pad-y) 0.7rem;
     height: var(--row-h);
     font-size: 0.8125rem;
     vertical-align: middle;
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
   }
   /* The 0.7rem padding above is symmetric, so an end-aligned cell keeps its
      trailing breathing room instead of hugging the next column's rule. */

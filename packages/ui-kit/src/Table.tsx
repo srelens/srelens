@@ -183,6 +183,35 @@ export function computeVisibleRange({
   return { start, end };
 }
 
+/**
+ * How far down the list one row advances it — the unit the spacer rows reserve
+ * space in.
+ *
+ * Taken from the distance between two *interior* rows, not from the height of
+ * the first rendered one, which is what this used to read and is a different
+ * number. The table is `border-collapse: collapse`, so every rule is shared
+ * between the two rows it separates; `.tbl-spacer` declares `border: 0`, so the
+ * row directly under the top spacer has no rule to share and comes out shorter
+ * than the rest. MEASURED in Chrome on a 1500-row pod list: 27.000 for that one
+ * row against 27.375 for every other, at every scroll position.
+ *
+ * `topPad`/`bottomPad` multiply this by the number of rows the window skips, so
+ * sampling the short row scaled a 0.375px error to 545px of `scrollHeight`, and
+ * the extent flipped between the two values as the sampled row moved in and out
+ * of the spacer's shadow — the scrollbar resizing under the reader's thumb on
+ * every scroll, which is what "scroll is not smooth" was.
+ *
+ * `tops` is the top of each of the first few rendered rows, in order.
+ * `fallbackHeight` is the first row's own height, used when there are too few
+ * rows to take a distance from, and when the tops are not real numbers — which
+ * is jsdom, where every rect is zeroed and the table renders every row anyway.
+ */
+export function rowPitch(tops: readonly number[], fallbackHeight: number): number {
+  // tops[2] - tops[1], never tops[1] - tops[0]: the first gap is the short one.
+  const pitch = tops.length >= 3 ? tops[2] - tops[1] : NaN;
+  return Number.isFinite(pitch) && pitch > 0 ? pitch : fallbackHeight;
+}
+
 /** Apply the toolbar query to one selected column, or all searchable columns. */
 export function filterTableData<T>(
   data: T[],
@@ -399,11 +428,20 @@ export function Table<T>({
     if (!scrollParent) return;
     const parent = scrollParent;
     const measure = () => {
-      const firstRow = root.querySelector<HTMLElement>("tbody tr.tbl-row");
+      // Three rects, not one: `rowPitch` needs two interior tops, and three is
+      // as many forced layouts as this is allowed to cost on a scroll tick.
+      const sample = Array.from(root.querySelectorAll<HTMLElement>("tbody tr.tbl-row"))
+        .slice(0, 3)
+        .map((row) => row.getBoundingClientRect());
       setMetrics({
         scrollTop: parent.scrollTop,
         viewportHeight: parent.clientHeight,
-        rowHeight: firstRow ? firstRow.getBoundingClientRect().height : 0,
+        rowHeight: sample.length
+          ? rowPitch(
+              sample.map((rect) => rect.top),
+              sample[0].height,
+            )
+          : 0,
       });
     };
     measure();
