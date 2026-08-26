@@ -12,6 +12,7 @@ import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
 import { Terminals } from "../screens/Terminals";
+import { Helm } from "../screens/Helm";
 import { Toolbox } from "../screens/Toolbox";
 import { Workloads } from "../screens/Workloads";
 
@@ -181,6 +182,14 @@ suite("screenFor", () => {
     // Without an entry here it landed the reader on the Placeholder with a
     // live PTY running behind it and nothing on screen to attach to.
     expect(screenFor("/terminals")).toBe(Terminals);
+  });
+
+  it("resolves /helm to the helm screen", () => {
+    // Cluster-scoped, and the only route that reaches the release table, the
+    // diff pane and the four operations. Without an entry here `/helm` titled
+    // itself correctly in the strip and then rendered the Placeholder — the
+    // sidebar's Helm node led nowhere.
+    expect(screenFor("/helm")).toBe(Helm);
   });
 
   it("resolves /toolbox to the toolbox screen", () => {

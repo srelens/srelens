@@ -224,6 +224,11 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // because it shares their shape — a session outlives the tab that started
   // it, so this screen is where the ones already running are seen and ended.
   { route: "/terminals", name: "Terminals" },
+  // The release table, the rendered diff between two revisions, and the four
+  // operations. Listed with forwards and terminals because it shares their
+  // shape: an upgrade or a rollback outlives the dialog that started it, and
+  // the status strip counts the ones still running.
+  { route: "/helm", name: "Helm" },
   // The only screen here that is about the machine rather than a cluster: the
   // managed kubectl, helm and krew under ~/.srelens/bin, and what the active
   // context's exec-auth needs on PATH.

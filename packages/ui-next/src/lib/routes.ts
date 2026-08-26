@@ -4,6 +4,7 @@ import { parseDetailRoute } from "./detailRoute";
 import { AppLog } from "../screens/AppLog";
 import { Events } from "../screens/Events";
 import { Forwards } from "../screens/Forwards";
+import { Helm } from "../screens/Helm";
 import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
@@ -157,6 +158,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // session first and opens this tab on it, so without this entry that action
   // left a live PTY running behind a Placeholder.
   "/terminals": Terminals,
+  // Cluster-scoped, and the last of the three screens whose work outlives the
+  // tab: an upgrade or a rollback started here keeps running in `helmOps`
+  // after its dialog closes, and the status strip counts it from there. The
+  // sidebar's Helm node points at this route and nothing else does.
+  "/helm": Helm,
   // App-scoped: the managed kubectl, helm and krew are the machine's, and the
   // exec-auth rail is the only part of it that looks at a context at all.
   "/toolbox": Toolbox,
