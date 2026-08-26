@@ -176,6 +176,24 @@ describe("HelmOpDialog — the equivalent command", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("escapes an apostrophe rather than closing the quote it opened", async () => {
+    // The wrapping half of `quoted` is not the whole of it. Left unescaped,
+    // the displayed line reads `'./charts/dev's chart'`, which a shell splices
+    // into `./charts/devs chart` — no error, and a DIFFERENT path than the one
+    // srelens ran. That silent divergence is exactly what showing the command
+    // is for.
+    open({ chart: "./charts/dev's chart" });
+    await screen.findByRole("dialog");
+    expect(shown()).toBe(
+      `helm install ${RELEASE} './charts/dev'\\''s chart' --namespace ${NAMESPACE}`,
+    );
+    await userEvent.click(button("Install"));
+    await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
+    // The argv is unquoted either way: quoting is a fact about shells, and
+    // nothing between here and helm is one.
+    expect(store.startHelmOperation.mock.calls[0][0].args[2]).toBe("./charts/dev's chart");
+  });
+
   it("submits exactly the argv it displayed", async () => {
     open({ kind: "upgrade" });
     await screen.findByRole("dialog");
@@ -220,6 +238,17 @@ describe("HelmOpDialog — uninstall's gate", () => {
     expect(button("Uninstall").disabled).toBe(false);
   });
 
+  it("stays shut when there is no release name to type", async () => {
+    // Task 8 can mount this before a selection resolves, or on a release whose
+    // name failed to load. Without the guard `complete` is true, the field
+    // reads `Type  to confirm`, and `typed === release` is `"" === ""` — so the
+    // danger button opens the moment the dialog does, with nothing typed, and
+    // one click submits `helm uninstall "" --namespace <ns>`.
+    open({ kind: "uninstall", release: "" });
+    await screen.findByRole("dialog");
+    expect(button("Uninstall").disabled).toBe(true);
+  });
+
   it("says what an uninstall removes without inventing a count of it", async () => {
     open({ kind: "uninstall" });
     const alert = await screen.findByRole("alert");
@@ -227,11 +256,17 @@ describe("HelmOpDialog — uninstall's gate", () => {
     expect(alert.textContent).toMatch(/persistent volume claims are kept/i);
     expect(alert.textContent).toMatch(/unless the chart marks them for deletion/i);
     // §A.5's "Twelve pods, one Service, one Ingress and two ConfigMaps" is the
-    // design's fixture. Nothing has counted this release's objects, so nothing
-    // here may say how many there are.
-    expect(alert.textContent).not.toMatch(/\d/);
-    expect(alert.textContent?.toLowerCase()).not.toContain("twelve");
-    expect(alert.textContent?.toLowerCase()).not.toContain("configmap");
+    // design's fixture. Nothing has counted this release's objects, so the
+    // PROPERTY to hold is that no count is stated at all — in digits or in
+    // words — and that no object is named as being in this particular release.
+    // Pinning only the fixture's own tokens would let "three pods and a
+    // Service" through, which is the same lie in different words.
+    const counted =
+      /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a few|several|dozens?)\b/i;
+    expect(alert.textContent).not.toMatch(counted);
+    const named =
+      /\b(pods?|services?|ingress(es)?|configmaps?|secrets?|deployments?|statefulsets?|jobs?)\b/i;
+    expect(alert.textContent).not.toMatch(named);
   });
 });
 
@@ -252,6 +287,39 @@ describe("HelmOpDialog — rollback's gate", () => {
     expect(button("Roll back to 3").disabled).toBe(true);
     await userEvent.click(confirm);
     expect(button("Roll back to 3").disabled).toBe(false);
+  });
+
+  it("will not default to a revision whose status this build cannot read", async () => {
+    // core's `neutral` is its UNKNOWN bucket as well as its `superseded` one —
+    // "it might be a failure this table has no name for". A status word helm
+    // adds tomorrow must not become the default target of a rollback, and
+    // neither must a revision left behind by `uninstall --keep-history`.
+    open({
+      kind: "rollback",
+      revision: 6,
+      history: [
+        ...HISTORY,
+        { revision: 5, status: "uninstalled", updated: "2026-08-25", chartVersion: "18.3.0", description: "Uninstalled" },
+        { revision: 6, status: "quiesced", updated: "2026-08-26", chartVersion: "18.4.0", description: "Something new" },
+      ],
+    });
+    await screen.findByRole("dialog");
+    // Revision 3 — the newest one that is actually deployed — not 5 and not 6.
+    expect(button("Roll back to 3")).toBeTruthy();
+    expect((hintedField("Target revision") as HTMLInputElement).value).toBe("3");
+  });
+
+  it("keeps a superseded revision, which is what a good one becomes", async () => {
+    // The other half of the same rule: `superseded` shares core's `neutral`
+    // bucket with the unknowns, and it is the ordinary state of every revision
+    // that WAS deployed and then replaced — the usual thing to roll back to.
+    open({
+      kind: "rollback",
+      revision: 3,
+      history: HISTORY.filter((r) => r.revision !== 4),
+    });
+    await screen.findByRole("dialog");
+    expect(button("Roll back to 2")).toBeTruthy();
   });
 
   it("takes another revision when the reader names one", async () => {

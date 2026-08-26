@@ -112,13 +112,20 @@ export function helmCommand(plan: HelmPlan): string {
  * than the one running now, that helm does not report as failed or as still
  * in flight.
  *
- * The judgement is core's, not this file's. `helmStatus` classifies helm's own
- * vocabulary — `deployed` is `success`, `failed` is `danger`, the `pending-*`
- * states are `warning`, and a revision that was deployed and then replaced
- * reads `superseded`, which is `neutral`. A revision worth rolling back to is
- * one of the two that are neither broken nor unfinished, and that test is read
- * off core's health rather than off a list of status words kept here. Ten of
- * those have been removed on this migration.
+ * `deployed` is read from core: `helmStatus` classifies helm's own vocabulary,
+ * and `success` is the one health that means this revision is up right now.
+ *
+ * `superseded` is named here, and ONLY `superseded`, because core's `neutral`
+ * cannot be trusted as a positive answer. That bucket holds `superseded`,
+ * `uninstalled` AND every status word this build has never heard of —
+ * `helmStatus` documents the fallback as "it might be a failure this table has
+ * no name for". Accepting the bucket wholesale would make a helm status added
+ * tomorrow, or an `uninstalled` revision left behind by
+ * `helm uninstall --keep-history`, the DEFAULT target of a rollback, under a
+ * hint promising it is the newest one helm does not report failed. So the one
+ * neutral word that actually means "this was deployed, then replaced" is named,
+ * and the unknown ones are left out. That is not a status-word table: nothing
+ * here renames or tones anything, and the health still comes from core.
  */
 export function lastGoodRevision(
   history: readonly HelmRevision[],
@@ -126,10 +133,7 @@ export function lastGoodRevision(
 ): HelmRevision | null {
   const candidates = history
     .filter((r) => r.revision !== current)
-    .filter((r) => {
-      const health = helmStatus(r.status).health;
-      return health === "success" || health === "neutral";
-    });
+    .filter((r) => helmStatus(r.status).health === "success" || r.status === "superseded");
   if (candidates.length === 0) return null;
   return candidates.reduce((best, r) => (r.revision > best.revision ? r : best));
 }
@@ -300,9 +304,9 @@ export function HelmOpDialog({
             {/* No counts. See this component's note: srelens has not asked the
                 cluster what is in this release, so it says what is true of any
                 release rather than what would sound specific. */}
-            Everything helm created for it goes, in one pass and with nothing to
-            undo it. Persistent volume claims are kept unless the chart marks
-            them for deletion.
+            Everything helm created for it goes, and nothing here can undo it.
+            Persistent volume claims are kept unless the chart marks them for
+            deletion.
           </Alert>
         )}
 
@@ -424,7 +428,7 @@ export function HelmOpDialog({
           </div>
           {/* The context is not a flag on the command — see `helmArgv` — so the
               cluster it runs against is said in words instead. */}
-          <div className="mt-1 text-[0.75rem] text-muted">
+          <div className="mt-1 break-words text-[0.75rem] text-muted">
             srelens runs this against {context}.
           </div>
         </div>
