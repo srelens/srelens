@@ -165,22 +165,34 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
 /// Map a kubeconfig's `auth-info` to the credential MECHANISM it names —
 /// never the credential. Exec ARGUMENTS are deliberately dropped: they
 /// routinely carry client IDs and, in bad kubeconfigs, secrets, and this
-/// string ends up rendered in a table.
+/// string ends up rendered in a table. The exec COMMAND is reduced to its
+/// basename for the same reason — a generated path can itself carry an
+/// identifier or secret (e.g. a per-account credential directory) and the
+/// basename (`gcloud`, `kubelogin`, `aws-iam-authenticator`) is all a reader
+/// needs to know which plugin authenticates the cluster.
 ///
 /// A legacy `auth-provider` block (`gcp`, `azure`, `oidc`, or any other name a
 /// plugin registers) is named as exactly what the kubeconfig calls it —
 /// never generalised to `oidc` for all of them, which would assert something
 /// the source doesn't say. The only extra detail ever appended is a plain-text
-/// `email` already sitting in that provider's config map; nothing else from
-/// that map is ever surfaced, since that's where a refresh token or secret
-/// would live.
+/// `email` already sitting in that provider's config map, and only when it
+/// actually looks like one (see [`looks_like_an_email`]) — `config` is a
+/// generic `HashMap<String, String>`, so nothing guarantees a provider ever
+/// puts a real address under that key rather than, say, a refresh token.
+/// Nothing else from that map is ever surfaced, since that's where a refresh
+/// token or client secret would live.
 fn auth_kind_of(auth: &AuthInfo) -> String {
     if let Some(exec) = &auth.exec {
         let command = exec.command.as_deref().unwrap_or("unknown");
-        return format!("exec plugin · {command}");
+        // Basename only, and split on both separators regardless of host OS
+        // (matching `local_cluster::is_cloud_auth`'s cross-platform basename
+        // handling) — a kubeconfig authored on Windows and read on macOS/
+        // Linux still shouldn't leak its directory structure here.
+        let basename = command.rsplit(['/', '\\']).next().unwrap_or(command);
+        return format!("exec plugin · {basename}");
     }
     if let Some(provider) = &auth.auth_provider {
-        return match provider.config.get("email") {
+        return match provider.config.get("email").filter(|value| looks_like_an_email(value)) {
             Some(account) => format!("{} · {account}", provider.name),
             None => provider.name.clone(),
         };
@@ -198,6 +210,21 @@ fn auth_kind_of(auth: &AuthInfo) -> String {
         return "impersonation".to_string();
     }
     "none".to_string()
+}
+
+/// Whether `value` looks enough like an email address to be safely echoed:
+/// contains `@`, carries no whitespace, and is short enough that a smuggled
+/// credential blob (a token, a JWT, a client secret) can't ride along under
+/// this key instead of a real address. This is a shape check, not proof —
+/// `AuthProviderConfig.config` is a generic `HashMap<String, String>`, and
+/// nothing in the kubeconfig format guarantees any particular value under
+/// `"email"` — but it is exactly what stops a construction like
+/// `"refresh-token:abc.def.SECRET"` (no `@`) from being surfaced verbatim.
+fn looks_like_an_email(value: &str) -> bool {
+    // RFC 5321's mailbox length ceiling; generous for a real address and far
+    // too short for most token/JWT/secret material to slip under.
+    const MAX_EMAIL_LEN: usize = 254;
+    value.len() <= MAX_EMAIL_LEN && value.contains('@') && !value.chars().any(char::is_whitespace)
 }
 
 /// Read each path and resolve its contexts. Unreadable files are skipped so one
@@ -304,6 +331,25 @@ mod tests {
     }
 
     #[test]
+    fn exec_command_is_reduced_to_its_basename() {
+        // A generated per-account path can itself carry an identifier or
+        // secret; only the plugin name is ever a reader's actual question.
+        let kind = auth_kind_of(&exec_auth("/opt/creds/AKIASECRETBLOB/get-token.sh", &[]));
+        assert_eq!(kind, "exec plugin · get-token.sh");
+        assert!(!kind.contains("AKIASECRETBLOB"));
+    }
+
+    #[test]
+    fn exec_command_basename_handles_windows_style_paths_too() {
+        let kind = auth_kind_of(&exec_auth(
+            r"C:\Users\dana\SECRET_TOKEN_DIR\gke-gcloud-auth-plugin.exe",
+            &[],
+        ));
+        assert_eq!(kind, "exec plugin · gke-gcloud-auth-plugin.exe");
+        assert!(!kind.contains("SECRET_TOKEN_DIR"));
+    }
+
+    #[test]
     fn legacy_auth_provider_is_named_as_what_it_is() {
         // Each provider is named verbatim — never generalised to `oidc`,
         // which would assert something the kubeconfig doesn't say.
@@ -324,6 +370,34 @@ mod tests {
     fn auth_provider_with_email_appends_only_the_email() {
         let kind = auth_kind_of(&auth_provider("oidc", &[("email", "dana@example.com")]));
         assert_eq!(kind, "oidc · dana@example.com");
+    }
+
+    #[test]
+    fn a_credential_parked_under_the_email_key_fails_the_shape_check() {
+        // The reviewer's construction: a real secret sitting under the one
+        // key meant to carry a plain-text account, with no `@` to give it
+        // away as anything but an address.
+        let kind = auth_kind_of(&auth_provider(
+            "oidc",
+            &[("email", "refresh-token:abc.def.SECRET")],
+        ));
+        assert_eq!(kind, "oidc", "a non-address value under `email` must not be echoed");
+        assert!(!kind.contains("SECRET") && !kind.contains("refresh-token"));
+    }
+
+    #[test]
+    fn an_overlong_value_under_email_fails_the_shape_check() {
+        // Has an `@` and no whitespace, so the naive check alone would pass
+        // it — the length bound is what catches a smuggled blob this shape.
+        let long = format!("{}@example.com", "a".repeat(300));
+        let kind = auth_kind_of(&auth_provider("oidc", &[("email", &long)]));
+        assert_eq!(kind, "oidc");
+    }
+
+    #[test]
+    fn a_value_with_whitespace_under_email_fails_the_shape_check() {
+        let kind = auth_kind_of(&auth_provider("oidc", &[("email", "not an email at all")]));
+        assert_eq!(kind, "oidc");
     }
 
     #[test]
@@ -465,5 +539,35 @@ mod tests {
             assert_eq!(context.auth_kind, "token", "auth_kind still computed correctly");
         }
         assert_eq!(reads.get(), 1, "the file must be read once, not once per context");
+    }
+
+    #[test]
+    fn resolve_from_cannot_be_reading_the_file_itself_for_auth_kind() {
+        // The counting test above only counts calls made through the reader
+        // `resolve_contexts_with` injects — it would not have caught a
+        // regression that added a direct `Kubeconfig::read_from(&sc.source)`
+        // inside `resolve_from`'s own per-context loop, which is structurally
+        // where the original re-read-per-context bug lived. That route
+        // doesn't go through any seam this module controls, so it can't be
+        // closed by counting calls to one.
+        //
+        // Instead this pins the actual property that matters: `resolve_from`
+        // is documented as pure over already-parsed input and must never
+        // touch disk at all. `source` here points at a path that does not
+        // exist. If anything in `resolve_from`'s call graph tried to read it
+        // for real — by any route — that read would fail, and `auth_kind`
+        // could not correctly come out as "token" except by already being in
+        // the in-memory `Kubeconfig` passed in.
+        let ghost = PathBuf::from("/definitely/does/not/exist/srelens-kube-ghost.yaml");
+        let yaml = "clusters:\n- name: c\n  cluster: { server: https://c }\ncontexts:\n- name: a\n  context: { cluster: c, user: u }\n- name: b\n  context: { cluster: c, user: u }\nusers:\n- name: u\n  user: { token: t }\n";
+        let resolved = resolve_from(&[SourceConfig {
+            source: ghost,
+            config: Kubeconfig::from_yaml(yaml).unwrap(),
+        }]);
+
+        assert_eq!(resolved.len(), 2);
+        for context in &resolved {
+            assert_eq!(context.auth_kind, "token");
+        }
     }
 }
