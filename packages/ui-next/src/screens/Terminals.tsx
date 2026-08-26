@@ -300,8 +300,14 @@ export function Terminals(_props: { route: string }) {
           ) : undefined
         }
       >
+        {/* The pane carries `min-w-0` as well as `min-h-0`. A flex item's
+            implicit `min-width: auto` refuses to shrink below its content, and
+            xterm sizes its content in explicit pixels — so without it the pane
+            grows to the terminal's width and pushes the 230px rail off the
+            right edge of the window. Fifth time this property has bitten on
+            this migration, and jsdom can see none of them. */}
         {active ? (
-          <div className="flex min-h-0 flex-1 flex-col">
+          <div data-slot="terminal-body" className="flex min-h-0 min-w-0 flex-1 flex-col">
             {active.error && (
               <Alert tone="sev" title="This session ended" className="m-3 mb-0">
                 {/* Already through `describeError` — the store describes a

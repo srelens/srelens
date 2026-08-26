@@ -163,6 +163,21 @@ afterEach(() => {
 });
 
 describe("Terminals", () => {
+  it("lets the pane shrink, so the rail is not pushed off the window", async () => {
+    // xterm sizes its content in explicit pixels, and a flex item's implicit
+    // `min-width: auto` refuses to shrink below its content — so without
+    // `min-w-0` the pane grows to the terminal's width and the 230px rail
+    // goes off the right edge. Seen on a real screen: the rail read
+    // "SESSIONS · 1 ATTACHE" with the D cut off.
+    //
+    // jsdom lays nothing out, so this asserts the mechanism. Fifth time this
+    // property has bitten on this migration.
+    draw();
+    await openPod("checkout-api-5c8b7f2d9-mk3wl");
+    const view = document.querySelector('[data-slot="terminal-body"]');
+    expect(view?.className ?? "").toContain("min-w-0");
+  });
+
   it("draws an ask control that is actually visible", () => {
     // `AskChip` is the ROW chip: `.row-ask` is `opacity: 0` until a `.tbl
     // tbody tr` is hovered, which is right for one of forty rows and

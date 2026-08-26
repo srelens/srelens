@@ -58,5 +58,9 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
     };
   }, [sessionId]);
 
-  return <div ref={ref} className="min-h-0 flex-1" />;
+  // `min-w-0` for the same reason as `min-h-0`: this box holds an element
+  // xterm sizes in explicit pixels, and a flex item's implicit
+  // `min-width: auto` would refuse to shrink below it — widening the pane
+  // instead of letting `FitAddon` narrow the terminal to fit.
+  return <div ref={ref} className="min-h-0 min-w-0 flex-1" />;
 }
