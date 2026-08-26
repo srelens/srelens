@@ -19,6 +19,7 @@ export { ContextMenu, type ContextMenuItem, type ContextMenuProps } from "./Cont
 export { CopyCommand, type CopyCommandProps } from "./CopyCommand";
 export { CustomizeMark, type CustomizeMarkProps, type MarkAppearance } from "./CustomizeMark";
 export { Dialog, type DialogProps } from "./Dialog";
+export { DiffLines, type DiffLinesProps, type DiffRow } from "./DiffLines";
 export { Drawer, type DrawerProps } from "./Drawer";
 export { DrillCard, type DrillCardProps, type DrillStep } from "./DrillCard";
 export { EmptyState, type EmptyStateProps } from "./EmptyState";
