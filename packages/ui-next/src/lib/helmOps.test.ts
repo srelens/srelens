@@ -235,6 +235,31 @@ describe("an operation in flight", () => {
   });
 });
 
+describe("an operation that ends before its start resolves", () => {
+  it("stops watching instead of parking a subscription nothing closes", async () => {
+    // Core registers both stream listeners before it invokes, so an operation
+    // that fails instantly can call `onExit` while `startHelmOp` is still
+    // pending. The handle arrives after the row has already settled.
+    const handle = { close: vi.fn() };
+    startHelmOp.mockImplementation(
+      (
+        _context: string,
+        _args: string[],
+        _data: (line: string) => void,
+        exit: (err: string | null) => void,
+      ) => {
+        exit("handler error: Error: UNINSTALL FAILED: release: not found");
+        return Promise.resolve(handle);
+      },
+    );
+
+    await startHelmOperation({ ...upgrade, kind: "uninstall" });
+
+    expect(getHelmOps()[0].state).toBe("failed");
+    expect(handle.close).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the store's snapshot", () => {
   it("is the same reference until something changes", async () => {
     fakeHelm();
@@ -297,6 +322,49 @@ describe("the store's snapshot", () => {
     turnTheSecond();
     expect(getHelmOps()[0].output).toEqual(["line 1", "line 2", "line 3"]);
     expect(notified).toHaveBeenCalledTimes(2);
+  });
+
+  it("still lands the first line of the second after a timer-driven flush", async () => {
+    vi.useFakeTimers({ now: new Date("2026-08-26T10:00:00.000Z") });
+    const helm = fakeHelm();
+    await startHelmOperation(upgrade);
+    helm.out("line 1");
+    vi.advanceTimersByTime(500);
+    helm.out("line 2");
+    // The tail lands on the boundary, by timer rather than by a new line.
+    turnTheSecond();
+    expect(getHelmOps()[0].output).toEqual(["line 1", "line 2"]);
+
+    vi.advanceTimersByTime(20);
+    helm.out("line 3");
+
+    // That flush closed the FIRST second; it must not have spent the new one.
+    // A `helm upgrade --wait` narrating a rollout would otherwise go quiet on
+    // screen for a whole second after every batch, for as long as it ran.
+    expect(getHelmOps()[0].output).toEqual(["line 1", "line 2", "line 3"]);
+  });
+
+  it("keeps each operation's tail on its own timer", async () => {
+    vi.useFakeTimers({ now: new Date("2026-08-26T10:00:00.000Z") });
+    const first = fakeHelm();
+    await startHelmOperation(upgrade);
+    const second = fakeHelm();
+    await startHelmOperation({ ...upgrade, release: "web" });
+
+    first.out("a1");
+    second.out("b1");
+    vi.advanceTimersByTime(10);
+    // Both now buffering inside the same second, each needing its own timer to
+    // land its tail: one shared timer, and whichever flushed first would
+    // cancel the other's, stranding those lines with nothing left to land them.
+    first.out("a2");
+    second.out("b2");
+    turnTheSecond();
+
+    expect(getHelmOps().map((o) => o.output)).toEqual([
+      ["a1", "a2"],
+      ["b1", "b2"],
+    ]);
   });
 
   it("leaves an untouched row alone when another operation changes", async () => {

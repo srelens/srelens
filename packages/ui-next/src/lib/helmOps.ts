@@ -147,10 +147,17 @@ export async function startHelmOperation(req: HelmOpRequest): Promise<number> {
     settle(id, e);
     return id;
   }
-  // Dismissed while the start was still in flight — there is no row left to
-  // report into, so stop watching what just opened rather than leaking a
-  // subscription. The operation itself carries on; nothing here could stop it.
-  if (!ops.some((o) => o.id === id)) {
+  // The row already ended, or is gone, while the start was still in flight.
+  // Core registers both stream listeners BEFORE it invokes, so an operation
+  // that fails instantly — `helm uninstall` of a release that is not there —
+  // can reach `settle` ahead of this await; `forget` ran then and found no
+  // handle to close, so storing this one would park a subscription nothing
+  // ever closes. (A row that has left entirely is the test reset's doing:
+  // `dismissHelmOp` declines every `running` row, and the row is `running` for
+  // this whole window.) Stop watching what just opened. The operation itself
+  // carries on regardless; nothing here could stop it.
+  const row = ops.find((o) => o.id === id);
+  if (!row || row.state !== "running") {
     handle.close();
     return id;
   }
@@ -225,11 +232,12 @@ function register(req: HelmOpRequest): number {
  * problem millisecond stamps caused in `sessions.ts`, arriving here through
  * the output array instead of a timestamp.
  *
- * The first line of any second lands at once, so an operation that has just
- * started printing is visibly printing; the rest of that second's lines wait
- * together. Nothing is lost by waiting: {@link scheduleFlush} lands the tail
- * when the output stops, and {@link settle} lands it immediately when the
- * operation ends.
+ * The first line of any second lands at once — including the second right
+ * after a timer-driven flush, which is charged to the second it closed, not
+ * the one it woke in — so an operation that is printing keeps looking like it
+ * is. The rest of each second's lines wait together. Nothing is lost by
+ * waiting: {@link scheduleFlush} lands the tail when the output stops, and
+ * {@link settle} lands it immediately when the operation ends.
  */
 function receive(id: number, line: string) {
   const buffered = pending.get(id);
@@ -239,25 +247,43 @@ function receive(id: number, line: string) {
   else flush(id);
 }
 
-/** Land the tail of a mid-second burst once the second turns. Only ever one
- *  timer per operation: a later line in the same second joins the buffer the
- *  pending timer will flush. */
+/**
+ * Land the tail of a mid-second burst once the second turns.
+ *
+ * One timer per operation, keyed by id — a shared timer would let one
+ * operation's flush cancel another's and strand its buffered lines with
+ * nothing left to land them. A later line in the same second joins the buffer
+ * this timer will flush.
+ *
+ * The second being closed is captured here rather than read back when the
+ * timer fires: the timer fires ON the boundary, and a flush that stamped the
+ * second it woke up in would spend a budget nothing had used yet, leaving the
+ * first line of the new second invisible for another whole second.
+ */
 function scheduleFlush(id: number) {
   if (flushTimers.has(id)) return;
   const now = Date.now();
+  const second = wholeSecond(now);
   flushTimers.set(
     id,
-    setTimeout(() => flush(id), wholeSecond(now) + 1000 - now),
+    setTimeout(() => flush(id, second), second + 1000 - now),
   );
 }
 
-/** Fold whatever this operation has buffered into the snapshot. */
-function flush(id: number) {
+/**
+ * Fold whatever this operation has buffered into the snapshot, and record the
+ * second that fold is charged to.
+ *
+ * `second` is the second the flushed lines belong to. It defaults to the
+ * current one — right for a flush a line or an ending drove — and
+ * {@link scheduleFlush} passes the older, closing second instead.
+ */
+function flush(id: number, second: number = wholeSecond(Date.now())) {
   clearTimeout(flushTimers.get(id));
   flushTimers.delete(id);
   const buffered = pending.get(id);
   pending.delete(id);
-  lastFlush.set(id, wholeSecond(Date.now()));
+  lastFlush.set(id, second);
   if (!buffered || buffered.length === 0) return;
   commit(ops.map((o) => (o.id === id ? { ...o, output: [...o.output, ...buffered] } : o)));
 }
@@ -294,6 +320,9 @@ function forget(id: number) {
   clearTimeout(flushTimers.get(id));
   flushTimers.delete(id);
   pending.delete(id);
+  // Ids never repeat, so a stamp left behind here is one dead number kept for
+  // the life of the window per operation ever started.
+  lastFlush.delete(id);
   handles.get(id)?.close();
   handles.delete(id);
 }
