@@ -330,3 +330,48 @@ describe("ContextMenu inside a surface", () => {
     }
   });
 });
+
+/**
+ * A surface whose node has not arrived yet.
+ *
+ * Real for exactly one render: `usePortalHost` holds the node in state, filled
+ * by a ref callback that fires after the render that declared it, so a layer
+ * mounting in the same commit as its surface sees a scope with no container.
+ * Standing it up by hand is the only way to hold that render still. (#357
+ * review)
+ */
+const arriving = { container: undefined, visible: true, hold: () => () => {} };
+
+async function openInArrivingSurface() {
+  const view = render(
+    <PortalScopeProvider scope={arriving}>
+      <ContextMenu items={ITEMS} label="Tab actions">
+        <button type="button">checkout-api</button>
+      </ContextMenu>
+    </PortalScopeProvider>,
+  );
+  fireEvent.contextMenu(screen.getByText("checkout-api"));
+  await screen.findByRole("menu");
+  return view;
+}
+
+describe("ContextMenu before its surface's node arrives", () => {
+  it("is still the tab's menu, not the window's", async () => {
+    // Where to mount and whether there is a surface to be modal within are two
+    // questions, and the container answers only the first: `undefined` means
+    // "document.body" outside a tab and "not yet" inside one. Read as the
+    // second, this render is a window-wide modal — the tab strip and the
+    // cluster rail out of the accessibility tree and the document's pointer
+    // events off — inside a tab that has one.
+    const chrome = document.createElement("div");
+    chrome.innerHTML = "<button>the tab strip</button>";
+    document.body.appendChild(chrome);
+    try {
+      await openInArrivingSurface();
+      expect(chrome.getAttribute("aria-hidden")).toBeNull();
+      expect(document.body.style.pointerEvents).toBe("");
+    } finally {
+      chrome.remove();
+    }
+  });
+});

@@ -1,6 +1,7 @@
-import { useCallback, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useRef, type ReactNode } from "react";
 import { Dialog as Modal } from "radix-ui";
 import { cx } from "./cx";
+import { declineEscape, useScopedEscape, useTabOut } from "./layerKeys";
 import { useOpenLayer } from "./portal";
 
 export interface DialogProps {
@@ -50,40 +51,11 @@ export interface DialogProps {
  * Composed in one more place than it first looked. Giving the reader the tab
  * strip back gave it back to the pointer only, because Radix's focus scope
  * loops Tab whether or not it is trapping — so a keyboard user was still shut
- * in a dialog that no longer had any right to hold them. See `onTabOut`. (#357)
+ * in a dialog that no longer had any right to hold them. Escape needed the same
+ * kind of composition for the same kind of reason: Radix routes it to the layer
+ * that mounted last, which is not necessarily the one the reader can see. Both
+ * are in `layerKeys`, shared with ConfirmDialog. (#357)
  */
-
-/**
- * Everything the browser would stop at on Tab, in document order.
- *
- * Narrower than a general tab-order model on purpose. This design writes no
- * positive `tabindex`, so document order *is* the order; and the only things
- * that take a control out of the sequence in this window are the three checked
- * here — `disabled`, the `hidden` attribute an inactive tab wears, and the
- * `inert` a surface puts on its own content while a layer covers it. A control
- * hidden by CSS alone would be missed, which is a real limit and a quiet one:
- * it is why the caller below leaves the loop in place rather than moving focus
- * when it is not sure, so the worst case is the behaviour we already had.
- *
- * Radix's own focus guards are the one thing removed rather than counted. It
- * plants a tabbable span at each end of the body to catch focus on its way out
- * to the browser's chrome; they show nothing and do nothing, and landing on one
- * is indistinguishable from focus having vanished. They are also, when the tab
- * holds nothing but the dialog, exactly what sits next to it.
- */
-function tabOrder(): HTMLElement[] {
-  const candidates = document.body.querySelectorAll<HTMLElement>(
-    "a[href],button,input,select,textarea,[tabindex]",
-  );
-  return Array.from(candidates).filter(
-    (el) =>
-      el.tabIndex >= 0 &&
-      !el.hasAttribute("disabled") &&
-      !el.hasAttribute("data-radix-focus-guard") &&
-      el.closest("[inert],[hidden]") === null,
-  );
-}
-
 export function Dialog({ title, children, onClose, footer, maxWidth = 420, closeLabel = "Close", className }: DialogProps) {
   const openerRef = useRef<HTMLElement | null>(null);
   // Held for as long as this component is mounted, which is as long as the
@@ -97,38 +69,11 @@ export function Dialog({ title, children, onClose, footer, maxWidth = 420, close
     return target instanceof Node && overlayRef.current?.contains(target) === true;
   }, []);
 
-  // Tab off either edge of the card, when the card is only as modal as its tab.
-  //
-  // Radix hands its focus scope `loop: true` and hardcodes it — there is no
-  // prop, and its handler does not check `defaultPrevented`, so the loop cannot
-  // be turned off from out here. It can be out-run. Radix's handler acts only
-  // when the *live* focus is on the first or last control in the card, and it
-  // reads that at the moment it runs; this one runs first, because Radix's
-  // `Slot` composes a child's handler ahead of its own. So moving focus out
-  // here leaves Radix's handler looking at a focus that is on neither edge, and
-  // it does nothing.
-  //
-  // Only inside a surface. A dialog with no tab around it is modal over the
-  // whole document, and being the only thing you can reach is what that means.
-  const onTabOut = useCallback(
-    (event: KeyboardEvent<HTMLDivElement>) => {
-      if (!scoped || event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return;
-      const card = event.currentTarget;
-      const order = tabOrder();
-      const inside = order.filter((el) => card.contains(el));
-      const edge = event.shiftKey ? inside[0] : inside[inside.length - 1];
-      if (edge === undefined || document.activeElement !== edge) return;
-      const at = order.indexOf(edge);
-      const next = order[(at + (event.shiftKey ? -1 : 1) + order.length) % order.length];
-      // Nothing outside the card to go to — the tab is all there is, or the
-      // window's own chrome is not in the list. Leave the loop to it rather
-      // than strand focus.
-      if (next === undefined || card.contains(next)) return;
-      event.preventDefault();
-      next.focus();
-    },
-    [scoped],
-  );
+  // Tab and Escape, both of which Radix answers for the whole window and
+  // neither of which is the whole window's to answer once the dialog belongs to
+  // one tab of it. See `layerKeys`.
+  const onTabOut = useTabOut(scoped);
+  useScopedEscape(scoped, showing, onClose);
 
   return (
     <Modal.Root open modal={!scoped} onOpenChange={(open) => !open && onClose()}>
@@ -217,9 +162,12 @@ export function Dialog({ title, children, onClose, footer, maxWidth = 420, close
           // layer opened last, which is not necessarily the one the reader can
           // see: a dialog left open on a tab they switched away from is still
           // mounted and still stacked. A hidden tab's dialog answering that key
-          // press is the same bug as a portal escaping `hidden`. (#357)
+          // press is the same bug as a portal escaping `hidden`. Refusing is
+          // not enough on its own — Radix stops at the layer it routed to
+          // either way, so the refusal has to be legible to the dialog the
+          // reader can actually see. (#357)
           onEscapeKeyDown={(event) => {
-            if (!showing) event.preventDefault();
+            if (!showing) declineEscape(event);
           }}
           onKeyDown={onTabOut}
         >

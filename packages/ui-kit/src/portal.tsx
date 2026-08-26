@@ -53,6 +53,20 @@ export function usePortalContainer(): HTMLElement | undefined {
 }
 
 /**
+ * Whether there is a surface around this component at all.
+ *
+ * The other half of what {@link usePortalContainer} answers, for the component
+ * that needs both: `container` says where to render, and this says whether
+ * there is a surface to be modal *within*. They are not the same question and
+ * they differ for one render — see {@link useOpenLayer}, which hands a layer
+ * both — so a component that has a use for the second must ask for it rather
+ * than infer it from the first.
+ */
+export function usePortalScoped(): boolean {
+  return useContext(ScopeContext) !== undefined;
+}
+
+/**
  * For a layer that covers the surface it belongs to, and must be counted while
  * it does: a dialog, not a tooltip.
  *

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
 import { Button } from "./Button";
+import { declineEscape, useScopedEscape, useTabOut } from "./layerKeys";
 import { useOpenLayer } from "./portal";
 import { Spinner } from "./Spinner";
 
@@ -49,7 +50,17 @@ export interface ConfirmDialogProps {
  * part-of-the-page, so it is composed out of three. `busy` is untouched by any
  * of it: the action is in flight and every way out of *this* dialog is still
  * closed. What is now open is the way out of the tab, which is not what `busy`
- * was ever protecting. Outside a scope nothing changes at all. (#357)
+ * was ever protecting — Tab answers nothing, and while the action is in flight
+ * it is the only thing left to press, because both controls are disabled and
+ * Radix stops Tab dead on a card that holds no tab stop at all. Outside a scope
+ * nothing changes at all. (#357)
+ *
+ * Two of Radix's answers do not survive the move and are replaced rather than
+ * turned off, because neither can be: its focus scope loops Tab whether or not
+ * it is trapping, and it routes Escape to the layer that mounted last rather
+ * than to the one the reader can see. Both live in `layerKeys`, shared with
+ * {@link Dialog} — every destructive confirmation in the app is this component,
+ * and a second copy of either is the one that would not get fixed. (#357)
  */
 export function ConfirmDialog({
   title,
@@ -67,6 +78,13 @@ export function ConfirmDialog({
   // question is on screen: it is what puts `inert` on the surface's content.
   const { container, scoped, showing } = useOpenLayer();
   const overlayRef = useRef<HTMLDivElement>(null);
+  const onTabOut = useTabOut(scoped);
+  // Escape, when this tab is the one on screen. `busy` decides the answer is
+  // no, which is not the same as the question having gone to the wrong tab:
+  // this dialog is still the one being asked, and it still refuses.
+  useScopedEscape(scoped, showing, () => {
+    if (!busy) onCancel();
+  });
   const wash = { background: "color-mix(in srgb, var(--canvas-deep) 72%, transparent)" };
 
   // Whether an interaction outside the card was an interaction with this tab.
@@ -157,8 +175,15 @@ export function ConfirmDialog({
           // see: a dialog left open on a tab they switched away from is still
           // mounted and still stacked. A hidden tab's dialog answering that key
           // press is the same bug as a portal escaping `hidden`. (#357)
+          //
+          // The order of these two matters. A hidden tab's question is not the
+          // one being asked, whether or not its own action is in flight, and
+          // saying so is what lets the dialog on screen answer instead; a
+          // silent refusal would leave the reader pressing Escape at a dialog
+          // they can see and getting nothing. (#357 review)
           onEscapeKeyDown={(event) => {
-            if (busy || !showing) event.preventDefault();
+            if (!showing) declineEscape(event);
+            else if (busy) event.preventDefault();
           }}
           onPointerDownOutside={(event) => {
             if (busy) event.preventDefault();
@@ -183,6 +208,7 @@ export function ConfirmDialog({
           onInteractOutside={(event) => {
             if (busy || (scoped && !onOverlay(event.target))) event.preventDefault();
           }}
+          onKeyDown={onTabOut}
         >
           <div className="card-head shrink-0">
             <Dialog.Title className="card-title">{title}</Dialog.Title>

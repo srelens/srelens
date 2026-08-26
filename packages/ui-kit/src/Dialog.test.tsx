@@ -140,7 +140,7 @@ describe("Dialog inside a surface", () => {
     expect(screen.getByRole("dialog").parentElement).toBe(document.body);
   });
 
-  it("covers only its surface: the overlay is positioned against the tab, not the window", () => {
+  it("positions its overlay against the tab, not the window", () => {
     setupInSurface();
     expect(overlay().className).toContain("absolute");
     expect(overlay().className).not.toContain("fixed");
@@ -152,7 +152,7 @@ describe("Dialog inside a surface", () => {
     expect(screen.getByRole("dialog").className).not.toContain("fixed");
   });
 
-  it("still covers the whole window when there is no surface", () => {
+  it("positions its overlay against the window when there is no surface", () => {
     setup();
     expect(overlay().className).toContain("fixed");
     expect(overlay().className).not.toContain("absolute");
@@ -190,13 +190,13 @@ describe("Dialog inside a surface", () => {
     }
   });
 
-  it("makes the tab's own content unreachable while it is open, and reachable again after", () => {
+  it("marks the tab's own content inert while it is open", () => {
     const { unmount } = setupInSurface();
     expect(screen.getByTestId("content").hasAttribute("inert")).toBe(true);
     unmount();
   });
 
-  it("leaves the tab's content reachable when no dialog is open", () => {
+  it("leaves the tab's content unmarked when no dialog is open", () => {
     render(<Surface><p>the table</p></Surface>);
     expect(screen.getByTestId("content").hasAttribute("inert")).toBe(false);
   });
@@ -361,5 +361,196 @@ describe("Dialog and the Tab key", () => {
     setupTabbing(false);
     await pressTabFrom(named("Done"));
     expect(document.activeElement).toBe(named("Close"));
+  });
+});
+
+/**
+ * Escape belongs to the tab the reader is looking at.
+ *
+ * Radix routes it to the highest layer and orders layers by mount, which is the
+ * right answer for a window that holds one dialog at a time and the wrong one
+ * here: a dialog left open on a tab the reader switched away from is still
+ * mounted, so a dialog opened *after* it — on the tab they are looking at now —
+ * sits below it and never hears the key. Declining is not something a layer can
+ * say from `onEscapeKeyDown`; all it can do is refuse to close, and Radix stops
+ * at the first layer either way. So the refusal is marked as a refusal, and the
+ * visible tab's dialog answers once the key has finished propagating and every
+ * layer has had its say. (#357 review)
+ */
+function setupTwoTabs() {
+  const onVisible = vi.fn();
+  const onHidden = vi.fn();
+  render(
+    <>
+      <Surface>
+        <Dialog title="Customise kind-local" onClose={onVisible}>
+          <input />
+        </Dialog>
+      </Surface>
+      <Surface visible={false}>
+        <Dialog title="Uninstall ingress-nginx" onClose={onHidden}>
+          <input />
+        </Dialog>
+      </Surface>
+    </>,
+  );
+  return { onVisible, onHidden };
+}
+
+/** The answer is deferred to the end of the dispatch; this is the end of it. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("Dialog and Escape across tabs", () => {
+  it("answers Escape on the tab on screen, though a hidden tab's dialog opened later", async () => {
+    const { onVisible } = setupTwoTabs();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(onVisible).toHaveBeenCalledTimes(1));
+  });
+
+  it("leaves the hidden tab's own dialog open", async () => {
+    // It is still that tab's question, and the reader is not looking at it.
+    const { onHidden } = setupTwoTabs();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(onHidden).not.toHaveBeenCalled();
+  });
+
+  it("answers once when its tab is the only one with a dialog open", async () => {
+    // Radix's own routing already closes this case, and the deferred answer
+    // must not close it a second time.
+    const { onClose } = setupInSurface();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the key alone when a layer above it has already answered", async () => {
+    // A select or a popover open inside the card is a Radix layer above this
+    // one, and it takes Escape from its own capture listener on the document.
+    // jsdom can host the mechanism but not the widget, so this stands in for
+    // one: a capture listener registered before either dialog mounts, which is
+    // where such a layer's listener sits.
+    const taken = (event: KeyboardEvent) => {
+      if (event.key === "Escape") event.preventDefault();
+    };
+    document.addEventListener("keydown", taken, true);
+    try {
+      const { onVisible, onHidden } = setupTwoTabs();
+      fireEvent.keyDown(document, { key: "Escape" });
+      await settle();
+      expect(onVisible).not.toHaveBeenCalled();
+      expect(onHidden).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener("keydown", taken, true);
+    }
+  });
+
+  it("answers on the dialog opened last inside the tab on screen", async () => {
+    // A dialog that opened a second dialog. The tab on screen owns the key, and
+    // inside that tab the last one opened is still the one on top of it.
+    const first = vi.fn();
+    const second = vi.fn();
+    render(
+      <>
+        <Surface>
+          <Dialog title="Customise kind-local" onClose={first}>
+            <input />
+          </Dialog>
+          <Dialog title="Rename kind-local" onClose={second}>
+            <input />
+          </Dialog>
+        </Surface>
+        <Surface visible={false}>
+          <Dialog title="Uninstall ingress-nginx" onClose={vi.fn()}>
+            <input />
+          </Dialog>
+        </Surface>
+      </>,
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(second).toHaveBeenCalledTimes(1));
+    expect(first).not.toHaveBeenCalled();
+  });
+
+  it("leaves a dialog with no surface of its own to Radix, even when nobody then answers", async () => {
+    // The one pairing this does not compose for, written down rather than
+    // fixed. A dialog with no surface is modal over the whole document, so it
+    // is the one that should answer — and it is deliberately not in this
+    // routing, because putting it there would run this on a path that has no
+    // tabs in it at all: the gallery, the frozen classic app, every test in
+    // this file above the surfaces. So the hidden tab's layer declines, and
+    // there is nobody registered to hand the key on to.
+    //
+    // Reaching it needs the reader to switch tabs and open a second dialog
+    // while a document-wide modal holds the window, which is the one thing such
+    // a modal does not let them do. (#357 review)
+    const unscoped = vi.fn();
+    const hidden = vi.fn();
+    render(
+      <>
+        <Dialog title="Customise kind-local" onClose={unscoped}>
+          <input />
+        </Dialog>
+        <Surface visible={false}>
+          <Dialog title="Uninstall ingress-nginx" onClose={hidden}>
+            <input />
+          </Dialog>
+        </Surface>
+      </>,
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(unscoped).not.toHaveBeenCalled();
+    expect(hidden).not.toHaveBeenCalled();
+  });
+
+  it("answers nothing when every dialog in the window is on a hidden tab", async () => {
+    const { onClose } = setupInSurface({}, false);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("Dialog's tab order", () => {
+  it("counts a contenteditable body as a control of its own", async () => {
+    // The values editor inside the Helm dialog is CodeMirror, whose content DOM
+    // is `contenteditable` with no tabindex of its own. Missed, the card's last
+    // control is the one before it, and Tab off the real last one falls through
+    // to Radix's loop — back to the top of a dialog the reader is entitled to
+    // leave. (#357 review)
+    const onClose = vi.fn();
+    render(
+      <>
+        <button type="button">the tab strip</button>
+        <Surface>
+          <Dialog title="Uninstall ingress-nginx" onClose={onClose}>
+            <div contentEditable suppressContentEditableWarning data-testid="values" />
+          </Dialog>
+        </Surface>
+        <button type="button">the status bar</button>
+      </>,
+    );
+    await pressTabFrom(screen.getByTestId("values"));
+    expect(document.activeElement).toBe(named("the status bar"));
+  });
+
+  it("ignores a contenteditable that opts out", async () => {
+    // `contenteditable="false"` is not a control, and counting it would make
+    // the card's last control something the browser never stops at.
+    const onClose = vi.fn();
+    render(
+      <>
+        <button type="button">the tab strip</button>
+        <Surface>
+          <Dialog title="Uninstall ingress-nginx" onClose={onClose} footer={<button type="button">Done</button>}>
+            <div contentEditable={false} data-testid="values" />
+          </Dialog>
+        </Surface>
+        <button type="button">the status bar</button>
+      </>,
+    );
+    await pressTabFrom(named("Done"));
+    expect(document.activeElement).toBe(named("the status bar"));
   });
 });

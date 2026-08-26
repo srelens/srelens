@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { ContextMenu as Menu } from "radix-ui";
 import type { IconComponent } from "./IconButton";
-import { usePortalContainer } from "./portal";
+import { usePortalContainer, usePortalScoped } from "./portal";
 
 export type ContextMenuItem =
   | { kind: "sep" }
@@ -82,8 +82,15 @@ export interface ContextMenuProps {
  */
 export function ContextMenu({ items, children, label, onOpenChange }: ContextMenuProps) {
   const container = usePortalContainer();
+  // Not `container === undefined`, which is the same answer for all but one
+  // render and the wrong question in every one of them: undefined means
+  // "document.body" outside a surface and "the node has not arrived yet"
+  // inside one, and the render between a surface mounting and its ref firing
+  // is the second. Read as the first, that render is a window-wide modal
+  // inside a tab that has one. (#357 review)
+  const scoped = usePortalScoped();
   return (
-    <Menu.Root onOpenChange={onOpenChange} modal={container === undefined}>
+    <Menu.Root onOpenChange={onOpenChange} modal={!scoped}>
       <Menu.Trigger asChild>{children}</Menu.Trigger>
       <Menu.Portal container={container}>
         <Menu.Content

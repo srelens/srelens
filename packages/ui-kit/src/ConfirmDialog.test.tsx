@@ -305,7 +305,7 @@ describe("ConfirmDialog inside a surface", () => {
     expect(screen.getByRole("dialog").parentElement).toBe(document.body);
   });
 
-  it("covers only its surface: the overlay is positioned against the tab, not the window", () => {
+  it("positions its overlay against the tab, not the window", () => {
     openInSurface();
     expect(overlay().className).toContain("absolute");
     expect(overlay().className).not.toContain("fixed");
@@ -317,7 +317,7 @@ describe("ConfirmDialog inside a surface", () => {
     expect(screen.getByRole("dialog").className).not.toContain("fixed");
   });
 
-  it("still covers the whole window when there is no surface", () => {
+  it("positions its overlay against the window when there is no surface", () => {
     open();
     expect(overlay().className).toContain("fixed");
     expect(overlay().className).not.toContain("absolute");
@@ -341,12 +341,12 @@ describe("ConfirmDialog inside a surface", () => {
     }
   });
 
-  it("makes its own tab's content unreachable while it is open", () => {
+  it("marks its own tab's content inert while it is open", () => {
     openInSurface();
     expect(screen.getByTestId("content").hasAttribute("inert")).toBe(true);
   });
 
-  it("gives the tab's content back when it is answered", () => {
+  it("clears its own tab's inert mark when it is answered", () => {
     // Rerendered rather than remounted: a fresh surface would start clear
     // whatever the dialog had done to the old one, so it would pass even if
     // the hold were never released.
@@ -437,5 +437,196 @@ describe("ConfirmDialog inside a surface", () => {
 
     unmount();
     await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+});
+
+function setupTabbing(inSurface: boolean, props: Partial<Parameters<typeof ConfirmDialog>[0]> = {}) {
+  const onCancel = vi.fn();
+  const dialog = (
+    <ConfirmDialog
+      title="Delete pod?"
+      message="This cannot be undone."
+      confirmLabel="Delete"
+      danger
+      onConfirm={() => {}}
+      onCancel={onCancel}
+      {...props}
+    />
+  );
+  const view = render(
+    <>
+      <button type="button">the tab strip</button>
+      {inSurface ? <Surface>{dialog}</Surface> : dialog}
+      <button type="button">the status bar</button>
+    </>,
+  );
+  return { onCancel, ...view };
+}
+
+const named = (name: string) => screen.getByRole("button", { name });
+
+async function pressTabFrom(from: HTMLElement, shift = false) {
+  await waitFor(() => expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true));
+  from.focus();
+  fireEvent.keyDown(from, { key: "Tab", shiftKey: shift });
+}
+
+/**
+ * Tab is how a keyboard user leaves, and this is the dialog they most need to
+ * leave: every destructive confirmation in the app is this component.
+ *
+ * Scoping it to its tab gave the tab strip back to the pointer only. Radix
+ * hands its focus scope `loop: true` and hardcodes it — the scope loops whether
+ * or not it is trapping — so Tab off the last control came back round to Cancel
+ * and the reader was still shut inside a dialog that no longer had any right to
+ * hold them. The loop cannot be turned off, so it is out-run: the card answers
+ * Tab at its own edge first and moves focus out, and Radix's handler then finds
+ * focus on neither edge and does nothing. (#357 review)
+ *
+ * Outside a surface the loop is still right and is left alone.
+ */
+describe("ConfirmDialog and the Tab key", () => {
+  it("lets Tab off the last control reach the window past the tab", async () => {
+    setupTabbing(true);
+    await pressTabFrom(named("Delete"));
+    expect(document.activeElement).toBe(named("the status bar"));
+  });
+
+  it("lets Shift+Tab off the first control reach the window before the tab", async () => {
+    setupTabbing(true);
+    await pressTabFrom(named("Cancel"), true);
+    expect(document.activeElement).toBe(named("the tab strip"));
+  });
+
+  it("leaves Tab inside the card alone", async () => {
+    // Not an edge, so nothing here should touch it: the browser moves focus,
+    // and jsdom's does not, which is exactly what makes this assertable.
+    setupTabbing(true);
+    await pressTabFrom(named("Cancel"));
+    expect(document.activeElement).toBe(named("Cancel"));
+  });
+
+  it("does not cancel itself when the reader tabs out of it", async () => {
+    // Leaving is the thing that was asked for. It is not an answer to the
+    // question, the same way clicking the tab strip is not.
+    const { onCancel } = setupTabbing(true);
+    await pressTabFrom(named("Delete"));
+    await waitFor(() => expect(document.activeElement).toBe(named("the status bar")));
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("keeps looping when there is nothing outside the tab to reach", async () => {
+    // The fallback: with no neighbour, out-running the loop would strand focus
+    // on nothing, so the loop is left to do its job.
+    render(
+      <Surface>
+        <ConfirmDialog
+          title="Delete pod?"
+          message="m"
+          confirmLabel="Delete"
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      </Surface>,
+    );
+    await pressTabFrom(named("Delete"));
+    expect(document.activeElement).toBe(named("Cancel"));
+  });
+
+  it("still loops inside itself when there is no surface", async () => {
+    // A confirmation with no tab around it is modal over the whole document,
+    // and being the only reachable thing is what that means.
+    setupTabbing(false);
+    await pressTabFrom(named("Delete"));
+    expect(document.activeElement).toBe(named("Cancel"));
+  });
+
+  it("lets the reader leave the tab while the action is in flight", async () => {
+    // `busy` closes every way out of the question, and Tab is not one of them:
+    // it answers nothing. It is also the moment the card holds no tab stop at
+    // all — both controls are disabled — so Radix stops Tab dead on the card
+    // itself, and a reader who cannot leave has nothing left to do but watch a
+    // request they can no longer cancel. (#357 review)
+    setupTabbing(true, { busy: true });
+    await pressTabFrom(screen.getByRole("dialog"));
+    expect(document.activeElement).toBe(named("the status bar"));
+  });
+
+  it("still holds the reader while an unscoped action is in flight", async () => {
+    // No tab to go back to: the document-wide modal is the whole window's
+    // question and the loop is right.
+    setupTabbing(false, { busy: true });
+    await pressTabFrom(screen.getByRole("dialog"));
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+  });
+});
+
+/** The answer is deferred to the end of the dispatch; this is the end of it. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function openTwoTabs() {
+  const onVisible = vi.fn();
+  const onHidden = vi.fn();
+  render(
+    <>
+      <Surface>
+        <ConfirmDialog title="Delete pod?" message="m" onConfirm={() => {}} onCancel={onVisible} />
+      </Surface>
+      <Surface visible={false}>
+        <ConfirmDialog title="Uninstall ingress-nginx?" message="m" onConfirm={() => {}} onCancel={onHidden} />
+      </Surface>
+    </>,
+  );
+  return { onVisible, onHidden };
+}
+
+/**
+ * Escape belongs to the tab the reader is looking at.
+ *
+ * Radix routes it to the highest layer and orders layers by mount, so a
+ * confirmation left open on a tab the reader switched away from swallows the
+ * key from the one they opened afterwards on the tab they are looking at — and
+ * with the first tab's dialog refusing to answer, as it must, nothing at all
+ * happens. Two clicks and a keypress away: the Helm uninstall gate, Workloads,
+ * a delete confirm, back. (#357 review)
+ */
+describe("ConfirmDialog and Escape across tabs", () => {
+  it("answers Escape on the tab on screen, though a hidden tab's dialog opened later", async () => {
+    const { onVisible } = openTwoTabs();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(onVisible).toHaveBeenCalledTimes(1));
+  });
+
+  it("leaves the hidden tab's own question unanswered", async () => {
+    const { onHidden } = openTwoTabs();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(onHidden).not.toHaveBeenCalled();
+  });
+
+  it("answers once when its tab is the only one with a dialog open", async () => {
+    const onCancel = vi.fn();
+    openInSurface({ onCancel });
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses while its own action is in flight", async () => {
+    // The deferred answer is a second way in, and `busy` has to close it too.
+    const onVisible = vi.fn();
+    render(
+      <>
+        <Surface>
+          <ConfirmDialog title="Delete pod?" message="m" busy onConfirm={() => {}} onCancel={onVisible} />
+        </Surface>
+        <Surface visible={false}>
+          <ConfirmDialog title="Uninstall ingress-nginx?" message="m" onConfirm={() => {}} onCancel={() => {}} />
+        </Surface>
+      </>,
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    await settle();
+    expect(onVisible).not.toHaveBeenCalled();
   });
 });
