@@ -475,6 +475,22 @@ describe("Window contexts", () => {
   });
 });
 
+describe("Window — the shell's own widths", () => {
+  it("lets the screen column shrink, so the tab strip scrolls instead of overflowing", async () => {
+    // `TabStrip`'s tablist is `overflow-x-auto` and is meant to scroll under
+    // the new-tab and overflow controls. It never got the chance: this column
+    // had no `min-w-0`, so a wide screen widened it, the strip grew with it,
+    // and the controls went off the right edge of the window. Photographed
+    // with eight tabs open and a terminal on screen.
+    //
+    // jsdom lays nothing out, so this pins the mechanism. Sixth time this
+    // exact property has bitten on this migration.
+    await booted();
+    const column = document.querySelector('[data-slot="screen-column"]');
+    expect(column?.className ?? "").toContain("min-w-0");
+  });
+});
+
 describe("Window — what boot has to ask for", () => {
   it("asks the backend what is still forwarding, whatever route it opens on", async () => {
     // The forwards store is module-level JavaScript and a browser reload
