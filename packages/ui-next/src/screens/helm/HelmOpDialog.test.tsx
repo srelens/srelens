@@ -253,20 +253,36 @@ describe("HelmOpDialog — uninstall's gate", () => {
     open({ kind: "uninstall" });
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("every object in the release");
-    expect(alert.textContent).toMatch(/persistent volume claims are kept/i);
-    expect(alert.textContent).toMatch(/unless the chart marks them for deletion/i);
-    // §A.5's "Twelve pods, one Service, one Ingress and two ConfigMaps" is the
-    // design's fixture. Nothing has counted this release's objects, so the
-    // PROPERTY to hold is that no count is stated at all — in digits or in
-    // words — and that no object is named as being in this particular release.
-    // Pinning only the fixture's own tokens would let "three pods and a
-    // Service" through, which is the same lie in different words.
-    // Digits, and the objects a count would have to be OF. The object half is
-    // the load-bearing one: a fabricated count cannot avoid naming the things
-    // it counts, so this catches §A.5's sentence and every rewrite of it. A
-    // spelled-out-number alternation was tried here and taken out again — it
-    // caught nothing this does not, and it forbade ordinary prose ("in one
-    // pass", "one click", "at once") in a sentence nobody had written yet.
+
+    /**
+     * **The exact sentence, on purpose.** A change-detector test over copy is
+     * normally a smell — it fails on edits that broke nothing and teaches
+     * people to update expectations without reading them. Here that is the
+     * mechanism, not the cost.
+     *
+     * srelens has not counted this release's objects and must not say how many
+     * there are, and this is the one screen in the app where being confidently
+     * wrong cannot be undone. Every property-shaped pin tried here leaked: a
+     * spelled-out-number alternation forbade ordinary prose ("in one pass"),
+     * and dropping it let "a dozen objects", "twelve things" and "several
+     * resources go" through — a fabricated quantity CAN avoid naming a
+     * Kubernetes kind, by counting a generic noun instead. So the pin is the
+     * whole sentence: any edit to this alert fails this test, whoever makes it
+     * comes back here, re-reads why the count is absent, and updates the
+     * expectation deliberately.
+     *
+     * A narrow, well-justified exception for one irreversible screen. It is
+     * not a pattern to spread to other copy.
+     */
+    const body = alert.querySelector('[data-slot="alert-body"]');
+    expect(body?.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Everything helm created for it goes, and nothing here can undo it. " +
+        "Persistent volume claims are kept unless the chart marks them for deletion.",
+    );
+
+    // The secondary net, kept for what it says rather than for what it adds:
+    // no digit anywhere in the alert, and no Kubernetes kind named as being in
+    // this particular release.
     expect(alert.textContent).not.toMatch(/\d/);
     expect(alert.textContent).not.toMatch(
       /\b(pods?|services?|ingress(es)?|configmaps?|secrets?|deployments?|statefulsets?|jobs?)\b/i,
