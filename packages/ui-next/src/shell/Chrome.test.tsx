@@ -42,7 +42,10 @@ vi.mock("@srelens/core", async (orig) => ({
   isApplePlatform: platform,
 }));
 
-const ctx = (id: string) => ({ name: id, stableId: id, cluster: id, server: "", isCurrent: false });
+const ctx = (id: string) => ({
+  name: id, stableId: id, cluster: id, server: "", isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
+});
 
 beforeEach(() => {
   setState(defaultState([ctx("prod")]));

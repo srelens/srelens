@@ -3,7 +3,10 @@ import { renderHook, act } from "@testing-library/react";
 import { probeCluster, getInfo, useInfo, useInfos, resetProbes } from "./probe";
 import { getView, resetView } from "./workspace";
 
-const ctx = { name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false };
+const ctx = {
+  name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
+};
 
 beforeEach(() => { resetView(); resetProbes(); });
 

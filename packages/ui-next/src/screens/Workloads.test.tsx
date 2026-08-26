@@ -48,6 +48,8 @@ const CTX: ClusterContext = {
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
 };
 
 // One row per kind, deliberately with ages that interleave across kinds

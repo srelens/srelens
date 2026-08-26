@@ -11,6 +11,7 @@ import {
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name, stableId, cluster: name, server: "", isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
 describe("contexts store", () => {

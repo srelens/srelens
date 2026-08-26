@@ -148,6 +148,8 @@ const CTX: ClusterContext = {
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
 };
 
 const PODS = [

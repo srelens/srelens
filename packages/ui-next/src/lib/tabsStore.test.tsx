@@ -6,6 +6,7 @@ import * as store from "./tabsStore";
 
 const ctx = (id: string): ClusterContext => ({
   name: id, stableId: id, cluster: id, server: `https://${id}`, isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
 function seed(over: Partial<TabsState> = {}) {

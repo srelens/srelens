@@ -20,6 +20,7 @@ function memory(): Storage & { data: Map<string, string> } {
 
 const ctx = (id: string): ClusterContext => ({
   name: id, stableId: id, cluster: id, server: `https://${id}`, isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
 const valid = (): TabsState => {

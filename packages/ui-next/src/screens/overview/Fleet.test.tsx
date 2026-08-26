@@ -15,7 +15,10 @@ import { statusTone, toneColor } from "@srelens/ui-kit";
 import { Fleet } from "./Fleet";
 
 function aContext(name: string): ClusterContext {
-  return { name, stableId: name, cluster: name, server: `https://${name}`, isCurrent: false };
+  return {
+    name, stableId: name, cluster: name, server: `https://${name}`, isCurrent: false,
+    sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
+  };
 }
 
 /** A 401 as it actually reaches this component, from a real kubeconfig context. */

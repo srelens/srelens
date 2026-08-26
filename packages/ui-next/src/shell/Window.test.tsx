@@ -102,7 +102,10 @@ import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
 
-const ctx = (stableId: string, name = stableId) => ({ name, stableId, cluster: name, server: "", isCurrent: false });
+const ctx = (stableId: string, name = stableId) => ({
+  name, stableId, cluster: name, server: "", isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
+});
 
 beforeEach(() => {
   listContexts.mockReset().mockResolvedValue({ contexts: [ctx("prod")] });
