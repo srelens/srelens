@@ -1204,7 +1204,26 @@
     padding: 0 0.4rem;
     background: var(--canvas-deep);
     border-top: 1px solid var(--rule);
+    /* MEASURED at the window's own 960px minimum (`minWidth` in
+       apps/desktop/src-tauri/tauri.conf.json), with every readout the strip can
+       carry at once: a 20-character cluster name, a version, the link word, a
+       dead forward, a plural forward count, live shells, a failed helm
+       operation and a running one, and `Ask`. `clientWidth` 960, `scrollWidth`
+       1036 — 76px over. `Ask` ran from 1005px to 1036px and `elementFromPoint`
+       at its own midpoint did not find it: the way into the console was off the
+       window and unclickable, not merely cramped.
+
+       And unreachable, because the segments are `white-space: nowrap` with no
+       `min-width`, so flex's `min-width: auto` keeps them at their full size and
+       the overflow escaped to the document, where `body { overflow: hidden }`
+       clipped it. The strip carries its own overflow instead, exactly as
+       `.tabstrip` does above and for the same reason. The scrollbar is hidden:
+       inside 22px — shorter than the tab strip's 33px — a visible bar would take
+       more room than the readouts it makes room for. */
+    overflow-x: auto;
+    scrollbar-width: none;
   }
+  .statusbar::-webkit-scrollbar { display: none; }
   .status-seg {
     display: inline-flex;
     align-items: center;
