@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { ColumnPicker, type ColumnOption } from "./ColumnPicker";
+import { PortalScopeProvider, usePortalHost } from "./portal";
 
 // jsdom has no ResizeObserver, and Radix's popper watches the trigger and the
 // content with one. The kit's shared setup does not stub it — nothing in the
@@ -243,5 +245,84 @@ describe("ColumnPicker's appearance", () => {
     await open();
     const panel = screen.getByRole("group").parentElement as HTMLElement;
     expect(panel.style.position).toBe("relative");
+  });
+});
+
+/** A tab-sized surface that owns the layers opened inside it, as `TabSurface` does. */
+function Surface({ children }: { children: ReactNode }) {
+  const { ref, scope } = usePortalHost();
+  return (
+    <div data-testid="surface">
+      <PortalScopeProvider scope={scope}>
+        <div data-testid="content">{children}</div>
+        <div data-testid="host" ref={ref} />
+      </PortalScopeProvider>
+    </div>
+  );
+}
+
+/**
+ * The node the layer was portalled into.
+ *
+ * Radix's `Portal` renders a div of its own as a direct child of the container
+ * and the popper adds another inside that, so the container is never the
+ * content's parent. Matching the outermost portalled element and taking *its*
+ * parent names the container exactly, where "somewhere in the document" would
+ * also pass for a container that was wrong but still attached.
+ */
+function mountedIn(node: Element): Element | null {
+  return node.closest("body > *, [data-testid='host'] > *")?.parentElement ?? null;
+}
+
+async function openInSurface() {
+  const onToggle = vi.fn();
+  const view = render(
+    <Surface>
+      <ColumnPicker columns={COLUMNS} hidden={new Set<string>()} onToggle={onToggle} pinnedKey="name" />
+    </Surface>,
+  );
+  await userEvent.click(trigger());
+  await screen.findByRole("group");
+  return { onToggle, ...view };
+}
+
+const columnPanel = () => screen.getByRole("dialog");
+
+/**
+ * A panel anchored to a toolbar button belongs to the tab that toolbar is in.
+ *
+ * The window is a strip of tabs over one screen each, all of them mounted at
+ * once with the inactive ones hidden by the `hidden` attribute — which a portal
+ * to `document.body` escapes. So the column list opened over one table stayed
+ * on screen over whatever tab the reader moved to, with its trigger and its
+ * table already gone. (#357)
+ *
+ * The container is the whole change. Radix's Popover is already non-modal and
+ * already dismisses on an outside interaction, which is the right answer for a
+ * panel and is why none of the dialog's other treatment applies here.
+ */
+describe("ColumnPicker inside a surface", () => {
+  it("mounts into the surface's own node, so hiding the tab hides it too", async () => {
+    await openInSurface();
+    expect(mountedIn(columnPanel())).toBe(screen.getByTestId("host"));
+  });
+
+  it("mounts into the document body when there is no surface", async () => {
+    // The fallback the gallery, the frozen classic app and most of this kit's
+    // own tests rely on, and it must stay exactly as it was.
+    await open();
+    expect(mountedIn(columnPanel())).toBe(document.body);
+  });
+
+  it("still toggles a column from inside the surface", async () => {
+    const { onToggle } = await openInSurface();
+    await userEvent.click(screen.getByRole("checkbox", { name: "Status" }));
+    expect(onToggle).toHaveBeenCalledWith("status");
+  });
+
+  it("still closes on Escape", async () => {
+    await openInSurface();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("group")).toBeNull());
   });
 });

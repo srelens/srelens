@@ -412,3 +412,230 @@ describe("useRowMenu", () => {
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 });
+
+/**
+ * **Every write here runs on the cluster the row was picked on.**
+ *
+ * Until #357 a dialog was window-modal: its overlay covered the cluster rail,
+ * so the reader could not switch clusters while one was open, and reading the
+ * live `context` prop inside `confirm` was accidentally right. It is not any
+ * more — `setActiveCluster` switches the active cluster in place, globally,
+ * and no screen carries `key={name}`, so nothing here remounts and `pending`
+ * survives the switch with the other cluster's row still in it.
+ *
+ * Reproduced by execution before this suite existed: Delete opened on
+ * `prod-eu`'s `checkout`, the rail moved to `stage-eu`, Delete confirmed, and
+ * `deleteResource` was called with `[ 'stage-eu', 'Deployment', 'default',
+ * 'checkout' ]`. Two clicks and staging's Deployment is gone, with the dialog
+ * still naming production's row.
+ *
+ * The rule, from `lib/clusterMoved`: the cluster is pinned when the entry is
+ * picked, the write runs against the pinned one, the divergence is stated —
+ * and, unlike Helm's dialog, the confirmation is re-armed. These confirms take
+ * one click (Scale takes one number, and it is kept), so asking again costs
+ * the reader a tick.
+ */
+describe("useRowMenu — the cluster the row was picked on", () => {
+  const PINNED = "prod-eu";
+  const MOVED = "stage-eu";
+  const ROW: ListRow = { name: "checkout", namespace: "default" };
+
+  const argsOn = (context: string): UseRowMenuArgs => ({
+    context,
+    kind: "Deployment",
+    actions: { scale: true, restart: true },
+  });
+
+  const box = () => within(screen.getByRole("dialog"));
+  const tickFor = (verb: string) => screen.getByRole("checkbox", { name: `Yes, still ${verb} on ${PINNED}.` });
+  const REFUSAL = `This runs on ${PINNED}, not ${MOVED}. Confirm the cluster above, or cancel.`;
+
+  /** Pick an entry on `prod-eu`, then move the rail to `stage-eu` under it. */
+  async function pickThenMove(label: string, args: (context: string) => UseRowMenuArgs = argsOn) {
+    const view = render(<Harness args={args(PINNED)} row={ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: label }));
+    await screen.findByRole("dialog");
+    view.rerender(<Harness args={args(MOVED)} row={ROW} />);
+    return view;
+  }
+
+  it("deletes on the cluster the row was picked on, not the one the rail moved to", async () => {
+    await pickThenMove("Delete");
+    await userEvent.click(tickFor("delete"));
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
+    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+  });
+
+  it("refuses the write until the reader confirms which cluster, and says why", async () => {
+    await pickThenMove("Delete");
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+
+    // Nothing went out, and the dialog is still up with the reason in it —
+    // the same path a validation message this hook wrote itself takes.
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(box().getByText(REFUSAL)).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    // And the tick is all it takes: the question is which cluster, not
+    // whether to ask the whole confirm again.
+    await userEvent.click(tickFor("delete"));
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
+    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+  });
+
+  it("says the rail moved, first, above the row's own name", async () => {
+    await pickThenMove("Delete");
+    const alert = screen.getByText(`This still runs against ${PINNED}, not ${MOVED}`).closest("[data-tone]");
+    expect(alert).toBeTruthy();
+    expect(alert?.getAttribute("data-tone")).toBe("warn");
+    // Toned `warn`, so the kit gives it `role="status"` — a polite live
+    // region, which is what announces a fact that appears while the dialog is
+    // already open.
+    expect(alert?.getAttribute("role")).toBe("status");
+    expect(alert?.textContent?.replace(/\s+/g, " ")).toContain(
+      `the same names on ${MOVED} are different objects`,
+    );
+
+    // First in the message, above `Delete checkout in default?`: it changes
+    // what that name refers to.
+    const message = alert?.parentElement;
+    expect(message?.firstElementChild).toBe(alert);
+    expect(message?.textContent).toContain("This cannot be undone.");
+  });
+
+  it("keeps naming the cluster the write will reach in the kubectl preview", async () => {
+    await pickThenMove("Delete");
+    expect(box().getByText(new RegExp(`^kubectl delete .* --context ${PINNED}$`))).toBeTruthy();
+    expect(box().queryByText(new RegExp(`--context ${MOVED}`))).toBeNull();
+  });
+
+  it("says nothing, and asks nothing, while the rail has not moved", async () => {
+    render(<Harness args={argsOn(PINNED)} row={ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByRole("dialog");
+
+    expect(document.querySelector('[role="dialog"] [data-tone]')).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    // One click, exactly as before this fix existed.
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
+    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+  });
+
+  it("re-arms when the rail moves on again, rather than carrying the tick over", async () => {
+    const view = await pickThenMove("Delete");
+    await userEvent.click(tickFor("delete"));
+    expect((tickFor("delete") as HTMLInputElement).checked).toBe(true);
+
+    // A third cluster. The reader confirmed a divergence that no longer
+    // exists, and was never asked about this one.
+    view.rerender(<Harness args={argsOn("dev-eu")} row={ROW} />);
+    const again = screen.getByRole("checkbox", { name: `Yes, still delete on ${PINNED}.` }) as HTMLInputElement;
+    expect(again.checked).toBe(false);
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(box().getByText(`This runs on ${PINNED}, not dev-eu. Confirm the cluster above, or cancel.`)).toBeTruthy();
+  });
+
+  /**
+   * Caught by mutation testing: making the gate's `reset` a no-op left every
+   * assertion above green. An acknowledgement is about ONE open question, and
+   * a dialog that cancelled and a dialog that opened next are two.
+   */
+  it("forgets an acknowledgement when the dialog it was given for closes", async () => {
+    const view = await pickThenMove("Delete");
+    await userEvent.click(tickFor("delete"));
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Back on the cluster the row belongs to, and a fresh Delete on it.
+    view.rerender(<Harness args={argsOn(PINNED)} row={ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByRole("dialog");
+    view.rerender(<Harness args={argsOn(MOVED)} row={ROW} />);
+
+    expect((tickFor("delete") as HTMLInputElement).checked).toBe(false);
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(box().getByText(REFUSAL)).toBeTruthy();
+  });
+
+  it("scales the cluster it was picked on, and keeps the replica count typed for it", async () => {
+    const view = render(<Harness args={argsOn(PINNED)} row={ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Scale" }));
+    await screen.findByRole("dialog");
+    await userEvent.type(box().getByLabelText("Replica count"), "3");
+    view.rerender(<Harness args={argsOn(MOVED)} row={ROW} />);
+
+    // The number survives the switch — the gate re-arms the confirmation, it
+    // does not reset the dialog.
+    expect((box().getByLabelText("Replica count") as HTMLInputElement).value).toBe("3");
+    await userEvent.click(tickFor("scale"));
+    await userEvent.click(box().getByRole("button", { name: "Scale" }));
+    await waitFor(() => expect(scaleResource).toHaveBeenCalledTimes(1));
+    expect(scaleResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout", 3);
+  });
+
+  it("restarts the cluster it was picked on", async () => {
+    // The other destructive entries share one `confirm`, but each names its
+    // own core call: a fix applied to Delete alone would still retarget these.
+    await pickThenMove("Restart rollout");
+    await userEvent.click(tickFor("restart"));
+    await userEvent.click(box().getByRole("button", { name: "Restart" }));
+    await waitFor(() => expect(rolloutRestart).toHaveBeenCalledTimes(1));
+    expect(rolloutRestart).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+  });
+
+  it("evicts on the cluster the pod was picked on", async () => {
+    const podArgs = (context: string): UseRowMenuArgs => ({ context, kind: "Pod", actions: { evict: true } });
+    await pickThenMove("Evict", podArgs);
+    await userEvent.click(tickFor("evict"));
+    await userEvent.click(box().getByRole("button", { name: "Evict" }));
+    await waitFor(() => expect(evictPod).toHaveBeenCalledTimes(1));
+    expect(evictPod).toHaveBeenCalledWith(PINNED, "default", "checkout");
+  });
+
+  it("suspends on the cluster the CronJob was picked on, and says which way in the tick", async () => {
+    const cronArgs = (context: string): UseRowMenuArgs => ({ context, kind: "CronJob", actions: { suspend: true } });
+    await pickThenMove("Suspend", cronArgs);
+    // The acknowledgement carries the button's own word, so a Resume can
+    // never be confirmed with a sentence that says "suspend".
+    await userEvent.click(tickFor("suspend"));
+    await userEvent.click(box().getByRole("button", { name: "Suspend" }));
+    await waitFor(() => expect(cronjobSetSuspend).toHaveBeenCalledTimes(1));
+    expect(cronjobSetSuspend).toHaveBeenCalledWith(PINNED, "default", "checkout", true);
+  });
+
+  /**
+   * `Open shell` is the one entry with a round trip between the click and the
+   * dialog — the exact case Helm's own fix singles out. It writes nothing, so
+   * it states the divergence and asks for no tick; what was wrong before is
+   * which cluster's pod the terminal attached to.
+   */
+  it("attaches a shell to the pod on the cluster it was picked on", async () => {
+    getObject.mockResolvedValue({ object: { spec: { containers: [{ name: "app" }, { name: "sidecar" }] } } });
+    const podArgs = (context: string): UseRowMenuArgs => ({ context, kind: "Pod", actions: { shell: true } });
+    await pickThenMove("Open shell", podArgs);
+
+    // Stated, with no acknowledgement to give: nothing is written by opening
+    // a terminal, and the terminal itself is labelled with its cluster.
+    expect(screen.getByText(`This still runs against ${PINNED}, not ${MOVED}`)).toBeTruthy();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+
+    await userEvent.click(box().getByRole("button", { name: "Open" }));
+    await waitFor(() => expect(startPodSession).toHaveBeenCalledTimes(1));
+    expect(startPodSession).toHaveBeenCalledWith({
+      context: PINNED,
+      namespace: "default",
+      pod: "checkout",
+      container: "app",
+    });
+    // The tab the session opens is labelled with the same cluster: a
+    // terminal captioned `stage-eu` over a `prod-eu` pod is the same lie one
+    // layer up.
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals" && t.sub === PINNED)).toBe(true);
+  });
+});

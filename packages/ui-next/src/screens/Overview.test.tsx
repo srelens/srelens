@@ -1655,3 +1655,122 @@ describe("Overview — coming back to the tab", () => {
     expect(screen.queryByText("prod-eu-1")).toBeNull();
   });
 });
+
+/**
+ * **A node action runs on the cluster it was picked on.**
+ *
+ * Until #357 a dialog was window-modal: its overlay covered the cluster rail,
+ * so the reader could not switch clusters while one was open, and reading the
+ * live `context` prop inside `confirm` was accidentally right. It is not any
+ * more. `setActiveCluster` switches the active cluster in place, globally;
+ * `Nodes` is mounted unconditionally and `{pending && <NodeConfirm/>}` sits
+ * outside the loading and error branches, so nothing here remounts and nothing
+ * resets `pending`.
+ *
+ * Reproduced by execution against this screen before this suite existed: Drain
+ * opened on `prod-eu`'s `n1`, `setActiveCluster("stage")`, the dialog still on
+ * screen, Drain confirmed — and `drainNode` was called with `[ 'stage-eu',
+ * 'n1' ]`. Every pod on staging's node of that name, evicted from a dialog
+ * that named production's.
+ *
+ * The rule is `lib/clusterMoved`'s: pin at pick, run against the pinned
+ * cluster, state the divergence, and re-arm the confirmation — this confirm's
+ * whole input is one click, so asking again costs the reader a tick.
+ */
+describe("Overview — the cluster a node action was picked on", () => {
+  const MOVED = "stage-eu";
+  const STAGE: ClusterContext = { ...CTX, name: MOVED, stableId: "stage", isCurrent: false };
+
+  const box = () => dialog() as HTMLElement;
+  const tick = (verb: string) =>
+    screen.getByRole("checkbox", { name: `Yes, still ${verb} on prod-eu.` }) as HTMLInputElement;
+  const REFUSAL = `This runs on prod-eu, not ${MOVED}. Confirm the cluster above, or cancel.`;
+
+  beforeEach(() => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+    store.setActiveCluster(CTX.stableId);
+  });
+
+  /** Pick a node action on `prod-eu`, then move the rail to `stage-eu`. */
+  async function pickThenMove(label: string, node = "n1") {
+    open();
+    await waitFor(() => expect(rowFor(node)).toBeTruthy());
+    await userEvent.click(within(rowFor(node)).getByRole("button", { name: label }));
+    expect(box()).toBeTruthy();
+
+    store.setActiveCluster(STAGE.stableId);
+    await waitFor(() => expect(store.currentWorkspace().activeCluster).toBe(STAGE.stableId));
+    // The rail is reachable behind a scoped dialog now, so the question is
+    // still on screen — which is the whole premise this fix answers.
+    expect(box()).toBeTruthy();
+  }
+
+  it("drains the node on the cluster it was picked on, not the one the rail moved to", async () => {
+    await pickThenMove("Drain");
+    await userEvent.click(tick("drain"));
+    await userEvent.click(within(box()).getByRole("button", { name: "Drain" }));
+
+    await waitFor(() => expect(core.drainNode).toHaveBeenCalledTimes(1));
+    expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1");
+  });
+
+  it("refuses the drain until the reader confirms which cluster, and says why", async () => {
+    await pickThenMove("Drain");
+    await userEvent.click(within(box()).getByRole("button", { name: "Drain" }));
+
+    expect(core.drainNode).not.toHaveBeenCalled();
+    expect(within(box()).getByText(REFUSAL)).toBeTruthy();
+    expect(box()).toBeTruthy();
+
+    await userEvent.click(tick("drain"));
+    await userEvent.click(within(box()).getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+
+  it("cordons the node on the cluster it was picked on", async () => {
+    // The other half of the same `confirm`: a fix applied to the drain branch
+    // alone would still retarget this one.
+    await pickThenMove("Cordon");
+    await userEvent.click(tick("cordon"));
+    await userEvent.click(within(box()).getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(core.cordonNode).toHaveBeenCalledTimes(1));
+    expect(core.cordonNode).toHaveBeenCalledWith("prod-eu", "n1", true);
+  });
+
+  it("says the rail moved, first, above the node's own name, and keeps the kubectl honest", async () => {
+    await pickThenMove("Drain");
+    const alert = screen.getByText(`This still runs against prod-eu, not ${MOVED}`).closest("[data-tone]");
+    expect(alert).toBeTruthy();
+    expect(alert?.getAttribute("data-tone")).toBe("warn");
+    expect(alert?.getAttribute("role")).toBe("status");
+    expect(alert?.textContent?.replace(/\s+/g, " ")).toContain(
+      `the same names on ${MOVED} are different objects`,
+    );
+
+    const message = alert?.parentElement;
+    expect(message?.firstElementChild).toBe(alert);
+    expect(message?.textContent).toContain("evicts every pod");
+
+    // The command names the cluster the write will actually reach, so the
+    // dialog and the operation cannot agree on the wrong one.
+    expect(
+      within(box()).getByText(
+        "kubectl drain n1 --ignore-daemonsets --delete-emptydir-data --force --context prod-eu",
+      ),
+    ).toBeTruthy();
+    expect(within(box()).queryByText(new RegExp(`--context ${MOVED}`))).toBeNull();
+  });
+
+  it("says nothing, and asks nothing, while the rail has not moved", async () => {
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "Drain" }));
+
+    expect(within(box()).queryByText(/This still runs against/)).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    // One click, exactly as before this fix existed.
+    await userEvent.click(within(box()).getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+});

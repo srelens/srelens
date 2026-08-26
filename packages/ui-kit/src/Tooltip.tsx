@@ -1,5 +1,6 @@
 import { isValidElement, type ReactNode } from "react";
 import { Tooltip as RadixTooltip } from "radix-ui";
+import { usePortalContainer } from "./portal";
 import { filled } from "./slot";
 
 export interface TooltipProps {
@@ -52,8 +53,18 @@ export interface TooltipProps {
  * focusable — around a badge or a truncated string the hint was pointer-only.
  * A single element is used as the target as it stands, and anything else is
  * wrapped in a span that can take focus. (#320)
+ *
+ * Inside a portal scope — one tab of a window that holds several — the bubble
+ * mounts into the tab's own node rather than the document body, so it is hidden
+ * with the tab. This is the weakest of the kit's five portalled layers' cases
+ * for that, and it is taken anyway: a hint lives and dies with hover and focus,
+ * and hiding the tab it is in normally takes both away, so most of the time it
+ * closes itself. Most of the time is the gap. A hint drawn beside a control
+ * that is no longer on screen is a caption on the wrong picture, and one line
+ * makes the question not arise. Outside a scope nothing changes. (#357)
  */
 export function Tooltip({ label, children, side = "top" }: TooltipProps) {
+  const container = usePortalContainer();
   return (
     <RadixTooltip.Provider delayDuration={200}>
       <RadixTooltip.Root>
@@ -75,7 +86,7 @@ export function Tooltip({ label, children, side = "top" }: TooltipProps) {
             unmounting the tree instead would remount the caller's control —
             taking focus off it — every time the label went from empty to not. */}
         {filled(label) && (
-          <RadixTooltip.Portal>
+          <RadixTooltip.Portal container={container}>
             <RadixTooltip.Content
               side={side}
               // `.tip::after` sat at `calc(100% + 5px)`.

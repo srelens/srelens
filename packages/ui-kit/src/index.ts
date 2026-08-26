@@ -43,6 +43,14 @@ export { NavIcon, type NavIconProps } from "./NavIcon";
 export { PairList, type PairListProps } from "./PairList";
 export { Panel, type PanelProps } from "./Panel";
 export { Popover, type PopoverProps } from "./Popover";
+export {
+  PortalScopeProvider,
+  useOpenLayer,
+  usePortalContainer,
+  usePortalHost,
+  usePortalScoped,
+  type PortalScope,
+} from "./portal";
 export { Progress, type ProgressProps } from "./Progress";
 export { Radio, type RadioProps } from "./Radio";
 export { RawError, type RawErrorProps } from "./RawError";

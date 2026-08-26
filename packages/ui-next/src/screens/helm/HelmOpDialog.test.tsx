@@ -666,3 +666,100 @@ describe("HelmOpDialog — submitting", () => {
     expect(screen.getByText(/image: nginx:1\.27/)).toBeTruthy();
   });
 });
+
+/**
+ * **The cluster this operation targets is the one it was opened against.**
+ *
+ * The rail is reachable behind a dialog since #357, so the cluster in focus
+ * can change while this is open. `context` is what the operation runs against
+ * and it must not move; `activeContext` is what the reader has in focus now,
+ * and the only thing it may change is what the dialog SAYS.
+ *
+ * A silent retarget is the failure worth all of this: `helm uninstall` on the
+ * cluster the reader wandered to, behind a gate they typed out for a different
+ * cluster's release, is not recoverable.
+ */
+describe("HelmOpDialog — the cluster it was opened against", () => {
+  const ELSEWHERE = "stage-eu";
+
+  /** What the store was told to run the operation against. */
+  const target = () => store.startHelmOperation.mock.calls[0]?.[0]?.context;
+
+  /** The divergence alert, by its title, or null when it is not there. */
+  const moved = () => screen.queryByText(`This still runs against ${CONTEXT}, not ${ELSEWHERE}`);
+
+  it("submits the context it was opened against, not the one in focus", async () => {
+    open({ kind: "uninstall", activeContext: ELSEWHERE });
+    await screen.findByRole("dialog");
+    await userEvent.type(field(`Type ${RELEASE} to confirm`), RELEASE);
+    await userEvent.click(button("Uninstall"));
+
+    expect(store.startHelmOperation).toHaveBeenCalledTimes(1);
+    expect(target()).toBe(CONTEXT);
+  });
+
+  it("keeps naming the cluster it was opened against in the command block", async () => {
+    open({ kind: "upgrade", activeContext: ELSEWHERE });
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(`srelens runs this against ${CONTEXT}.`)).toBeTruthy();
+    expect(within(dialog).queryByText(new RegExp(ELSEWHERE + "\\."))).toBeNull();
+  });
+
+  it("says the rail has moved, and what that does not change", async () => {
+    open({ kind: "uninstall", activeContext: ELSEWHERE });
+    await screen.findByRole("dialog");
+    // Toned `warn`, so the kit gives it `role="status"` — a polite live region,
+    // which is what announces a fact that appears while the dialog is already
+    // open. Uninstall's own `sev` alert stays the assertive one.
+    const alert = moved()?.closest('[data-tone="warn"]');
+    expect(alert).toBeTruthy();
+    expect(alert?.getAttribute("role")).toBe("status");
+    expect(alert?.textContent?.replace(/\s+/g, " ")).toContain(
+      `a release of the same name on ${ELSEWHERE} is a different release`,
+    );
+
+    // And it is first, above even "This removes every object in the release":
+    // it changes what every name under it refers to.
+    const alerts = Array.from(document.querySelectorAll("[data-tone]"));
+    expect(alerts[0]).toBe(alert);
+  });
+
+  it("says nothing when the rail has not moved, or when there is nothing in focus", async () => {
+    const { unmount } = render(
+      <HelmOpDialog
+        kind="uninstall"
+        context={CONTEXT}
+        activeContext={CONTEXT}
+        namespace={NAMESPACE}
+        release={RELEASE}
+        onClose={vi.fn()}
+      />,
+    );
+    await screen.findByRole("dialog");
+    // Uninstall's own alert, and only it.
+    expect(document.querySelectorAll("[data-tone]")).toHaveLength(1);
+    expect(screen.queryByText(new RegExp("This still runs against"))).toBeNull();
+    unmount();
+
+    open({ kind: "uninstall" });
+    await screen.findByRole("dialog");
+    expect(document.querySelectorAll("[data-tone]")).toHaveLength(1);
+    expect(screen.queryByText(new RegExp("This still runs against"))).toBeNull();
+  });
+
+  /**
+   * The gate is unchanged by any of this: it is the release the dialog was
+   * opened for, typed exactly. A switch neither passes it nor re-arms it — the
+   * operation has not changed, so neither has what was confirmed about it.
+   */
+  it("leaves the typed gate exactly as it was", async () => {
+    open({ kind: "uninstall", activeContext: ELSEWHERE });
+    await screen.findByRole("dialog");
+    expect(button("Uninstall").disabled).toBe(true);
+    await userEvent.type(field(`Type ${RELEASE} to confirm`), RELEASE.toUpperCase());
+    expect(button("Uninstall").disabled).toBe(true);
+    await userEvent.clear(field(`Type ${RELEASE} to confirm`));
+    await userEvent.type(field(`Type ${RELEASE} to confirm`), RELEASE);
+    expect(button("Uninstall").disabled).toBe(false);
+  });
+});

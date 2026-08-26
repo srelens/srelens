@@ -1440,3 +1440,181 @@ describe("Helm — failures the table cannot show", () => {
     expect(document.querySelector('[data-slot="helm-failures"]')).toBeNull();
   });
 });
+
+/**
+ * **The cluster rail is reachable while a dialog is open, and the dialog is
+ * the one irreversible surface in the app.**
+ *
+ * PR #354's whole-branch review asked whether a destructive operation could
+ * run against a different cluster than the one named on screen and cleared it,
+ * partly because Radix's modal overlay covered the rail: with a dialog open the
+ * reader simply could not switch clusters underneath it. `b6dd228` scopes a
+ * dialog to its own tab (#357), so the rail, the tab strip and the status bar
+ * are all live behind one — and that clearance no longer holds on its own.
+ *
+ * The rule these pin: **an operation runs against the cluster it was opened
+ * against, and says so whenever that is no longer the cluster in focus.**
+ * Following the rail silently is the one outcome that must never happen here;
+ * `helm uninstall checkout` on the wrong cluster is not recoverable, and a
+ * release of the SAME NAME on the cluster the reader moved to is the ordinary
+ * shape of a staging cluster beside a production one.
+ */
+describe("Helm — a dialog open across a cluster switch", () => {
+  /**
+   * The second cluster, carrying a release with production's name.
+   *
+   * `stage-eu` is what `staging/checkout` would look like if it lived on its
+   * own cluster rather than in its own namespace, which is the case that makes
+   * a silent retarget destroy something: an uninstall gate typed out for
+   * `checkout` on `prod-eu` is a gate already passed for `checkout` on
+   * `stage-eu`.
+   */
+  const STAGE: ClusterContext = {
+    name: "stage-eu",
+    stableId: "stage",
+    cluster: "stage",
+    server: "https://stage",
+    isCurrent: false,
+    namespace: "default",
+  };
+
+  /** The screen on a window that has both clusters, opened on `prod-eu`. */
+  function openBoth() {
+    resetContexts();
+    setContexts([CTX, STAGE]);
+    setKubeconfigFiles(FILES);
+    // `defaultState` focuses the first, so this opens on `prod-eu`.
+    store.setState(defaultState([CTX, STAGE]));
+    return open();
+  }
+
+  /** What the rail does: put another cluster in focus, with the dialog open. */
+  const switchTo = (stableId: string) =>
+    act(() => {
+      store.setActiveCluster(stableId);
+    });
+
+  /** The context every `startHelmOp` was told to run against. */
+  const targets = () => core.startHelmOp.mock.calls.map((c) => c[0] as string);
+
+  async function openUninstall() {
+    await userEvent.click(
+      within(rowFor("checkout", "checkout")).getByRole("button", { name: "Uninstall checkout" }),
+    );
+    return screen.findByRole("dialog");
+  }
+
+  it("uninstalls on the cluster the dialog was opened against, not the one the rail moved to", async () => {
+    openBoth();
+    await ready();
+    const dialog = await openUninstall();
+    await userEvent.type(within(dialog).getByLabelText("Type checkout to confirm"), "checkout");
+
+    switchTo("stage");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Uninstall" }));
+    await waitFor(() => expect(core.startHelmOp).toHaveBeenCalled());
+
+    // The release this gate was typed out for lives on `prod-eu`. `stage-eu`
+    // has one with the same name and it is not this one.
+    expect(targets()).toEqual(["prod-eu"]);
+  });
+
+  it("says which cluster it runs against once that is no longer the one in focus", async () => {
+    openBoth();
+    await ready();
+    const dialog = await openUninstall();
+    expect(within(dialog).getByText("srelens runs this against prod-eu.")).toBeTruthy();
+
+    switchTo("stage");
+
+    // Still prod-eu, because that is still what it will do — and now said
+    // twice, because the screen behind the dialog is a different cluster's.
+    expect(within(dialog).getByText("srelens runs this against prod-eu.")).toBeTruthy();
+    expect(
+      within(dialog).getByText("This still runs against prod-eu, not stage-eu"),
+    ).toBeTruthy();
+  });
+
+  it("keeps quiet about the cluster while the rail has not moved", async () => {
+    openBoth();
+    await ready();
+    const dialog = await openUninstall();
+    expect(within(dialog).queryByText(/This still runs against/)).toBeNull();
+  });
+
+  /**
+   * The gate is the release name typed out, matched exactly against the
+   * release the dialog was OPENED for. A switch must not turn that into a
+   * gate for some other cluster's release of the same name — and it must not
+   * quietly re-arm either: the operation has not changed, so neither has what
+   * was confirmed.
+   */
+  it("holds the typed gate to the release it was opened for", async () => {
+    openBoth();
+    await ready();
+    const dialog = await openUninstall();
+    switchTo("stage");
+
+    const gate = within(dialog).getByLabelText("Type checkout to confirm");
+    expect((within(dialog).getByRole("button", { name: "Uninstall" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.type(gate, "checkou");
+    expect((within(dialog).getByRole("button", { name: "Uninstall" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.type(gate, "t");
+    expect((within(dialog).getByRole("button", { name: "Uninstall" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  /**
+   * **The in-flight read is the sharp one.** A rollback dialog opens on an
+   * answer, not before it — `getHelmRelease` is asked for the release's
+   * revisions and the dialog is opened once they arrive. Move the rail during
+   * that round trip and the dialog mounts under a cluster that is not the one
+   * the revisions came from; anything that reads the cluster at MOUNT rather
+   * than at the click has already lost the answer's own cluster by then.
+   */
+  it("opens a rollback against the cluster its revisions came from", async () => {
+    let deliver!: () => void;
+    const held = new Promise<void>((resolve) => {
+      deliver = resolve;
+    });
+    core.getHelmRelease.mockImplementationOnce(async (_c: string, ns: string, n: string) => {
+      await held;
+      return { release: { name: n, manifest: "", history: HISTORIES[`${ns}/${n}`] ?? [] } };
+    });
+
+    openBoth();
+    await ready();
+    await userEvent.click(
+      within(rowFor("checkout", "checkout")).getByRole("button", { name: "Roll back checkout" }),
+    );
+
+    // The rail moves while the read is still out.
+    switchTo("stage");
+    await act(async () => {
+      deliver();
+      await held;
+    });
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("srelens runs this against prod-eu.")).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole("checkbox"));
+    await userEvent.click(within(dialog).getByRole("button", { name: /^Roll back to / }));
+    await waitFor(() => expect(core.startHelmOp).toHaveBeenCalled());
+    expect(targets()).toEqual(["prod-eu"]);
+  });
+
+  /**
+   * The read itself, not just the dialog it opens: `getHelmRelease` is asked
+   * of the cluster the row was clicked on. A screen that read the context
+   * afresh inside the async body would ask `stage-eu` for a release it does
+   * not have.
+   */
+  it("reads the release from the cluster the row was clicked on", async () => {
+    openBoth();
+    await ready();
+    await userEvent.click(
+      within(rowFor("checkout", "checkout")).getByRole("button", { name: "Roll back checkout" }),
+    );
+    await screen.findByRole("dialog");
+    expect(core.getHelmRelease.mock.calls.map((c) => c[0] as string)).toContain("prod-eu");
+  });
+});

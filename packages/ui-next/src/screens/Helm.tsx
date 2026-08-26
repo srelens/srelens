@@ -89,6 +89,24 @@ interface ReleaseRow {
 /** What the dialog is about, decided when it is opened and not before. */
 interface Pending {
   kind: HelmOpKind;
+  /**
+   * The cluster the operation will run against, captured when the dialog was
+   * asked for and never re-read.
+   *
+   * **Not the cluster in focus.** Since #357 a dialog covers only its own tab,
+   * so the cluster rail stays live behind it and the focus can move while the
+   * dialog is open — or, for upgrade and rollback, during the `getHelmRelease`
+   * round trip that has to answer before the dialog can open at all. Reading
+   * the focus at render time meant an operation opened on one cluster's
+   * release ran against whichever cluster the reader had wandered to, with the
+   * dialog quietly renaming its own target to match. `helm uninstall checkout`
+   * is not recoverable, and a staging cluster with a release of the same name
+   * is the ordinary shape rather than the exotic one.
+   *
+   * The release, namespace, values and history beside it are all that
+   * cluster's; this is the field that keeps them together.
+   */
+  context: string;
   release: string;
   namespace: string;
   chart: string;
@@ -499,6 +517,10 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
     setSelectedKey(row.key);
     const base: Pending = {
       kind,
+      // The cluster this row is a row OF, read once, here. Everything below —
+      // including the read that has to come back before an upgrade or a
+      // rollback dialog can open — belongs to it.
+      context: name,
       release: row.name,
       namespace: row.namespace,
       // The chart and version the release is ON. §16's own upgrade path is the
@@ -797,6 +819,10 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
             onClick={() =>
               setPending({
                 kind: "install",
+                // The cluster in focus when the reader asked for the dialog.
+                // See `Pending.context`: an install started here creates a
+                // release on THIS cluster, whatever the rail does next.
+                context: name,
                 // **Empty, and the dialog asks.** This opened on
                 // `new-release` — §A.5's own fixture — over a dialog with no
                 // field to change it with, so every install srelens could
@@ -826,7 +852,13 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
       {pending && (
         <HelmOpDialog
           kind={pending.kind}
-          context={name}
+          // Captured, not current — see `Pending.context`. `name` goes in
+          // beside it as what the reader has in FOCUS, which is the only thing
+          // a cluster switch is allowed to change about an open dialog: the
+          // dialog says the two have parted, and keeps running against the
+          // first.
+          context={pending.context}
+          activeContext={name}
           namespace={pending.namespace}
           release={pending.release}
           chart={pending.chart}

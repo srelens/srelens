@@ -197,8 +197,27 @@ export function lastGoodRevision(
 export interface HelmOpDialogProps {
   /** Which of the four this is. */
   kind: HelmOpKind;
-  /** The cluster it runs in — a kubeconfig context NAME. */
+  /**
+   * The cluster it runs in — a kubeconfig context NAME.
+   *
+   * **Fixed when the dialog is opened, and never afterwards.** The caller
+   * captures it and hands the same value for this dialog's whole life; see
+   * {@link activeContext} for why that is now a rule rather than an accident.
+   */
   context: string;
+  /**
+   * The cluster the reader has in FOCUS, which is not always {@link context}.
+   *
+   * Since #357 a dialog covers only its own tab, so the cluster rail is live
+   * behind this one and the reader can move it while the dialog is open. The
+   * operation does not move with it: it runs against the cluster it was opened
+   * against, because the release named in this dialog is that cluster's and a
+   * release of the same name elsewhere is a different release. What changes is
+   * only what the dialog SAYS — a divergence is stated rather than acted on.
+   *
+   * Omitted means "nothing to compare against", and the dialog says nothing.
+   */
+  activeContext?: string;
   /** Where the release lives — and, for install, where its own field starts. */
   namespace: string;
   /**
@@ -283,6 +302,7 @@ const TITLE: Record<HelmOpKind, string> = {
 export function HelmOpDialog({
   kind,
   context,
+  activeContext,
   namespace,
   release,
   chart: initialChart = "",
@@ -297,6 +317,19 @@ export function HelmOpDialog({
   onStarted,
 }: HelmOpDialogProps) {
   const takesChart = kind === "install" || kind === "upgrade";
+  /**
+   * Has the reader moved the cluster rail out from under this dialog?
+   *
+   * Nothing is done about it beyond saying so. Retargeting the operation to
+   * follow the rail is the one outcome that must never happen here — an
+   * uninstall whose gate was typed out for one cluster's release, submitted
+   * against another cluster's release of the same name, is not recoverable —
+   * and closing the dialog would throw away a values body the reader typed for
+   * a mistake they may be about to undo. The screen's own habit is the one
+   * followed: keep what is there, state what changed, reset nothing the reader
+   * did not ask to have reset.
+   */
+  const moved = activeContext !== undefined && activeContext !== context;
   /**
    * **Install names its own release, which §A.5 does not draw.**
    *
@@ -473,6 +506,19 @@ export function HelmOpDialog({
       }
     >
       <div className="flex min-w-0 flex-col gap-3 p-3">
+        {moved && (
+          /* First, above even uninstall's own alert: it is the only thing on
+             screen the reader does not already know, and it changes what every
+             name below it refers to. */
+          <Alert tone="warn" title={`This still runs against ${context}, not ${activeContext}`}>
+            The cluster in focus changed while this was open. srelens is still
+            talking to {context}, and the release named here is that cluster's
+            — a release of the same name on {activeContext} is a different
+            release. Cancel and open this again from {activeContext} to operate
+            there.
+          </Alert>
+        )}
+
         {kind === "uninstall" && (
           <Alert tone="sev" title="This removes every object in the release">
             {/* No counts. See this component's note: srelens has not asked the

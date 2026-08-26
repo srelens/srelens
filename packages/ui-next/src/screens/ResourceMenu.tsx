@@ -18,6 +18,7 @@ import {
   type KubectlInput,
 } from "@srelens/core";
 import { ConfirmDialog, KubectlPreview, Select, TextInput, type ContextMenuItem } from "@srelens/ui-kit";
+import { ClusterMovedAlert, useClusterGate } from "../lib/clusterMoved";
 import { detailRoute } from "../lib/detailRoute";
 import { FailureLine } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
@@ -37,13 +38,42 @@ export interface UseRowMenuArgs {
 }
 
 /** What a picked entry is waiting to do, once the confirm is taken. */
-type Pending =
+type Ask =
   | { type: "delete"; row: ListRow }
   | { type: "scale"; row: ListRow }
   | { type: "restart"; row: ListRow }
   | { type: "evict"; row: ListRow }
   /** `suspend: true` sets the CronJob suspended; `false` resumes it. */
   | { type: "suspend"; row: ListRow; suspend: boolean };
+
+/**
+ * An {@link Ask}, plus the cluster it was asked ON.
+ *
+ * **The context is captured when the entry is picked and never re-read.**
+ * Since #357 a dialog covers only its own tab, so the cluster rail is live
+ * behind this one and `setActiveCluster` switches the active cluster in place,
+ * globally — no screen carries `key={name}`, so nothing here remounts and
+ * `pending` survives the switch intact. Reading the `context` prop inside
+ * `confirm` therefore meant a Delete opened on production's `checkout` ran
+ * against whichever cluster the reader had moved to, while the dialog on
+ * screen still named production's row. Two clicks, and staging's Deployment
+ * is gone.
+ *
+ * The row, its namespace and the kubectl line beside it are all that cluster's;
+ * this is the field that keeps them together. See `lib/clusterMoved`.
+ */
+type Pending = Ask & { context: string };
+
+/**
+ * The word on the confirm's own button, for the acknowledgement the cluster
+ * gate asks for. Taken from the pick rather than restated, so "Yes, still
+ * resume on prod-eu." can never read as "suspend".
+ */
+function verbOf(pending: Pending | null): string {
+  if (!pending) return "act";
+  if (pending.type === "suspend") return pending.suspend ? "suspend" : "resume";
+  return pending.type;
+}
 
 /** `CronJobSummary` carries `suspended`; a bare `ListRow` doesn't promise it. */
 function isSuspended(row: ListRow): boolean {
@@ -58,6 +88,14 @@ interface ShellPick {
   namespace: string;
   choices: ContainerChoice[];
   container: string;
+  /**
+   * The cluster the pod was picked on, captured BEFORE the read that opens
+   * this — the exact case Helm's own fix (7e50ea0) singles out. `getObject` is
+   * a round trip, and the rail can move while it is in flight, so a dialog
+   * that pinned the context at mount would already be showing one cluster's
+   * container names over another cluster's pod.
+   */
+  context: string;
 }
 
 /**
@@ -112,15 +150,35 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
   const [error, setError] = useState("");
   const [replicas, setReplicas] = useState("");
 
-  function open(next: Pending) {
+  /**
+   * The divergence banner, its acknowledgement and the refusal behind it.
+   *
+   * `pending.context` is what this dialog runs against; `context` is what the
+   * reader has in FOCUS, which is the only thing a rail switch may change.
+   * The verb is the button's own word, so the tick reads as the thing that is
+   * about to happen rather than as a generic assent.
+   */
+  const gate = useClusterGate({
+    pinned: pending?.context ?? null,
+    live: context,
+    verb: verbOf(pending),
+  });
+  /** The same, for the container picker — see {@link ShellPick.context}. */
+  const shellMoved = shellPick !== null && shellPick.context !== context;
+
+  function open(next: Ask) {
     setError("");
+    gate.reset();
     if (next.type === "scale") setReplicas("");
-    setPending(next);
+    // The cluster the reader picked this ON, read once, here. Everything the
+    // confirm does below belongs to it.
+    setPending({ ...next, context });
   }
 
   function close() {
     setPending(null);
     setError("");
+    gate.reset();
   }
 
   async function runNow(row: ListRow) {
@@ -153,7 +211,11 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
    */
   async function startShell(row: ListRow) {
     const namespace = row.namespace ?? "";
-    const result = await getObject(context, kind, namespace || null, row.name);
+    // Pinned before the read, not after it: the rail can move while
+    // `getObject` is in flight, and a shell opened on one cluster's container
+    // list must not attach to another cluster's pod of the same name.
+    const target = context;
+    const result = await getObject(target, kind, namespace || null, row.name);
     if (result.error || !result.object) {
       notify.error(`Couldn't open a shell in ${row.name}`, describeError(result.error ?? "Pod not found").detail);
       return;
@@ -169,33 +231,43 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
         namespace,
         choices,
         container: defaultContainer(result.object, choices) ?? choices[0].name,
+        context: target,
       });
       return;
     }
-    await launchShell(row, namespace, choices[0].name);
+    await launchShell(row, namespace, choices[0].name, target);
   }
 
   /** Starts the session and opens the screen that shows it. Two separate
    *  effects — a session that failed to open is still a `closed` row on
    *  `/terminals`, worth showing rather than hiding behind a tab that never
    *  opens. */
-  async function launchShell(row: ListRow, namespace: string, container: string) {
-    await startPodSession({ context, namespace, pod: row.name, container });
-    openTab("/terminals", { clusterName: context });
+  async function launchShell(row: ListRow, namespace: string, container: string, target: string) {
+    await startPodSession({ context: target, namespace, pod: row.name, container });
+    openTab("/terminals", { clusterName: target });
   }
 
   async function confirmShell() {
     if (!shellPick) return;
     setShellBusy(true);
-    await launchShell(shellPick.row, shellPick.namespace, shellPick.container);
+    await launchShell(shellPick.row, shellPick.namespace, shellPick.container, shellPick.context);
     setShellBusy(false);
     setShellPick(null);
   }
 
   async function confirm() {
     if (!pending) return;
-    const { row } = pending;
+    const { row, context: target } = pending;
     const ns = row.namespace ?? "";
+
+    // Asked before anything else: it is the only question on screen whose
+    // answer changes what every other name in the dialog refers to. The write
+    // still goes to `target` either way — this re-arms the confirmation, it
+    // does not retarget it.
+    if (gate.refusal) {
+      setError(gate.refusal);
+      return;
+    }
 
     if (pending.type === "scale") {
       const n = Number(replicas);
@@ -209,16 +281,18 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     setError("");
     const result = await (async () => {
       switch (pending.type) {
+        // Every one of these takes `target` — the cluster the entry was picked
+        // on — and never the live `context` prop. See {@link Pending}.
         case "delete":
-          return deleteResource(context, kind, row.namespace ?? null, row.name);
+          return deleteResource(target, kind, row.namespace ?? null, row.name);
         case "scale":
-          return scaleResource(context, kind, ns, row.name, Number(replicas));
+          return scaleResource(target, kind, ns, row.name, Number(replicas));
         case "restart":
-          return rolloutRestart(context, kind, ns, row.name);
+          return rolloutRestart(target, kind, ns, row.name);
         case "evict":
-          return evictPod(context, ns, row.name);
+          return evictPod(target, ns, row.name);
         case "suspend":
-          return cronjobSetSuspend(context, ns, row.name, pending.suspend);
+          return cronjobSetSuspend(target, ns, row.name, pending.suspend);
       }
     })();
     setBusy(false);
@@ -313,7 +387,21 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
   }
 
   const dialog = pending ? (
-    <PendingDialog pending={pending} kind={kind} context={context} busy={busy} error={error} replicas={replicas} onReplicasChange={setReplicas} onConfirm={() => void confirm()} onCancel={close} />
+    <PendingDialog
+      pending={pending}
+      kind={kind}
+      // Captured, not current. The kubectl line under the message names the
+      // cluster the write will actually reach, which is the same one the alert
+      // above it names.
+      context={pending.context}
+      moved={gate.alert}
+      busy={busy}
+      error={error}
+      replicas={replicas}
+      onReplicasChange={setReplicas}
+      onConfirm={() => void confirm()}
+      onCancel={close}
+    />
   ) : forwarding ? (
     // The row's own kind and identity, prefilled. A list row knows no ports,
     // so the remote one is the reader's to name — and the dialog stays fully
@@ -333,6 +421,15 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
       onCancel={() => setShellPick(null)}
       message={
         <>
+          {/* Stated, and nothing more: opening a shell writes nothing, and the
+              terminal it opens is labelled with the cluster it is on. What was
+              silently wrong before is which cluster's pod it attached to, and
+              pinning `shellPick.context` is what fixes that. */}
+          {shellMoved && (
+            <ClusterMovedAlert pinned={shellPick.context} live={context}>
+              {` Cancel and open a shell again from ${context} to attach there.`}
+            </ClusterMovedAlert>
+          )}
           <p style={{ marginTop: 0 }}>
             <code>{shellPick.row.name}</code> runs more than one container — which one?
           </p>
@@ -443,6 +540,7 @@ function PendingDialog({
   pending,
   kind,
   context,
+  moved,
   busy,
   error,
   replicas,
@@ -452,7 +550,10 @@ function PendingDialog({
 }: {
   pending: Pending;
   kind: string;
+  /** The cluster this runs against — `pending.context`, never the live prop. */
   context: string;
+  /** The cluster-moved banner and its tick, or `null` when the rail has not moved. */
+  moved: ReactNode;
   busy: boolean;
   error: string;
   replicas: string;
@@ -487,6 +588,10 @@ function PendingDialog({
       onCancel={onCancel}
       message={
         <>
+          {/* First, above the row's own name: it changes what that name refers
+              to, and it is the only thing here the reader does not already
+              know. */}
+          {moved}
           <p style={{ marginTop: 0 }}>{messageFor(pending)}</p>
           {pending.type === "scale" && (
             <TextInput
