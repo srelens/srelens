@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { Tooltip } from "./Tooltip";
+import { PortalScopeProvider, usePortalHost } from "./portal";
 
 // jsdom has no ResizeObserver, and Radix's popper watches the trigger and the
 // content with one. The kit's shared setup does not stub it, and that setup is
@@ -150,5 +152,82 @@ describe("Tooltip", () => {
     await userEvent.hover(target());
     expect(screen.queryByRole("tooltip")).toBeNull();
     expect(target()).toBeDefined();
+  });
+});
+
+/** A tab-sized surface that owns the layers opened inside it, as `TabSurface` does. */
+function Surface({ children }: { children: ReactNode }) {
+  const { ref, scope } = usePortalHost();
+  return (
+    <div data-testid="surface">
+      <PortalScopeProvider scope={scope}>
+        <div data-testid="content">{children}</div>
+        <div data-testid="host" ref={ref} />
+      </PortalScopeProvider>
+    </div>
+  );
+}
+
+/**
+ * The node the layer was portalled into.
+ *
+ * Radix's `Portal` renders a div of its own as a direct child of the container
+ * and the popper adds another inside that, so the container is never the
+ * content's parent. Matching the outermost portalled element and taking *its*
+ * parent names the container exactly, where "somewhere in the document" would
+ * also pass for a container that was wrong but still attached.
+ */
+function mountedIn(node: Element): Element | null {
+  return node.closest("body > *, [data-testid='host'] > *")?.parentElement ?? null;
+}
+
+async function showInSurface() {
+  const view = render(
+    <Surface>
+      <Tooltip label="Delete this pod">
+        <button type="button">Delete</button>
+      </Tooltip>
+    </Surface>,
+  );
+  await userEvent.tab();
+  await screen.findByRole("tooltip");
+  return view;
+}
+
+/**
+ * A hint belongs to the tab the thing it is about is in.
+ *
+ * The window is a strip of tabs over one screen each, all of them mounted at
+ * once with the inactive ones hidden by the `hidden` attribute — which a portal
+ * to `document.body` escapes. A tooltip is the weakest case for this of the
+ * five layers: it is tied to hover and focus, both of which the browser
+ * normally takes away when the tab it is in is hidden, so most of the time it
+ * closes itself. But "most of the time" is the whole gap — a hint drawn beside
+ * a button that is no longer on screen is a caption on the wrong picture, and
+ * the container costs one line and removes the question. (#357)
+ */
+describe("Tooltip inside a surface", () => {
+  it("mounts into the surface's own node, so hiding the tab hides it too", async () => {
+    await showInSurface();
+    expect(mountedIn(screen.getByRole("tooltip"))).toBe(screen.getByTestId("host"));
+  });
+
+  it("mounts into the document body when there is no surface", async () => {
+    // The fallback the gallery, the frozen classic app and most of this kit's
+    // own tests rely on, and it must stay exactly as it was.
+    setup();
+    await userEvent.tab();
+    await screen.findByRole("tooltip");
+    expect(mountedIn(screen.getByRole("tooltip"))).toBe(document.body);
+  });
+
+  it("still describes its target from inside the surface", async () => {
+    // The portal moved; the wiring that makes the hint reachable at all did
+    // not. `aria-describedby` crosses the portal either way, and this is the
+    // one property of this component that a wrong container could quietly
+    // break.
+    await showInSurface();
+    const tip = screen.getByRole("tooltip");
+    expect(screen.getByRole("button", { name: "Delete" }).getAttribute("aria-describedby")).toBe(tip.id);
   });
 });

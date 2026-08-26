@@ -263,3 +263,103 @@ describe("Dialog inside a surface", () => {
     opener.remove();
   });
 });
+
+function setupTabbing(inSurface: boolean) {
+  const onClose = vi.fn();
+  const dialog = (
+    <Dialog title="Customise kind-local" onClose={onClose} footer={<button type="button">Done</button>}>
+      <label>
+        Display name
+        <input />
+      </label>
+    </Dialog>
+  );
+  const view = render(
+    <>
+      <button type="button">the tab strip</button>
+      {inSurface ? <Surface>{dialog}</Surface> : dialog}
+      <button type="button">the status bar</button>
+    </>,
+  );
+  return { onClose, ...view };
+}
+
+const named = (name: string) => screen.getByRole("button", { name });
+
+async function pressTabFrom(from: HTMLElement, shift = false) {
+  await waitFor(() => expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true));
+  from.focus();
+  fireEvent.keyDown(from, { key: "Tab", shiftKey: shift });
+}
+
+/**
+ * Tab is how a keyboard user leaves.
+ *
+ * The rest of the fix gave the reader the tab strip back, and gave it back to
+ * the pointer only: Radix hands its focus scope `loop: true` unconditionally,
+ * so Tab off the last control in the card came back round to the first one and
+ * a keyboard user was still shut in — the one thing the scoping was for. The
+ * flag is hardcoded and there is no prop for it, so the loop is not turned off
+ * but out-run: this component answers Tab at the card's edge first, moves focus
+ * to the neighbour outside, and Radix's own handler then finds focus somewhere
+ * that is neither edge and does nothing. (#357)
+ *
+ * Outside a surface the loop is still right and is left alone — a document-wide
+ * modal is meant to be the only thing you can reach.
+ */
+describe("Dialog and the Tab key", () => {
+  it("lets Tab off the last control reach the window past the tab", async () => {
+    setupTabbing(true);
+    await pressTabFrom(named("Done"));
+    expect(document.activeElement).toBe(named("the status bar"));
+  });
+
+  it("lets Shift+Tab off the first control reach the window before the tab", async () => {
+    setupTabbing(true);
+    await pressTabFrom(named("Close"), true);
+    expect(document.activeElement).toBe(named("the tab strip"));
+  });
+
+  it("leaves Tab inside the card alone", async () => {
+    setupTabbing(true);
+    // Not an edge, so nothing here should touch it: the browser moves focus,
+    // and jsdom's does not, which is exactly what makes this assertable.
+    await pressTabFrom(screen.getByLabelText(/Display name/));
+    expect(document.activeElement).toBe(screen.getByLabelText(/Display name/));
+  });
+
+  it("does not dismiss itself when the reader tabs out of it", async () => {
+    // Leaving is the thing that was asked for. It is not an answer to the
+    // question the dialog is asking, the same way clicking the strip is not.
+    const { onClose } = setupTabbing(true);
+    await pressTabFrom(named("Done"));
+    await waitFor(() => expect(document.activeElement).toBe(named("the status bar")));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps looping when there is nothing outside the tab to reach", async () => {
+    // The fallback: with no neighbour, out-running the loop would strand focus
+    // on nothing, so the loop is left to do its job.
+    const onClose = vi.fn();
+    render(
+      <Surface>
+        <Dialog title="Customise kind-local" onClose={onClose} footer={<button type="button">Done</button>}>
+          <label>
+            Display name
+            <input />
+          </label>
+        </Dialog>
+      </Surface>,
+    );
+    await pressTabFrom(named("Done"));
+    expect(document.activeElement).toBe(named("Close"));
+  });
+
+  it("still loops inside itself when there is no surface", async () => {
+    // A dialog with no tab around it is modal over the whole document, and
+    // being the only reachable thing is what that means.
+    setupTabbing(false);
+    await pressTabFrom(named("Done"));
+    expect(document.activeElement).toBe(named("Close"));
+  });
+});

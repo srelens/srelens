@@ -1,6 +1,7 @@
 import { Popover } from "radix-ui";
 import { Button } from "./Button";
 import { cx } from "./cx";
+import { usePortalContainer } from "./portal";
 import { filled } from "./slot";
 
 export interface ColumnOption {
@@ -38,6 +39,14 @@ export interface ColumnPickerProps {
  * hidden set through the pin, because that set outlives the layout it was
  * written for — a persisted set can still name a column that has since become
  * the identifier, and neither the checkbox nor the count may believe it.
+ *
+ * Inside a portal scope — one tab of a window that holds several — the panel
+ * mounts into the tab's own node rather than the document body, so it is hidden
+ * with the tab. A portal escapes the `hidden` attribute an inactive tab wears,
+ * so the column list opened over one table used to stay on screen over the next
+ * tab, with the toolbar it belonged to already gone. Nothing else changes: this
+ * popover is already non-modal and already dismisses on an outside interaction,
+ * which is right for a panel. Outside a scope nothing changes at all. (#357)
  */
 export function ColumnPicker({
   columns,
@@ -53,6 +62,7 @@ export function ColumnPicker({
   // matching what is on screen is what lets a speech-input user say it, and the
   // fallback appears only when nothing is on screen to say. (#318 review)
   const named = filled(label);
+  const container = usePortalContainer();
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
@@ -88,7 +98,7 @@ export function ColumnPicker({
           )}
         </Button>
       </Popover.Trigger>
-      <Popover.Portal>
+      <Popover.Portal container={container}>
         <Popover.Content
           align="end"
           sideOffset={6}

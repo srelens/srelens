@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Popover as RadixPopover } from "radix-ui";
 import { cx } from "./cx";
+import { usePortalContainer } from "./portal";
 
 export interface PopoverProps {
   /** What the trigger shows. It is the button's content, and so its name. */
@@ -54,6 +55,15 @@ export interface PopoverProps {
  * has to be able to dismiss itself and nothing else can tell it how; a plain
  * node is accepted too, since most panels are content rather than a form.
  * (#320)
+ *
+ * Inside a portal scope — one tab of a window that holds several — the panel
+ * mounts into the tab's own node rather than the document body, so it is hidden
+ * with the tab. A portal escapes the `hidden` attribute an inactive tab wears,
+ * so a panel opened in one tab used to stay on screen over the next one, still
+ * anchored to a trigger that had gone with the tab. That is the whole change: a
+ * popover is already non-modal and already dismisses on an outside interaction,
+ * which is the right behaviour for it and none of the dialog's business.
+ * Outside a scope nothing changes. (#357)
  */
 export function Popover({
   trigger,
@@ -66,6 +76,7 @@ export function Popover({
   // Held here rather than left to Radix, because `close` is the whole point of
   // the render prop and an uncontrolled root has nothing to hand out.
   const [open, setOpen] = useState(false);
+  const container = usePortalContainer();
 
   return (
     <RadixPopover.Root open={open} onOpenChange={setOpen}>
@@ -77,7 +88,7 @@ export function Popover({
       <RadixPopover.Trigger type="button" className="inline-flex">
         {trigger}
       </RadixPopover.Trigger>
-      <RadixPopover.Portal>
+      <RadixPopover.Portal container={container}>
         <RadixPopover.Content
           // The panel is a dialog by Radix's reckoning; `label` is what it is
           // called. Not repeated on the trigger — see the note above.

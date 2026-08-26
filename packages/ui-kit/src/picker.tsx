@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Popover } from "radix-ui";
 import { Command } from "cmdk";
 import { cx } from "./cx";
+import { usePortalContainer } from "./portal";
 import { filled } from "./slot";
 
 export interface ComboboxOption {
@@ -46,9 +47,19 @@ export interface PickerProps {
  * filtered list are each a library-sized problem, and all four are already
  * solved. What is ours is the seam: which classes it wears, and the render prop
  * below. (#318)
+ *
+ * Inside a portal scope — one tab of a window that holds several — the popover
+ * mounts into the tab's own node rather than the document body, so it is hidden
+ * with the tab. A portal escapes the `hidden` attribute an inactive tab wears,
+ * so a list opened in one tab used to stay on screen over the next one,
+ * anchored to a trigger that had gone with the tab. Nothing else changes: it is
+ * already non-modal, already dismisses on an outside interaction, and the
+ * search box holds a filter rather than anything the reader would mind losing.
+ * Outside a scope nothing changes at all. (#357)
  */
 export function Picker({ summary, ariaLabel, searchPlaceholder = "Search…", className, footer, children }: PickerProps) {
   const [open, setOpen] = useState(false);
+  const container = usePortalContainer();
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -67,7 +78,7 @@ export function Picker({ summary, ariaLabel, searchPlaceholder = "Search…", cl
           </svg>
         </button>
       </Popover.Trigger>
-      <Popover.Portal>
+      <Popover.Portal container={container}>
         <Popover.Content
           align="start"
           sideOffset={4}

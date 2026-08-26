@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ContextMenu as Menu } from "radix-ui";
 import type { IconComponent } from "./IconButton";
+import { usePortalContainer } from "./portal";
 
 export type ContextMenuItem =
   | { kind: "sep" }
@@ -68,12 +69,23 @@ export interface ContextMenuProps {
  * and Radix does the rest. What stays ours is the item vocabulary, the icon
  * column that holds its width so the labels line up, and keeping the shortcut
  * hint out of each item's accessible name. (#320)
+ *
+ * Inside a portal scope — one tab of a window that holds several — the menu
+ * belongs to that tab twice over. It mounts into the tab's own node, so it is
+ * hidden with the tab instead of following the reader to the next one, and it
+ * stops being modal, because Radix's menu is modal by default and that took the
+ * whole document out of the accessibility tree and switched the document's
+ * pointer events off — the tab strip and the cluster rail with them. Both
+ * matter, and the second matters more once the first lands: a menu left open on
+ * a tab the reader has switched away from is invisible and would otherwise
+ * still be holding the window. Outside a scope nothing changes. (#357)
  */
 export function ContextMenu({ items, children, label, onOpenChange }: ContextMenuProps) {
+  const container = usePortalContainer();
   return (
-    <Menu.Root onOpenChange={onOpenChange}>
+    <Menu.Root onOpenChange={onOpenChange} modal={container === undefined}>
       <Menu.Trigger asChild>{children}</Menu.Trigger>
-      <Menu.Portal>
+      <Menu.Portal container={container}>
         <Menu.Content
           aria-label={label}
           className="ctx-menu"

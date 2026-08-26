@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { PortalScopeProvider, usePortalHost } from "./portal";
 
 // jsdom has no ResizeObserver, and Radix's popper watches the trigger and the
 // content with one. The kit's shared setup does not stub it, and that setup is
@@ -197,5 +200,133 @@ describe("ContextMenu is wired to Radix correctly", () => {
     // applies.
     await open();
     expect(screen.getByRole("menu").style.position).toBe("relative");
+  });
+});
+
+/** A tab-sized surface that owns the layers opened inside it, as `TabSurface` does. */
+function Surface({ children }: { children: ReactNode }) {
+  const { ref, scope } = usePortalHost();
+  return (
+    <div data-testid="surface">
+      <PortalScopeProvider scope={scope}>
+        <div data-testid="content">{children}</div>
+        <div data-testid="host" ref={ref} />
+      </PortalScopeProvider>
+    </div>
+  );
+}
+
+/**
+ * The node the layer was portalled into.
+ *
+ * Radix's `Portal` renders a div of its own as a direct child of the container
+ * and the popper adds another inside that, so the container is never the
+ * content's parent. Matching the outermost portalled element and taking *its*
+ * parent names the container exactly, where "somewhere in the document" would
+ * also pass for a container that was wrong but still attached.
+ */
+function mountedIn(node: Element): Element | null {
+  return node.closest("body > *, [data-testid='host'] > *")?.parentElement ?? null;
+}
+
+async function openInSurface() {
+  const view = render(
+    <Surface>
+      <ContextMenu items={ITEMS} label="Tab actions">
+        <button type="button">checkout-api</button>
+      </ContextMenu>
+    </Surface>,
+  );
+  fireEvent.contextMenu(screen.getByText("checkout-api"));
+  await screen.findByRole("menu");
+  return view;
+}
+
+/**
+ * A menu opened in one tab belongs to that tab.
+ *
+ * The window is a strip of tabs over one screen each, all of them mounted at
+ * once with the inactive ones hidden by the `hidden` attribute — which a portal
+ * to `document.body` escapes. So a right-click menu opened in one tab stayed on
+ * screen over whatever tab the reader moved to. (#357)
+ *
+ * A menu is not a dialog and does not get a dialog's treatment: it already
+ * dismisses on an outside interaction, which is right for it, and it holds
+ * nothing the reader typed that leaving the tab would lose. What it does share
+ * with the dialog is Radix's modality — `ContextMenu.Root` defaults to `modal`,
+ * which takes the whole document out of the accessibility tree and switches the
+ * document's pointer events off, so the tab strip and the cluster rail were
+ * unreachable behind a right-click menu for exactly the reason they were
+ * unreachable behind a dialog. Worse once the menu mounts inside the tab: a
+ * menu left open on a tab the reader has switched away from is invisible and
+ * still holding the window hostage.
+ */
+describe("ContextMenu inside a surface", () => {
+  it("mounts into the surface's own node, so hiding the tab hides it too", async () => {
+    await openInSurface();
+    expect(mountedIn(screen.getByRole("menu"))).toBe(screen.getByTestId("host"));
+  });
+
+  it("mounts into the document body when there is no surface", async () => {
+    // The fallback the gallery, the frozen classic app and most of this kit's
+    // own tests rely on, and it must stay exactly as it was.
+    await open();
+    expect(mountedIn(screen.getByRole("menu"))).toBe(document.body);
+  });
+
+  it("leaves the rest of the window in the accessibility tree", async () => {
+    const chrome = document.createElement("div");
+    chrome.innerHTML = "<button>the tab strip</button>";
+    document.body.appendChild(chrome);
+    try {
+      await openInSurface();
+      expect(chrome.getAttribute("aria-hidden")).toBeNull();
+    } finally {
+      chrome.remove();
+    }
+  });
+
+  it("still takes the whole document out of it when there is no surface", async () => {
+    const chrome = document.createElement("div");
+    chrome.innerHTML = "<button>the window chrome</button>";
+    document.body.appendChild(chrome);
+    try {
+      await open();
+      expect(chrome.getAttribute("aria-hidden")).toBe("true");
+    } finally {
+      chrome.remove();
+    }
+  });
+
+  it("leaves the window outside the tab clickable", async () => {
+    // Radix's modal menu switches the document's own pointer events off, so the
+    // first click anywhere outside the menu does nothing but dismiss it. Inside
+    // a tab that costs the reader a click to reach a strip they can see.
+    await openInSurface();
+    expect(document.body.style.pointerEvents).toBe("");
+  });
+
+  it("still blocks the window outside it when there is no surface", async () => {
+    await open();
+    expect(document.body.style.pointerEvents).toBe("none");
+  });
+
+  it("still closes on Escape", async () => {
+    await openInSurface();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("still closes on an interaction outside it", async () => {
+    const elsewhere = document.createElement("button");
+    elsewhere.textContent = "the tab strip";
+    document.body.appendChild(elsewhere);
+    try {
+      await openInSurface();
+      await userEvent.click(elsewhere);
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    } finally {
+      elsewhere.remove();
+    }
   });
 });
