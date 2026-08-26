@@ -45,13 +45,31 @@ beforeEach(() => {
 const tabFor = (route: string) => currentWorkspace().tabs.find((t) => t.route === route);
 
 describe("Nav", () => {
-  it("lists a built-in kind and previews it in a tab", async () => {
+  it("keeps a tab per kind, so clicking four leaves four", async () => {
+    // The property, not the flag. Under the preview pattern each click
+    // replaced the last, so comparing four kinds left one tab — which is the
+    // opposite of what a tab strip is for.
+    render(<Nav contexts={[PROD]} />);
+
+    for (const kind of ["Pods", "Deployments", "Services", "Nodes"]) {
+      await userEvent.click(await screen.findByRole("treeitem", { name: kind }));
+    }
+
+    const routes = currentWorkspace().tabs.map((t) => t.route);
+    expect(routes).toContain("/k/pods");
+    expect(routes).toContain("/k/deployments");
+    expect(routes).toContain("/k/services");
+    expect(routes).toContain("/k/nodes");
+  });
+
+  it("lists a built-in kind and opens it in a tab of its own", async () => {
     render(<Nav contexts={[PROD]} />);
 
     await userEvent.click(await screen.findByRole("treeitem", { name: "Pods" }));
 
     const tab = tabFor("/k/pods");
-    expect(tab?.preview).toBe(true);
+    // Not a preview: a second kind must not replace the first.
+    expect(tab?.preview).toBeFalsy();
     expect(tab?.sub).toBe("prod-eu");
     expect(currentWorkspace().activeId).toBe(tab?.id);
   });
@@ -82,7 +100,7 @@ describe("Nav", () => {
 
     await userEvent.click(await screen.findByRole("treeitem", { name: "Incidents" }));
 
-    expect(tabFor("/incidents")?.preview).toBe(true);
+    expect(tabFor("/incidents")?.preview).toBeFalsy();
   });
 
   it("names the cluster and how it is linked", async () => {
