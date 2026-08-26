@@ -93,10 +93,14 @@ export interface ReleasePaneProps {
  * revision that retry produced unreachable and Dismiss the only way out.
  *
  * **Retiring a failure here does not retire the ROW.** The store keeps it
- * until the reader dismisses it and the status strip goes on counting it,
- * deliberately: the strip answers "a failure happened and you have not
- * acknowledged it", this pane answers "here is what is worth looking at right
- * now". Dismissing clears both. Nothing in this function touches the store.
+ * until the reader dismisses it; the status strip goes on counting it and the
+ * Helm screen's own failures register goes on listing it, deliberately. Those
+ * two answer "a failure happened and you have not acknowledged it"; this pane
+ * answers "here is what is worth looking at right now". A retired failure is
+ * therefore still readable and still dismissable — on the screen above, which
+ * is what keeps the strip's segment honest for an operation this function
+ * never returns. Dismissing clears all three. Nothing in this function touches
+ * the store.
  *
  * Ties go to the newest start, then to the higher id — two operations started
  * inside the same millisecond are ordered by the sequence that registered
@@ -155,10 +159,24 @@ type DiffLoad =
  * left-hand side to compare with. Both sentences exist below and neither is
  * reachable from the other's state.
  *
- * **Nothing here cancels anything.** `dismissHelmOp` declines to remove a
- * `running` row by design, so this pane draws no dismiss control on one: a
- * button that looks like it stops a `helm upgrade` and does not would be worse
- * than no button, and the upgrade continues whether srelens watches or not.
+ * **Nothing here cancels anything, and the reason is NOT that srelens could
+ * quietly look away.** `dismissHelmOp` declines to remove a `running` row by
+ * design, so this pane draws no dismiss control on one. This comment used to
+ * justify that with "the upgrade continues whether srelens watches or not",
+ * which read as: closing our view of it is harmless. It is not. The store's
+ * only lever over a live operation is the handle's `close()`, and that is not
+ * an unsubscribe — it aborts the task owning helm's child process, which the
+ * backend spawns `kill_on_drop(true)`, so it SIGKILLs helm wherever it had
+ * reached: a release left half-upgraded, its Secret mid-write, and no output
+ * saying why, because the process that would have said it is gone. See
+ * `lib/helmOps`'s header, and `crates/streams/src/helm.rs`, which calls it a
+ * "best-effort abort" and means it.
+ *
+ * So the two buttons this pane could draw on a running operation are one that
+ * does nothing and one that maims the release under a word meaning "stop
+ * watching". Neither is a cancel, and a control that looked like one would be
+ * worse than no control at all. The row stays, watched, until helm ends it;
+ * only then is there anything to dismiss.
  *
  * **A failed operation's reason is printed as the store wrote it.** `helmOps`
  * already ran it through `describeError`; running the resulting sentence
@@ -340,6 +358,13 @@ export function ReleasePane({
  * lines helm printed before it gave up are usually the only description of
  * what it was doing, and #349's vanishing port-forward is what happens when a
  * dead thing is quietly cleared away instead.
+ *
+ * The Dismiss below is not the only one on the screen — the failures register
+ * above the table carries one per failed operation, because a release the
+ * table cannot list has no row to select and so never reaches this pane. Both
+ * call the same `dismissHelmOp`, and the row leaves every surface at once.
+ * This one stays because this is where the whole output is, unfolded, for the
+ * release the reader actually has open.
  */
 function Operation({ op, onDismiss }: { op: HelmOpRow; onDismiss: (id: number) => void }) {
   return (
