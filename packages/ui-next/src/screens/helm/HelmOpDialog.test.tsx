@@ -217,6 +217,54 @@ describe("HelmOpDialog — the equivalent command", () => {
   });
 });
 
+describe("HelmOpDialog — the values note", () => {
+  /**
+   * **The defect this block exists for.** The backend appends `--values
+   * <path>` itself once a values body is sent — `helmArgv`'s own note says so
+   * — so the printed line is not what actually runs whenever the Values panel
+   * carries a body. A reader who copies the printed line and runs it gets an
+   * upgrade with no values at all, which is destructive on its own: helm's
+   * default for `helm upgrade <rel> <chart>` with no values flag discards the
+   * release's values and applies the chart's defaults.
+   */
+  it("says the values are sent separately when the panel carries a body", async () => {
+    open({ kind: "upgrade", values: "replicaCount: 12" });
+    await screen.findByRole("dialog");
+    expect(screen.getByText(/temporary file/i)).toBeTruthy();
+    expect(screen.getByText(/--values/)).toBeTruthy();
+  });
+
+  it("says nothing about values when the panel is empty", async () => {
+    open({ kind: "upgrade" });
+    await screen.findByRole("dialog");
+    expect(screen.queryByText(/temporary file/i)).toBeNull();
+  });
+
+  it("says nothing about values when the panel is only whitespace", async () => {
+    open({ kind: "upgrade", values: "   \n  " });
+    await screen.findByRole("dialog");
+    expect(screen.queryByText(/temporary file/i)).toBeNull();
+  });
+
+  it("says it on install too, which sends a body the same way", async () => {
+    open({ kind: "install", values: "replicaCount: 12" });
+    await screen.findByRole("dialog");
+    expect(screen.getByText(/temporary file/i)).toBeTruthy();
+  });
+
+  it("never says it on rollback, which has no values panel to send", async () => {
+    open({ kind: "rollback", history: HISTORY, revision: 4 });
+    await screen.findByRole("dialog");
+    expect(screen.queryByText(/temporary file/i)).toBeNull();
+  });
+
+  it("never says it on uninstall, even carrying a values prop it will not send", async () => {
+    open({ kind: "uninstall", values: "replicaCount: 12" });
+    await screen.findByRole("dialog");
+    expect(screen.queryByText(/temporary file/i)).toBeNull();
+  });
+});
+
 describe("HelmOpDialog — install names its own release", () => {
   /**
    * **A deliberate departure from §A.5**, which lists Chart and Chart version

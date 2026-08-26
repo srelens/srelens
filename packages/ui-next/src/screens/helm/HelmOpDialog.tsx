@@ -368,6 +368,19 @@ export function HelmOpDialog({
    */
   const reuseValues = kind === "upgrade" && valuesUnavailable !== undefined;
 
+  /**
+   * Whether a values body will actually leave this dialog — install and
+   * upgrade only, and only once the panel holds more than whitespace.
+   *
+   * The one derivation for two jobs, same shape as {@link plan}: what
+   * `submit` sends as `values`, and whether the command area needs to say the
+   * printed line does not include it. See `helmArgv`'s note on `--values` —
+   * the backend appends the flag itself, against a temp file this dialog
+   * never names, so a body sent this way is the one case where the printed
+   * command is not what runs.
+   */
+  const valuesBody = takesChart && values.trim() !== "" ? values : undefined;
+
   /** Why helm would refuse the name in the field, or null. Install only. */
   const nameError = takesName ? releaseNameError(name) : null;
 
@@ -411,7 +424,6 @@ export function HelmOpDialog({
 
   function submit() {
     if (!ready) return;
-    const body = takesChart && values.trim() !== "" ? values : undefined;
     // Fired and left to run: the store owns what happens next, and the reader
     // gets the screen back. `startHelmOperation` never throws.
     void startHelmOperation({
@@ -423,7 +435,7 @@ export function HelmOpDialog({
       context,
       args: helmArgv(plan),
       ...(extraKubeconfigs ? { extraKubeconfigs } : {}),
-      ...(body === undefined ? {} : { values: body }),
+      ...(valuesBody === undefined ? {} : { values: valuesBody }),
     }).then((id) => onStarted?.(id));
     onClose();
   }
@@ -628,6 +640,17 @@ export function HelmOpDialog({
               <span className="text-[0.75rem] text-muted">{incomplete}</span>
             )}
           </div>
+          {valuesBody !== undefined && (
+            // See `helmArgv`'s note on `--values`: the backend appends it
+            // itself, against a temp file this dialog never names, so the
+            // printed line above is not what actually runs whenever a values
+            // body is sent. Said here rather than left to the comment that
+            // used to be the only place it was true.
+            <div className="mt-1 break-words text-[0.75rem] text-muted">
+              srelens writes the values above to a temporary file and passes
+              it to helm with --values.
+            </div>
+          )}
           {/* The context is not a flag on the command — see `helmArgv` — so the
               cluster it runs against is said in words instead. */}
           <div className="mt-1 break-words text-[0.75rem] text-muted">
