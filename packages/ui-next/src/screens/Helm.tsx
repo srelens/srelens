@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   ageFromTimestamp,
+  getHelmRelease,
   helmStatus,
   listHelmReleases,
   type ClusterContext,
   type HelmReleaseSummary,
+  type HelmRevision,
 } from "@srelens/core";
 import { Button, LoadingState, Screen, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -68,6 +70,14 @@ interface Pending {
   chartVersion: string;
   /** The revision running now, for rollback's own arithmetic. */
   revision?: number;
+  /**
+   * The release's revisions, fetched before a rollback dialog is opened.
+   *
+   * Only rollback carries one: it is the only mode with a target to default,
+   * and the fetch is what stops §16's `Roll back to 118` opening on a blank
+   * field. See {@link HelmReleases}.
+   */
+  history?: readonly HelmRevision[];
 }
 
 /** Where the release listing stands. */
@@ -97,14 +107,11 @@ export function Helm({ route }: { route: string }) {
 /**
  * §16's two panes: the release table, and the fixed 420px pane beside it.
  *
- * **Everything this screen knows about a release comes from
- * `listHelmReleases`.** It makes no `getHelmRelease` call of its own — the
- * pane makes the two the diff needs, and nothing here would be improved by a
- * third. That is also why the rollback dialog is opened with no `history`: the
- * dialog was built to degrade honestly without one ("srelens has no history
- * for this release, so name the revision yourself"), and fetching a release's
- * whole manifest, values and history to pre-fill one number is a round trip
- * per selection for a field the reader can type.
+ * **The table is `listHelmReleases` and nothing else.** The pane makes the two
+ * `getHelmRelease` calls its diff needs; this screen makes exactly one of its
+ * own, and only when a rollback dialog is opened — see {@link operate}. Not
+ * per selection, and never for the table: a release's revisions are what
+ * rollback's target defaults from, and nothing else on this screen wants them.
  *
  * **No status word or tone is invented here.** `helmStatus` is the only thing
  * that turns Helm's word into a tone, on the rows and in the pane's badge
@@ -168,13 +175,38 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
    * anything having happened in the cluster, and a listing per dismissal is a
    * round trip nobody asked for.
    */
-  const relisted = useRef(new Set<number>());
+  const relisted = useRef<{ context: string; ids: Set<number> } | null>(null);
+  // Seeded during render, and re-seeded whenever the cluster changes. The ops
+  // store is module-level and outlives this screen, so a mount that started
+  // with settled operations in it would fire the effect below for news it never
+  // showed — a second `listHelmReleases` racing the mount effect's, two
+  // unordered writes of the same data. Everything already settled counts as
+  // seen; only what settles from here on is news.
+  if (relisted.current?.context !== name) {
+    relisted.current = {
+      context: name,
+      // Settled only. An operation still RUNNING at mount is news that has not
+      // happened yet: it will settle under this screen and must re-list then.
+      ids: new Set(
+        getHelmOps()
+          .filter((o) => o.state !== "running")
+          .map((o) => o.id),
+      ),
+    };
+  }
   useEffect(() => {
-    const settled = ops.filter((o) => o.state !== "running" && !relisted.current.has(o.id));
+    const seen = relisted.current;
+    if (!seen || seen.context !== name) return;
+    // Scoped to THIS cluster. An upgrade finishing on another context changes
+    // nothing in the list on screen, and re-listing for it is a round trip
+    // spent on somebody else's news.
+    const settled = ops.filter(
+      (o) => o.context === name && o.state !== "running" && !seen.ids.has(o.id),
+    );
     if (settled.length === 0) return;
-    for (const o of settled) relisted.current.add(o.id);
+    for (const o of settled) seen.ids.add(o.id);
     void reload();
-  }, [ops, reload]);
+  }, [ops, name, reload]);
 
   const releases = list.status === "ready" ? list.releases : [];
   const at = list.status === "ready" ? list.at : 0;
@@ -226,10 +258,19 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
     ? `What did ${selected.name} release ${selected.revision} change?`
     : `Which Helm releases on ${name} need attention?`;
 
+  /**
+   * Which rollback request is the current one.
+   *
+   * A rollback waits on a round trip before its dialog can open, and a reader
+   * who clicks `Roll back` on two rows in quick succession must get the second
+   * one — not whichever history answered first.
+   */
+  const rollbackSeq = useRef(0);
+
   /** Open the dialog on a row, and follow that row in the pane. */
   function operate(kind: HelmOpKind, row: ReleaseRow) {
     setSelectedKey(row.key);
-    setPending({
+    const base: Pending = {
       kind,
       release: row.name,
       namespace: row.namespace,
@@ -240,7 +281,41 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
       chart: row.chartName,
       chartVersion: row.chartVersion,
       revision: row.revision,
-    });
+    };
+    if (kind !== "rollback") {
+      setPending(base);
+      return;
+    }
+    /**
+     * **Rollback reads the release's revisions first, and opens on the answer.**
+     *
+     * This is the one round trip this screen makes for itself, and it is what
+     * stops a control lying about its own label. §16's pane footer reads
+     * `Roll back to 118`; with no history the dialog's `lastGoodRevision` has
+     * nothing to work from, so it opened on a blank field over "srelens has no
+     * history for this release" — the reader clicked a button naming a number
+     * and was asked to type that number back in.
+     *
+     * The two numbers are still NOT reconciled. Nothing here overrides the
+     * dialog's target: helm's own record is handed over and `lastGoodRevision`
+     * decides. It lands on `revision - 1` whenever helm's record supports it —
+     * which is the ordinary case, and is why the button now honours its label —
+     * and on an older one when that revision is itself failed or unfinished,
+     * with the hint saying which and why. That divergence is the point: the
+     * footer says what the reader is LOOKING at, the dialog says what is safe
+     * to return to.
+     *
+     * Opened after the answer rather than before it: the dialog fixes its
+     * target field on mount, so a history that arrived later would be a default
+     * the reader never sees. A refused fetch opens on no history, which is the
+     * degrade the dialog was built with.
+     */
+    const seq = ++rollbackSeq.current;
+    void (async () => {
+      const out = await getHelmRelease(name, row.namespace, row.name);
+      if (seq !== rollbackSeq.current) return;
+      setPending({ ...base, history: out.release?.history ?? [] });
+    })();
   }
 
   /**
@@ -248,12 +323,14 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
    *
    * The number the pane hands over is `revision - 1` — the revision the diff
    * on screen is comparing against, which is what makes the button read
-   * `Roll back to 118`. **It is deliberately not forced into the dialog.**
-   * The dialog's own default target is `lastGoodRevision`: the newest revision
-   * helm does not report as failed or unfinished, which on a release whose
-   * last two upgrades failed is a different and better number. They answer
-   * different questions — "what am I looking at" and "what is safe to return
-   * to" — and reconciling them would mean one of the two lying.
+   * `Roll back to 118`. **It is still not forced into the dialog**, and the
+   * unused parameter is the point: {@link operate} hands helm's own record
+   * over and `lastGoodRevision` decides. It agrees with the button whenever
+   * helm's record supports it, so the button honours its label; it offers an
+   * older revision when the one the pane names is itself failed, which is the
+   * divergence worth keeping. The footer says what the reader is LOOKING at;
+   * the dialog says what is safe to return to. Making either say the other's
+   * number would mean one of the two lying.
    */
   function rollbackFromPane() {
     const row = rows.find((r) => r.key === selectedKey);
@@ -426,6 +503,7 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
           release={pending.release}
           chart={pending.chart}
           chartVersion={pending.chartVersion}
+          history={pending.history}
           revision={pending.revision}
           extraKubeconfigs={files}
           onClose={() => setPending(null)}
