@@ -84,7 +84,18 @@ export function helmArgv(plan: HelmPlan): string[] {
   ];
   switch (plan.kind) {
     case "install":
-      return ["install", plan.release, plan.chart.trim(), ...scope, ...flags];
+      return [
+        "install",
+        plan.release,
+        plan.chart.trim(),
+        ...scope,
+        // Classic has always sent this, and helm's own default is to fail an
+        // install into a namespace that does not exist yet — which is the
+        // ordinary case for a first install. Install only: the other three
+        // operate on a release that is already somewhere.
+        "--create-namespace",
+        ...flags,
+      ];
     case "upgrade":
       return [
         "upgrade",
@@ -106,6 +117,31 @@ export function helmArgv(plan: HelmPlan): string[] {
     case "uninstall":
       return ["uninstall", plan.release, ...scope];
   }
+}
+
+/**
+ * helm's own release-name rule, copied from `ValidateReleaseName`: a DNS-1123
+ * name, lower case, at most 53 characters.
+ *
+ * Checked here rather than left to helm because the reader is looking at the
+ * field now, and a rejected name comes back as a failed operation in the strip
+ * a minute later — by which time the dialog, and the values typed into it, are
+ * gone. Nothing about it is a srelens house rule: every clause is helm's, and
+ * the 53 is helm's own `maxReleaseNameLen`.
+ */
+const RELEASE_NAME = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+const MAX_RELEASE_NAME = 53;
+
+/** Why helm would refuse this release name, or null when it would take it. */
+export function releaseNameError(name: string): string | null {
+  if (name === "") return "A release needs a name.";
+  if (name.length > MAX_RELEASE_NAME) {
+    return `helm allows ${MAX_RELEASE_NAME} characters; this is ${name.length}.`;
+  }
+  if (!RELEASE_NAME.test(name)) {
+    return "Lower-case letters, digits, - and . only, starting and ending with a letter or digit.";
+  }
+  return null;
 }
 
 /** Characters a shell leaves alone; anything else earns quotes. */
@@ -163,8 +199,17 @@ export interface HelmOpDialogProps {
   kind: HelmOpKind;
   /** The cluster it runs in — a kubeconfig context NAME. */
   context: string;
+  /** Where the release lives — and, for install, where its own field starts. */
   namespace: string;
-  /** The release being installed, upgraded, rolled back or removed. */
+  /**
+   * The release being upgraded, rolled back or removed.
+   *
+   * In install mode this is only where the `Release name` FIELD starts — the
+   * reader names the release, and everything downstream reads the field. Empty
+   * is the ordinary case there and nowhere else: uninstall's gate compares
+   * what was typed to this prop and guards `release !== ""`, so an empty name
+   * is a gate that can never be passed.
+   */
   release: string;
   /** Where the chart field starts, for install and upgrade. */
   chart?: string;
@@ -252,6 +297,19 @@ export function HelmOpDialog({
   onStarted,
 }: HelmOpDialogProps) {
   const takesChart = kind === "install" || kind === "upgrade";
+  /**
+   * **Install names its own release, which §A.5 does not draw.**
+   *
+   * The design lists Chart and Chart version and nothing else, because the
+   * mock only ever depicts one install — of a fixture called `new-release`.
+   * Built as drawn, srelens could create exactly one release per cluster: the
+   * second `helm install new-release` is refused, "cannot re-use a name that
+   * is still in use". The namespace is here for the same reason — a fixed one
+   * installs everything into `default` — and `--create-namespace` with it,
+   * which classic has always sent, because helm's own default is to fail an
+   * install into a namespace that does not exist yet.
+   */
+  const takesName = kind === "install";
 
   const suggested = useMemo(() => lastGoodRevision(history, current), [history, current]);
   /**
@@ -275,6 +333,10 @@ export function HelmOpDialog({
     return "No earlier revision is safe to offer: each one is failed, unfinished, gone, or in a state this build does not recognise. Name the revision yourself.";
   }, [history, current]);
 
+  // Install's own two fields. Seeded from the props, and read by everything
+  // downstream from there: the title, the argv, and what the store is told.
+  const [name, setName] = useState(release);
+  const [ns, setNs] = useState(namespace);
   const [chart, setChart] = useState(initialChart);
   const [chartVersion, setChartVersion] = useState(initialVersion);
   const [values, setValues] = useState(initialValues);
@@ -306,10 +368,13 @@ export function HelmOpDialog({
    */
   const reuseValues = kind === "upgrade" && valuesUnavailable !== undefined;
 
+  /** Why helm would refuse the name in the field, or null. Install only. */
+  const nameError = takesName ? releaseNameError(name) : null;
+
   const plan: HelmPlan = {
     kind,
-    release,
-    namespace,
+    release: takesName ? name : release,
+    namespace: takesName ? ns.trim() : namespace,
     chart,
     chartVersion,
     revision: target,
@@ -318,8 +383,27 @@ export function HelmOpDialog({
     reuseValues,
   };
 
-  /** Does the argv have everything it needs to be a command at all? */
-  const complete = takesChart ? chart.trim() !== "" : kind === "rollback" ? target !== null : true;
+  /**
+   * Why the argv is not a command helm could run yet, or null when it is one.
+   *
+   * One derivation for two jobs — what the command area says instead of a
+   * command, and whether the button is dead — so the two can never disagree
+   * about whether this dialog is ready. The name's own reason is under its
+   * field rather than here: that is where the reader is looking.
+   */
+  const incomplete: string | null =
+    takesName && nameError !== null
+      ? "Name the release to see it."
+      : takesName && ns.trim() === ""
+        ? // Not "helm will use the current namespace": the field says which
+          // namespace this goes to, and an empty one makes it say nothing.
+          "Name a namespace to see it."
+        : takesChart && chart.trim() === ""
+          ? "Name a chart to see it."
+          : kind === "rollback" && target === null
+            ? "Name a revision to see it."
+            : null;
+  const complete = incomplete === null;
   /** Has the reader passed this operation's gate? */
   const confirmed =
     kind === "uninstall" ? typed === release && release !== "" : kind === "rollback" ? acknowledged : true;
@@ -332,8 +416,10 @@ export function HelmOpDialog({
     // gets the screen back. `startHelmOperation` never throws.
     void startHelmOperation({
       kind,
-      release,
-      namespace,
+      // The plan's, not the props': install's release and namespace are the
+      // reader's fields, and the store must follow the same pair the argv did.
+      release: plan.release,
+      namespace: plan.namespace,
       context,
       args: helmArgv(plan),
       ...(extraKubeconfigs ? { extraKubeconfigs } : {}),
@@ -342,9 +428,20 @@ export function HelmOpDialog({
     onClose();
   }
 
+  /**
+   * §A.5's `<Op> <release>` — and, before an install has been named, the word
+   * on the control that opened it. "Install " with nothing after it reads as a
+   * rendering fault.
+   */
+  const heading = takesName
+    ? name.trim() === ""
+      ? "Install chart"
+      : `Install ${name}`
+    : `${TITLE[kind]} ${release}`;
+
   return (
     <Dialog
-      title={`${TITLE[kind]} ${release}`}
+      title={heading}
       maxWidth={WIDTH}
       onClose={onClose}
       footer={
@@ -394,6 +491,35 @@ export function HelmOpDialog({
             release keeps the values it has, and anything typed here is merged
             over them.
           </Alert>
+        )}
+
+        {takesName && (
+          /* `min-w-0` on the cells as well as the grid: a grid item's implicit
+             `min-width: auto` refuses to shrink below its content, and a long
+             release name would push this 620px dialog wider than it says it
+             is. Seven defects on this migration, none of them visible in
+             jsdom. */
+          <div className="grid min-w-0 grid-cols-2 gap-x-3">
+            <Field
+              label="Release name"
+              className="min-w-0"
+              // Only once there is something to be wrong about: an error under
+              // an untouched empty field is a scolding for not having typed
+              // yet. The button is dead either way.
+              error={name !== "" && nameError !== null ? nameError : undefined}
+            >
+              <TextInput
+                value={name}
+                onValueChange={setName}
+                placeholder="checkout-api"
+                invalid={name !== "" && nameError !== null}
+                autoFocus
+              />
+            </Field>
+            <Field label="Namespace" className="min-w-0">
+              <TextInput value={ns} onValueChange={setNs} placeholder="default" />
+            </Field>
+          </div>
         )}
 
         {takesChart && (
@@ -499,9 +625,7 @@ export function HelmOpDialog({
             {complete ? (
               <CopyCommand command={helmCommand(plan)} />
             ) : (
-              <span className="text-[0.75rem] text-muted">
-                {takesChart ? "Name a chart to see it." : "Name a revision to see it."}
-              </span>
+              <span className="text-[0.75rem] text-muted">{incomplete}</span>
             )}
           </div>
           {/* The context is not a flag on the command — see `helmArgv` — so the

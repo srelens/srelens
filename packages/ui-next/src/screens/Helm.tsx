@@ -30,17 +30,6 @@ import { NoClusterScreen } from "./resourceShell";
  */
 const EXPLAIN_LABEL = "Explain";
 
-/**
- * The name §16's `Install chart` opens its dialog on.
- *
- * A PROP, never a blank field. `HelmOpDialog` takes the release name as a
- * prop in all four modes, and its uninstall gate compares what was typed to
- * `release` with an explicit `release !== ""` guard — an empty name is a gate
- * that can never be passed. There is no install-mode field for it either, so a
- * blank here would build `helm install "" <chart>`.
- */
-const NEW_RELEASE = "new-release";
-
 /** One row of §16's release table, every cell already resolved to what it draws. */
 interface ReleaseRow {
   /** Helm scopes a release name to a namespace, so both are the identity. */
@@ -522,9 +511,19 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
             onClick={() =>
               setPending({
                 kind: "install",
-                release: NEW_RELEASE,
-                // The context's own default namespace, which is where `helm
-                // install` with no `--namespace` would have gone anyway.
+                // **Empty, and the dialog asks.** This opened on
+                // `new-release` — §A.5's own fixture — over a dialog with no
+                // field to change it with, so every install srelens could
+                // make was called `new-release` and the second one helm
+                // refused outright. The name is the reader's; install mode
+                // has a field for it, and its own gate refuses a name helm
+                // would not take. Nothing else is weakened by the blank:
+                // uninstall's typed gate reads this prop and guards
+                // `release !== ""`, and this is not uninstall.
+                release: "",
+                // Where the field starts. The context's own default
+                // namespace, which is where `helm install` with no
+                // `--namespace` would have gone anyway.
                 namespace: context.namespace || "default",
                 chart: "",
                 chartVersion: "",

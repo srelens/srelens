@@ -16,7 +16,7 @@ vi.mock("../../lib/helmOps", async (orig) => ({
 }));
 
 import type { HelmRevision } from "@srelens/core";
-import { HelmOpDialog, helmArgv, helmCommand } from "./HelmOpDialog";
+import { HelmOpDialog, helmArgv, helmCommand, releaseNameError } from "./HelmOpDialog";
 
 const CONTEXT = "prod-eu";
 const NAMESPACE = "checkout";
@@ -130,8 +130,11 @@ describe("HelmOpDialog — §A.5's frame", () => {
 
 describe("HelmOpDialog — the equivalent command", () => {
   it("reads the argv helm will be given, for each of the four", () => {
+    // `--create-namespace` on install, the way classic's dialog has always
+    // sent it: a first install into a namespace that does not exist yet is the
+    // ordinary case, and helm's own default is to fail it.
     expect(helmCommand({ kind: "install", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "", revision: null, atomic: false, wait: false, reuseValues: false })).toBe(
-      `helm install ${RELEASE} ${CHART} --namespace ${NAMESPACE}`,
+      `helm install ${RELEASE} ${CHART} --namespace ${NAMESPACE} --create-namespace`,
     );
     expect(helmCommand({ kind: "upgrade", release: RELEASE, namespace: NAMESPACE, chart: CHART, chartVersion: "18.3.0", revision: null, atomic: true, wait: true, reuseValues: false })).toBe(
       `helm upgrade ${RELEASE} ${CHART} --namespace ${NAMESPACE} --version 18.3.0 --atomic --wait`,
@@ -168,7 +171,7 @@ describe("HelmOpDialog — the equivalent command", () => {
     const onClose = open({ chart: "./charts/my chart" });
     await screen.findByRole("dialog");
     expect(shown()).toBe(
-      `helm install ${RELEASE} './charts/my chart' --namespace ${NAMESPACE}`,
+      `helm install ${RELEASE} './charts/my chart' --namespace ${NAMESPACE} --create-namespace`,
     );
     await userEvent.click(button("Install"));
     await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
@@ -178,6 +181,7 @@ describe("HelmOpDialog — the equivalent command", () => {
       "./charts/my chart",
       "--namespace",
       NAMESPACE,
+      "--create-namespace",
     ]);
     expect(onClose).toHaveBeenCalled();
   });
@@ -191,7 +195,7 @@ describe("HelmOpDialog — the equivalent command", () => {
     open({ chart: "./charts/dev's chart" });
     await screen.findByRole("dialog");
     expect(shown()).toBe(
-      `helm install ${RELEASE} './charts/dev'\\''s chart' --namespace ${NAMESPACE}`,
+      `helm install ${RELEASE} './charts/dev'\\''s chart' --namespace ${NAMESPACE} --create-namespace`,
     );
     await userEvent.click(button("Install"));
     await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
@@ -210,6 +214,103 @@ describe("HelmOpDialog — the equivalent command", () => {
     await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
     const { args } = store.startHelmOperation.mock.calls[0][0];
     expect(["helm", ...args].join(" ")).toBe(displayed);
+  });
+});
+
+describe("HelmOpDialog — install names its own release", () => {
+  /**
+   * **A deliberate departure from §A.5**, which lists Chart and Chart version
+   * and nothing else — because the mock only ever depicts ONE install, of a
+   * fixture called `new-release`. Shipped as drawn, srelens could install
+   * exactly one chart per cluster: the second `helm install new-release` is
+   * refused, "cannot re-use a name that is still in use". The name and the
+   * namespace are the reader's to choose.
+   */
+  it("asks for the release name and the namespace, which §A.5 draws neither of", async () => {
+    open({ kind: "install", release: "", namespace: "default" });
+    await screen.findByRole("dialog");
+    expect((field("Release name") as HTMLInputElement).value).toBe("");
+    expect((field("Namespace") as HTMLInputElement).value).toBe("default");
+    // Nothing to install under no name.
+    expect(button("Install").disabled).toBe(true);
+    expect(screen.getByText("Name the release to see it.")).toBeTruthy();
+
+    await userEvent.type(field("Release name"), "checkout-api");
+    await userEvent.clear(field("Namespace"));
+    await userEvent.type(field("Namespace"), "checkout");
+    // The title follows the name, because the reader chose it.
+    expect(screen.getByText("Install checkout-api")).toBeTruthy();
+    expect(shown()).toBe(
+      `helm install checkout-api ${CHART} --namespace checkout --create-namespace`,
+    );
+    expect(button("Install").disabled).toBe(false);
+  });
+
+  it("installs into the namespace the reader named, and creates it", async () => {
+    open({ kind: "install", release: "", namespace: "default" });
+    await screen.findByRole("dialog");
+    await userEvent.type(field("Release name"), "checkout-api");
+    await userEvent.clear(field("Namespace"));
+    // An empty namespace is not a command: helm would silently use whatever
+    // the kubeconfig's current namespace is, which is not what the field says.
+    expect(button("Install").disabled).toBe(true);
+    await userEvent.type(field("Namespace"), "brand-new");
+    await userEvent.click(button("Install"));
+    await waitFor(() => expect(store.startHelmOperation).toHaveBeenCalled());
+    const call = store.startHelmOperation.mock.calls[0][0];
+    expect(call.args).toEqual([
+      "install",
+      "checkout-api",
+      CHART,
+      "--namespace",
+      "brand-new",
+      "--create-namespace",
+    ]);
+    // The store follows the fields, not the props the dialog opened on.
+    expect(call.release).toBe("checkout-api");
+    expect(call.namespace).toBe("brand-new");
+  });
+
+  /**
+   * helm's own rule, and it refuses the name rather than the install: DNS-1123
+   * and at most 53 characters. A name helm will reject is worth catching here,
+   * where the reader is looking at the field, rather than as a failed
+   * operation in the strip a minute later.
+   */
+  it("judges a release name the way helm judges it", () => {
+    // helm's rule, clause by clause, on the exported function rather than
+    // through 170 keystrokes: DNS-1123, lower case, at most 53 characters.
+    expect(releaseNameError("checkout-api")).toBeNull();
+    expect(releaseNameError("checkout.api-2")).toBeNull();
+    expect(releaseNameError("a".repeat(53))).toBeNull();
+    expect(releaseNameError("")).toBe("A release needs a name.");
+    expect(releaseNameError("a".repeat(54))).toContain("53 characters");
+    for (const bad of ["Checkout", "-checkout", "checkout-", "check_out", "check out", ".checkout"]) {
+      expect(releaseNameError(bad)).toBeTruthy();
+    }
+  });
+
+  it("will not submit a name helm would refuse", async () => {
+    open({ kind: "install", release: "", namespace: "default" });
+    await screen.findByRole("dialog");
+    await userEvent.type(hintedField("Release name"), "Checkout");
+    expect(button("Install").disabled).toBe(true);
+    // The reason is under the field, not only in a disabled button.
+    expect(screen.getByText(/Lower-case letters/)).toBeTruthy();
+
+    await userEvent.clear(hintedField("Release name"));
+    await userEvent.type(hintedField("Release name"), "checkout");
+    expect(button("Install").disabled).toBe(false);
+  });
+
+  it("gives the other three no name field, because their release already exists", async () => {
+    open({ kind: "upgrade" });
+    await screen.findByRole("dialog");
+    expect(screen.queryByLabelText(/^Release name/)).toBeNull();
+    expect(screen.queryByLabelText(/^Namespace/)).toBeNull();
+    // And no `--create-namespace`: the namespace is where the release already
+    // lives, so there is nothing to create.
+    expect(shown()).not.toContain("--create-namespace");
   });
 });
 
@@ -261,7 +362,9 @@ describe("HelmOpDialog — the release's current values", () => {
   it("never offers to reuse values on an install, which has none to reuse", async () => {
     open({ kind: "install", valuesUnavailable: "boom" });
     await screen.findByRole("dialog");
-    expect(shown()).toBe(`helm install ${RELEASE} ${CHART} --namespace ${NAMESPACE}`);
+    expect(shown()).toBe(
+      `helm install ${RELEASE} ${CHART} --namespace ${NAMESPACE} --create-namespace`,
+    );
     expect(screen.queryByText(/could not read/i)).toBeNull();
   });
 });

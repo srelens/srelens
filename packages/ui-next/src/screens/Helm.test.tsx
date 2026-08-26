@@ -347,16 +347,34 @@ describe("Helm — the header", () => {
     );
   });
 
-  it("opens the install dialog on a release name, never an empty one", async () => {
+  /**
+   * **The name is the reader's, not a fixture's.** This screen used to open
+   * the install dialog on `new-release` — the design's own placeholder — and
+   * the dialog had no field to change it with. Every install was therefore
+   * called `new-release`, and the second one helm refused outright: "cannot
+   * re-use a name that is still in use". The same defect as §A.5's
+   * "Twelve pods" alert, which this branch caught and this did not.
+   */
+  it("opens the install dialog on an empty name field, not on the mock's fixture", async () => {
     open();
     await ready();
     await userEvent.click(screen.getByRole("button", { name: "Install chart" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Install new-release")).toBeTruthy();
-    // The gate that proves the name is a prop and not a field: an empty
-    // release can never open it.
-    expect(within(dialog).getByLabelText("Chart")).toBeTruthy();
+    expect(within(dialog).queryByText("Install new-release")).toBeNull();
+    expect((within(dialog).getByLabelText("Release name") as HTMLInputElement).value).toBe("");
+    // The context's own namespace, prefilled and editable.
+    expect((within(dialog).getByLabelText("Namespace") as HTMLInputElement).value).toBe("platform");
+    // Nothing to install until the reader says what to call it.
+    expect((within(dialog).getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    await userEvent.type(within(dialog).getByLabelText("Release name"), "checkout-api");
+    await userEvent.type(within(dialog).getByLabelText("Chart"), "bitnami/nginx");
+    expect(document.querySelector(".copy-command-text")?.textContent).toBe(
+      "helm install checkout-api bitnami/nginx --namespace platform --create-namespace",
+    );
   });
 });
 
