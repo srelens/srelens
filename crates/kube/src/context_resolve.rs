@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use kube::config::Kubeconfig;
+use kube::config::{AuthInfo, Kubeconfig};
 
 /// One context resolved to a unique, user-facing identity plus everything
 /// needed to enumerate it and to reconnect via its own file.
@@ -37,6 +37,11 @@ pub struct ResolvedContext {
     pub exec_command: Option<String>,
     /// The user's auth-provider name, if any (for classification).
     pub auth_provider: Option<String>,
+    /// The credential MECHANISM this context's `auth-info` uses — never the
+    /// credential itself. See [`auth_kind_of`] for exactly what values this
+    /// takes. Computed once here, while the file is already parsed in memory,
+    /// rather than by re-reading the kubeconfig again per context.
+    pub auth_kind: String,
 }
 
 impl ResolvedContext {
@@ -129,6 +134,9 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             let auth_provider = auth
                 .and_then(|info| info.auth_provider.as_ref())
                 .map(|provider| provider.name.clone());
+            let auth_kind = auth
+                .map(auth_kind_of)
+                .unwrap_or_else(|| "none".to_string());
 
             let is_current = !current_taken
                 && global_current.as_deref() == Some(original.as_str());
@@ -147,22 +155,68 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
                 is_current,
                 exec_command,
                 auth_provider,
+                auth_kind,
             });
         }
     }
     out
 }
 
+/// Map a kubeconfig's `auth-info` to the credential MECHANISM it names —
+/// never the credential. Exec ARGUMENTS are deliberately dropped: they
+/// routinely carry client IDs and, in bad kubeconfigs, secrets, and this
+/// string ends up rendered in a table.
+///
+/// A legacy `auth-provider` block (`gcp`, `azure`, `oidc`, or any other name a
+/// plugin registers) is named as exactly what the kubeconfig calls it —
+/// never generalised to `oidc` for all of them, which would assert something
+/// the source doesn't say. The only extra detail ever appended is a plain-text
+/// `email` already sitting in that provider's config map; nothing else from
+/// that map is ever surfaced, since that's where a refresh token or secret
+/// would live.
+fn auth_kind_of(auth: &AuthInfo) -> String {
+    if let Some(exec) = &auth.exec {
+        let command = exec.command.as_deref().unwrap_or("unknown");
+        return format!("exec plugin · {command}");
+    }
+    if let Some(provider) = &auth.auth_provider {
+        return match provider.config.get("email") {
+            Some(account) => format!("{} · {account}", provider.name),
+            None => provider.name.clone(),
+        };
+    }
+    if auth.client_certificate.is_some() || auth.client_certificate_data.is_some() {
+        return "client certificate".to_string();
+    }
+    if auth.token.is_some() || auth.token_file.is_some() {
+        return "token".to_string();
+    }
+    if auth.username.is_some() || auth.password.is_some() {
+        return "basic".to_string();
+    }
+    if auth.impersonate.is_some() {
+        return "impersonation".to_string();
+    }
+    "none".to_string()
+}
+
 /// Read each path and resolve its contexts. Unreadable files are skipped so one
 /// bad path can't hide every other cluster.
 pub fn resolve_contexts(paths: &[PathBuf]) -> Vec<ResolvedContext> {
+    resolve_contexts_with(paths, |path| Kubeconfig::read_from(path).ok())
+}
+
+/// Same as [`resolve_contexts`], but takes the file reader as a parameter so
+/// a test can count how many times each path is actually read. Kept private:
+/// this seam exists for that one pinning test, not as a public extension
+/// point.
+fn resolve_contexts_with(
+    paths: &[PathBuf],
+    mut read: impl FnMut(&Path) -> Option<Kubeconfig>,
+) -> Vec<ResolvedContext> {
     let configs: Vec<SourceConfig> = paths
         .iter()
-        .filter_map(|path| {
-            Kubeconfig::read_from(path)
-                .ok()
-                .map(|config| SourceConfig { source: path.clone(), config })
-        })
+        .filter_map(|path| read(path).map(|config| SourceConfig { source: path.clone(), config }))
         .collect();
     resolve_from(&configs)
 }
@@ -186,6 +240,106 @@ mod tests {
             source: PathBuf::from(source),
             config: Kubeconfig::from_yaml(yaml).unwrap(),
         }
+    }
+
+    /// An exec-plugin `AuthInfo` naming `command`, with `args` attached the
+    /// way a real exec plugin's arguments would be — so the leak test has
+    /// something to actually catch if `auth_kind_of` ever started including
+    /// them.
+    fn exec_auth(command: &str, args: &[&str]) -> AuthInfo {
+        AuthInfo {
+            exec: Some(kube::config::ExecConfig {
+                command: Some(command.to_string()),
+                args: Some(args.iter().map(|a| a.to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn token_auth(token: &str) -> AuthInfo {
+        serde_yaml::from_str(&format!("token: \"{token}\"\n")).expect("valid auth-info fixture")
+    }
+
+    fn client_cert_auth() -> AuthInfo {
+        AuthInfo {
+            client_certificate_data: Some("c2VjcmV0LWNlcnQ=".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn empty_auth() -> AuthInfo {
+        AuthInfo::default()
+    }
+
+    /// A legacy `auth-provider` block naming `provider`, with an arbitrary
+    /// config map — used to pin that the provider's own name is surfaced
+    /// verbatim, and that nothing from `config` leaks except a plain-text
+    /// `email` when present.
+    fn auth_provider(provider: &str, config: &[(&str, &str)]) -> AuthInfo {
+        AuthInfo {
+            auth_provider: Some(kube::config::AuthProviderConfig {
+                name: provider.to_string(),
+                config: config.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                other: Default::default(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auth_kind_names_the_mechanism_and_never_the_secret() {
+        assert_eq!(auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"])), "exec plugin · gcloud");
+        assert_eq!(auth_kind_of(&token_auth("eyJhbGciOi.very.secret")), "token");
+        assert_eq!(auth_kind_of(&client_cert_auth()), "client certificate");
+        assert_eq!(auth_kind_of(&empty_auth()), "none");
+    }
+
+    #[test]
+    fn auth_kind_leaks_no_credential_material() {
+        let kind = auth_kind_of(&token_auth("eyJhbGciOi.very.secret"));
+        assert!(!kind.contains("eyJ"), "auth kind must not carry the token: {kind}");
+        let exec = auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"]));
+        assert!(!exec.contains("s3cr3t"), "auth kind must not carry exec args: {exec}");
+    }
+
+    #[test]
+    fn legacy_auth_provider_is_named_as_what_it_is() {
+        // Each provider is named verbatim — never generalised to `oidc`,
+        // which would assert something the kubeconfig doesn't say.
+        assert_eq!(auth_kind_of(&auth_provider("gcp", &[])), "gcp");
+        assert_eq!(auth_kind_of(&auth_provider("azure", &[])), "azure");
+        assert_eq!(auth_kind_of(&auth_provider("oidc", &[])), "oidc");
+        assert_eq!(auth_kind_of(&auth_provider("my-custom-plugin", &[])), "my-custom-plugin");
+    }
+
+    #[test]
+    fn auth_provider_without_email_yields_the_bare_kind() {
+        // No plain-text account field present — nothing is invented.
+        let kind = auth_kind_of(&auth_provider("oidc", &[("client-id", "abc123")]));
+        assert_eq!(kind, "oidc");
+    }
+
+    #[test]
+    fn auth_provider_with_email_appends_only_the_email() {
+        let kind = auth_kind_of(&auth_provider("oidc", &[("email", "dana@example.com")]));
+        assert_eq!(kind, "oidc · dana@example.com");
+    }
+
+    #[test]
+    fn auth_provider_never_surfaces_any_other_config_key() {
+        // Secrets and refresh material live in this map under other keys —
+        // only `email` is ever allowed through, and only its value.
+        let kind = auth_kind_of(&auth_provider(
+            "oidc",
+            &[
+                ("id-token", "eyJ.super.secret"),
+                ("refresh-token", "another-secret"),
+                ("client-secret", "shh"),
+            ],
+        ));
+        assert_eq!(kind, "oidc", "no email present, so no key from config should leak in");
+        assert!(!kind.contains("secret"));
     }
 
     #[test]
@@ -289,5 +443,27 @@ mod tests {
         let by_display = resolved.iter().find(|c| c.display_name == "kube_stage/default").unwrap();
         assert_eq!(by_display.source, PathBuf::from("/kube/kube_stage.yaml"));
         assert_eq!(by_display.original_name, "default");
+    }
+
+    #[test]
+    fn a_file_with_several_contexts_is_read_once_not_once_per_context() {
+        // auth_kind used to be computed by re-reading each context's owning
+        // kubeconfig separately (once per CONTEXT); it must now come from the
+        // single parse `resolve_contexts` already does (once per FILE).
+        let path = PathBuf::from("/fake/multi.yaml");
+        let yaml = "clusters:\n- name: c\n  cluster: { server: https://c }\ncontexts:\n- name: a\n  context: { cluster: c, user: u }\n- name: b\n  context: { cluster: c, user: u }\n- name: c\n  context: { cluster: c, user: u }\nusers:\n- name: u\n  user: { token: t }\n";
+
+        let reads = std::cell::Cell::new(0usize);
+        let resolved = resolve_contexts_with(&[path.clone()], |p| {
+            assert_eq!(p, path.as_path());
+            reads.set(reads.get() + 1);
+            Kubeconfig::from_yaml(yaml).ok()
+        });
+
+        assert_eq!(resolved.len(), 3, "all three contexts in the file resolve");
+        for context in &resolved {
+            assert_eq!(context.auth_kind, "token", "auth_kind still computed correctly");
+        }
+        assert_eq!(reads.get(), 1, "the file must be read once, not once per context");
     }
 }
