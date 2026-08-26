@@ -175,7 +175,12 @@ export function Nav({ contexts }: NavProps) {
               return;
             }
             const next = routeForNode(id, crds);
-            if (next) openTab(next, { preview: true, clusterName: ctx.name });
+            // A tab of its own, not a preview. The preview pattern — one
+            // italic tab the next click replaces — keeps a strip tidy while
+            // browsing, and it costs the reader the thing the strip is for:
+            // clicking four kinds to compare them left one tab, not four.
+            // The strip scrolls, so accumulating is affordable.
+            if (next) openTab(next, { clusterName: ctx.name });
           }}
           expanded={view.expanded}
           onExpandedChange={toggleExpanded}

@@ -458,6 +458,10 @@ function LogsScreen({
   );
 }
 
+/** The question the header's ask control sends, named because the control
+ *  now states it in its accessible name as well as sending it. */
+const SUMMARISE_QUESTION = "Summarise the last 500 log lines and group errors by cause";
+
 export function Logs({ route }: { route: string }) {
   const cluster = useActiveContext();
   const parts = parseLogsRoute(route);
@@ -1114,11 +1118,20 @@ function LogsStream({
       eyebrow={`${clusterName} / ${namespace} / ${name} · ${podCount(targets)}`}
       actions={
         <>
-          <AskChip
-            label="Summarise this stream"
-            question="Summarise the last 500 log lines and group errors by cause"
-            onAsk={ask}
-          />
+          {/* A `Button`, not the row's `AskChip`, for the reason `Events.tsx`
+              and `Overview.tsx` both give: `.row-ask` is `opacity: 0` until a
+              `.tbl tbody tr` is hovered, which is right for one of forty rows
+              and invisible in a header, where there is no row to hover. This
+              header advertised an action nobody could see from #344 until it
+              was measured on a real screen. */}
+          <Button
+            type="button"
+            size="sm"
+            aria-label={`Summarise this stream: ${SUMMARISE_QUESTION}`}
+            onClick={() => ask(SUMMARISE_QUESTION)}
+          >
+            Summarise this stream
+          </Button>
           {/* Disabled while a previous instance is on screen, and it says why
               in its own accessible name: `previous` forbids following because
               the API cannot follow a terminated container, not because this

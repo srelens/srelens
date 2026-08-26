@@ -1,4 +1,5 @@
-// @vitest-environment node
+// jsdom, not node: `./tabs` imports `./routes`, whose screen table reaches
+// `@xterm/addon-fit` — a UMD bundle that reads `self` as it evaluates.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ClusterContext } from "@srelens/core";
 import { defaultState, makeTab, type TabsState } from "./tabs";

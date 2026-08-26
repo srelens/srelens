@@ -7,8 +7,8 @@ import userEvent from "@testing-library/user-event";
 // demand — the dialog's error path is the whole point of half these tests.
 type ActionResult = { ok?: boolean; error?: string };
 
-const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspend, cronjobTriggerNow } = vi.hoisted(
-  () => ({
+const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspend, cronjobTriggerNow, getObject } =
+  vi.hoisted(() => ({
     deleteResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     scaleResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     rolloutRestart: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
@@ -17,8 +17,22 @@ const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspe
     cronjobTriggerNow: vi.fn(async (): Promise<{ jobName?: string; error?: string }> => ({
       jobName: "nightly-manual-1",
     })),
-  }),
-);
+    // `Open shell` looks the pod up fresh, off the live cluster, to find out
+    // which containers are worth asking about — a list row carries no
+    // container names. Real by default (one running "app" container); tests
+    // that care about the shape override it per-call.
+    getObject: vi.fn(
+      async (): Promise<{ object?: { spec: { containers: { name: string }[] } }; error?: string }> => ({
+        object: { spec: { containers: [{ name: "app" }] } },
+      }),
+    ),
+  }));
+
+// `Open shell` starts a session in the module-level store rather than
+// minting a route — mocked so a test can see exactly what it was asked to
+// start, without a real xterm instance or a real PTY behind it.
+const startPodSession = vi.hoisted(() => vi.fn(async () => 1));
+vi.mock("../lib/sessions", () => ({ startPodSession }));
 
 // Direct references, not `(...a) => fn(...a)` wrappers: each mock above is
 // typed by its own implementation (zero declared params), and TypeScript
@@ -43,6 +57,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   evictPod,
   cronjobSetSuspend,
   cronjobTriggerNow,
+  getObject,
   ...forwardCore,
 }));
 
@@ -205,12 +220,72 @@ describe("useRowMenu", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("still opens a shell in a tab — only the forward entry changed", async () => {
+  /**
+   * `Open shell` used to mint `/resources/<name>/shell` — a route no screen
+   * is registered for, the same dead end Follow logs and Port forward shipped
+   * with (#346, #349). Sessions live in a module-level store, so the fix is
+   * to start one there and open the screen that shows it, not to design the
+   * route the other two needed.
+   *
+   * Both effects are asserted, deliberately: a test that checked only the
+   * `/terminals` tab would still pass with the session start deleted, and a
+   * test that checked only `startPodSession` would still pass with the
+   * navigation deleted. Neither promise implies the other.
+   */
+  it("starts a session for the pod and opens /terminals on it — a one-container pod is not interrogated", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Open shell" }));
+
+    await waitFor(() =>
+      expect(startPodSession).toHaveBeenCalledWith({
+        context: "prod",
+        namespace: "kube-system",
+        pod: "web-0",
+        container: "app",
+      }),
+    );
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(true);
+    // The pod has one candidate container — nothing was asked.
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("asks which container on a pod with more than one, and starts nothing until the pick is confirmed", async () => {
+    getObject.mockResolvedValueOnce({
+      object: { spec: { containers: [{ name: "app" }, { name: "proxy" }] } },
+    });
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open shell" }));
-    expect(
-      store.currentWorkspace().tabs.some((t) => t.route === "/resources/web-0/shell"),
-    ).toBe(true);
+
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(startPodSession).not.toHaveBeenCalled();
+    // No annotation and neither container reported running: the first app
+    // container is the default offered.
+    await waitFor(() => expect((dialog.getByLabelText("Container") as HTMLSelectElement).value).toBe("app"));
+
+    await userEvent.selectOptions(dialog.getByLabelText("Container"), "proxy");
+    await userEvent.click(dialog.getByRole("button", { name: "Open" }));
+
+    await waitFor(() =>
+      expect(startPodSession).toHaveBeenCalledWith({
+        context: "prod",
+        namespace: "kube-system",
+        pod: "web-0",
+        container: "proxy",
+      }),
+    );
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(true);
+  });
+
+  it("reports the pod lookup's failure through describeError, and starts nothing", async () => {
+    getObject.mockResolvedValueOnce({ error: "pods \"web-0\" is forbidden" });
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open shell" }));
+
+    await waitFor(() => expect(getObject).toHaveBeenCalled());
+    expect(startPodSession).not.toHaveBeenCalled();
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(false);
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("opens a cluster-scoped resource with the placeholder namespace segment", async () => {

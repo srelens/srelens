@@ -335,7 +335,14 @@ export function Window({
       <div className="flex min-h-0 flex-1">
         {active && <Rail contexts={contexts} error={contextsError} onConnect={() => openTab("/connect")} />}
         {active && <Nav contexts={contexts} />}
-        <div className="flex min-h-0 flex-1 flex-col">
+        {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
+            and the screen, and a flex item's implicit `min-width: auto`
+            refuses to shrink below its content — so a wide screen widens the
+            column, and `TabStrip`'s `overflow-x-auto` never engages because
+            the box it would scroll inside has grown to fit. The strip then
+            pushes its own new-tab and overflow controls off the window, which
+            is where the user meets it. */}
+        <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
           {active && (
             <TabStrip
               tabs={tabs}

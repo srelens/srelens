@@ -8,6 +8,7 @@ import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
 import { Workloads } from "../screens/Workloads";
 
@@ -88,10 +89,11 @@ export function describe(route: string, clusterName?: string): RouteInfo {
     // ("Open in new tab", "Follow logs", "Open shell") got three tabs with the
     // identical title and kind, indistinguishable in the strip.
     //
-    // Only `shell` is still minted (`ResourceMenu.tsx`). Logs and Port forward
-    // have real front doors now — `logsRoute` and §A.4's dialog — and the
-    // other two shapes survive here only so a tab a previous session
-    // persisted can still name itself in the strip.
+    // None of the three is minted any more. Logs and Port forward have real
+    // front doors — `logsRoute` and §A.4's dialog — and `Open shell` starts a
+    // session and opens `/terminals` on it, so all three shapes survive here
+    // only so a tab a previous session persisted can still name itself in the
+    // strip.
     if (suffix === "logs") return { route, title: `${name} · logs`, sub, kind: "logs" };
     if (suffix === "shell") return { route, title: `${name} · shell`, sub, kind: "terminal" };
     if (suffix === "forward") return { route, title: `${name} · forward`, sub, kind: "forwards" };
@@ -147,6 +149,14 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // process holds — the store behind it is module-level and does not partition
   // by context, and a forward outlives the tab that started it.
   "/forwards": Forwards,
+  // Cluster-scoped in the strip for the same reason as `/forwards` and with
+  // the same caveat: the store behind it is module-level, a session outlives
+  // the tab that opened it, and the rail lists every one this process holds.
+  // The route is reached from the strip, from the status bar's live-session
+  // count, and from the resource row menu's `Open shell` — which starts the
+  // session first and opens this tab on it, so without this entry that action
+  // left a live PTY running behind a Placeholder.
+  "/terminals": Terminals,
   // App-scoped: the managed kubectl, helm and krew are the machine's, and the
   // exec-auth rail is the only part of it that looks at a context at all.
   "/toolbox": Toolbox,

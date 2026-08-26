@@ -23,10 +23,24 @@ vi.mock("@srelens/core", async (orig) => ({
   },
 }));
 
+// The session store is ui-next's own (it holds the xterm instance core may
+// not depend on), but it is read the same way the forwards store is: a
+// module-level snapshot faked at the boundary rather than a real session
+// stood up through xterm.
+const sessions = vi.hoisted(() => ({ list: [] as unknown[], notify: new Set<() => void>() }));
+vi.mock("../lib/sessions", () => ({
+  getSessions: () => sessions.list,
+  subscribeSessions: (l: () => void) => {
+    sessions.notify.add(l);
+    return () => sessions.notify.delete(l);
+  },
+}));
+
 const ctx = { name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false };
 
 beforeEach(() => {
   forwards.list = [];
+  sessions.list = [];
   resetView();
   resetProbes();
 });
@@ -108,6 +122,40 @@ describe("Status", () => {
     forwards.list = [{ id: 1, status: "active" }];
     mount(<Status contexts={[ctx]} />);
     expect(screen.queryByRole("button", { name: /failed/i })).toBeNull();
+  });
+
+  it("counts idle sessions as live, alongside attached ones", () => {
+    setState(defaultState([ctx]));
+    // One of each running state. A count that only recognised `attached`
+    // would say "1 shell" here — the same number a bug that forgot `idle`
+    // would print — so this is the fixture that tells the two apart.
+    sessions.list = [
+      { id: 1, state: "attached" },
+      { id: 2, state: "idle" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "2 shells" })).toBeDefined();
+  });
+
+  it("does not count a session that has closed", () => {
+    setState(defaultState([ctx]));
+    // Three rows, two live. The closed one stays out of the count but (unlike
+    // a dead forward, which this file has its own segment for) does not get
+    // one of its own here — the rail is where a reader goes to see why it died.
+    sessions.list = [
+      { id: 1, state: "attached" },
+      { id: 2, state: "idle" },
+      { id: 3, state: "closed" },
+    ];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("button", { name: "2 shells" })).toBeDefined();
+  });
+
+  it("says nothing about shells when none are live", () => {
+    setState(defaultState([ctx]));
+    sessions.list = [{ id: 1, state: "closed" }];
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByRole("button", { name: /shell/i })).toBeNull();
   });
 
   it("opens the console from Ask", async () => {
