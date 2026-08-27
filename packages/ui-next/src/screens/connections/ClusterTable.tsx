@@ -1,17 +1,9 @@
 import { contextDisplayName, type ClusterContext, type ClusterFacts } from "@srelens/core";
-import {
-  Badge,
-  Button,
-  Mark,
-  Table,
-  cx,
-  type BadgeTone,
-  type Column,
-} from "@srelens/ui-kit";
+import { Badge, Button, Mark, Table, cx, type Column } from "@srelens/ui-kit";
 import { useMark } from "../../lib/marks";
 import { glyph } from "../../lib/tree";
-import type { Probe, ProbeState } from "../../lib/probe";
-import { joined, latencyLabel, viaOf } from "./clusterText";
+import type { Probe } from "../../lib/probe";
+import { STATUS, joined, latencyLabel, viaOf } from "./clusterText";
 
 /**
  * One cluster as §6's table draws it: the context, what the last probe said,
@@ -36,25 +28,6 @@ export interface ClusterTableProps {
 }
 
 /**
- * What each probe state is called, and how it is toned.
- *
- * **No cluster is ever `healthy` or `degraded`.** §6's mock tones
- * `healthy`→ok and `degraded`→sev, and the spec's decision 3 refuses both:
- * `connectCluster` reports whether the API server answered, and calling that
- * answer a health verdict claims a check that never ran. What is drawn is the
- * reading itself.
- *
- * `unread` is the absence, NAMED as an absence. Not a third status word
- * ("pending", "idle") — those read as things the cluster is, and this is a
- * thing srelens has not done yet.
- */
-const STATUS: Record<ProbeState, { word: string; tone: BadgeTone }> = {
-  reachable: { word: "reachable", tone: "ok" },
-  unreachable: { word: "unreachable", tone: "sev" },
-  unread: { word: "no reading", tone: "muted" },
-};
-
-/**
  * §6's `Source`, and the whole of its vocabulary.
  *
  * Two values, from `isLocal`. **`Team server` is never one of them** — §6's
@@ -67,11 +40,13 @@ function sourceOf(context: ClusterContext): string {
 }
 
 /**
- * The three helpers this file used to hold — `joined`, `viaOf` and
- * `latencyLabel` — now live in `./clusterText`, because the Sources rail
- * renders the same facts and a second latency formatter is how the
- * absent-not-zero rule gets lost. `latencySort` below stays here: it is about
- * how THIS table orders a column, which the rail has no opinion about.
+ * The four things this file used to hold — `joined`, `viaOf`,
+ * `latencyLabel` and the `STATUS` table — now live in `./clusterText`,
+ * because the Sources rail and §24's first-run card render the same facts: a
+ * second latency formatter is how the absent-not-zero rule gets lost, and a
+ * second status table is how one screen starts calling a cluster something the
+ * other never would. `latencySort` below stays here: it is about how THIS
+ * table orders a column, which the rail has no opinion about.
  *
  * The number the `Latency` column SORTS on — never the text beside it.
  */

@@ -18,7 +18,6 @@ import {
   Field,
   LoadingState,
   Mark,
-  type BadgeTone,
   type IconComponent,
 } from "@srelens/ui-kit";
 import {
@@ -33,11 +32,11 @@ import {
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
-import { getProbe, probeCluster, useProbes, type Probe, type ProbeState } from "../lib/probe";
+import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
 import { openTab, setActiveCluster, setWorkspaceClusters, useTabs } from "../lib/tabsStore";
 import { glyph } from "../lib/tree";
-import { latencyLabel, viaOf } from "./connections/clusterText";
+import { STATUS, latencyLabel, viaOf } from "./connections/clusterText";
 
 /** §24's copy, verbatim, and in one place so the page and the suite quote one string. */
 const HEADLINE_ONE = "Pick a cluster.";
@@ -71,28 +70,6 @@ const WEB_ONLY =
  * each of those rows re-render on every notification about any other one.
  */
 const UNREAD: Probe = { state: "unread" };
-
-/**
- * The three words a probe can put on a row, and the tone each is worth.
- *
- * **No cluster is ever `healthy` or `degraded`** (decision 3). `connectCluster`
- * reports whether the API server answered; calling that a health verdict claims
- * a check nothing ran. `unread` is the absence, named as an absence — not
- * "pending" or "idle", which read as things the cluster is.
- *
- * This table is the same three pairs as `ClusterTable`'s own `STATUS`, which is
- * private to that file. It is duplicated rather than shared because promoting
- * it means editing a file under review in a parallel task; **it belongs beside
- * `latencyLabel` in `connections/clusterText.ts`** and should move there the
- * next time that file is opened. The latency formatter is imported for exactly
- * this reason — two formatters for one reading is how two surfaces start
- * disagreeing about the same number.
- */
-const STATUS: Record<ProbeState, { word: string; tone: BadgeTone }> = {
-  reachable: { word: "reachable", tone: "ok" },
-  unreachable: { word: "unreachable", tone: "sev" },
-  unread: { word: "no reading", tone: "muted" },
-};
 
 /**
  * How many files the rows came out of.

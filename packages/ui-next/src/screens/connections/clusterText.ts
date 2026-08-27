@@ -1,17 +1,21 @@
 import type { ClusterContext } from "@srelens/core";
-import type { Probe } from "../../lib/probe";
+import type { BadgeTone } from "@srelens/ui-kit";
+import type { Probe, ProbeState } from "../../lib/probe";
 
 /**
- * The words two surfaces of §6 have to agree on: the table's cells and the
- * Sources rail's rows.
+ * The words the surfaces that draw a cluster have to agree on: §6's table
+ * cells, the Sources rail's rows, and §24's first-run card.
  *
- * These three started private in `ClusterTable.tsx`. They live here because
- * the rail renders the same facts about the same clusters — a local cluster's
- * `Via`, its round trip, and a line assembled out of parts that may be missing
- * — and a second copy of any of them is how two panes six inches apart start
- * disagreeing about one reading. The latency formatter in particular: its
- * whole job is to never print `0 ms`, and a second formatter written beside it
- * is exactly how that rule gets lost.
+ * All of them started private in a screen. `joined`, `viaOf` and
+ * `latencyLabel` came out of `ClusterTable.tsx`; {@link STATUS} came out of
+ * `ClusterTable.tsx` and `Connect.tsx` at once, where the same three pairs had
+ * been written twice. They live here because those screens render the same
+ * facts about the same clusters — a local cluster's `Via`, its round trip, a
+ * line assembled out of parts that may be missing, and what the last probe
+ * said — and a second copy of any of them is how two panes six inches apart
+ * start disagreeing about one reading. The latency formatter in particular:
+ * its whole job is to never print `0 ms`, and a second formatter written
+ * beside it is exactly how that rule gets lost.
  */
 
 /**
@@ -81,3 +85,30 @@ export function latencyLabel(probe: Probe): string | null {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
   return ms < 0.5 ? "<1 ms" : `${Math.round(ms)} ms`;
 }
+
+/**
+ * The three words a probe can put on a row, and the tone each is worth.
+ *
+ * **No cluster is ever `healthy` or `degraded`** (spec decision 3). §6's mock
+ * tones `healthy`→ok and `degraded`→sev, and the spec refuses both:
+ * `connectCluster` reports whether the API server answered, and calling that
+ * answer a health verdict claims a check that never ran. What is drawn is the
+ * reading itself.
+ *
+ * `unread` is the absence, NAMED as an absence. Not a third status word
+ * ("pending", "idle") — those read as things the cluster is, and this is a
+ * thing srelens has not done yet.
+ *
+ * **One table, and this is the only copy of it.** It was private in
+ * `ClusterTable.tsx` and written again in `Connect.tsx`, because promoting it
+ * would have meant editing a file under review in a parallel task — which is
+ * what the note there said, along with where the table belonged. This project
+ * has already taken ten hand-paired label/tone tables out of the screens that
+ * held them; that pair was the eleventh. It sits beside {@link latencyLabel},
+ * which the first-run card already imported for exactly this reason.
+ */
+export const STATUS: Record<ProbeState, { word: string; tone: BadgeTone }> = {
+  reachable: { word: "reachable", tone: "ok" },
+  unreachable: { word: "unreachable", tone: "sev" },
+  unread: { word: "no reading", tone: "muted" },
+};

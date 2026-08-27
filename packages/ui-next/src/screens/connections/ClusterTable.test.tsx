@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import type { ClusterContext, ClusterFacts } from "@srelens/core";
 import type { Probe } from "../../lib/probe";
 import { ClusterTable } from "./ClusterTable";
+import { STATUS } from "./clusterText";
 
 const ctx = (over: Partial<ClusterContext> = {}): ClusterContext => ({
   name: "prod-eu",
@@ -434,5 +435,34 @@ describe("ClusterTable", () => {
       await userEvent.click(byLatency());
       expect(order()).toEqual(["alpha", "bravo", "charlie"]);
     });
+  });
+});
+
+/**
+ * The vocabulary itself, pinned once at the one place it now lives.
+ *
+ * `ClusterTable` and `Connect` each held a private copy of this table and each
+ * pinned it through what they render, so the words were asserted twice and the
+ * table that produced them not at all. Both render assertions stay — they are
+ * what proves each screen reaches for this and tones a real badge with it — and
+ * this one is what a reader who edits the table has to get past first.
+ */
+describe("the status vocabulary", () => {
+  it("is reachable, unreachable, and the absence named as one", () => {
+    expect(STATUS.reachable).toEqual({ word: "reachable", tone: "ok" });
+    expect(STATUS.unreachable).toEqual({ word: "unreachable", tone: "sev" });
+    // Not "pending" or "idle": those read as things the cluster is, and this is
+    // a thing srelens has not done yet.
+    expect(STATUS.unread).toEqual({ word: "no reading", tone: "muted" });
+  });
+
+  it("never calls a cluster healthy or degraded, whichever screen reads it", () => {
+    // Spec decision 3, and the reason this table exists rather than §6's mock
+    // pairing: the probe reports whether the API server answered, and no word
+    // here may claim a health check that never ran. Asserted over every entry
+    // so a fourth state added later cannot smuggle one in.
+    for (const status of Object.values(STATUS)) {
+      expect(status.word).not.toMatch(/healthy|degraded/i);
+    }
   });
 });
