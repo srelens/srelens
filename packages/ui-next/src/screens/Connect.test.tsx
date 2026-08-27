@@ -89,6 +89,31 @@ const LOCAL: ClusterContext = {
   authKind: "client certificate",
 };
 
+/**
+ * **A context whose `stableId` is not its `name`.**
+ *
+ * Every other fixture in this file has the two strings equal, and that is
+ * exactly the shape that hides a key conflation: handing `openTab` a stableId
+ * where it wants a context name passed all 59 tests across the two connection
+ * screens, because `activeCluster` and `clusters` are both keyed by id and
+ * neither can see the label. A stableId is the declaring file plus the name in
+ * it, which is what every context looks like once two kubeconfigs declare one
+ * name — so the tab-label assertions use this one and can tell a NAME from an
+ * id.
+ *
+ * Used on its own with {@link PROD}, never beside {@link STAGING}, whose name
+ * it deliberately shares.
+ */
+const TWIN: ClusterContext = {
+  name: "staging-eu",
+  stableId: `${EDGE_FILE}#staging-eu`,
+  cluster: "staging",
+  server: "https://staging-eu.example:6443",
+  isCurrent: false,
+  sourceFile: EDGE_FILE,
+  authKind: "token",
+};
+
 /** The three default contexts: two in one file, one in another. */
 const THREE = [PROD, STAGING, EDGE];
 
@@ -430,6 +455,35 @@ describe("Connect", () => {
       }
       // Each row's own reading, not one number copied down the list.
       expect(row("prod-eu").latency?.textContent).not.toBe(row("edge-1").latency?.textContent);
+    });
+
+    /**
+     * **A SECOND cluster opened onto an `/overview` tab the FIRST one made.**
+     *
+     * `openTab` dedupes by route and used to return with `activeId:
+     * existing.id` without looking at `clusterName`, while `makeTab` spends
+     * `clusterName` on the tab's `sub` — so the label was fixed at creation.
+     * The workspace's active cluster moved, the screen rendered the second
+     * cluster, and the strip went on reading the first: the one place a reader
+     * looks to know which cluster they are in.
+     *
+     * The label is asserted to be the NAME and explicitly not the stableId —
+     * see {@link TWIN} for why that second line is not redundant here.
+     */
+    it("relabels the overview tab when a second cluster is opened onto it", async () => {
+      setContexts([PROD, TWIN]);
+      open();
+      await screen.findByText("Contexts found");
+
+      await userEvent.click(screen.getByRole("button", { name: /Open prod-eu/i }));
+      await userEvent.click(screen.getByRole("button", { name: /Open staging-eu/i }));
+
+      const overview = store.currentWorkspace().tabs.filter((t) => t.route === "/overview");
+      // Still one tab: the route dedupe was never the fault.
+      expect(overview).toHaveLength(1);
+      expect(store.activeCluster()).toBe(TWIN.stableId);
+      expect(overview[0]?.sub).toBe(TWIN.name);
+      expect(overview[0]?.sub).not.toBe(TWIN.stableId);
     });
 
     it("opens the cluster the row stands for", async () => {

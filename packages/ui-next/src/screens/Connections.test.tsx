@@ -726,6 +726,34 @@ describe("Connections", () => {
   });
 
   /**
+   * **A SECOND cluster opened onto the `/overview` tab the FIRST one made.**
+   *
+   * `openTab` dedupes by route and returned with `activeId: existing.id`
+   * without looking at `clusterName`, while `makeTab` spends `clusterName` on
+   * the tab's `sub` — so the label was fixed at creation. The workspace's
+   * active cluster moved, the overview rendered the second cluster, and the
+   * strip went on reading the first.
+   *
+   * STAGING is the fixture whose stableId differs from its name, so the last
+   * two lines can tell a relabel from a stableId written onto the strip.
+   */
+  it("relabels the overview tab when a second cluster is opened onto it", async () => {
+    const user = userEvent.setup();
+    open();
+    await waitFor(() => expect(drawn().length).toBe(2));
+
+    await user.click(within(rowFor("prod-eu")).getByRole("button", { name: "Open" }));
+    await user.click(within(rowFor("staging-eu")).getByRole("button", { name: "Open" }));
+
+    const overview = store.currentWorkspace().tabs.filter((t) => t.route === "/overview");
+    // Still one tab: the route dedupe was never the fault.
+    expect(overview).toHaveLength(1);
+    expect(store.activeCluster()).toBe(STAGING.stableId);
+    expect(overview[0]?.sub).toBe(STAGING.name);
+    expect(overview[0]?.sub).not.toBe(STAGING.stableId);
+  });
+
+  /**
    * **`min-width: auto` is why this is asserted as a class list.**
    *
    * A flex item refuses to shrink below its content, so without `min-w-0` on

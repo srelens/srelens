@@ -30,6 +30,9 @@ export function openCluster(context: ClusterContext): void {
   }
   setActiveCluster(id);
   // By NAME, not by stableId: core's `list*` and `watchResource` all take a
-  // context name, and the tab is what carries it to them (#265).
+  // context name, and the tab is what carries it to them (#265). `openTab`
+  // relabels an `/overview` tab that is already open for a different cluster,
+  // so nothing extra is needed here — see its own note for why that lives
+  // there and not in this function.
   openTab("/overview", { clusterName: context.name });
 }
