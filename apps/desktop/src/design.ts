@@ -242,6 +242,13 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // cluster connected at all. Listed after connections because that is where
   // both ways in are — the `Add connection` control and the empty state's own.
   { route: "/connect", name: "Connect a cluster" },
+  // srelens itself rather than a cluster or the machine: the six panes behind
+  // §23's nav rail — Agent & MCP, Security, Appearance, Accessibility,
+  // Shortcuts and Clusters. Listed last because it is the newest, and worth
+  // naming here in particular: the new design's own Appearance pane is where
+  // this toggle lives on that side, so a reader weighing the switch is
+  // weighing whether they can find their way back.
+  { route: "/settings", name: "Settings" },
 ];
 
 /**

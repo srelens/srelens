@@ -19,6 +19,7 @@ import { Overview } from "../screens/Overview";
 import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { Settings } from "../screens/Settings";
 import { Terminals } from "../screens/Terminals";
 import { Helm } from "../screens/Helm";
 import { Toolbox } from "../screens/Toolbox";
@@ -254,8 +255,17 @@ suite("screenFor", () => {
     expect(screenFor("/connect")).toBe(Connect);
   });
 
+  it("resolves /settings, which the titlebar's gear opens", () => {
+    // `Chrome`'s gear has pointed at /settings since the chrome was built, and
+    // all six panes behind it were finished before this entry existed — so the
+    // button opened a correctly titled tab onto the Placeholder, with the
+    // Appearance pane's design toggle, the Security pane's `Lock now` and the
+    // MCP token all unreachable in the design that owns them.
+    expect(screenFor("/settings")).toBe(Settings);
+  });
+
   it("gives a route with no screen a placeholder", () => {
-    for (const route of ["/", "/settings"]) {
+    for (const route of ["/", "/incidents", "/topology"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });

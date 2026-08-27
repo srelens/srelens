@@ -11,6 +11,7 @@ import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { Settings } from "../screens/Settings";
 import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
 import { Workloads } from "../screens/Workloads";
@@ -241,6 +242,13 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // built and tested against a route that rendered the Placeholder, which is
   // the seam the note in `Connections.tsx` left for this entry.
   "/connect": Connect,
+  // App-scoped, and the one screen here that is about srelens itself: the six
+  // panes behind §23's 196px nav rail. Reached from the titlebar's gear, which
+  // has opened this route since the chrome was built — so without this entry
+  // that button opened a correctly titled tab onto the Placeholder, and the
+  // Appearance pane's design toggle, the Security pane's `Lock now` and the
+  // MCP token were all unreachable in the design that owns them.
+  "/settings": Settings,
 });
 
 /**
