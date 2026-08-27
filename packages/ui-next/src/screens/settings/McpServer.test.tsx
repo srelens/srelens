@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
   getMcpToken: vi.fn(),
+  mcpHttpStatus: vi.fn(),
   rotateMcpToken: vi.fn(),
   revokeMcpToken: vi.fn(),
 }));
@@ -23,6 +24,9 @@ import { McpServer } from "./McpServer";
  */
 const TOKEN = "srl_4f9a2c7e1b6d80f3c9a1e7b4f2d6c8035a9e1c7b4f2d6c8035f9c1a7e4b2d6f8";
 
+/** What a running loopback server's own status call answers with. */
+const STATUS_URL = "http://127.0.0.1:8765/mcp";
+
 /** jsdom ships no clipboard at all, so there is nothing to spy on. */
 function stubClipboard() {
   const writeText = vi.fn().mockResolvedValue(undefined);
@@ -34,6 +38,7 @@ describe("McpServer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     core.getMcpToken.mockResolvedValue(TOKEN);
+    core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
     core.rotateMcpToken.mockResolvedValue(TOKEN);
     core.revokeMcpToken.mockResolvedValue(undefined);
   });
@@ -109,6 +114,7 @@ describe("McpServer", () => {
 
   it("says the server is not running when there is no token yet, and offers no dead controls", async () => {
     core.getMcpToken.mockResolvedValue(null);
+    core.mcpHttpStatus.mockResolvedValue(null);
     render(<McpServer />);
     expect(await screen.findByText("not running")).toBeTruthy();
     expect(screen.queryByText("running")).toBeNull();
@@ -117,5 +123,26 @@ describe("McpServer", () => {
     expect(screen.queryByRole("button", { name: "Rotate" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
     expect(screen.getByText(/not accepting connections/i)).toBeTruthy();
+  });
+
+  /**
+   * The pin the branch review asked for: `running` must be a live read of
+   * the process (`mcpHttpStatus`), not inferred from the token existing. A
+   * token can persist across restarts while nothing is bound to the port, so
+   * this is the state where the two facts disagree — and it's exactly the
+   * state a token-presence proxy would have gotten wrong.
+   */
+  it("does not read the badge as running just because a token exists", async () => {
+    core.getMcpToken.mockResolvedValue(TOKEN);
+    core.mcpHttpStatus.mockResolvedValue(null);
+    render(<McpServer />);
+    expect(await screen.findByText("not running")).toBeTruthy();
+    expect(screen.queryByText("running")).toBeNull();
+    // The token itself is still a real, actionable credential — rotate and
+    // revoke work whether or not the listener is up — so its controls stay.
+    expect(screen.getByRole("button", { name: "Reveal" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rotate" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
+    expect(screen.getByText(/not currently listening/i)).toBeTruthy();
   });
 });

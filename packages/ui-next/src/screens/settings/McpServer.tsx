@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getMcpToken, notify, revokeMcpToken, rotateMcpToken } from "@srelens/core";
+import { getMcpToken, mcpHttpStatus, notify, revokeMcpToken, rotateMcpToken } from "@srelens/core";
 import { Badge, Button, Panel, SubHead } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 
@@ -12,18 +12,24 @@ import { FailureAlert } from "../../lib/errorCopy";
  * setting anywhere for it, so there is nothing here to read from a running
  * server that a constant wouldn't already say.
  *
- * **`running` is inferred from the token, not read live.** The only signal
- * this pane's given interfaces expose is `getMcpToken()`, and the backend's
- * own invariant makes one direction of that inference sound: `mcp_token_get`
- * / `mcp_token_revoke` (`mcp.rs`) guarantee the HTTP transport is "never...
- * unauthenticated", so NO TOKEN really does mean NOT RUNNING. The other
- * direction is weaker — `mcp_token_rotate` can mint a token while the server
- * stays stopped ("rotating a token must never switch the server on"), and
- * nothing restarts it on launch, so a token surviving from an earlier session
- * can read as `running` here before anything is actually listening. A live
- * signal exists (`mcpHttpStatus()`, `packages/core/src/lib/mcp.ts`) but is not
- * part of this pane's given interfaces — flagged for the branch's review
- * rather than reached past what this task was scoped to.
+ * **`running` is `mcpHttpStatus()` — a live read of the process, not a proxy.**
+ * A token existing is not the same fact as a listener being bound: rotate can
+ * mint a fresh token while the server stays stopped ("rotating a token must
+ * never switch the server on", `mcp.rs`), and nothing here restarts it on
+ * launch, so a token surviving from an earlier session says nothing about
+ * whether anything is on 127.0.0.1:8765 right now. `mcpHttpStatus`
+ * (`packages/core/src/lib/mcp.ts`) reads `McpHttpManager`'s own `running`
+ * state (`mcp.rs`) directly — the one place that fact actually lives — and a
+ * stopped server never reads `running` here (pinned below).
+ *
+ * **The token and the listener are independent facts, and the pane treats
+ * them that way.** Reveal, copy, rotate and revoke all act on the persisted
+ * token itself and work whether or not the HTTP server is currently
+ * listening — so those controls are gated on the token existing, not on
+ * `running`. A token that exists while the server is stopped still shows its
+ * row, plus one sentence saying the server isn't listening right now: stating
+ * what's true, rather than hiding a control that works or offering one that
+ * doesn't.
  *
  * **`getMcpTokenStorage()` is deliberately NOT read here**, despite being
  * named for this file. Its own doc comment says what it actually reports:
@@ -57,6 +63,7 @@ function maskedToken(): string {
 
 export function McpServer() {
   const [token, setToken] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -64,9 +71,11 @@ export function McpServer() {
 
   useEffect(() => {
     let cancelled = false;
-    getMcpToken()
-      .then((t) => {
-        if (!cancelled) setToken(t);
+    Promise.all([getMcpToken(), mcpHttpStatus()])
+      .then(([t, url]) => {
+        if (cancelled) return;
+        setToken(t);
+        setRunning(url !== null);
       })
       .catch((e) => {
         if (!cancelled) setError(e);
@@ -79,7 +88,7 @@ export function McpServer() {
     };
   }, []);
 
-  const running = token !== null;
+  const hasToken = token !== null;
 
   async function copyToken() {
     if (!token) return;
@@ -99,6 +108,9 @@ export function McpServer() {
       const next = await rotateMcpToken();
       setToken(next);
       setRevealed(false);
+      // Rotating never changes whether the server is listening — it restarts
+      // it in place if it was already running, and leaves it stopped
+      // otherwise (`mcp.rs`) — so `running` is left untouched here.
     } catch (e) {
       setError(e);
     } finally {
@@ -113,6 +125,9 @@ export function McpServer() {
       await revokeMcpToken();
       setToken(null);
       setRevealed(false);
+      // Revoking always stops the server too — "it must never serve
+      // unauthenticated" (`mcp.rs`) — so this is a known fact, not a guess.
+      setRunning(false);
     } catch (e) {
       setError(e);
     } finally {
@@ -131,7 +146,7 @@ export function McpServer() {
     >
       {loading ? (
         <p className="text-[0.75rem] text-muted">Checking the MCP server…</p>
-      ) : running ? (
+      ) : hasToken ? (
         <>
           <SubHead className="mt-1">Bearer token</SubHead>
           {/* `min-w-0` on the flex child holding the token: a 64-character
@@ -161,6 +176,11 @@ export function McpServer() {
             Rotating restarts the server, drops in-flight requests, and invalidates clients still using the old
             token.
           </p>
+          {!running && (
+            <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
+              The server is not currently listening on {ADDRESS}, so no client can reach it right now.
+            </p>
+          )}
         </>
       ) : (
         <p className="text-[0.75rem] leading-relaxed text-muted">
