@@ -138,7 +138,7 @@ describe("SourcesRail", () => {
   });
 
   it("says how a local cluster is reached and what it measured", () => {
-    render(
+    const { container } = render(
       <SourcesRail
         files={[]}
         rows={[
@@ -153,18 +153,38 @@ describe("SourcesRail", () => {
     expect(local.textContent).toContain("kind-dev");
     expect(screen.getByText("kind · 127.0.0.1:6443")).toBeTruthy();
     expect(screen.getByText("12 ms")).toBeTruthy();
+    // The other half of {@link readingPill}'s pin: one pill, and the reading
+    // is inside it rather than merely somewhere on the rail.
+    const pill = readingPill(container);
+    expect(pill?.textContent).toBe("12 ms");
   });
 
+  /**
+   * **The badge is asserted as an ELEMENT, not as absent digits.**
+   *
+   * These two used to assert `queryByText(/\d+\s*ms/)` alone, and replacing
+   * the rail's `{reading !== null && …}` gate with `{true && …}` — an EMPTY
+   * muted pill beside a local cluster nothing has read — passed all 47 tests.
+   * An empty pill is exactly "a placeholder that implies a reading was taken",
+   * which is the shape this project's absent-not-zero rule exists to prevent,
+   * and no assertion about digits can see it. So the pin is on the pill's own
+   * node: for a cluster with no reading there is no pill at all.
+   */
+  function readingPill(container: HTMLElement): Element | null {
+    return container.querySelector('[data-slot="local-reading"]');
+  }
+
   it("shows no latency for a local cluster it has not read", () => {
-    render(
+    const { container } = render(
       <SourcesRail files={[]} rows={[row({ isLocal: true, provider: "kind" }, { state: "unread" })]} />,
     );
     expect(screen.queryByText(/0\s*ms/)).toBeNull();
     expect(screen.queryByText(/\d+\s*ms/)).toBeNull();
+    expect(readingPill(container)).toBeNull();
   });
 
   it("shows no latency for a local cluster that did not answer", () => {
-    render(
+    const { container } = render(
       <SourcesRail
         files={[]}
         rows={[
@@ -177,6 +197,7 @@ describe("SourcesRail", () => {
     );
     expect(screen.queryByText(/0\s*ms/)).toBeNull();
     expect(screen.queryByText(/\d+\s*ms/)).toBeNull();
+    expect(readingPill(container)).toBeNull();
   });
 
   it("draws a sub-millisecond reading as <1 ms, never as 0 ms", () => {

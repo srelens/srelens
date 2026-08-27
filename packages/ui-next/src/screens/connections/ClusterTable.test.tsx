@@ -34,9 +34,26 @@ describe("ClusterTable", () => {
     expect(screen.getByText("/home/dana/.kube/config")).toBeTruthy();
   });
 
+  /**
+   * **The placeholder is asserted as an ELEMENT, not as absent digits.**
+   *
+   * Every "no latency" assertion here used to be `queryByText(/\d+\s*ms/)`
+   * alone, and `return null` in place of the column's whole null branch — the
+   * documented em-dash gone — passed all 82 tests. An absence of digits is
+   * satisfied by an empty cell just as well as by the placeholder, so it
+   * cannot tell "srelens has no reading" apart from "srelens forgot to say
+   * so". {@link noReading} reads the dash's own node, and the exact character
+   * is part of it: this project's absent-not-zero rule is about the reader
+   * seeing that a figure is MISSING rather than seeing nothing at all.
+   */
+  function noReading(): HTMLElement {
+    return screen.getByTitle("no reading");
+  }
+
   it("shows no latency for a cluster it has not read", () => {
     render(<ClusterTable rows={[{ context: ctx(), probe: { state: "unread" } }]} onOpen={() => {}} />);
-    expect(screen.queryByText(/0\s*ms/)).toBeNull();
+    expect(screen.queryByText(/\d+\s*ms/)).toBeNull();
+    expect(noReading().textContent).toBe("—");
   });
 
   it("shows no latency for a cluster that did not answer", () => {
@@ -48,6 +65,7 @@ describe("ClusterTable", () => {
     );
     expect(screen.queryByText(/0\s*ms/)).toBeNull();
     expect(screen.queryByText(/\d+\s*ms/)).toBeNull();
+    expect(noReading().textContent).toBe("—");
   });
 
   /**
@@ -69,6 +87,9 @@ describe("ClusterTable", () => {
     );
     expect(screen.queryByText(/0\s*ms/)).toBeNull();
     expect(screen.queryByText(/\d+\s*ms/)).toBeNull();
+    // And the cell says so rather than standing empty — a blank where a
+    // figure belongs reads as a bug, not as "nothing has read this cluster".
+    expect(noReading().textContent).toBe("—");
   });
 
   it("shows the round trip it timed for a cluster that answered", () => {
@@ -79,6 +100,9 @@ describe("ClusterTable", () => {
       />,
     );
     expect(screen.getByText("12 ms")).toBeTruthy();
+    // The other half of {@link noReading}'s pin: a cell that drew the dash
+    // unconditionally would satisfy every test above.
+    expect(screen.queryByTitle("no reading")).toBeNull();
   });
 
   /**
