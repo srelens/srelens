@@ -177,6 +177,27 @@ export interface TableProps<T> {
    * That rule lives here rather than in the caller because the sort may be the
    * table's own (uncontrolled), which no caller can see. A heading that
    * silently became wrong under sort is worse than no heading at all.
+   *
+   * **Known limit: headings and virtualization drift, and this comment is the
+   * only guard there is.** Both facts below are invisible to jsdom — every
+   * rect is zeroed there and the table renders every row — so no test in this
+   * kit can hold them.
+   *
+   * 1. `topPad`/`bottomPad` are `count * rowHeight` (see {@link rowPitch}), and
+   *    a rendered heading's height is outside that arithmetic. So the
+   *    scrollTop-to-index mapping drifts by roughly one heading per group above
+   *    the window: two groups is a few pixels and nobody sees it, twenty groups
+   *    over a long list walks the window away from the scrollbar.
+   * 2. `rowPitch` samples the first three `tr.tbl-row`, and a heading row is
+   *    not one — but it still occupies space between them. A first group of one
+   *    or two rows therefore puts a heading inside the measured distance and
+   *    the pitch comes out too large, which scales into `scrollHeight` exactly
+   *    the way the short-first-row bug did.
+   *
+   * Neither bites `/connections`: it has two groups and virtualizes only above
+   * 60 rows. A future consumer with many small groups over a long list should
+   * expect to fix the padding arithmetic to account for headings rather than
+   * assume this works.
    */
   rowGroup?: (row: T) => { key: string; label: ReactNode };
   /**
