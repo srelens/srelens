@@ -85,6 +85,26 @@ type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortc
  * and Connections offers no file adding there for the same reason. A control
  * that cannot work is not drawn, and the reason is said once — in the rail,
  * where the missing entry would have been.
+ *
+ * **`Agent & MCP` keeps its entry on the web, and loses two of its three
+ * panes.** It is the section this screen OPENS ON, and `McpServer` and
+ * `AuditPane` were mounted there unconditionally — but `getMcpToken()`,
+ * `mcpHttpStatus()` and `auditTail()` are direct `invoke`s from
+ * `@tauri-apps/api/core` (`packages/core/src/lib/mcpSecurity.ts`,
+ * `packages/core/src/lib/mcp.ts`) with no web half, so all three rejected on
+ * every visit and the default pane was two failure alerts over a server that
+ * cannot be started and a trail that cannot be read. Same rule as `Security`,
+ * one level down: the panes are not drawn, and the reason is said once — this
+ * time inside the section, because what is missing here is a panel and not an
+ * entry.
+ *
+ * The ENTRY stays, because `AgentAccess` is not desktop-only: it reads
+ * srelens's own capability registry through `gatedCapabilityIds`, which is
+ * plain data compiled into the bundle and equally true in a browser — and it
+ * is the pane a web reader most wants, since it is the one that says what a
+ * connected agent may do without asking. A section with real content is not
+ * removed for the panes it cannot fill; `desktopOnly` is for a section that
+ * would be left empty.
  */
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
   { id: "agent", label: "Agent & MCP" },
@@ -150,12 +170,31 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
     switch (id) {
       case "agent":
         // §23's one section over three panes, in §23's order: what the agent
-        // may do, the server it is reached through, and what it has done.
+        // may do, the server it is reached through, and what it has done. The
+        // last two are desktop-only — see {@link SECTIONS} for why, and why
+        // this section is still drawn on the web without them.
         return (
           <div className="flex flex-col gap-4">
             <AgentAccess />
-            <McpServer />
-            <AuditPane />
+            {desktop ? (
+              <>
+                <McpServer />
+                <AuditPane />
+              </>
+            ) : (
+              /* Said ONCE, inside the section that lost them — not in the
+                 rail, which reports an absent ENTRY and stays about
+                 `Security`. Not an `Alert` either: nothing has failed, and
+                 the whole point is that nothing is asked to. */
+              <p
+                data-testid="no-agent-server"
+                className="text-[0.75rem] leading-relaxed text-muted"
+              >
+                The MCP server and its audit trail live in the srelens desktop app. Starting the
+                loopback server and reading the audit log are both desktop commands, so there is
+                nothing here for them to act on.
+              </p>
+            )}
           </div>
         );
       case "security":

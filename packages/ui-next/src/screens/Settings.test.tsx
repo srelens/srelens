@@ -262,7 +262,19 @@ describe("Settings", () => {
   });
 
   describe("on the web", () => {
-    beforeEach(() => core.isTauri.mockReturnValue(false));
+    beforeEach(() => {
+      core.isTauri.mockReturnValue(false);
+      // What a browser actually does with these. `getMcpToken`, `auditTail`
+      // and the vault commands are direct `invoke`s from
+      // `@tauri-apps/api/core` with no web half, so every one of them rejects
+      // before it reaches a server. Left resolving, a pane that mounted them
+      // anyway would look perfectly well here and be a run of failure alerts
+      // in the real web build — which is the defect this section is about.
+      const noHost = () => Promise.reject(new Error("window.__TAURI_INTERNALS__ is undefined"));
+      core.getMcpToken.mockImplementation(noHost);
+      core.mcpHttpStatus.mockImplementation(noHost);
+      core.auditTail.mockImplementation(noHost);
+    });
 
     it("draws no Security section, because no vault command can answer there", () => {
       paint();
@@ -300,6 +312,72 @@ describe("Settings", () => {
       expect(screen.getByRole("tab", { name: "Agent & MCP" }).getAttribute("aria-selected")).toBe(
         "true",
       );
+    });
+
+    /**
+     * `Agent & MCP` is the pane the web build OPENS ON, and two of its three
+     * panels could not work there: `getMcpToken()` and `auditTail()` are
+     * direct `invoke`s from `@tauri-apps/api/core`
+     * (`packages/core/src/lib/mcpSecurity.ts`) with no web half, so both
+     * rejected on every visit and the default pane was two failure alerts over
+     * controls that can never act. The same reason `Security` is not in the
+     * rail, one level down — so the same answer: the panels are not drawn, and
+     * the reason is said once.
+     */
+    it("draws neither the server nor the audit trail, because no command behind them can answer", async () => {
+      const { user } = paint();
+      // Every entry, not only the one it opens on — a panel drawn under an
+      // unvisited tab would pass an assertion made against the first pane.
+      for (const label of sections()) {
+        await user.click(screen.getByRole("tab", { name: label }));
+      }
+      expect(screen.queryByText(/drops in-flight requests/i)).toBeNull();
+      expect(screen.queryByText(/every capability call/i)).toBeNull();
+      expect(screen.queryByRole("button", { name: /start server/i })).toBeNull();
+      expect(core.getMcpToken).not.toHaveBeenCalled();
+      expect(core.mcpHttpStatus).not.toHaveBeenCalled();
+      expect(core.auditTail).not.toHaveBeenCalled();
+    });
+
+    it("keeps the section, because what an agent may do is true on both", async () => {
+      paint();
+      expect(sections()).toContain("Agent & MCP");
+      // `AgentAccess` is static information read from srelens's own capability
+      // registry, and it is the pane a web reader most wants: what a connected
+      // agent may do without asking.
+      expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
+      expect(screen.getAllByTestId("gated-capability").length).toBeGreaterThan(0);
+    });
+
+    it("says why the two panels are missing, once, inside the section that lost them", async () => {
+      paint();
+      const note = screen.getByTestId("no-agent-server");
+      expect(note.textContent).toMatch(/desktop/i);
+      expect(screen.getAllByTestId("no-agent-server")).toHaveLength(1);
+      // And not in the rail: this is an absence WITHIN a section that is still
+      // drawn, not an absent entry — the footnote by the nav is the report for
+      // the latter and stays about `Security` alone.
+      const rail = screen.getByRole("complementary", { name: "Settings" });
+      expect(rail.contains(note)).toBe(false);
+      expect(within(rail).getByTestId("no-security").textContent).not.toMatch(/audit|mcp server/i);
+    });
+
+    it("draws no failure alert on the pane it opens on", async () => {
+      paint();
+      expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
+      // The whole shape of the defect: the default pane was two alerts. Any
+      // `role="alert"` here would be one of them back.
+      expect(screen.queryAllByRole("alert")).toEqual([]);
+    });
+  });
+
+  describe("on the desktop", () => {
+    it("draws all three agent panels, because every command behind them answers", async () => {
+      paint();
+      expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
+      expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+      expect(screen.getByText(/every capability call/i)).toBeTruthy();
+      expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });
   });
 });
