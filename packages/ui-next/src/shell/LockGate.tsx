@@ -15,8 +15,19 @@ import {
   vaultUnlockPassword,
   type VaultStatus,
 } from "@srelens/core";
-import { Button, Checkbox, Eyebrow, Field, LoadingState, RawError, Spinner, TextInput } from "@srelens/ui-kit";
+import {
+  Button,
+  Checkbox,
+  Eyebrow,
+  Field,
+  LoadingState,
+  Mark,
+  RawError,
+  Spinner,
+  TextInput,
+} from "@srelens/ui-kit";
 import { useContexts } from "../lib/clusters";
+import { Icons } from "../lib/icons";
 import { FailureAlert, friendly } from "../lib/errorCopy";
 
 /**
@@ -478,7 +489,29 @@ export function LockGate({ children }: { children: ReactNode }) {
         />
       ) : (
         <>
-          <header>
+          {/* Centred, and only this block.
+              §25 states no alignment; the user, looking at the first render of
+              this screen anyone has seen, asked for the mark to be centred, and
+              a centred mark over a left-aligned heading is the ragged
+              composition they were describing. Its sibling §24 is "centred at
+              860 px", so the pair agrees.
+
+              The tile centres because it is `inline-flex` inside a `text-center`
+              block, which is also what centres the heading and the lede. The
+              lede is a judgement call: three lines with an em-dash aside read
+              better ragged-right, but a left-aligned paragraph directly under a
+              centred heading in a 26rem card looks like a mistake, and the
+              block reading as one thing beats the paragraph reading marginally
+              faster.
+
+              What is NOT centred, deliberately, is everything below: the field's
+              eyebrow sits opposite `Show passphrase` as a row and centring
+              would break the pair; the `role="alert"` error keeps its own
+              layout, its shake and the escalation wording tests pin; and the
+              raw refusal, the failure alerts, the repeat field and the recovery
+              checkbox are all left-aligned prose that a centre would only make
+              harder to read. */}
+          <header className="text-center">
             <LockGlyph />
             <h1 className="mt-3 text-[1.375rem] font-semibold tracking-[-0.01em]">
               {setup ? "Protect your workspace" : "Workspace locked"}
@@ -646,7 +679,10 @@ export function LockGate({ children }: { children: ReactNode }) {
           </div>
 
           {!setup && (
-            <div className="mt-5 border-t border-rule pt-3">
+            // Centred with the header, not with the body: one short line under
+            // a full-width button, which is the composition's closing note
+            // rather than something to read along.
+            <div className="mt-5 border-t border-rule pt-3 text-center">
               <Eyebrow>{footer(clusterCount, failures)}</Eyebrow>
             </div>
           )}
@@ -657,22 +693,50 @@ export function LockGate({ children }: { children: ReactNode }) {
 }
 
 /**
- * The tile's padlock. Inline rather than from `lib/icons`, for the reason the
- * kit gives for its own glyphs: this is the one decorative mark on a surface
- * that must render before anything else is known to work, and its colour comes
- * from the token axis like everything else here.
+ * §25's first bullet: "a dark rounded lock tile".
+ *
+ * **It was rendering as an empty pale box, and the cause was a token that does
+ * not exist.** The tile drew its own inline `<svg>` whose two strokes were
+ * `var(--muted)`. There is no `--muted` in `packages/ui-kit/src/styles/
+ * tokens.css` — the token is `--ink-muted` — so both strokes resolved to an
+ * invalid value, neither path painted, and what reached the screen was a
+ * rounded `--surface-sunk` rectangle with nothing in it: a failed image rather
+ * than a mark. It was the only surface in the app nobody had ever seen
+ * rendered (#372: `scripts/screenshot.mjs` drives web mode, where this gate
+ * deliberately never raises), and those were the only two `var(--muted)` in the
+ * whole source tree.
+ *
+ * **The kit's own `Mark`, not a second inline SVG.** `Mark` is what the cluster
+ * rail draws its squares with: a rounded solid square, a glyph centred in it,
+ * both colours from tokens, and an accessible name or `aria-hidden` — every
+ * property this tile needed and had hand-rolled. `AgentMark` is the agent's
+ * animated signal and `CustomizeMark` is the mark EDITOR; `NavIcon` is a bare
+ * sized glyph with no tile at all. `Mark` is the fit.
+ *
+ * **The padlock is new, and had to be.** Nothing in `@srelens/ui-kit` carries
+ * one — the kit takes no dependency on an icon set by design — and
+ * `lib/icons.ts` had no `lock` either; this file's inline SVG was the only
+ * padlock in the tree. It is an entry in `Icons` now, so it is drawn from the
+ * one place every other glyph in this design comes from.
+ *
+ * **"Dark" cannot be honoured in all five themes, and is not attempted.** The
+ * token axis inverts: no token is dark under Light, Paper AND Dark, Midnight,
+ * and naming a colour is forbidden here. §25's "dark" describes the one theme
+ * the mock was drawn in. What the axis can honour is the kit's own rule for a
+ * solid mark — `--accent` for the tile, `--surface` for its ink — which reads
+ * as intentional in every theme and lands the glyph-on-tile contrast between
+ * 5.78:1 (Dark) and 11.51:1 (High contrast), well clear of the 3:1 a non-text
+ * glyph needs. On Light, Paper and High contrast the accent IS the dark half of
+ * that pair, so those three are literally §25's tile.
  */
 function LockGlyph() {
   return (
-    <span
-      aria-hidden="true"
-      className="flex size-9 items-center justify-center rounded-lg"
-      style={{ background: "var(--surface-sunk)", border: "1px solid var(--rule)" }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-        <rect x="4" y="10" width="16" height="11" rx="2" stroke="var(--muted)" strokeWidth="2" />
-        <path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="var(--muted)" strokeWidth="2" />
-      </svg>
+    // Named by the `<h1>` directly beneath it, so the mark is decorative:
+    // `Mark`'s own note is that an unnamed `role="img"` announces as "image"
+    // and tells the listener nothing, and a second "Workspace locked" would be
+    // no better.
+    <span data-testid="lock-mark">
+      <Mark name="Workspace locked" icon={Icons.lock} size="lg" withBadge={false} decorative />
     </span>
   );
 }

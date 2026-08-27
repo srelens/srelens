@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { UserEvent } from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
@@ -168,6 +170,79 @@ describe("LockGate — the cover", () => {
     expect(cover.getAttribute("role")).toBe("dialog");
     expect(cover.getAttribute("aria-label")).toBe("Workspace locked");
     expect(cover.getAttribute("aria-modal")).toBeNull();
+  });
+
+  /**
+   * The first render of this screen anyone had seen (#372: `screenshot.mjs`
+   * drives web mode, where this gate deliberately never raises) showed an empty
+   * pale box above the heading. The tile drew its own inline `<svg>` with
+   * `stroke="var(--muted)"`, and there is no `--muted` token — it is
+   * `--ink-muted` — so neither path painted.
+   *
+   * jsdom attaches no stylesheet and computes no layout, so what this can
+   * defend is that the tile CONTAINS a glyph rather than being an empty box, and
+   * that the glyph is the kit's mark rather than a second hand-rolled SVG.
+   * Whether it LOOKS right, in five themes, is not testable here and is not
+   * claimed: only a screenshot can say, and until #372 the user is the only one
+   * who can take one.
+   */
+  it("draws a mark with a glyph in it, not an empty tile", async () => {
+    paint();
+    await screen.findByText("Workspace locked");
+    const mark = screen.getByTestId("lock-mark");
+    expect(mark.querySelector('[data-slot="chip-mark"]')).not.toBeNull();
+    expect(mark.querySelector("svg")).not.toBeNull();
+    // The mark is decorative — the `<h1>` under it says "Workspace locked", and
+    // `Mark`'s own note is that a second name would announce it twice.
+    expect(mark.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    // The badge would ride the initials under the glyph, which is not a thing
+    // this tile has to say.
+    expect(mark.querySelector('[data-slot="chip-badge"]')).toBeNull();
+  });
+
+  it("names no colour of its own on that tile", async () => {
+    paint();
+    await screen.findByText("Workspace locked");
+    const source = readFileSync(join(__dirname, "LockGate.tsx"), "utf8").replace(
+      /\/\*[\s\S]*?\*\/|\/\/.*/g,
+      "",
+    );
+    expect(source).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    // The token that did not exist. Both of its uses were here, and they were
+    // the only two in the whole source tree.
+    expect(source).not.toMatch(/var\(--muted\)/);
+  });
+
+  /**
+   * The user's words: "logo is not proper and should be in center". §25 states
+   * no alignment, so the instruction is the authority, and §24 — this screen's
+   * sibling — is "centred at 860 px".
+   *
+   * Classes, not geometry: jsdom lays nothing out. What is asserted is which
+   * blocks were centred and, just as deliberately, which were not — the field
+   * row whose eyebrow sits opposite `Show passphrase`, and the error alert whose
+   * layout, shake and wording other tests in this file already pin.
+   */
+  it("centres the composition without centring the form under it", async () => {
+    const user = userEvent.setup();
+    paint();
+    const heading = await screen.findByText("Workspace locked");
+    const header = heading.closest("header");
+    expect(header?.className).toContain("text-center");
+    expect(screen.getByTestId("lock-mark").closest("header")).toBe(header);
+    // The lede rides with it, so the block reads as one thing.
+    expect(header?.textContent ?? "").toMatch(/MCP bearer token/);
+
+    // The field is outside that block and stays as it was.
+    const fieldRow = screen.getByRole("button", { name: "Show passphrase" }).closest("div");
+    expect(fieldRow?.className ?? "").not.toContain("text-center");
+
+    // And so does the error, which is what carries the shake and the alert role.
+    await failOnce(user);
+    const alert = screen.getByRole("alert");
+    expect(alert.className).toContain("shake");
+    expect(alert.className).not.toContain("text-center");
+    expect(alert.textContent).toBe("That passphrase is not correct.");
   });
 
   it("asks the vault nothing where there is no vault to ask", async () => {
