@@ -192,6 +192,40 @@ export function applyStoredAppearance(storage: Storage = settingsStorage): void 
 }
 
 /**
+ * Whether the reader has NAMED a theme, as opposed to being shown one.
+ *
+ * **Why the document cannot answer this.** `data-theme` has two kinds of value
+ * on it: a choice out of {@link THEMES}, and the light/dark reading
+ * `applyNextDesignTheme` derives from classic's preference. Those overlap
+ * exactly where it matters — `dark` is both a derivation and the third named
+ * theme, and a bare root is both "nothing has been read yet" and a chosen
+ * `light`. So {@link readRootTheme} can say what the window is wearing and
+ * never why. The stored record is the only thing that separates the two,
+ * because {@link remember} is per-axis: a stored `theme` exists exactly where
+ * the pane's Theme control or the titlebar's light/dark button put one.
+ *
+ * **What the host does with it.** `apps/desktop/src/main.tsx` boots by arming a
+ * `prefers-color-scheme` listener for a reader whose classic mode is `system`,
+ * and that listener writes `data-theme` too — knowing only `dark` and bare
+ * light. Left armed, the next OS change turned a chosen Midnight into plain
+ * dark and a chosen Paper into bare light, for the rest of the session. This
+ * predicate is what stands it down. (#373 review)
+ *
+ * **All five themes count the same.** The pane offers no `System` entry, so
+ * naming nothing is the only way to say "follow the OS" — and naming Dark is
+ * as explicit as naming Midnight. A rule that let a chosen light or dark keep
+ * following the OS would flip that reader at dusk while leaving the reader who
+ * picked Midnight alone, with nothing in the control to explain the difference.
+ *
+ * A theme this build cannot read — an unparsable document, or an id no
+ * stylesheet defines — is not a choice it can honour, so {@link readStored}
+ * drops it and the OS keeps its vote.
+ */
+export function hasChosenTheme(storage: Storage = settingsStorage): boolean {
+  return readStored(storage).theme !== undefined;
+}
+
+/**
  * Remember one axis, leaving the other two as they were STORED.
  *
  * Read-modify-write against the stored document, and never against the

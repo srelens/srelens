@@ -39,8 +39,13 @@ async function bootstrap(root: HTMLElement): Promise<void> {
   // index.html then links unconditionally — and the classic design's CSS would
   // load underneath the new one. Verified against a real build.
   if (loadDesign() === "next") {
-    // Before the stylesheet, so the first paint is already the right mode.
-    applyNextDesignTheme();
+    // Before the stylesheet, so the first paint is already the right mode. Its
+    // stop function is HELD, not discarded: this call cannot yet know whether
+    // the reader has named one of the new design's five themes — that record
+    // lives on the chunk below — so the OS-appearance listener it arms for a
+    // reader on "system" is provisional, and gets swapped for a guarded one as
+    // soon as the record is readable. (#373 review)
+    const stopDerivedThemeFollower = applyNextDesignTheme();
     // The overlay titlebar goes on before anything renders, so the window is
     // never seen with doubled chrome. A rejection inside is swallowed there:
     // an undressed window beats a blank one.
@@ -49,7 +54,7 @@ async function bootstrap(root: HTMLElement): Promise<void> {
     // independent downloads, and awaiting one before requesting the other
     // serialised them. index.html links no stylesheet, so the window stays
     // blank until both land — that wait is the whole startup screen.
-    const [, { NextApp, applyStoredAppearance }] = await Promise.all([
+    const [, { NextApp, applyStoredAppearance, hasChosenTheme }] = await Promise.all([
       import("@srelens/ui-next/styles"),
       import("@srelens/ui-next"),
     ]);
@@ -65,7 +70,28 @@ async function bootstrap(root: HTMLElement): Promise<void> {
     // classic boot downloads too, or awaited on its own, which would serialise
     // the stylesheet behind it. Still before `createRoot`, so nothing paints
     // under the wrong appearance.
+    //
+    // The provisional follower is stood down first. It writes this same
+    // `data-theme`, and it knows only "dark" and bare light, so an OS change
+    // later in the session rewrote a chosen Midnight to plain dark and deleted
+    // a chosen Paper down to light — throwing the reader's choice away until
+    // the next launch. (#373 review)
+    stopDerivedThemeFollower();
     applyStoredAppearance();
+    // Re-armed behind the reader's own record, which is the only thing that can
+    // tell a named theme from a derived one: `data-theme="dark"` is both a
+    // reading of the OS and the third of the five themes, and a bare root is
+    // both "nothing read" and a chosen Light.
+    //
+    // Not simply dropped, because naming no theme is the ONLY way a reader has
+    // of saying "follow the OS" — the pane offers no System entry — so someone
+    // who has never opened it must still track their OS while the app is open.
+    // The predicate is re-read on every change, so naming a theme later in this
+    // session stands this listener down too.
+    //
+    // Its own stop is discarded deliberately: it is armed for as long as the
+    // window lives, and there is no unmount here to hang a teardown on.
+    applyNextDesignTheme(hasChosenTheme);
     createRoot(root).render(
       <NextApp
         ported={PORTED_SCREENS.map((s) => s.name)}

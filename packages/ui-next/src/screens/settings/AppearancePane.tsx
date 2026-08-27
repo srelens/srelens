@@ -16,6 +16,7 @@ import {
   THEMES,
   ZOOM_STEPS,
   applyStoredAppearance,
+  hasChosenTheme,
   readRootAccent,
   readRootDensity,
   readRootTheme,
@@ -118,7 +119,15 @@ import { hint as chordHint } from "../../lib/shortcuts";
  * re-exports below keep this file the name the rest of the tree imports these
  * by.
  */
-export { APPEARANCE_KEY, ACCENTS, DENSITIES, THEMES, ZOOM_STEPS, applyStoredAppearance };
+export {
+  APPEARANCE_KEY,
+  ACCENTS,
+  DENSITIES,
+  THEMES,
+  ZOOM_STEPS,
+  applyStoredAppearance,
+  hasChosenTheme,
+};
 export type { AccentId, DensityId, ThemeId };
 
 /**

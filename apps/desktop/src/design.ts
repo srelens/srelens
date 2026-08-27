@@ -153,7 +153,29 @@ function applyNextThemeAttribute(): void {
   }
 }
 
-export function applyNextDesignTheme(): () => void {
+/**
+ * @param themeChosen Whether the reader has NAMED one of ui-next's five themes,
+ * in which case this function keeps its hands off `data-theme` entirely — it
+ * neither derives a value nor arms the listener that would.
+ *
+ * The reading here is derived, from classic's light/dark preference, and it
+ * knows only two of those five: `dark`, or the attribute's absence. So for a
+ * reader on `system` the listener below was overwriting a chosen theme —
+ * Midnight became plain dark, Paper became bare light — at the next OS change,
+ * for the rest of the session and with nothing on screen to say why. (#373
+ * review)
+ *
+ * The predicate is a parameter rather than a read, because the answer lives in
+ * ui-next's stored appearance record and nowhere else: the document cannot be
+ * asked, since `dark` is both a derivation and a named theme and a bare root is
+ * both "nothing read yet" and a chosen Light. That record sits on the chunk the
+ * new design is loaded from — a static import of it here would put the whole
+ * new tree in the entry chunk a classic boot downloads — so `main.tsx` hands it
+ * down. It defaults to "nothing named", which is what the first call of the
+ * boot, made before that chunk exists, has to assume.
+ */
+export function applyNextDesignTheme(themeChosen: () => boolean = () => false): () => void {
+  if (themeChosen()) return () => {};
   applyNextThemeAttribute();
 
   // Someone on "system" changes appearance while the app is open, and the new
@@ -161,7 +183,13 @@ export function applyNextDesignTheme(): () => void {
   // sit on a stale palette until the next reload. (#314 review)
   if (getInitialTheme().mode !== "system") return () => {};
   const query = window.matchMedia("(prefers-color-scheme: dark)");
-  const apply = () => applyNextThemeAttribute();
+  const apply = () => {
+    // Asked again on every change, not once at arm time: the Appearance pane is
+    // live, so a reader who boots having named nothing and then picks Midnight
+    // has to stand this listener down without a reload.
+    if (themeChosen()) return;
+    applyNextThemeAttribute();
+  };
   query.addEventListener("change", apply);
   return () => query.removeEventListener("change", apply);
 }

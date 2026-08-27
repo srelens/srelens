@@ -29,6 +29,7 @@ import {
   ZOOM_STEPS,
   AppearancePane,
   applyStoredAppearance,
+  hasChosenTheme,
 } from "./AppearancePane";
 import { rememberTheme } from "../../lib/appearance";
 
@@ -413,6 +414,88 @@ describe("AppearancePane", () => {
       document.documentElement.setAttribute("data-theme", "dark");
       applyStoredAppearance();
       expect(rootAttributes().theme).toBe("midnight");
+    });
+
+    /**
+     * Finding: the OS kept a vote after the reader had named a theme.
+     *
+     * Boot's `applyNextDesignTheme()` arms a `prefers-color-scheme` listener
+     * for a reader whose classic mode is `system`, and that listener writes
+     * `data-theme` too — but it knows only `dark` and bare light, so the next
+     * OS change turned a chosen Midnight into plain dark, or deleted a chosen
+     * Paper down to light, for the rest of the session.
+     *
+     * The root cannot decide this: `dark` is BOTH a derived value and one of
+     * the five named themes, and the absence of the attribute is both "no
+     * reading" and a chosen Light. Only the stored record separates a choice
+     * from a derivation, which is what this predicate is for.
+     */
+    describe("hasChosenTheme", () => {
+      it("says no for a reader who has never chosen anything", () => {
+        expect(hasChosenTheme()).toBe(false);
+      });
+
+      it("says no when the OS reading is on the root but nothing is stored", () => {
+        // The exact boot state for the default classic preference. Answering
+        // yes here would freeze every such reader out of following their OS.
+        document.documentElement.setAttribute("data-theme", "dark");
+        expect(hasChosenTheme()).toBe(false);
+      });
+
+      it("says no for a reader who chose an accent but no theme", async () => {
+        // The per-axis rule made visible: picking Teal stores an accent and
+        // nothing else, so the OS keeps its vote.
+        const { user } = paint();
+        await user.click(screen.getByRole("radio", { name: /Teal/ }));
+        expect(stored()).toEqual({ accent: "teal" });
+        expect(hasChosenTheme()).toBe(false);
+      });
+
+      it("says yes once the pane's Theme control has been used", async () => {
+        const { user } = paint();
+        await user.click(screen.getByRole("radio", { name: /Midnight/ }));
+        expect(hasChosenTheme()).toBe(true);
+      });
+
+      it("says yes for a chosen Light, which leaves the root bare", async () => {
+        // The case no reading of the document can get right: chosen Light and
+        // "nothing chosen" are the same root. The record tells them apart.
+        //
+        // Via Midnight, because Light is what a bare root already reads as, so
+        // its radio starts checked and clicking it fires no change at all.
+        const { user } = paint();
+        await user.click(screen.getByRole("radio", { name: /Midnight/ }));
+        await user.click(screen.getByRole("radio", { name: /^Light/ }));
+        expect(rootAttributes().theme).toBeUndefined();
+        expect(stored()).toEqual({ theme: "light" });
+        expect(hasChosenTheme()).toBe(true);
+      });
+
+      it("says yes for a chosen Dark, which looks exactly like the OS reading", () => {
+        // The mirror: `data-theme="dark"` is both. Deciding on the root would
+        // have been wrong for precisely the reader who asked for Dark.
+        document.documentElement.setAttribute("data-theme", "dark");
+        rememberTheme();
+        expect(hasChosenTheme()).toBe(true);
+      });
+
+      it("says yes once the titlebar's light/dark button has been used", () => {
+        // `Chrome` calls the host's toggle and then `rememberTheme`, so the
+        // second writer of this axis counts as a choice too.
+        document.documentElement.removeAttribute("data-theme");
+        rememberTheme();
+        expect(hasChosenTheme()).toBe(true);
+      });
+
+      it("says no for a stored theme this build cannot read", () => {
+        // An unparsable document, or a theme id no stylesheet defines, is not
+        // a choice this build can honour — so the OS keeps its vote rather
+        // than the reader being pinned to whatever boot happened to derive.
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ theme: "neon" }));
+        expect(hasChosenTheme()).toBe(false);
+        localStorage.setItem(APPEARANCE_KEY, "{ not json");
+        expect(hasChosenTheme()).toBe(false);
+      });
     });
 
     it("ignores a value no stylesheet defines", () => {

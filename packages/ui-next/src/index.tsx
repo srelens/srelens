@@ -5,16 +5,22 @@ import { ConsoleProvider } from "./console";
 
 export { ConsoleProvider, useConsole, type ConsoleValue } from "./console";
 /**
- * The boot half of the Appearance pane, re-exported for the host.
+ * The boot half of the Appearance pane, re-exported for the host, and the one
+ * question about the stored record that the host has to be able to ask.
  *
- * `apps/desktop/src/main.tsx` calls this beside its own
- * `applyNextDesignTheme()`, and it has to come from the module the host already
- * imports dynamically: a static `@srelens/ui-next` import from the entry would
- * drag this whole tree into the entry chunk that a classic-design boot also
- * downloads, and a second dynamic `import()` before the `Promise.all` would
- * serialise the two downloads the comment there keeps parallel.
+ * `apps/desktop/src/main.tsx` calls `applyStoredAppearance` beside its own
+ * `applyNextDesignTheme()`, and passes `hasChosenTheme` INTO that function so
+ * the OS-appearance listener it arms stands down once the reader has named a
+ * theme — see `lib/appearance.ts` for why only the stored record can tell a
+ * named theme from a derived one.
+ *
+ * Both have to come from the module the host already imports dynamically: a
+ * static `@srelens/ui-next` import from the entry would drag this whole tree
+ * into the entry chunk that a classic-design boot also downloads, and a second
+ * dynamic `import()` before the `Promise.all` would serialise the two downloads
+ * the comment there keeps parallel.
  */
-export { applyStoredAppearance } from "./screens/settings/AppearancePane";
+export { applyStoredAppearance, hasChosenTheme } from "./screens/settings/AppearancePane";
 
 function subscribeToHash(onChange: () => void): () => void {
   window.addEventListener("hashchange", onChange);
