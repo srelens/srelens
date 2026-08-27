@@ -786,35 +786,70 @@ mod tests {
     /// lock must WAIT for a vault write already inside the process-local
     /// critical section. `update` holds that mutex across its `mutate`
     /// closure, so the closure is a real, production critical section to
-    /// observe from — no hook, and no dependence on which order two threads
-    /// happen to start in.
+    /// observe from — no hook into the vault, and no need for the discard to
+    /// arrive at any particular moment on its own.
+    ///
+    /// **The interleaving is imposed, not hoped for.** The discard thread is
+    /// spawned first but is parked on `entered` until the write signals it
+    /// from INSIDE the closure, so `discard_key` is provably called against a
+    /// held guard on every run. Which order the two threads happen to start in
+    /// therefore cannot decide anything: whoever gets the CPU first, the
+    /// discard is not permitted to call anything until the write is in.
+    ///
+    /// That was not true before, and the test was flaky in the one direction
+    /// that also blinded it. The discard could take the mutex outright, seal
+    /// the vault and return `Ok` — and then `update` refused a locked vault
+    /// and the `unwrap` below panicked. So the runs where the race went the
+    /// wrong way did not merely fail; they were runs where the test never got
+    /// to observe the serialisation it is named for.
+    ///
+    /// What is left to timing is only the 300ms, and only in the safe
+    /// direction: it bounds how long a BROKEN `discard_key` — one not taking
+    /// the mutex first — is given to land, and an unserialised discard takes
+    /// two uncontended write locks and needs microseconds. A serialised one
+    /// cannot land inside any timeout, however loaded the machine, because it
+    /// is blocked on a mutex this thread holds.
     #[test]
     fn a_lock_waits_for_a_vault_write_already_in_flight() {
         let (vault, _dir) = a_set_up_unlocked_vault();
         let vault = Arc::new(vault);
-        let (tx, rx) = std::sync::mpsc::channel();
+        // Two channels, in opposite directions. `entered` releases the discard
+        // thread from inside the write's critical section; `locked` carries the
+        // discard's result back out.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let discarding = {
             let vault = Arc::clone(&vault);
             std::thread::spawn(move || {
-                let _ = tx.send(vault.discard_key());
+                // Nothing before this line touches the vault, so this thread
+                // cannot win a race it is not yet allowed to enter.
+                entered_rx.recv().expect("the write announces its critical section");
+                let _ = locked_tx.send(vault.discard_key());
             })
         };
 
         vault
             .update(|s| {
                 s.mcp_token = Some(test_pw("race-token"));
-                // Inside `update`'s critical section. An unserialised discard
-                // lands here in microseconds; a serialised one cannot land at
-                // all until this closure returns and the guard drops.
+                // Inside `update`'s critical section, and only now: the guard
+                // is held for the whole of this closure, so whatever the
+                // discard does next is racing a write that is already in.
+                // Unbounded, so this never blocks on a thread that has not
+                // reached its `recv` yet.
+                entered_tx.send(()).expect("the lock thread is waiting to be let go");
+                // An unserialised discard lands here in microseconds; a
+                // serialised one cannot land at all until this closure returns
+                // and the guard drops.
                 assert!(
-                    rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+                    locked_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
                     "the lock discarded the key while a vault write held the lock",
                 );
             })
             .unwrap();
 
         // And it is not lost — only deferred.
-        rx.recv_timeout(std::time::Duration::from_secs(5))
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the lock lands once the write releases the vault")
             .expect("locking a set-up vault is never an error");
         discarding.join().unwrap();
