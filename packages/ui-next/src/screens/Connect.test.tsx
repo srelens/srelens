@@ -184,9 +184,41 @@ describe("Connect", () => {
       expect(screen.getByText("The room is already reading it.")).toBeTruthy();
       expect(
         screen.getByText(
-          "srelens uses the credentials already in your kubeconfig and talks to the API server directly. Nothing about your clusters leaves this machine.",
+          "srelens uses the credentials already in your kubeconfig and talks to the API server directly. That file stays on this machine, and no srelens service sits between you and your clusters.",
         ),
       ).toBeTruthy();
+    });
+
+    /**
+     * **The absolute promise is gone, and its absence is half the assertion.**
+     *
+     * The lede used to end "Nothing about your clusters leaves this machine",
+     * and srelens cannot keep that. `srelens --mcp-stdio` serves
+     * `k8s.listContexts` as a READ-ONLY capability, and only a mutating one is
+     * confirm-gated — `assert_mutating_capabilities_are_gated`
+     * (`crates/mcp/src/completeness.rs:36-45`) fails the build for a mutating
+     * capability that is not, and says nothing about a read. So a connected
+     * agent, typically a remote model, can read every cluster name, server,
+     * source file and credential kind on this page with no prompt at all. The
+     * reader configured that themselves; the sentence promised it could not
+     * happen.
+     *
+     * What is kept is what holds unconditionally, and it is worth keeping: the
+     * kubeconfig is not uploaded, and there is no srelens service between the
+     * reader and their API servers. Pinned as the ABSENCE of the false
+     * sentence as well as the presence of the true one, because a narrowed
+     * privacy claim is exactly the copy a well-meaning revert restores — and a
+     * presence-only test would pass with both sentences on the page.
+     */
+    it("does not promise a desktop reader that nothing about their clusters leaves the machine", async () => {
+      core.isTauri.mockReturnValue(true);
+      open();
+      await screen.findByText("Contexts found");
+
+      expect(screen.queryByText(/Nothing about your clusters leaves this machine/)).toBeNull();
+      expect(screen.queryByText(/leaves this machine/)).toBeNull();
+      expect(screen.getByText(/That file stays on this machine/)).toBeTruthy();
+      expect(screen.getByText(/no srelens service sits between you and your clusters/)).toBeTruthy();
     });
 
     /**
@@ -689,9 +721,35 @@ describe("Connect", () => {
       expect(strip.querySelector("svg")).toBeTruthy();
       expect(
         within(strip).getByText(
-          "srelens reads each cluster directly, with the credentials already in your kubeconfig, and sends that file nowhere. Asking the console about a cluster in plain language is not in this design yet.",
+          "srelens reads each cluster directly, with the credentials already in your kubeconfig, and never copies or uploads that file. Connect an agent to srelens over MCP and it can read this list, and the clusters on it, without asking first; every change it makes stops at a confirmation prompt. Asking the console about a cluster in plain language is not in this design yet.",
         ),
       ).toBeTruthy();
+    });
+
+    /**
+     * **The agent's READ access gets its own clause, and the old absolute
+     * claim's absence is pinned beside it.**
+     *
+     * The strip used to end "and sends that file nowhere" — a claim about the
+     * kubeconfig, which is true, wrapped around an absolute the neighbouring
+     * lede also made. `SourcesRail`'s own section already tells the reader that
+     * every agent CHANGE stops at a confirmation prompt; nothing anywhere told
+     * them the agent can READ freely, which is the half of the MCP story that
+     * makes "nothing leaves this machine" false. So the true, narrow claim
+     * about the file stays ("never copies or uploads that file"), and the read
+     * is said plainly next to it.
+     *
+     * The confirmation half is worded to agree with the rail rather than to
+     * paraphrase it: two panes one click apart must not describe one gate two
+     * ways.
+     */
+    it("tells the desktop reader the agent may read freely and change nothing unasked", async () => {
+      core.isTauri.mockReturnValue(true);
+      const strip = (open(), await screen.findByTestId("connect-footer"));
+      expect(within(strip).queryByText(/sends that file nowhere/)).toBeNull();
+      expect(within(strip).getByText(/never copies or uploads that file/)).toBeTruthy();
+      expect(within(strip).getByText(/read this list, and the clusters on it, without asking first/)).toBeTruthy();
+      expect(within(strip).getByText(/every change it makes stops at a confirmation prompt/)).toBeTruthy();
     });
 
     /**

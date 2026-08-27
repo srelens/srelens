@@ -67,8 +67,30 @@ import { STATUS, bySource, latencyLabel, viaOf } from "./connections/clusterText
  */
 const HEADLINE_ONE = "Pick a cluster.";
 const HEADLINE_TWO = "The room is already reading it.";
+/**
+ * **The desktop lede claims only what holds unconditionally, and that is a
+ * deliberate narrowing of §24 rather than an omission to restore.**
+ *
+ * It used to end "Nothing about your clusters leaves this machine". srelens
+ * cannot keep that promise, and the reader is the one who breaks it: srelens
+ * ships an MCP server (`srelens --mcp-stdio`), `k8s.listContexts` is one of its
+ * READ-ONLY capabilities, and only a MUTATING capability is confirm-gated —
+ * `assert_mutating_capabilities_are_gated`
+ * (`crates/mcp/src/completeness.rs:36-45`) fails the build for a mutating
+ * capability that carries no `requires_confirm` and says nothing about a read.
+ * So once a client is connected, every cluster name, server, source file and
+ * credential kind on this page can be read by it with no prompt, and that
+ * client is usually a remote model.
+ *
+ * The two surrounding facts are true unconditionally and are kept, because a
+ * privacy claim that is specific and true is worth more than none — and the
+ * desktop build really does do something better than a hosted tool: the
+ * kubeconfig is read in place and never uploaded, and there is no srelens
+ * service between the reader and their API servers. What the agent may read is
+ * said in {@link FOOTER_DESKTOP}, where the agent is already the subject.
+ */
 const LEDE_DESKTOP =
-  "srelens uses the credentials already in your kubeconfig and talks to the API server directly. Nothing about your clusters leaves this machine.";
+  "srelens uses the credentials already in your kubeconfig and talks to the API server directly. That file stays on this machine, and no srelens service sits between you and your clusters.";
 const LEDE_WEB =
   "srelens uses the credentials in the kubeconfig this server was started with, and talks to the API server directly from the server's host. The clusters listed below are the ones that server can see, not the ones on the machine you are reading this on.";
 /**
@@ -82,7 +104,30 @@ const EYEBROW_WEB = "srelens · shared server";
 /** Said once, in both footers: the console is not wired up in this design. */
 const CONSOLE_NOT_YET =
   "Asking the console about a cluster in plain language is not in this design yet.";
-const FOOTER_DESKTOP = `srelens reads each cluster directly, with the credentials already in your kubeconfig, and sends that file nowhere. ${CONSOLE_NOT_YET}`;
+/**
+ * **What an agent may do with this list, both halves of it.**
+ *
+ * `SourcesRail`'s own section (one click away, on `/connections`) already tells
+ * the reader that every agent CHANGE stops at a confirmation prompt. Nothing
+ * told them the agent can READ freely, and that is the half which makes an
+ * absolute "nothing leaves this machine" false — see {@link LEDE_DESKTOP} for
+ * why the read is ungated. A reader who has been told only about the gate would
+ * reasonably conclude the reads are gated too.
+ *
+ * Worded to AGREE with the rail rather than to paraphrase it: two panes a click
+ * apart describing one gate in two vocabularies is how a reader starts
+ * believing there are two gates.
+ *
+ * **Desktop only, deliberately.** It is the desktop reader who can start
+ * `srelens --mcp-stdio` on the machine in front of them; the web build's
+ * footer makes no absolute claim to narrow, and telling a browser reader about
+ * a process only whoever runs the server can start would be a fact about
+ * somebody else's machine — the exact fault this file's platform branches
+ * exist to avoid.
+ */
+const AGENT_READS =
+  "Connect an agent to srelens over MCP and it can read this list, and the clusters on it, without asking first; every change it makes stops at a confirmation prompt.";
+const FOOTER_DESKTOP = `srelens reads each cluster directly, with the credentials already in your kubeconfig, and never copies or uploads that file. ${AGENT_READS} ${CONSOLE_NOT_YET}`;
 const FOOTER_WEB = `srelens reads each cluster directly from this server, with the credentials in the kubeconfig it was started with. ${CONSOLE_NOT_YET}`;
 
 /**
