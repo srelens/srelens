@@ -32,9 +32,9 @@ import {
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
+import { openCluster } from "../lib/openCluster";
 import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
-import { openTab, setActiveCluster, setWorkspaceClusters, useTabs } from "../lib/tabsStore";
 import { glyph } from "../lib/tree";
 import { STATUS, bySource, latencyLabel, viaOf } from "./connections/clusterText";
 
@@ -431,7 +431,6 @@ export function Connect({ route }: { route: string }) {
   const status = useContextsStatus();
   const listError = useContextsError();
   const probes = useProbes();
-  const { workspace } = useTabs();
 
   /** A listing asked for by the reader, still out. */
   const [busy, setBusy] = useState(false);
@@ -536,23 +535,6 @@ export function Connect({ route }: { route: string }) {
     // rows the reader pasted the context to see.
     setPasteOpen(false);
     await remember([path]);
-  }
-
-  /**
-   * Open a cluster: put it in this workspace, focus it, and open its overview.
-   *
-   * The workspace step is not a flourish. This screen lists every context on
-   * the machine, including ones no workspace holds, and `setActiveCluster`
-   * refuses an id the workspace does not have — so without it `Open` on exactly
-   * those rows would do nothing at all, silently.
-   */
-  function open(context: ClusterContext) {
-    const id = context.stableId;
-    if (!workspace.clusters.includes(id)) {
-      setWorkspaceClusters(workspace.id, [...workspace.clusters, id]);
-    }
-    setActiveCluster(id);
-    openTab("/overview", { clusterName: context.name });
   }
 
   const desktop = isTauri();
@@ -667,7 +649,7 @@ export function Connect({ route }: { route: string }) {
                 // `no reading` until the store has an answer for this cluster,
                 // which is what lets every row paint before any probe lands.
                 probe={probes[context.stableId] ?? UNREAD}
-                onOpen={open}
+                onOpen={openCluster}
               />
             ))}
 

@@ -20,9 +20,10 @@ import {
   useContextsStatus,
 } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { openCluster } from "../lib/openCluster";
 import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
-import { openTab, setActiveCluster, setWorkspaceClusters, useTabs } from "../lib/tabsStore";
+import { openTab } from "../lib/tabsStore";
 import { ClusterTable, type ClusterRow } from "./connections/ClusterTable";
 import { SourcesRail } from "./connections/SourcesRail";
 
@@ -97,7 +98,6 @@ export function Connections({ route }: { route: string }) {
    * is what re-renders this screen with the new list in hand.
    */
   const files = getKubeconfigFiles();
-  const { workspace } = useTabs();
 
   /**
    * Provider and region per cluster, from the second round trip, **keyed by
@@ -350,21 +350,17 @@ export function Connections({ route }: { route: string }) {
     rows.length > 0 ? `${plural(rows.length, "cluster")} · ${plural(sources, "source")}` : undefined;
 
   /**
-   * Open a cluster: put it in this workspace, focus it, and open its overview.
+   * Open the cluster a row stands for.
    *
-   * The workspace step is not a flourish. This screen lists every context on
-   * the machine, including ones no workspace holds, and `setActiveCluster`
-   * refuses an id the workspace does not have — so without it `Open` on exactly
-   * those rows would do nothing at all, silently.
+   * The row hands over a `stableId` — the table's own key — and the lookup is
+   * what turns it back into the context {@link openCluster} needs. A row for an
+   * id no longer on the list opens nothing rather than opening the wrong
+   * cluster.
    */
   function open(stableId: string) {
     const context = contexts.find((c) => c.stableId === stableId);
     if (!context) return;
-    if (!workspace.clusters.includes(stableId)) {
-      setWorkspaceClusters(workspace.id, [...workspace.clusters, stableId]);
-    }
-    setActiveCluster(stableId);
-    openTab("/overview", { clusterName: context.name });
+    openCluster(context);
   }
 
   /**

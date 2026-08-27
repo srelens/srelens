@@ -654,8 +654,24 @@ describe("Connections", () => {
     await user.click(within(rowFor("staging-eu")).getByRole("button", { name: "Open" }));
     // The stableId, never the name — the workspace is keyed by id (#265).
     expect(store.activeCluster()).toBe(STAGING.stableId);
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/overview")).toBe(true);
     expect(store.currentWorkspace().clusters).toContain(STAGING.stableId);
+
+    /**
+     * **And the TAB is opened with the NAME, which is the other half of #265
+     * and the half no test held.**
+     *
+     * `makeTab` spends `clusterName` on the tab's `sub`, and every core call
+     * the overview then makes takes a context NAME. Handing `openTab` the
+     * stableId instead read `/home/dana/.kube/config#staging-eu` on the tab
+     * strip and passed the whole ui-next suite, because `activeCluster` and
+     * `clusters` above are both keyed by id and neither can see it. STAGING is
+     * the fixture whose two keys differ, so asking for the `sub` here IS the
+     * assertion.
+     */
+    const tab = store.currentWorkspace().tabs.find((t) => t.route === "/overview");
+    expect(tab).toBeTruthy();
+    expect(tab?.sub).toBe(STAGING.name);
+    expect(tab?.sub).not.toBe(STAGING.stableId);
   });
 
   /**
