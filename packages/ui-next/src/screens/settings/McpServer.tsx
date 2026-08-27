@@ -1,25 +1,63 @@
 import { useEffect, useRef, useState } from "react";
-import { getMcpToken, mcpHttpStatus, notify, revokeMcpToken, rotateMcpToken } from "@srelens/core";
+import {
+  getMcpToken,
+  loadMcpSettings,
+  mcpHttpStatus,
+  notify,
+  revokeMcpToken,
+  rotateMcpToken,
+  saveMcpSettings,
+  startMcpHttp,
+  stopMcpHttp,
+} from "@srelens/core";
 import { Badge, Button, Panel, SubHead } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 
 /**
- * §23's `MCP server` pane: the loopback HTTP transport's own bearer token —
- * masked until the reader asks for it, with reveal, copy, rotate and revoke.
+ * §23's `MCP server` pane: the loopback HTTP transport itself — start it, stop
+ * it, and manage the bearer token clients authenticate with.
  *
- * **The address is fixed, not read back.** `start_server` (`apps/desktop/src-
- * tauri/src/mcp.rs`) binds `Ipv4Addr::LOCALHOST` unconditionally; there is no
- * setting anywhere for it, so there is nothing here to read from a running
- * server that a constant wouldn't already say.
+ * **The start and stop are the whole reason this file changed.** It used to
+ * read status and manage a token and nothing else: `startMcpHttp` and
+ * `stopMcpHttp` appeared nowhere in this package, and their only callers were
+ * classic's — `apps/desktop/src/App.tsx`'s auto-start effect and
+ * `McpSettingsSection`. `main.tsx` mounts `App` or `NextApp` and never both, so
+ * a reader in the new design could not bring the server up at all, and this
+ * pane's empty-token note pointed them at "when the loopback HTTP server
+ * starts" as though that were something they could make happen. The behaviour
+ * is PORTED from `McpSettingsSection`, not reinvented: the same
+ * `startMcpHttp(port)` / `stopMcpHttp()` pair, the same `McpSettings` record,
+ * the same token re-read after a start (`mcp_http_start` mints one when none
+ * exists), and the same revert-to-disabled when a start is refused.
+ *
+ * **It does not come back up on its own** (#374). The auto-start effect is
+ * still classic's (`App.tsx:771`, gated on the vault gate reporting ready), and
+ * moving it belongs with the rest of that tree's launch work rather than to a
+ * settings pane — so this pane says, once, that a start lasts the session. The PREFERENCE is
+ * persisted all the same: `McpSettings` is one record shared with classic, and
+ * a reader who starts the server here and switches designs should not find the
+ * toggle over there disagreeing with the server they are talking to.
+ *
+ * **The address is read, not written.** `mcpHttpStatus()` returns the running
+ * server's URL and this pane used to discard it into a boolean while printing a
+ * hardcoded `127.0.0.1:8765` in its head — so a reader who had set a
+ * non-default port in classic, and whose server was bound to it, was shown an
+ * endpoint with nothing on it. The live URL is kept and rendered now. For a
+ * STOPPED server there is no live URL to read, so the address is composed from
+ * the two facts that actually determine it: `start_server`
+ * (`apps/desktop/src-tauri/src/mcp.rs`) binds `Ipv4Addr::LOCALHOST`
+ * unconditionally and `url_for` renders `http://{addr}/mcp`, and the port is
+ * the persisted one — the very value the Start button passes to
+ * `startMcpHttp`. It is labelled as what Start would bind, not as a listener.
+ * One element carries that claim, so there is one place to keep true.
  *
  * **`running` is `mcpHttpStatus()` — a live read of the process, not a proxy.**
  * A token existing is not the same fact as a listener being bound: rotate can
  * mint a fresh token while the server stays stopped ("rotating a token must
- * never switch the server on", `mcp.rs`), and nothing here restarts it on
- * launch, so a token surviving from an earlier session says nothing about
- * whether anything is on 127.0.0.1:8765 right now. `mcpHttpStatus`
- * (`packages/core/src/lib/mcp.ts`) reads `McpHttpManager`'s own `running`
- * state (`mcp.rs`) directly — the one place that fact actually lives.
+ * never switch the server on", `mcp.rs`), so a token surviving from an earlier
+ * session says nothing about whether anything is listening right now.
+ * `mcpHttpStatus` (`packages/core/src/lib/mcp.ts`) reads `McpHttpManager`'s own
+ * `running` state (`mcp.rs`) directly — the one place that fact actually lives.
  *
  * **The token and the listener are independent facts, read independently.**
  * `getMcpToken()` and `mcpHttpStatus()` run in their OWN effects, not a
@@ -40,31 +78,33 @@ import { FailureAlert } from "../../lib/errorCopy";
  * three-state shape the contexts store uses for "which cluster is in focus"
  * (still loading / failed / actually none), for the same reason.
  *
+ * That discipline is why the start/stop control is drawn only once the status
+ * is `ready`: the control has to NAME which of the two it is, and a status
+ * that is still loading or failed has established neither. A button labelled
+ * `Start server` beside an unread status would be the same claim-from-nothing
+ * the three-state union exists to prevent; the failure banner says the check
+ * did not answer, which is all this pane knows.
+ *
  * Reveal, copy, rotate and revoke all act on the persisted token itself and
  * work whether or not the HTTP server is currently listening — so those
  * controls are gated on the token being known and present, not on `running`.
- * A token that's present while the server reads not-running still shows its
- * row, plus one sentence saying the server isn't listening right now.
  *
- * **A late status response cannot un-say what `revoke()` just established.**
- * `revoke()` sets `statusRead` to `{ ready, false }` directly, because
- * revoking a token is guaranteed to stop the server (`mcp.rs`) — that is not
- * a guess. But the mount effect's own `mcpHttpStatus()` call can still be in
- * flight when that happens (the Revoke button only waits on the TOKEN read,
- * not the status read), and if it resolves afterwards it would otherwise
- * overwrite the accurate post-revoke value with a stale one. `statusSeq`
- * guards exactly that: every write that establishes the status — the fetch
- * starting, and `revoke()`'s direct set — bumps it, and a fetch only applies
- * its result if nothing has superseded it since it started. One source, one
- * sequence — this pane has one status read to protect, not the three-guard
- * shape a listing-plus-per-item read needs.
+ * **A late status response cannot un-say what an action just established.**
+ * `revoke()` sets `statusRead` directly, because revoking a token is
+ * guaranteed to stop the server (`mcp.rs`) — that is not a guess; so do the
+ * start and the stop, which return the fact themselves. But the mount effect's
+ * own `mcpHttpStatus()` call can still be in flight when any of them happens,
+ * and if it resolves afterwards it would otherwise overwrite the accurate
+ * value with a stale one. `statusSeq` guards exactly that: every write that
+ * establishes the status bumps it, and a fetch only applies its result if
+ * nothing has superseded it since it started.
  *
  * **`rotate()` does not need the same guard.** It sets `tokenRead` directly
  * too, but the Rotate button only exists once `tokenRead.kind === "ready"`
  * — which means the mount effect's `getMcpToken()` call has already
  * resolved by the time a click is even possible. There is no in-flight
- * initial read left to race against, and `busy` already serializes rotate
- * and revoke against each other, so no second guard is load-bearing here.
+ * initial read left to race against, and `busy` already serializes every
+ * action on this pane against every other, so no second guard is load-bearing.
  *
  * **`getMcpTokenStorage()` is deliberately NOT read here**, despite being
  * named for this file — but the reason first written down was wrong. It said
@@ -83,11 +123,27 @@ import { FailureAlert } from "../../lib/errorCopy";
  * is where classic put it too: `McpSettingsSection` never called this, only
  * `SecuritySettingsSection` did.
  *
+ * **No port editor** (#374). Changing the port is a second, differently-shaped
+ * job — validate, persist, and restart a listener that may be serving an agent
+ * mid-call — and this pane has no control for it, so it makes no claim that it
+ * has one. The persisted value is read and honoured; classic is where it is
+ * still set.
+ *
  * **`Clients` is not drawn** (#369): `mcpClientConfig` generates configuration
  * *for* a client to paste elsewhere; srelens does not track who connects.
  */
 
-const ADDRESS = "127.0.0.1:8765";
+/**
+ * Where a STOPPED server would bind, from the two facts that determine it:
+ * `start_server` binds `Ipv4Addr::LOCALHOST` unconditionally and `url_for`
+ * renders `http://{addr}/mcp` (`apps/desktop/src-tauri/src/mcp.rs`), so the
+ * port is the only variable — and `port` here is the same value the Start
+ * button hands `startMcpHttp`. A RUNNING server's address is never built this
+ * way; that one comes back from `mcpHttpStatus()` itself.
+ */
+function wouldBindAt(port: number): string {
+  return `http://127.0.0.1:${port}/mcp`;
+}
 
 /**
  * How many bullets the mask shows. FIXED, independent of the real token's
@@ -117,16 +173,28 @@ const LOADING: Read<never> = { kind: "loading" };
 
 export function McpServer() {
   const [tokenRead, setTokenRead] = useState<Read<string | null>>(LOADING);
-  const [statusRead, setStatusRead] = useState<Read<boolean>>(LOADING);
+  /** The running server's own URL, or `null` for "not running" — the value
+   *  `mcpHttpStatus()` actually returns, kept rather than reduced to a flag. */
+  const [statusRead, setStatusRead] = useState<Read<string | null>>(LOADING);
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
+  const [serverError, setServerError] = useState<{ verb: "started" | "stopped"; error: unknown } | null>(
+    null,
+  );
+
+  /** Read ONCE, at mount: the port a start uses and a stopped server's address
+   *  is composed from. Not re-read per render — nothing in this tree writes it,
+   *  and a value that changed between the address on screen and the number
+   *  handed to `startMcpHttp` would be two different claims. */
+  const [port] = useState(() => loadMcpSettings().port);
 
   /** Bumped by anything that authoritatively establishes `statusRead` — the
-   * fetch below starting, and `revoke()`'s direct set. A fetch's result is
-   * only applied if this still reads the value it captured when it started,
-   * so a response that belongs to a superseded read is discarded rather than
-   * applied over a newer, already-correct state. */
+   * fetch below starting, and the direct sets in `start()`, `stop()` and
+   * `revoke()`. A fetch's result is only applied if this still reads the value
+   * it captured when it started, so a response that belongs to a superseded
+   * read is discarded rather than applied over a newer, already-correct
+   * state. */
   const statusSeq = useRef(0);
 
   // Two independent effects, not one `Promise.all` — a status failure must
@@ -152,7 +220,7 @@ export function McpServer() {
     mcpHttpStatus()
       .then((url) => {
         if (cancelled || statusSeq.current !== seq) return;
-        setStatusRead({ kind: "ready", value: url !== null });
+        setStatusRead({ kind: "ready", value: url });
       })
       .catch((e) => {
         if (cancelled || statusSeq.current !== seq) return;
@@ -165,7 +233,19 @@ export function McpServer() {
 
   const token = tokenRead.kind === "ready" ? tokenRead.value : null;
   const hasToken = tokenRead.kind === "ready" && tokenRead.value !== null;
-  const running = statusRead.kind === "ready" && statusRead.value;
+  const running = statusRead.kind === "ready" && statusRead.value !== null;
+  /** The one address claim this pane makes: the live URL when there is one, and
+   *  otherwise what Start would bind. */
+  const address = statusRead.kind === "ready" ? (statusRead.value ?? wouldBindAt(port)) : null;
+
+  /** Establish the status from a value an action itself returned, superseding
+   *  any read still in flight. Bumps the sequence FIRST: an in-flight fetch
+   *  must be told it has been superseded before the authoritative value lands,
+   *  or its late response can overwrite it right back. */
+  function establishStatus(url: string | null) {
+    statusSeq.current += 1;
+    setStatusRead({ kind: "ready", value: url });
+  }
 
   async function copyToken() {
     if (!token) return;
@@ -175,6 +255,54 @@ export function McpServer() {
     } catch {
       // No clipboard on a non-secure origin, and nothing to recover: Reveal
       // already shows the value in full and it can be selected by hand.
+    }
+  }
+
+  async function start() {
+    setBusy(true);
+    setServerError(null);
+    try {
+      establishStatus(await startMcpHttp(port));
+      saveMcpSettings({ enabled: true, port });
+      // The first start is also the first place a token can exist:
+      // `mcp_http_start` mints one when none is stored (`mcp.rs`), so a
+      // previously-read `null` is now stale. Re-read rather than assume —
+      // this pane never invents a secret's value.
+      try {
+        setTokenRead({ kind: "ready", value: await getMcpToken() });
+      } catch (e) {
+        setTokenRead({ kind: "error", error: e });
+      }
+    } catch (e) {
+      setServerError({ verb: "started", error: e });
+      // Nothing to re-establish: `Start server` is only offered while the
+      // status is a KNOWN not-running, and a refused start leaves it that way
+      // — `start_server` binds the listener before it records anything as
+      // running (`mcp.rs`), so nothing is bound when the bind is what failed.
+      // A write here would be a no-op dressed as a fact; the mutation pass
+      // caught it as one, since no reachable state could tell it apart.
+      // The PREFERENCE does revert, as classic's does: a start that failed
+      // must not leave `enabled` set for the next launch to retry blindly.
+      saveMcpSettings({ enabled: false, port });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stop() {
+    setBusy(true);
+    setServerError(null);
+    try {
+      await stopMcpHttp();
+      establishStatus(null);
+      saveMcpSettings({ enabled: false, port });
+    } catch (e) {
+      setServerError({ verb: "stopped", error: e });
+      // Deliberately NOT establishing a status here. A stop that rejected
+      // says nothing about what is listening now, and the previous value is
+      // the last thing that was actually read.
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -204,11 +332,11 @@ export function McpServer() {
       setRevealed(false);
       // Revoking always stops the server too — "it must never serve
       // unauthenticated" (`mcp.rs`) — so this is a known fact, not a guess.
-      // Bump the sequence FIRST: a still-in-flight initial status fetch must
-      // be told it's been superseded before this authoritative value lands,
-      // or its late response can overwrite it right back.
-      statusSeq.current += 1;
-      setStatusRead({ kind: "ready", value: false });
+      establishStatus(null);
+      // And the preference follows the server, exactly as classic's revoke
+      // does: leaving `enabled` set would have the next launch (or a switch
+      // to the other design) start a server the reader just took down.
+      saveMcpSettings({ enabled: false, port });
     } catch (e) {
       setActionError(e);
     } finally {
@@ -220,18 +348,58 @@ export function McpServer() {
     <Panel
       title={
         <span className="flex flex-wrap items-center gap-2">
-          <span>MCP server · loopback http · {ADDRESS}</span>
+          <span>MCP server · loopback http</span>
           {statusRead.kind === "ready" && (
             <Badge tone={running ? "ok" : "muted"}>{running ? "running" : "not running"}</Badge>
           )}
         </span>
       }
     >
+      {/* The control and the address, together — one row, because the address
+          is the thing the control acts on. Drawn only once the status is
+          `ready`: see the file comment on why a Start/Stop label is a claim. */}
+      {statusRead.kind === "ready" && address !== null && (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant={running ? "secondary" : "primary"}
+              size="sm"
+              disabled={busy}
+              onClick={() => void (running ? stop() : start())}
+            >
+              {running ? "Stop server" : "Start server"}
+            </Button>
+            {/* `min-w-0` and `break-all` for the same reason the token row has
+                them: a URL beside a control is the shape that has bitten this
+                migration under `min-width: auto`. */}
+            <span
+              data-testid="mcp-address"
+              className="min-w-0 text-[0.75rem] leading-relaxed text-muted"
+            >
+              {running ? "Listening at " : "Not listening. Start binds "}
+              <code className="code break-all rounded px-1.5 py-0.5 text-[0.6875rem]">{address}</code>
+            </span>
+          </div>
+          <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
+            A start lasts this session — srelens does not bring the server back up for you on the
+            next launch.
+          </p>
+        </>
+      )}
+
+      {serverError !== null && (
+        <FailureAlert
+          tone="sev"
+          title={`The MCP server could not be ${serverError.verb}`}
+          error={serverError.error}
+        />
+      )}
+
       {tokenRead.kind === "loading" ? (
-        <p className="text-[0.75rem] text-muted">Checking the MCP server…</p>
+        <p className="mt-3 text-[0.75rem] text-muted">Checking the MCP server…</p>
       ) : tokenRead.kind === "ready" && hasToken ? (
         <>
-          <SubHead className="mt-1">Bearer token</SubHead>
+          <SubHead className="mt-4">Bearer token</SubHead>
           {/* `min-w-0` on the flex child holding the token: a 64-character
               secret beside four controls is the exact shape that has bitten
               this migration eight times under `min-width: auto`. `break-all`,
@@ -259,16 +427,11 @@ export function McpServer() {
             Rotating restarts the server, drops in-flight requests, and invalidates clients still using the old
             token.
           </p>
-          {statusRead.kind === "ready" && !running && (
-            <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
-              The server is not currently listening on {ADDRESS}, so no client can reach it right now.
-            </p>
-          )}
         </>
       ) : tokenRead.kind === "ready" ? (
-        <p data-testid="no-token-note" className="text-[0.75rem] leading-relaxed text-muted">
-          No bearer token has been minted yet, so there is nothing to reveal, copy or rotate. One is
-          minted when the loopback HTTP server starts.
+        <p data-testid="no-token-note" className="mt-3 text-[0.75rem] leading-relaxed text-muted">
+          No bearer token has been minted yet, so there is nothing to reveal, copy or rotate.
+          Starting the server mints one.
         </p>
       ) : null}
 

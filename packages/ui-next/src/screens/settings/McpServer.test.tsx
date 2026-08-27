@@ -7,6 +7,10 @@ const core = vi.hoisted(() => ({
   mcpHttpStatus: vi.fn(),
   rotateMcpToken: vi.fn(),
   revokeMcpToken: vi.fn(),
+  startMcpHttp: vi.fn(),
+  stopMcpHttp: vi.fn(),
+  loadMcpSettings: vi.fn(),
+  saveMcpSettings: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -31,6 +35,16 @@ const ROTATED = "f".repeat(64);
 /** What a running loopback server's own status call answers with. */
 const STATUS_URL = "http://127.0.0.1:8765/mcp";
 
+/**
+ * A port that is NOT the default. Every address assertion here uses it, so a
+ * pane that hardcodes 8765 — which is what the default would have hidden —
+ * fails rather than agreeing with the fixture by coincidence.
+ */
+const PORT = 9411;
+
+/** What that port's stopped server would bind, and what a start returns. */
+const PORT_URL = `http://127.0.0.1:${PORT}/mcp`;
+
 /** jsdom ships no clipboard at all, so there is nothing to spy on. */
 function stubClipboard() {
   const writeText = vi.fn().mockResolvedValue(undefined);
@@ -45,7 +59,16 @@ describe("McpServer", () => {
     core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
     core.rotateMcpToken.mockResolvedValue(TOKEN);
     core.revokeMcpToken.mockResolvedValue(undefined);
+    core.startMcpHttp.mockResolvedValue(PORT_URL);
+    core.stopMcpHttp.mockResolvedValue(undefined);
+    core.loadMcpSettings.mockReturnValue({ enabled: false, port: PORT });
+    core.saveMcpSettings.mockReturnValue(undefined);
   });
+
+  /** The one element that carries the pane's claim about the address. */
+  function address(): string {
+    return screen.getByTestId("mcp-address").textContent ?? "";
+  }
 
   it("masks the token until the reader asks for it", async () => {
     render(<McpServer />);
@@ -170,7 +193,7 @@ describe("McpServer", () => {
     expect(screen.getByRole("button", { name: "Reveal" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Rotate" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
-    expect(screen.getByText(/not currently listening/i)).toBeTruthy();
+    expect(address()).toMatch(/not listening/i);
   });
 
   /**
@@ -244,5 +267,172 @@ describe("McpServer", () => {
 
     expect(screen.queryByText("running")).toBeNull();
     expect(screen.getByText("not running")).toBeTruthy();
+  });
+
+  // ---- Starting and stopping the server (the whole of it, from here) ----
+
+  /**
+   * The pane read status and managed a token and did NOTHING else: it never
+   * called `startMcpHttp` or `stopMcpHttp`, and the only callers of either were
+   * classic's — `App.tsx`'s auto-start effect and `McpSettingsSection`. Since
+   * `main.tsx` mounts one tree or the other, a reader in the new design could
+   * not start the server at all, and the empty-token note pointed them at
+   * "when the loopback HTTP server starts" as though that were something they
+   * could make happen.
+   */
+  describe("starting and stopping", () => {
+    it("starts the server on the port the reader actually persisted", async () => {
+      core.getMcpToken.mockResolvedValue(null);
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Start server" }));
+      expect(core.startMcpHttp).toHaveBeenCalledTimes(1);
+      expect(core.startMcpHttp).toHaveBeenCalledWith(PORT);
+    });
+
+    it("shows the server running at the URL the start itself returned", async () => {
+      core.getMcpToken.mockResolvedValue(null);
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Start server" }));
+      expect(await screen.findByText("running")).toBeTruthy();
+      expect(address()).toContain(PORT_URL);
+      expect(address()).toMatch(/listening at/i);
+    });
+
+    it("re-reads the token after a start, because the first start mints one", async () => {
+      core.getMcpToken.mockResolvedValueOnce(null).mockResolvedValue(TOKEN);
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      expect(await screen.findByTestId("no-token-note")).toBeTruthy();
+      await userEvent.click(screen.getByRole("button", { name: "Start server" }));
+      expect(await screen.findByRole("button", { name: "Reveal" })).toBeTruthy();
+      expect(screen.queryByTestId("no-token-note")).toBeNull();
+    });
+
+    it("stops the server through stopMcpHttp and says so", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Stop server" }));
+      expect(core.stopMcpHttp).toHaveBeenCalledTimes(1);
+      expect(await screen.findByText("not running")).toBeTruthy();
+      expect(screen.queryByText("running")).toBeNull();
+      // The token is untouched by a stop — it is the credential, not the
+      // listener.
+      expect(screen.getByRole("button", { name: "Reveal" })).toBeTruthy();
+    });
+
+    it("remembers the choice the same way classic does, so one setting means one thing", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Stop server" }));
+      expect(core.saveMcpSettings).toHaveBeenCalledWith({ enabled: false, port: PORT });
+      await userEvent.click(await screen.findByRole("button", { name: "Start server" }));
+      expect(core.saveMcpSettings).toHaveBeenCalledWith({ enabled: true, port: PORT });
+    });
+
+    it("reports a refused start instead of claiming the server came up", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      core.startMcpHttp.mockRejectedValue(new Error("address already in use"));
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Start server" }));
+      expect(await screen.findByText(/could not be started/i)).toBeTruthy();
+      expect(screen.getByText(/address already in use/i)).toBeTruthy();
+      // `start_server` binds before it records anything as running, so a
+      // rejection is a KNOWN not-running, not a guess.
+      expect(screen.getByText("not running")).toBeTruthy();
+      expect(screen.queryByText("running")).toBeNull();
+      expect(core.saveMcpSettings).toHaveBeenLastCalledWith({ enabled: false, port: PORT });
+    });
+
+    it("offers no start or stop while it has not established which one it would be", async () => {
+      // A status read that never settles: the pane knows neither state, and a
+      // control has to name one of them.
+      core.mcpHttpStatus.mockReturnValue(new Promise<string | null>(() => {}));
+      render(<McpServer />);
+      expect(await screen.findByRole("button", { name: "Reveal" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /start server/i })).toBeNull();
+      expect(screen.queryByRole("button", { name: /stop server/i })).toBeNull();
+      expect(screen.queryByTestId("mcp-address")).toBeNull();
+    });
+
+    /**
+     * The mutation pass killed the test that stood here. It resolved the
+     * mount's status promise a SECOND time to play a stale response — which a
+     * settled promise ignores, so it passed with `establishStatus`'s sequence
+     * bump removed. And the scenario itself cannot happen: the Start button
+     * does not exist until the mount read is `ready`, so a start can never
+     * race it. (`revoke()` can, because its button appears on the TOKEN read
+     * — that race has its own test above, and it is the one the shared guard
+     * is load-bearing for.)
+     *
+     * What is real, and what this asserts instead: a start takes the URL the
+     * start itself returned and makes no second status read. There is then no
+     * later answer to be raced by, rather than a guard against one.
+     */
+    it("takes the URL the start returned instead of reading the status again", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Start server" }));
+      expect(await screen.findByText("running")).toBeTruthy();
+      expect(address()).toContain(PORT_URL);
+      // Once, at mount. A start that re-read would be asking for a fact it was
+      // just handed, and inviting exactly the stale-answer race it then has to
+      // guard.
+      expect(core.mcpHttpStatus).toHaveBeenCalledTimes(1);
+      await userEvent.click(screen.getByRole("button", { name: "Stop server" }));
+      expect(await screen.findByText("not running")).toBeTruthy();
+      expect(core.mcpHttpStatus).toHaveBeenCalledTimes(1);
+    });
+
+    it("points the empty-token note at the control this pane actually has", async () => {
+      core.getMcpToken.mockResolvedValue(null);
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      const note = await screen.findByTestId("no-token-note");
+      expect(note.textContent).toMatch(/start/i);
+      // And the action it names is really here, in this tree, one click away.
+      expect(screen.getByRole("button", { name: "Start server" })).toBeTruthy();
+    });
+  });
+
+  // ---- The address (finding 3) ----------------------------------------
+
+  /**
+   * `mcpHttpStatus()` returns the running server's URL and the pane threw it
+   * away into a boolean, then printed a hardcoded `127.0.0.1:8765` in the
+   * head. A reader who set a non-default port in classic kept a server on that
+   * port, and this pane advertised an endpoint with nothing on it.
+   */
+  describe("the address", () => {
+    it("renders the URL the running server reported, not one of its own", async () => {
+      // The persisted port disagrees with where the server is actually bound
+      // — exactly the state a port change leaves behind. The live read wins.
+      core.loadMcpSettings.mockReturnValue({ enabled: true, port: 8765 });
+      core.mcpHttpStatus.mockResolvedValue(PORT_URL);
+      render(<McpServer />);
+      expect(await screen.findByText("running")).toBeTruthy();
+      expect(address()).toContain(PORT_URL);
+      expect(address()).not.toContain("8765");
+    });
+
+    it("reads the persisted port for a stopped server rather than guessing", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      expect(await screen.findByText("not running")).toBeTruthy();
+      expect(address()).toContain(PORT_URL);
+      expect(address()).not.toContain("8765");
+    });
+
+    it("names no address anywhere else, so there is one claim to keep true", async () => {
+      core.mcpHttpStatus.mockResolvedValue(PORT_URL);
+      render(<McpServer />);
+      await screen.findByText("running");
+      const stray = Array.from(document.querySelectorAll("*")).filter(
+        (node) =>
+          node.children.length === 0 &&
+          /127\.0\.0\.1|8765/.test(node.textContent ?? "") &&
+          !screen.getByTestId("mcp-address").contains(node),
+      );
+      expect(stray.map((n) => n.textContent)).toEqual([]);
+    });
   });
 });
