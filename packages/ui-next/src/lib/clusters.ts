@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { ClusterContext } from "@srelens/core";
-import { useActiveCluster } from "./tabsStore";
+import { reconcileClusters, useActiveCluster } from "./tabsStore";
 
 /**
  * The cluster contexts this window knows about.
@@ -12,8 +12,18 @@ import { useActiveCluster } from "./tabsStore";
  * list in `useState` and passed it as props to the two components that needed
  * it.
  *
- * `Window` is still the only writer; it sets this from the same `listContexts`
- * call it already makes, and reads it back rather than keeping a second copy.
+ * **Three writers, not one.** `Window` sets it at boot from the `listContexts`
+ * call it already makes; `Connections.reload()` and `Connect.reload()` both
+ * write their own listing back through {@link setContexts}, which is what makes
+ * `Refresh all` and either door shared rather than private — the rail, the
+ * status bar and every other screen see the list those screens are drawing.
+ *
+ * This comment said "Window is still the only writer" while both screens wrote
+ * to it, and this branch was already bitten once by a screen depending on a
+ * store invariant the store knew nothing about (`/connections` cleared its
+ * in-flight facts only on its OWN reload, latent purely because Window's write
+ * sits behind `if (!booted)`). So: any writer must assume another may write
+ * next, and nothing here promises otherwise.
  */
 let contexts: ClusterContext[] = [];
 const listeners = new Set<() => void>();
@@ -64,18 +74,49 @@ export function getContextsError(): string {
  * One call rather than a separate `setContextsError`, so the three states can
  * never be observed half-changed — a list installed before its error, or an
  * error left standing over a list that has since succeeded.
+ *
+ * **A listing that ANSWERED also reconciles the workspaces, and that is part of
+ * this write rather than of its callers.** A replaced context list can invalidate
+ * a workspace's `activeCluster`: remove or rename the active context, press
+ * `Refresh all`, and the workspace went on naming a cluster nobody declares —
+ * `useActiveContext()` answered `undefined` and every cluster-scoped screen fell
+ * to its no-cluster state, telling the reader to pick a cluster while other
+ * clusters sat in the table. `Window` had always reconciled its boot listing;
+ * neither connection screen did. Doing it here is what makes all three callers
+ * consistent at once, rather than leaving the fourth to rediscover it — and it
+ * is the same lesson as {@link ContextsStatus} above: a store write that
+ * invalidates other state has to say so.
+ *
+ * **Only on a clean answer, and the guard is load-bearing.** A listing that
+ * refused — wholly, or partially with some contexts and a reason — has taken
+ * nothing away: the missing clusters may be perfectly present behind an
+ * unreadable file or a dropped VPN. `Window` keeps the restored cluster ids on
+ * exactly that path (see its `saved && failure` branch) precisely so a transient
+ * failure is not persisted as an emptied workspace, and it calls this with an
+ * empty list when it does. Reconciling then would undo it.
  */
 export function setContexts(next: ClusterContext[], error = ""): void {
   contexts = next;
   status = error === "" ? "loaded" : "failed";
   failure = error;
+  // Before this store's own listeners: the tabs store's subscribers read the
+  // active cluster AND this list, and waking them while the two disagree is the
+  // torn render the single-write rule above exists to prevent.
+  if (error === "") reconcileClusters(next);
   for (const listener of listeners) listener();
 }
 
 /**
  * The kubeconfig files the backend must know about before a client can be built
- * for a context that came from one of them. Resolved once at boot and read by
- * every core call that takes them.
+ * for a context that came from one of them. Read by every core call that takes
+ * them.
+ *
+ * **Not resolved once at boot, which this said.** It is seeded at boot and
+ * written again by `Connections.addFile()` and by `Connect.remember()` — a file
+ * the reader has just picked has to be here before the listing that follows,
+ * or the backend cannot build a client for any context in it. Deliberately not
+ * reactive: every writer re-lists in the same breath, and the listing is what
+ * re-renders the screens.
  */
 let files: string[] = [];
 

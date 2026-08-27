@@ -70,6 +70,8 @@ const CTX: ClusterContext = {
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
+  sourceFile: "/home/u/.kube/config",
+  authKind: "client certificate",
 };
 
 const ROUTE = "/overview";

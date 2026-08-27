@@ -2,6 +2,8 @@ import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 import { parseDetailRoute } from "./detailRoute";
 import { AppLog } from "../screens/AppLog";
+import { Connect } from "../screens/Connect";
+import { Connections } from "../screens/Connections";
 import { Events } from "../screens/Events";
 import { Forwards } from "../screens/Forwards";
 import { Helm } from "../screens/Helm";
@@ -166,6 +168,18 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // App-scoped: the managed kubectl, helm and krew are the machine's, and the
   // exec-auth rail is the only part of it that looks at a context at all.
   "/toolbox": Toolbox,
+  // App-scoped, and about every cluster at once rather than one: which contexts
+  // srelens can see, the file each was read from, and what the last probe said.
+  // Reached from the cluster rail's `Connection details`, which has pointed
+  // here since the rail was built — without this entry that menu item opened a
+  // correctly titled tab onto the Placeholder.
+  "/connections": Connections,
+  // The first-run door, and the only screen a reader can be on with no cluster
+  // connected at all. Reached from `/connections` twice over — the
+  // `Add connection` control and the empty state's own — and both of those were
+  // built and tested against a route that rendered the Placeholder, which is
+  // the seam the note in `Connections.tsx` left for this entry.
+  "/connect": Connect,
 });
 
 /**

@@ -60,6 +60,8 @@ const CTX: ClusterContext = {
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
 };
 
 /** jsdom has no `matchMedia`; xterm's `CoreBrowserService` reads it on open(). */

@@ -6,6 +6,7 @@ import * as store from "./tabsStore";
 
 const ctx = (id: string): ClusterContext => ({
   name: id, stableId: id, cluster: id, server: `https://${id}`, isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
 function seed(over: Partial<TabsState> = {}) {
@@ -63,6 +64,62 @@ describe("openTab", () => {
   it("carries the cluster name into the tab", () => {
     store.openTab("/k/pods", { clusterName: "staging" });
     expect(active().sub).toBe("staging");
+  });
+
+  /**
+   * **The bug this pins: a second cluster opened onto a tab still labelled with
+   * the first.**
+   *
+   * `openTab` dedupes by ROUTE, which is right for most of its callers — a
+   * detail route, a list route and `/overview` are each meant to be one tab.
+   * But it returned with `activeId: existing.id` and never looked at
+   * `clusterName`, and `makeTab` spends `clusterName` on the `sub`, so the
+   * label was baked in at creation. With an `/overview` tab open for one
+   * cluster, opening a second changed the workspace's active cluster and reused
+   * the first tab: the screen rendered the second cluster while the strip read
+   * the first. Every caller that names a cluster — `Nav`, `Status`,
+   * `openCluster`, and the six screens that open a detail route — had the same
+   * hole.
+   */
+  it("relabels a reused tab for the cluster the caller named", () => {
+    store.openTab("/overview", { clusterName: "prod-eu" });
+    const first = active().id;
+    store.openTab("/overview", { clusterName: "staging-eu" });
+    // One tab, still — the route dedupe is not what was wrong.
+    expect(routes()).toEqual(["/", "/overview"]);
+    expect(active().id).toBe(first);
+    expect(active().sub).toBe("staging-eu");
+  });
+
+  it("leaves a tab's cluster alone when the caller names none", () => {
+    // Cmd-clicking a route from a shortcut says nothing about a cluster, and it
+    // must not blank the label of the tab it lands on.
+    store.openTab("/overview", { clusterName: "prod-eu" });
+    store.openTab("/overview");
+    expect(active().sub).toBe("prod-eu");
+  });
+
+  /**
+   * **Relabelling goes through `describe`, not through `sub = clusterName`.**
+   *
+   * `describe` drops `sub` for an app-scoped route (`{ route, ...app }`, with no
+   * `sub` spread in), because `/connections` and `/connect` are not about a
+   * cluster. Assigning the caller's `clusterName` straight onto the tab would
+   * put a cluster name under the strip's `Connections` label — a tab claiming
+   * to be scoped to a cluster it has nothing to do with. The route table stays
+   * the one place that decides whether a route carries a cluster.
+   */
+  it("puts no cluster on a tab whose route is not about one", () => {
+    store.openTab("/connections");
+    store.openTab("/connections", { clusterName: "staging-eu" });
+    expect(active().sub).toBeUndefined();
+  });
+
+  it("promotes a preview and relabels it in one go", () => {
+    store.openTab("/overview", { preview: true, clusterName: "prod-eu" });
+    store.openTab("/overview", { clusterName: "staging-eu" });
+    expect(active().preview).toBeFalsy();
+    expect(active().sub).toBe("staging-eu");
   });
 
   it("newTab always appends, even when the route is open", () => {
@@ -386,6 +443,15 @@ describe("no-op actions do not notify", () => {
   }
 
   silent("openTab on the active, non-preview route", () => {}, () => store.openTab("/"));
+
+  // The relabel must be a no-op when there is nothing to relabel: one
+  // subscriber writes a file, and re-opening the cluster you are already
+  // looking at must not schedule a save.
+  silent(
+    "openTab naming the cluster the tab already carries",
+    () => store.openTab("/overview", { clusterName: "prod-eu" }),
+    () => store.openTab("/overview", { clusterName: "prod-eu" }),
+  );
 
   silent(
     "closeOthers when every other tab is pinned and this one is active",

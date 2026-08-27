@@ -6,6 +6,7 @@ import { CLOSED_CAP, defaultState, makeTab, newId, reconcile, type TabsState, ty
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name, stableId, cluster: name, server: `https://${name}`, isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
 const ws = (over: Partial<Workspace> = {}): Workspace => ({

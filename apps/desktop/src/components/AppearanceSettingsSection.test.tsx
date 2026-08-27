@@ -109,6 +109,19 @@ describe("AppearanceSettingsSection", () => {
     expect(items).toContain("Toolbox");
   });
 
+  it("lists the connections screen and the door a first run comes through", () => {
+    // `/connections` is where a reader sees every cluster srelens can see and
+    // which file each came from; `/connect` is the first-run door, and the only
+    // screen either design shows with no cluster connected at all. A reader
+    // weighing the toggle with nothing connected is weighing that one in
+    // particular, so leaving it unnamed would tell them the new design has no
+    // way in.
+    render(<AppearanceSettingsSection />);
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toContain("Connections");
+    expect(items).toContain("Connect a cluster");
+  });
+
   it("introduces the list, so the names are not a bare list under the hint", () => {
     render(<AppearanceSettingsSection />);
     expect(screen.getByText(/in the new design so far/i)).toBeDefined();

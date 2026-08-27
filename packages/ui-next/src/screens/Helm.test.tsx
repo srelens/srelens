@@ -64,6 +64,8 @@ const CTX: ClusterContext = {
   server: "https://prod",
   isCurrent: true,
   namespace: "platform",
+  sourceFile: "/home/u/.config/srelens/imported.yaml",
+  authKind: "client certificate",
 };
 
 const DAY = 86_400_000;
@@ -1476,6 +1478,8 @@ describe("Helm — a dialog open across a cluster switch", () => {
     server: "https://stage",
     isCurrent: false,
     namespace: "default",
+    sourceFile: "/home/u/work/kubeconfig.yaml",
+    authKind: "client certificate",
   };
 
   /** The screen on a window that has both clusters, opened on `prod-eu`. */

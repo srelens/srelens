@@ -66,6 +66,8 @@ describe("the list of ported screens", () => {
       "/terminals",
       "/helm",
       "/toolbox",
+      "/connections",
+      "/connect",
     ]);
   });
 
@@ -82,6 +84,8 @@ describe("the list of ported screens", () => {
       "Terminals",
       "Helm",
       "Toolbox",
+      "Connections",
+      "Connect a cluster",
     ]);
   });
 });

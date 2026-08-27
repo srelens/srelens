@@ -404,6 +404,10 @@ const TITLES = {
   // screen's own heading is the longer word. `CLUSTER_SCOPED` in routes.ts.
   "/terminals": ["Shell", "terminal"],
   "/toolbox": ["Toolbox", "toolbox"],
+  "/connections": ["Connections", "connections"],
+  // "Connect a cluster", not "Connect": the tab strip carries the whole title
+  // from `APP_SCOPED` in routes.ts, and the screen's own headline is neither.
+  "/connect": ["Connect a cluster", "connect"],
   "/topology": ["Topology", "topology"],
   "/incidents": ["Incidents", "incidents"],
 };
@@ -423,7 +427,12 @@ function tabFor(r, id) {
   // App-scoped routes carry no cluster in their sub — `APP_SCOPED` in
   // packages/ui-next/src/lib/routes.ts is the list, and the toolbox is on it:
   // the managed tools are the machine's, not any one cluster's.
-  if (name && !["/applog", "/notes", "/toolbox"].includes(r)) tab.sub = name;
+  // `/connections` and `/connect` are on it too, and for a sharper reason than
+  // the toolbox: both are about every cluster srelens can see (or none at all),
+  // so a tab naming one of them would be the strip claiming a scope the screen
+  // does not have.
+  if (name && !["/applog", "/notes", "/toolbox", "/connections", "/connect"].includes(r))
+    tab.sub = name;
   return tab;
 }
 

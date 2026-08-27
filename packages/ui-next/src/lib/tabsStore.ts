@@ -1,6 +1,17 @@
 import { useSyncExternalStore } from "react";
+import type { ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import { CLOSED_CAP, defaultState, makeTab, newId, type Tab, type TabsState, type Workspace } from "./tabs";
+import {
+  CLOSED_CAP,
+  defaultState,
+  makeTab,
+  newId,
+  reconcile,
+  relabel,
+  type Tab,
+  type TabsState,
+  type Workspace,
+} from "./tabs";
 
 /**
  * The tab store: module-level state, one hook, plain functions for actions.
@@ -47,6 +58,29 @@ export function getState(): TabsState {
 /** Replace the whole state — for boot and for tests. */
 export function setState(next: TabsState): void {
   emit(next);
+}
+
+/**
+ * Make every workspace consistent with the clusters that actually exist.
+ *
+ * **Called after a listing that answered, from the contexts store rather than
+ * from a screen.** `Window` does this at boot against the restored state, and
+ * for a while it was the only caller: `/connections`' `Refresh all` and
+ * `/connect`'s `reload` both replaced the context list and left the workspace
+ * pointing at whatever it had, so removing or renaming the ACTIVE context and
+ * refreshing left `activeCluster` naming a context nobody declares —
+ * `useActiveContext()` `undefined`, and every cluster-scoped screen on its
+ * no-cluster state while other clusters sat in the table. `reconcile` is what
+ * picks the first survivor, and it did not run.
+ *
+ * It lives behind the contexts store's own write (see `setContexts`) so that
+ * every listing goes through it, including a fourth caller nobody has written
+ * yet. `reconcile` returns the state untouched when nothing needed changing and
+ * `emit` skips an unchanged state, so a refresh that answers with the same
+ * clusters wakes nobody — one of the subscribers writes a file.
+ */
+export function reconcileClusters(contexts: readonly ClusterContext[]): void {
+  emit(reconcile(cur(), [...contexts]));
 }
 
 export function subscribe(listener: () => void): () => void {
@@ -111,15 +145,34 @@ export function useTabs() {
   };
 }
 
+/**
+ * The tab for a route: the one already open, or a new one.
+ *
+ * **The dedupe is by route, and a reused tab is relabelled for the cluster the
+ * caller named.** Route-only dedupe is what most callers want — one tab per
+ * detail route, per list route, per `/overview` — and it stays. What did not
+ * hold was returning that tab untouched: `makeTab` fixes the `sub` at creation
+ * from `clusterName`, so opening a second cluster onto an `/overview` tab left
+ * the strip reading the first cluster while the screen rendered the second.
+ *
+ * The relabel lives here rather than in `openCluster` because HERE is where the
+ * reuse decision is made, and every caller that names a cluster had the same
+ * hole: `Nav`, `Status`, `openCluster` and the six screens that open a detail
+ * or logs route from a row. Fixing it in one caller would have left the others
+ * to find it again. See {@link relabel} for why the new label comes back
+ * through the route table rather than from the argument.
+ */
 export function openTab(route: string, opts: { preview?: boolean; clusterName?: string } = {}): void {
   patchCurrent((w) => {
     const existing = w.tabs.find((t) => t.route === route);
     if (existing) {
       // Opening for real promotes a preview; re-previewing leaves it be.
-      const tabs =
-        !opts.preview && existing.preview
-          ? w.tabs.map((t) => (t.id === existing.id ? { ...t, preview: false } : t))
-          : w.tabs;
+      const promoted =
+        !opts.preview && existing.preview ? { ...existing, preview: false } : existing;
+      const next = relabel(promoted, opts.clusterName);
+      // Identity is the signal, as everywhere else in this store: nothing to
+      // promote and nothing to relabel means no new array and no emit.
+      const tabs = next === existing ? w.tabs : w.tabs.map((t) => (t.id === existing.id ? next : t));
       if (tabs === w.tabs && w.activeId === existing.id) return w;
       return { ...w, tabs, activeId: existing.id };
     }

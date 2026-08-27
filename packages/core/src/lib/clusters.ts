@@ -18,6 +18,10 @@ export interface ClusterContext {
   isLocal?: boolean;
   /** The detected local provider (e.g. "kind", "vind"), when `isLocal`. */
   provider?: string;
+  /** The kubeconfig this context was declared in. */
+  sourceFile: string;
+  /** The credential MECHANISM — never the credential. See the Rust side. */
+  authKind: string;
   /** The context's default namespace from the kubeconfig; empty/absent when unset. */
   namespace?: string;
 }

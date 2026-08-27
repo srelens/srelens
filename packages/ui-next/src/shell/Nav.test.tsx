@@ -22,6 +22,8 @@ const ctx = (name: string): ClusterContext => ({
   cluster: name,
   server: "https://example",
   isCurrent: false,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
 });
 
 const PROD = ctx("prod-eu");

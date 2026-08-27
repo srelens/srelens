@@ -8,9 +8,12 @@ import {
   resetContexts,
   setContexts,
 } from "./clusters";
+import { defaultState } from "./tabs";
+import * as store from "./tabsStore";
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name, stableId, cluster: name, server: "", isCurrent: false,
+  sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
 describe("contexts store", () => {
@@ -79,5 +82,86 @@ describe("contexts store — listed, not listed yet, or refused", () => {
     expect(getContextsStatus()).toBe("loading");
     expect(getContextsError()).toBe("");
     expect(getContexts()).toEqual([]);
+  });
+});
+
+/**
+ * **A listing is not only a list — it can invalidate the workspace, and the
+ * store is what has to say so.**
+ *
+ * `Window` already knew this and reconciled its boot listing against the
+ * restored workspaces. Neither connection screen did: a reader who removed or
+ * renamed the ACTIVE context and pressed `Refresh all` got a replaced context
+ * list and a workspace still pointing at the cluster that had gone, so
+ * `useActiveContext()` answered `undefined` and every cluster-scoped screen
+ * fell to its no-cluster state — while other clusters were sitting right there
+ * in the table. `/connect`'s own `reload` had the same gap.
+ *
+ * So it happens HERE, in the one write both screens and `Window` go through,
+ * rather than three times in three callers. Same lesson as this branch's
+ * loaded/failed signal, which exists because an empty list was three facts
+ * being read as one: a store write that invalidates other state has to say so.
+ */
+describe("contexts store — a listing that invalidates the workspace", () => {
+  const PROD = ctx("prod-1", "prod");
+  const DEV = ctx("dev-1", "dev");
+
+  beforeEach(() => {
+    resetContexts();
+    store.setState(defaultState([PROD, DEV]));
+    setContexts([PROD, DEV]);
+  });
+
+  it("moves the focus onto a surviving cluster when a listing drops the active one", () => {
+    expect(store.activeCluster()).toBe("prod-1");
+    setContexts([DEV]);
+    expect(store.activeCluster()).toBe("dev-1");
+    expect(store.currentWorkspace().clusters).toEqual(["dev-1"]);
+  });
+
+  it("leaves the focus where it is when the active cluster survives", () => {
+    setContexts([DEV, PROD]);
+    expect(store.activeCluster()).toBe("prod-1");
+  });
+
+  /**
+   * The workspace is not rewritten when nothing about it changed — identity is
+   * the signal in that store, and one of its subscribers writes a file. A
+   * refresh that answers with the same clusters must not schedule a save.
+   */
+  it("does not touch the workspace when the listing changes nothing about it", () => {
+    const before = store.getState();
+    setContexts([PROD, DEV]);
+    expect(store.getState()).toBe(before);
+  });
+
+  /**
+   * **A listing that REFUSED takes nothing away, and this is the case that
+   * makes the guard load-bearing.**
+   *
+   * `Window` deliberately keeps the restored cluster ids when `listContexts`
+   * refuses — reconciling against nothing would strip every workspace's
+   * clusters and the next change would persist that emptied state. It calls
+   * `setContexts(found, failure)` with `found` empty on that path, so
+   * reconciling on a failed listing here would undo the very thing that branch
+   * exists to protect.
+   */
+  it("strips nothing from the workspace when the listing refused", () => {
+    setContexts([], "kubeconfig unreadable");
+    expect(store.activeCluster()).toBe("prod-1");
+    expect(store.currentWorkspace().clusters).toEqual(["prod-1", "dev-1"]);
+  });
+
+  /**
+   * A PARTIAL listing is a refusal too. `listContexts` can answer with some
+   * contexts and an error — one of several merged kubeconfigs was unreadable —
+   * and a cluster missing for that reason has not gone anywhere. The conservative
+   * read is the same one `Window` takes: trust what is on disk until a listing
+   * answers cleanly.
+   */
+  it("strips nothing when a listing came back short with a reason", () => {
+    setContexts([DEV], "one kubeconfig was unreadable");
+    expect(store.activeCluster()).toBe("prod-1");
+    expect(store.currentWorkspace().clusters).toEqual(["prod-1", "dev-1"]);
   });
 });

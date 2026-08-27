@@ -70,6 +70,41 @@ export function makeTab(route: string, opts: { preview?: boolean; clusterName?: 
   return tab;
 }
 
+/**
+ * The tab a caller asked for, labelled for the cluster they named.
+ *
+ * **Why this exists at all.** `openTab` dedupes by ROUTE — deliberately, and
+ * right for most of its callers: a detail route, a list route and `/overview`
+ * are each meant to be one tab in the strip. But `makeTab` spends
+ * `clusterName` on the `sub` at CREATION, so a tab reused for a second cluster
+ * kept the first one's label: the overview rendered cluster B while the strip
+ * read cluster A, which is the one place a reader looks to know which cluster
+ * they are in.
+ *
+ * **Through `describe`, never `sub = clusterName`.** `describe` drops `sub`
+ * entirely for an app-scoped route (`{ route, ...app }` spreads no `sub`),
+ * because `/connections` and `/connect` are not about a cluster — assigning the
+ * caller's string straight onto the tab would put a cluster name under the
+ * strip's `Connections` label. The route table stays the one place that decides
+ * whether a route carries a cluster, and the title comes back through the same
+ * call so a route that ever spends `clusterName` on its title follows too.
+ *
+ * No `clusterName` means the caller said nothing about a cluster — a keyboard
+ * shortcut, a reopened tab — and the tab keeps the label it has rather than
+ * being blanked. Returns the input untouched when nothing changed, which is
+ * what lets `openTab` decide by identity whether to emit: one subscriber of
+ * that store writes a file.
+ */
+export function relabel(tab: Tab, clusterName?: string): Tab {
+  if (!clusterName) return tab;
+  const info = describe(tab.route, clusterName);
+  if (info.title === tab.title && info.sub === tab.sub) return tab;
+  const next: Tab = { ...tab, title: info.title };
+  if (info.sub) next.sub = info.sub;
+  else delete next.sub;
+  return next;
+}
+
 function homeTab(): Tab {
   return makeTab("/");
 }

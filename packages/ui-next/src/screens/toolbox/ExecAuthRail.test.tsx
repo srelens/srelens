@@ -421,6 +421,8 @@ describe("Toolbox mounts the rail", () => {
     cluster: "prod",
     server: "https://prod",
     isCurrent: true,
+    sourceFile: "/home/dana/.kube/config",
+    authKind: "exec plugin · gcloud",
   };
 
   it("puts it beside the inventory without losing the pane head", async () => {

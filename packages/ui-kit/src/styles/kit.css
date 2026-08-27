@@ -273,6 +273,79 @@
   .tbl-resized { table-layout: fixed; }
   .tbl-check { width: 36px; text-align: center; }
   .tbl-check input { accent-color: var(--accent); vertical-align: middle; }
+  /* A column pinned to the end of the table, from `Column.sticky` — for the
+     control a reader has to be able to reach when the table is wider than the
+     pane it scrolls in. MEASURED, before and after: the connections table's
+     seven columns sum to 1082px, its pane is 1014px wide at a 1600px window and
+     374px wide at the 960px minimum, so `Open` sat at x=1311 against a right
+     edge of 1308 on every row and the window had to reach 1668px before it
+     appeared. At 960px the overflow is 711px, which is why the columns were
+     pinned rather than capped: a cap can fit one window and cannot fit both. */
+  .tbl th[data-sticky="end"],
+  .tbl td[data-sticky="end"] {
+    position: sticky;
+    right: 0;
+    /* Painted, or the columns are visible sliding under it. `--canvas` is the
+       ground the app's tables sit on — the rows themselves are transparent, so
+       there is nothing to inherit — and `--tbl-sticky-bg` is the way out for a
+       table that sits on another one. */
+    background: var(--tbl-sticky-bg, var(--canvas));
+    /* Says the column is pinned rather than merely last, which is the whole
+       difference between a control at the end of a row and one that follows the
+       reader. */
+    border-left: 1px solid var(--rule);
+  }
+  /* Above the cells it slides over, and the head above the body: `.tbl thead th`
+     already carries `z-index: 1`, so the pinned head takes 2 to sit over its
+     own row's cells. The head keeps the head's own ground — the rule above is
+     the more specific selector, so without this line the pinned header cell
+     paints `--canvas` and sits in the header strip as a patch a shade darker
+     than the six cells beside it. MEASURED as rgb(13,12,18) against the strip's
+     rgb(22,21,29) before this line existed. */
+  .tbl thead th[data-sticky="end"] { z-index: 2; background: var(--surface); }
+  .tbl tbody td[data-sticky="end"] { z-index: 1; }
+  /* The row's own states have to be repeated on the pinned cell: it paints its
+     own background, so the hover wash and the selected wash on the `tr` stop at
+     its edge otherwise — one row in two colours. */
+  .tbl tbody tr:hover td[data-sticky="end"] {
+    background: var(--tbl-sticky-bg-hover, var(--surface-sunk));
+  }
+  .tbl tbody tr[data-selected="true"] td[data-sticky="end"],
+  .tbl tbody tr[data-state="selected"] td[data-sticky="end"] {
+    background: var(--accent-wash);
+  }
+  /* A boundary between two groups of rows, from `Table`'s `rowGroup` — the
+     label for the rows under it, in the head's own voice so the eye reads it as
+     structure rather than as data. Ordering rows alone does not group them: the
+     connections table listed its fourteen kubeconfig contexts before its three
+     local clusters with no header, no rule and no change of spacing, and the
+     only cue a reader had was the `Source` cell's text changing at row 15 of 17.
+     Not interactive, so it takes neither the hover wash nor a cursor. */
+  .tbl tbody tr.tbl-group:hover { background: transparent; }
+  .tbl-group th {
+    padding: 0.5rem 0.7rem 0.3rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    text-align: left;
+    white-space: nowrap;
+  }
+  /* Air above every boundary but the first, which is what makes two groups read
+     as two rather than as one list with labels dropped into it. */
+  .tbl-group:not(:first-child) th { padding-top: 0.95rem; }
+  /* The label follows the horizontal scroll. A cell spanning the whole table
+     cannot itself be pinned — its box is as wide as the table — so the inline
+     label inside it is what sticks. MEASURED: the connections table is 1082px
+     against a 374px pane at a 960px window, so without this every group label
+     sits 700px to the left of what the reader is looking at. */
+  .tbl-group th > span {
+    position: sticky;
+    left: 0.7rem;
+    display: inline-block;
+  }
   /* Holds the space the virtualized rows would occupy, so the scrollbar
      describes the whole list rather than the window being rendered. */
   .tbl-spacer { border: 0 !important; }

@@ -5,6 +5,8 @@
 import { describe as suite, it, expect } from "vitest";
 import { describe, isBuiltInKind, screenFor } from "./routes";
 import { AppLog } from "../screens/AppLog";
+import { Connect } from "../screens/Connect";
+import { Connections } from "../screens/Connections";
 import { Events } from "../screens/Events";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { Overview } from "../screens/Overview";
@@ -227,6 +229,23 @@ suite("screenFor", () => {
     // fall to the generic three-column (Name/Namespace/Age) descriptor and
     // silently lose Type, Reason, Object, Message and Count.
     expect(screenFor("/k/events")).toBe(Events);
+  });
+
+  it("resolves the connections screen, which the cluster rail opens", () => {
+    // The rail's `Connection details` has pointed at /connections since the
+    // rail was built, and both panes behind it — the cluster table and the
+    // Sources rail — were finished before this entry existed, so the menu item
+    // opened a correctly titled tab onto the Placeholder.
+    expect(screenFor("/connections")).toBe(Connections);
+  });
+
+  it("resolves the connect screen, the first-run door", () => {
+    // Two controls on /connections open this route — `Add connection` and the
+    // empty state's own — and both were built against a route with no entry
+    // here, which is the seam the note in `Connections.tsx` left for it. It is
+    // also the only screen a reader can be on with no cluster connected, so a
+    // Placeholder here is a first run that never gets past the door.
+    expect(screenFor("/connect")).toBe(Connect);
   });
 
   it("gives a route with no screen a placeholder", () => {
