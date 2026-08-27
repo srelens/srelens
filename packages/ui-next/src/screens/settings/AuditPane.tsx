@@ -34,6 +34,15 @@ import { FailureState } from "../../lib/errorCopy";
  * mcpSecurity.ts`), which is what makes the three states here real rather than
  * decorative.
  *
+ * **The fix went one layer deeper afterwards**, because the wrapper alone only
+ * distinguished an IPC failure. `srelens_mcp::audit::tail` swallowed three I/O
+ * failures of its own — open, seek, read — into the same empty vector, so a log
+ * this pane could not read still arrived as a successful empty trail and still
+ * rendered the fresh-install sentence. The backend returns `io::Result` now
+ * (`crates/mcp/src/audit.rs`), empty only for a log that does not exist, and
+ * `mcp_audit_tail` refuses with the file named — so the failure branch below
+ * really does stand for an unreadable trail and not only for a broken bridge.
+ *
  * **It re-reads on demand**, because classic's `McpAuditList` wrote the reason
  * down and this pane lost it: "a list read once on mount quietly goes stale —
  * an operator looking for an agent's action would conclude it never happened."

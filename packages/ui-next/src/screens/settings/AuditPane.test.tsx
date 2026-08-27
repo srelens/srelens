@@ -109,6 +109,36 @@ describe("AuditPane", () => {
   });
 
   /**
+   * The fix's second layer, from this branch's own review: the failure branch
+   * has to stand for a trail that EXISTS and could not be read, and not only
+   * for a broken bridge. `auditTail` rejecting was an IPC-level distinction —
+   * `srelens_mcp::audit::tail` still swallowed a failed open, seek or read into
+   * the same empty vector the fresh-install sentence is drawn from, so an
+   * unreadable log reached this pane as a perfectly successful `[]`. The
+   * backend refuses now, with the file named (`crates/mcp/src/audit.rs`,
+   * `apps/desktop/src-tauri/src/mcp.rs`), and this is the message that arrives
+   * when it does.
+   */
+  it("draws the failure state for a trail that exists and could not be read", async () => {
+    core.auditTail.mockRejectedValue(
+      new Error(
+        "the MCP audit log at /home/dana/.config/srelens/mcp-audit.jsonl could not be read: Permission denied (os error 13)",
+      ),
+    );
+    render(<AuditPane />);
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("The audit trail could not be read")).toBeTruthy();
+    // The sentence a fresh install gets must not appear over a log srelens
+    // could not open — that is the whole collapse this closed.
+    expect(screen.queryByText(/a fresh install has made none/i)).toBeNull();
+    expect(screen.queryByText(/no capability calls/i)).toBeNull();
+    // And it says WHICH file, because the reader's next step is looking at it.
+    // `describeError` passes the backend's sentence through as the detail; it
+    // reads as one, which is why the command writes it that way.
+    expect(alert.querySelector("[data-slot=detail]")?.textContent).toContain("mcp-audit.jsonl");
+  });
+
+  /**
    * Classic's `McpAuditList` wrote the reason down and the new pane lost it:
    * "a list read once on mount quietly goes stale — an operator looking for an
    * agent's action would conclude it never happened."

@@ -132,13 +132,21 @@ export async function vaultChangePassword(current: string, next: string): Promis
  * rejects, on the one screen whose whole purpose is answering "what did the
  * agent do?" after an incident.
  *
- * What an empty result still means, said exactly: `srelens_mcp::audit::tail`
- * (`crates/mcp/src/audit.rs:92-110`) returns an empty vector for a log file it
- * cannot open, seek or read as well as for one that does not exist yet, so a
- * resolved `[]` is "the backend found no entries" and not "the backend
- * answered". What reaches a caller's `catch` is a refusal at the command
- * boundary — no such command, an IPC failure, or the web build, where every
- * `invoke` rejects because there is no Tauri host behind it.
+ * **And the backend now draws the same line**, which is what makes the two
+ * outcomes here mean what they say. Rejecting in TypeScript alone only ever
+ * distinguished an IPC failure: `srelens_mcp::audit::tail`
+ * (`crates/mcp/src/audit.rs`) used to return an empty vector for a log it could
+ * not open, seek or read as well as for one that did not exist, so an
+ * unreadable trail still arrived here as a perfectly successful `[]`. It
+ * returns `io::Result` now — `Ok(vec![])` for a log that is genuinely absent,
+ * because a fresh install has made no calls, and an `Err` otherwise — and
+ * `mcp_audit_tail` (`apps/desktop/src-tauri/src/mcp.rs`) maps that to a
+ * refusal naming the file.
+ *
+ * So a resolved `[]` is "there are no entries", and a rejection is any of: the
+ * log exists and could not be read, no such command, an IPC failure, or the
+ * web build, where every `invoke` rejects because there is no Tauri host behind
+ * it.
  */
 export async function auditTail(limit: number): Promise<AuditEntry[]> {
   return await invoke<AuditEntry[]>("mcp_audit_tail", { limit });
