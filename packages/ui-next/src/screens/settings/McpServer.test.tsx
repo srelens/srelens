@@ -17,12 +17,16 @@ import { McpServer } from "./McpServer";
 
 /**
  * A realistic bearer value. The real backend mints a 64-character hex string
- * with no prefix (`Token::generate`, `crates/mcp/src/auth.rs`) — `srl_` here
- * is the pane's own cosmetic label, not part of the wire value, but the
- * fixture carries it anyway so a reader of this file sees the same shape the
- * masked-length test below reasons about (`srl_${TOKEN}`).
+ * with NO prefix (`Token::generate`, `crates/mcp/src/auth.rs`) — an earlier
+ * version of this fixture baked a `srl_` label into the value itself, which
+ * is exactly why no test caught the mask inventing that same label: both
+ * states agreed by construction. This one carries no label, matching what
+ * `getMcpToken()` actually returns in production.
  */
-const TOKEN = "srl_4f9a2c7e1b6d80f3c9a1e7b4f2d6c8035a9e1c7b4f2d6c8035f9c1a7e4b2d6f8";
+const TOKEN = "4f9a2c7e1b6d80f3c9a1e7b4f2d6c8035a9e1c7b4f2d6c8035f9c1a7e4b2d6f8";
+
+/** A second, equally realistic value — distinct from TOKEN — for rotation. */
+const ROTATED = "f".repeat(64);
 
 /** What a running loopback server's own status call answers with. */
 const STATUS_URL = "http://127.0.0.1:8765/mcp";
@@ -45,7 +49,7 @@ describe("McpServer", () => {
 
   it("masks the token until the reader asks for it", async () => {
     render(<McpServer />);
-    expect(await screen.findByText(/^srl_•+$/)).toBeTruthy();
+    expect(await screen.findByText(/^•+$/)).toBeTruthy();
     expect(screen.queryByText(TOKEN)).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
     expect(screen.getByText(TOKEN)).toBeTruthy();
@@ -53,8 +57,18 @@ describe("McpServer", () => {
 
   it("does not tell the reader how long the secret is", async () => {
     render(<McpServer />);
-    const masked = (await screen.findByText(/^srl_•+$/)).textContent ?? "";
-    expect(masked.length).not.toBe(`srl_${TOKEN}`.length);
+    const masked = (await screen.findByText(/^•+$/)).textContent ?? "";
+    expect(masked.length).not.toBe(TOKEN.length);
+  });
+
+  it("masked and revealed agree on format — neither carries a label the other lacks", async () => {
+    render(<McpServer />);
+    const masked = (await screen.findByText(/^•+$/)).textContent ?? "";
+    expect(masked).not.toContain("srl_");
+    await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    const revealed = screen.getByText(TOKEN).textContent ?? "";
+    expect(revealed).not.toContain("srl_");
+    expect(revealed).toBe(TOKEN);
   });
 
   it("warns what rotating costs before it is done", async () => {
@@ -74,7 +88,7 @@ describe("McpServer", () => {
     expect(screen.getByText(TOKEN)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Hide" }));
     expect(screen.queryByText(TOKEN)).toBeNull();
-    expect(screen.getByText(/^srl_•+$/)).toBeTruthy();
+    expect(screen.getByText(/^•+$/)).toBeTruthy();
   });
 
   it("copies the real token, not the mask", async () => {
@@ -86,7 +100,6 @@ describe("McpServer", () => {
   });
 
   it("rotates through rotateMcpToken and drops the old value from view", async () => {
-    const ROTATED = "srl_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     core.rotateMcpToken.mockResolvedValue(ROTATED);
     render(<McpServer />);
     await userEvent.click(await screen.findByRole("button", { name: "Reveal" }));
@@ -95,14 +108,14 @@ describe("McpServer", () => {
     expect(core.rotateMcpToken).toHaveBeenCalledTimes(1);
     // Rotating re-masks: the reader saw the OLD value, not the new one, so
     // the pane must not carry it forward revealed.
-    expect(await screen.findByText(/^srl_•+$/)).toBeTruthy();
+    expect(await screen.findByText(/^•+$/)).toBeTruthy();
     expect(screen.queryByText(TOKEN)).toBeNull();
     expect(screen.queryByText(ROTATED)).toBeNull();
   });
 
   it("revokes through revokeMcpToken and shows the server as not running", async () => {
     render(<McpServer />);
-    await screen.findByText(/^srl_•+$/);
+    await screen.findByText(/^•+$/);
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
     expect(core.revokeMcpToken).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("not running")).toBeTruthy();
@@ -125,13 +138,6 @@ describe("McpServer", () => {
     expect(screen.getByText(/not accepting connections/i)).toBeTruthy();
   });
 
-  /**
-   * The pin the branch review asked for: `running` must be a live read of
-   * the process (`mcpHttpStatus`), not inferred from the token existing. A
-   * token can persist across restarts while nothing is bound to the port, so
-   * this is the state where the two facts disagree — and it's exactly the
-   * state a token-presence proxy would have gotten wrong.
-   */
   it("does not read the badge as running just because a token exists", async () => {
     core.getMcpToken.mockResolvedValue(TOKEN);
     core.mcpHttpStatus.mockResolvedValue(null);
@@ -144,5 +150,39 @@ describe("McpServer", () => {
     expect(screen.getByRole("button", { name: "Rotate" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
     expect(screen.getByText(/not currently listening/i)).toBeTruthy();
+  });
+
+  /**
+   * Round 2 finding 1 (first half): a rejecting initial read must not fall
+   * through to the "no token" branch — that sentence is a claim about a
+   * DEFINITE fact, and a failed read never established one.
+   */
+  it("does not claim no token exists when the initial read fails", async () => {
+    core.getMcpToken.mockRejectedValue(new Error("boom"));
+    render(<McpServer />);
+    expect(await screen.findByText(/could not be read/i)).toBeTruthy();
+    expect(screen.queryByText(/no bearer token has been generated/i)).toBeNull();
+    expect(screen.queryByText(/not accepting connections/i)).toBeNull();
+    // Unknown, not "definitely absent": no controls implying either.
+    expect(screen.queryByRole("button", { name: "Reveal" })).toBeNull();
+  });
+
+  /**
+   * Round 2 finding 1 (second half): the two reads must not share a fate.
+   * A rejecting status check must not discard a token that was fetched
+   * successfully in its own, independent effect.
+   */
+  it("does not discard a fetched token when the status check fails", async () => {
+    core.getMcpToken.mockResolvedValue(TOKEN);
+    core.mcpHttpStatus.mockRejectedValue(new Error("status boom"));
+    render(<McpServer />);
+    expect(await screen.findByText(/could not be checked/i)).toBeTruthy();
+    // The token is still known and usable, despite the unrelated failure.
+    expect(await screen.findByText(/^•+$/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    expect(screen.getByText(TOKEN)).toBeTruthy();
+    // The badge asserts neither state while the status is genuinely unknown.
+    expect(screen.queryByText("running")).toBeNull();
+    expect(screen.queryByText("not running")).toBeNull();
   });
 });

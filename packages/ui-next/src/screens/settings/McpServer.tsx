@@ -19,17 +19,32 @@ import { FailureAlert } from "../../lib/errorCopy";
  * launch, so a token surviving from an earlier session says nothing about
  * whether anything is on 127.0.0.1:8765 right now. `mcpHttpStatus`
  * (`packages/core/src/lib/mcp.ts`) reads `McpHttpManager`'s own `running`
- * state (`mcp.rs`) directly — the one place that fact actually lives — and a
- * stopped server never reads `running` here (pinned below).
+ * state (`mcp.rs`) directly — the one place that fact actually lives.
  *
- * **The token and the listener are independent facts, and the pane treats
- * them that way.** Reveal, copy, rotate and revoke all act on the persisted
- * token itself and work whether or not the HTTP server is currently
- * listening — so those controls are gated on the token existing, not on
- * `running`. A token that exists while the server is stopped still shows its
- * row, plus one sentence saying the server isn't listening right now: stating
- * what's true, rather than hiding a control that works or offering one that
- * doesn't.
+ * **The token and the listener are independent facts, read independently.**
+ * `getMcpToken()` and `mcpHttpStatus()` run in their OWN effects, not a
+ * shared `Promise.all` — a status check failing must not cost a token that
+ * was fetched successfully, and vice versa. A round of review caught the
+ * combined form doing exactly that: a rejecting `mcpHttpStatus()` discarded
+ * an already-resolved token, which then rendered as "No bearer token has
+ * been generated" beside a failure banner — a fact asserted from a value
+ * that was never actually absent, only unlearned.
+ *
+ * **A boolean cannot carry three states, so neither fact is one.** `token`
+ * and `running` are each `"loading" | "error" | { known value }` unions, not
+ * a `string | null` / `boolean` that collapses "haven't read it yet" and
+ * "the read failed" onto the same falsy value as "definitely absent" /
+ * "definitely not running". Only the `ready` case renders a claim about the
+ * fact; `loading` renders nothing yet, and `error` renders a failure banner
+ * and otherwise says nothing about what the fact actually is — the same
+ * three-state shape the contexts store uses for "which cluster is in focus"
+ * (still loading / failed / actually none), for the same reason.
+ *
+ * Reveal, copy, rotate and revoke all act on the persisted token itself and
+ * work whether or not the HTTP server is currently listening — so those
+ * controls are gated on the token being known and present, not on `running`.
+ * A token that's present while the server reads not-running still shows its
+ * row, plus one sentence saying the server isn't listening right now.
  *
  * **`getMcpTokenStorage()` is deliberately NOT read here**, despite being
  * named for this file. Its own doc comment says what it actually reports:
@@ -51,44 +66,69 @@ const ADDRESS = "127.0.0.1:8765";
  * How many bullets the mask shows. FIXED, independent of the real token's
  * length — a mask that grew with the secret would tell a reader (or a
  * screenshot) how long it is, which is exactly the property this pane must
- * not leak. The literal `srl_` label is cosmetic, not sliced from the real
- * token: the backend mints a 64-character hex string with no prefix
- * (`Token::generate`, `crates/mcp/src/auth.rs`).
+ * not leak.
+ *
+ * **No invented prefix.** An earlier version prepended a literal `srl_` label
+ * to the mask ("`srl_••••••••••••`"), but the real backend mints a bare
+ * 64-character hex string with no prefix at all (`Token::generate`,
+ * `crates/mcp/src/auth.rs`) — Reveal showed a value that didn't start with
+ * what the mask claimed it did. Masked and revealed now agree on format:
+ * both are just characters, neither carries a label the other doesn't.
  */
-const MASK_BULLETS = 12;
+const MASK_BULLETS = 16;
 
 function maskedToken(): string {
-  return `srl_${"•".repeat(MASK_BULLETS)}`;
+  return "•".repeat(MASK_BULLETS);
 }
 
+/** Whether a fact this pane reads once at mount is still loading, failed, or
+ * landed. Kept generic so `token` and `running` don't each reinvent it, and
+ * so neither can collapse "unknown" onto the same value as "known absent". */
+type Read<T> = { kind: "loading" } | { kind: "error"; error: unknown } | { kind: "ready"; value: T };
+
+const LOADING: Read<never> = { kind: "loading" };
+
 export function McpServer() {
-  const [token, setToken] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [tokenRead, setTokenRead] = useState<Read<string | null>>(LOADING);
+  const [statusRead, setStatusRead] = useState<Read<boolean>>(LOADING);
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const [actionError, setActionError] = useState<unknown>(null);
 
+  // Two independent effects, not one `Promise.all` — a status failure must
+  // not cost an already-resolved token, and a token failure must not cost an
+  // already-resolved status. See the file-level comment.
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getMcpToken(), mcpHttpStatus()])
-      .then(([t, url]) => {
-        if (cancelled) return;
-        setToken(t);
-        setRunning(url !== null);
+    getMcpToken()
+      .then((t) => {
+        if (!cancelled) setTokenRead({ kind: "ready", value: t });
       })
       .catch((e) => {
-        if (!cancelled) setError(e);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setTokenRead({ kind: "error", error: e });
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const hasToken = token !== null;
+  useEffect(() => {
+    let cancelled = false;
+    mcpHttpStatus()
+      .then((url) => {
+        if (!cancelled) setStatusRead({ kind: "ready", value: url !== null });
+      })
+      .catch((e) => {
+        if (!cancelled) setStatusRead({ kind: "error", error: e });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const token = tokenRead.kind === "ready" ? tokenRead.value : null;
+  const hasToken = tokenRead.kind === "ready" && tokenRead.value !== null;
+  const running = statusRead.kind === "ready" && statusRead.value;
 
   async function copyToken() {
     if (!token) return;
@@ -103,16 +143,16 @@ export function McpServer() {
 
   async function rotate() {
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       const next = await rotateMcpToken();
-      setToken(next);
+      setTokenRead({ kind: "ready", value: next });
       setRevealed(false);
       // Rotating never changes whether the server is listening — it restarts
       // it in place if it was already running, and leaves it stopped
-      // otherwise (`mcp.rs`) — so `running` is left untouched here.
+      // otherwise (`mcp.rs`) — so `statusRead` is left untouched here.
     } catch (e) {
-      setError(e);
+      setActionError(e);
     } finally {
       setBusy(false);
     }
@@ -120,16 +160,16 @@ export function McpServer() {
 
   async function revoke() {
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       await revokeMcpToken();
-      setToken(null);
+      setTokenRead({ kind: "ready", value: null });
       setRevealed(false);
       // Revoking always stops the server too — "it must never serve
       // unauthenticated" (`mcp.rs`) — so this is a known fact, not a guess.
-      setRunning(false);
+      setStatusRead({ kind: "ready", value: false });
     } catch (e) {
-      setError(e);
+      setActionError(e);
     } finally {
       setBusy(false);
     }
@@ -140,13 +180,15 @@ export function McpServer() {
       title={
         <span className="flex flex-wrap items-center gap-2">
           <span>MCP server · loopback http · {ADDRESS}</span>
-          {!loading && <Badge tone={running ? "ok" : "muted"}>{running ? "running" : "not running"}</Badge>}
+          {statusRead.kind === "ready" && (
+            <Badge tone={running ? "ok" : "muted"}>{running ? "running" : "not running"}</Badge>
+          )}
         </span>
       }
     >
-      {loading ? (
+      {tokenRead.kind === "loading" ? (
         <p className="text-[0.75rem] text-muted">Checking the MCP server…</p>
-      ) : hasToken ? (
+      ) : tokenRead.kind === "ready" && hasToken ? (
         <>
           <SubHead className="mt-1">Bearer token</SubHead>
           {/* `min-w-0` on the flex child holding the token: a 64-character
@@ -176,21 +218,31 @@ export function McpServer() {
             Rotating restarts the server, drops in-flight requests, and invalidates clients still using the old
             token.
           </p>
-          {!running && (
+          {statusRead.kind === "ready" && !running && (
             <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
               The server is not currently listening on {ADDRESS}, so no client can reach it right now.
             </p>
           )}
         </>
-      ) : (
+      ) : tokenRead.kind === "ready" ? (
         <p className="text-[0.75rem] leading-relaxed text-muted">
           No bearer token has been generated, so the MCP server is not accepting connections — there is nothing to
           reveal, copy or rotate yet.
         </p>
-      )}
+      ) : null}
 
-      {error !== null && (
-        <FailureAlert tone="sev" title="The MCP server's token could not be updated" error={error} />
+      {tokenRead.kind === "error" && (
+        <FailureAlert tone="sev" title="The MCP server's token could not be read" error={tokenRead.error} />
+      )}
+      {statusRead.kind === "error" && (
+        <FailureAlert
+          tone="sev"
+          title="Whether the MCP server is running could not be checked"
+          error={statusRead.error}
+        />
+      )}
+      {actionError !== null && (
+        <FailureAlert tone="sev" title="The MCP server's token could not be updated" error={actionError} />
       )}
 
       {/* #369: mcpClientConfig GENERATES config FOR a client to paste
