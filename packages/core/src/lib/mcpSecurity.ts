@@ -102,6 +102,15 @@ export async function vaultRecoverPassword(): Promise<string> {
   return await invoke<string>("vault_recover_password");
 }
 
+/** Lock the workspace: the backend discards the derived key it holds in
+ * memory. The vault's sealed bytes are untouched — this forgets a key, it does
+ * not change one, and the same master password re-opens it. `vaultStatus()`
+ * reports `"locked"` afterwards, so the gate takes over again. Rejects (and
+ * the vault stays open) if there is nothing to lock to yet. */
+export async function vaultLock(): Promise<void> {
+  await invoke("vault_lock", {});
+}
+
 /** The backend refreshes the keychain recovery copy only if one exists —
  * setup's opt-in/opt-out choice is preserved, never silently reversed.
  * Resolves to a warning string when the change succeeded but the biometric

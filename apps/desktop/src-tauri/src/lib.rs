@@ -497,6 +497,7 @@ pub fn run() {
             vault_password::vault_status,
             vault_password::vault_setup_password,
             vault_password::vault_unlock_password,
+            vault_password::vault_lock,
             vault_password::vault_recover_password,
             vault_password::vault_change_password,
             mcp_audit_tail,

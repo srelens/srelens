@@ -9,6 +9,7 @@ import {
   promptIssues,
   respondToConfirm,
   rotateMcpToken,
+  vaultLock,
 } from "./mcpSecurity";
 
 describe("mcpSecurity", () => {
@@ -45,5 +46,19 @@ describe("mcpSecurity", () => {
   it("promptIssues returns [] rather than throwing when the command fails", async () => {
     invoke.mockRejectedValue(new Error("nope"));
     await expect(promptIssues()).resolves.toEqual([]);
+  });
+
+  it("locks the vault by name, with an empty payload", async () => {
+    invoke.mockResolvedValue(undefined);
+    await vaultLock();
+    expect(invoke).toHaveBeenCalledWith("vault_lock", {});
+  });
+
+  it("surfaces a refused lock instead of resolving quietly", async () => {
+    // The reader must be told the workspace is still open — a swallowed
+    // failure would leave the Settings pane claiming a lock that never
+    // happened.
+    invoke.mockRejectedValueOnce(new Error("no master password is set"));
+    await expect(vaultLock()).rejects.toThrow("no master password");
   });
 });

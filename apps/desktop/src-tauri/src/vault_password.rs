@@ -54,7 +54,7 @@ fn status_core(vault: &Vault, dir: &Path, biometric_available: bool) -> VaultSta
         // shows setup. A legacy vault stays readable underneath (its machine
         // key resolved silently), so setup migrates it losslessly.
         "setup-required"
-    } else if vault.current_key().is_some() {
+    } else if vault.is_unlocked() {
         "unlocked"
     } else {
         "locked"
@@ -354,6 +354,27 @@ fn change_password_core(
     Ok((new_key, transition))
 }
 
+/// Lock the workspace: discard the derived key held in memory. Nothing on
+/// disk changes — the sealed bytes stay exactly as they were and the same
+/// master password re-opens them; this forgets a key, it does not change one.
+/// Afterwards `vault_status` reports `"locked"` and every read is empty and
+/// every write refused until the next unlock.
+#[tauri::command]
+pub async fn vault_lock(vault: tauri::State<'_, Arc<Vault>>) -> Result<(), String> {
+    lock_core(&vault)
+}
+
+/// The lock behind the #28 seam — no AppHandle needed, since locking touches
+/// neither the vault dir nor the OS keychain nor the biometric plugin: the key
+/// lives in memory, and that memory is all a lock reaches.
+///
+/// Locking an ALREADY-LOCKED vault is deliberately not an error: a second
+/// press of `Lock now`, or a shortcut firing after a biometric timeout, must
+/// leave the reader with a locked vault and no failure to interpret.
+fn lock_core(vault: &Vault) -> Result<(), String> {
+    vault.discard_key()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +642,91 @@ mod tests {
         let new_pw = test_pw("cl-new");
         change_password_core(&locked, &dir, &recovery, &old_pw, &new_pw).unwrap();
         assert!(locked.current_key().is_some(), "unlocked inline by the change");
+    }
+
+    // ---- Lock (`Lock now` in Settings) --------------------------------
+
+    /// The passphrase the lock fixtures set up with, spelled out because the
+    /// lock tests re-open the vault with it by name.
+    const LOCK_PASSPHRASE: &str = "correct horse";
+
+    /// A vault that has been through setup AND holds a secret: unlocked, with
+    /// real sealed bytes on disk for a lock to leave alone.
+    fn a_set_up_unlocked_vault() -> (Vault, std::path::PathBuf) {
+        let dir = temp_dir("lock");
+        let vault = fresh_vault(&dir);
+        setup_password_core(&vault, &dir, &MemRecovery::default(), LOCK_PASSPHRASE, false).unwrap();
+        vault.update(|s| s.mcp_token = Some(test_pw("lock-token"))).unwrap();
+        (vault, dir)
+    }
+
+    /// The same vault reopened: password-locked, the state every launch after
+    /// setup starts in — and the state a lock must leave behind.
+    fn a_set_up_locked_vault() -> (Vault, std::path::PathBuf) {
+        let (unlocked, dir) = a_set_up_unlocked_vault();
+        drop(unlocked);
+        (fresh_vault(&dir), dir)
+    }
+
+    /// The sealed secrets on disk: the bytes a lock must not rewrite.
+    fn sealed_bytes(dir: &std::path::Path) -> Vec<u8> {
+        std::fs::read(dir.join("secrets.enc")).expect("setup sealed the vault")
+    }
+
+    /// Names the unlock seam the way `lock_core` names the lock seam.
+    fn unlock_core(vault: &Vault, dir: &std::path::Path, password: &str) -> Result<(), String> {
+        vault::unlock_with_master_password(vault, dir, password)
+    }
+
+    #[test]
+    fn locking_forgets_the_key_and_leaves_the_vault_intact() {
+        let (vault, dir) = a_set_up_unlocked_vault();
+        assert!(vault.is_unlocked());
+        lock_core(&vault);
+        assert!(!vault.is_unlocked(), "locking must discard the key");
+        // The sealed bytes are untouched: the same passphrase still opens it.
+        assert!(unlock_core(&vault, &dir, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn locking_an_already_locked_vault_is_not_an_error() {
+        let (vault, _dir) = a_set_up_locked_vault();
+        assert!(lock_core(&vault).is_ok());
+        assert!(!vault.is_unlocked());
+    }
+
+    #[test]
+    fn locking_never_rekeys() {
+        let (vault, dir) = a_set_up_unlocked_vault();
+        let before = sealed_bytes(&dir);
+        lock_core(&vault);
+        assert_eq!(sealed_bytes(&dir), before, "locking must not rewrite the vault");
+    }
+
+    #[test]
+    fn a_locked_vault_reads_as_locked_and_refuses_writes() {
+        // What the gate and Settings see afterwards must match a fresh launch:
+        // mode "locked", the password label, and writes that fail loudly
+        // rather than minting a replacement key over the sealed secrets.
+        let (vault, dir) = a_set_up_unlocked_vault();
+        lock_core(&vault).unwrap();
+        let s = status_core(&vault, &dir, false);
+        assert_eq!(s.mode, "locked");
+        assert_eq!(s.key_source, "password-locked");
+        assert!(vault.update(|s| s.mcp_token = None).is_err(), "locked writes fail loudly");
+        assert_eq!(vault.load().mcp_token, None, "and reads are empty while locked");
+    }
+
+    #[test]
+    fn locking_a_vault_with_no_master_password_is_refused() {
+        // Pre-setup (machine-key era): there is no passphrase to unlock with,
+        // so discarding the key would strand this process until a restart —
+        // setup itself refuses a locked vault. Nothing is discarded.
+        let dir = temp_dir("lock-presetup");
+        let vault = fresh_vault(&dir);
+        assert!(vault.is_unlocked(), "a fresh machine-key vault resolves a key");
+        let e = lock_core(&vault).unwrap_err();
+        assert!(e.contains("no master password"), "got: {e}");
+        assert!(vault.is_unlocked(), "the key is still there");
     }
 }
