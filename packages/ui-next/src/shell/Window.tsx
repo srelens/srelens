@@ -250,9 +250,41 @@ export function Window({
     // workspace id is the trigger for the switch case.
   }, [booted, contexts, workspaceId, active]);
 
+  /**
+   * Which accelerators survive a raised cover, and why one of them does.
+   *
+   * The cover unmounts the band, so the surfaces these act ON are gone — but
+   * the actions themselves are not: the tab store is a module-level store, and
+   * behind a raised cover ⌘T twice took the tabs from 2 to 4 and ⌘W three times
+   * took them to 1, with no credential typed. Every action that touches the
+   * workspace therefore stops at the gate.
+   *
+   * Zoom is the exception, and not for convenience. Its whole effect is on the
+   * surface the reader is looking at — this cover — and a reader who cannot
+   * read the passphrase field cannot unlock. Taking the ability to make the
+   * lock screen legible away from them would be a lock-out rather than a lock.
+   * It also persists nothing about the workspace: `setUiScale` stores an
+   * interface scale, which is the same preference the (still enabled) titlebar
+   * buttons write.
+   *
+   * `lock` stops here too, which is the same outcome `lockNow`'s own guard
+   * already produced — a second ⌘⇧L over a raised cover would otherwise call
+   * `vault_lock` with no key to discard and log a refusal the reader caused by
+   * pressing a key that had already worked.
+   */
+  function actsOnTheWorkspace(action: WindowAction): boolean {
+    return (
+      action.type !== "zoom-in" && action.type !== "zoom-out" && action.type !== "zoom-reset"
+    );
+  }
+
   // Read at call time rather than closed over: an effect installed once must
   // act on whatever the strip shows now, not whatever it showed at mount.
   function run(action: WindowAction) {
+    // `isWorkspaceSealed()` rather than a subscribed boolean: this is called
+    // from a listener installed once, and the answer has to be the one that is
+    // true at the keystroke.
+    if (isWorkspaceSealed() && actsOnTheWorkspace(action)) return;
     const w = currentWorkspace();
     switch (action.type) {
       case "close-tab":

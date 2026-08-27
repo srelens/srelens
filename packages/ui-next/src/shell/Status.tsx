@@ -12,6 +12,7 @@ import { getHelmOps, subscribeHelmOps } from "../lib/helmOps";
 import { useInfo } from "../lib/probe";
 import { getSessions, subscribeSessions } from "../lib/sessions";
 import { openTab, useActiveCluster } from "../lib/tabsStore";
+import { useWorkspaceSealed } from "./LockGate";
 // The words and their tones live beside `LinkState` rather than here: the
 // overview rail reads the same link and must say the same thing about it.
 import { LINK_TONE, LINK_WORD, useWorkspaceView } from "../lib/workspace";
@@ -62,9 +63,26 @@ import { LINK_TONE, LINK_WORD, useWorkspaceView } from "../lib/workspace";
  * A segment that counted more than its destination could show would be a
  * readout the reader cannot act on — worst of all in `sev`, where it reads as
  * a summons.
+ *
+ * **Every segment is a readout while the vault is sealed** (spec decision 5).
+ * §25 leaves this strip outside what the lock replaces, which is defensible as
+ * a matter of layout; it was not defensible as a matter of behaviour. Eight
+ * `onSelect`s here called `openTab` — the cluster overview, forwards,
+ * terminals, helm, and the console — every one of them a way into the
+ * workspace from a window that looked sealed, with no credential typed. The
+ * strip drops its handlers instead of its content: the kit renders a segment
+ * without `onSelect` as plain text (`StatusBar`'s own contract), so what is
+ * left is exactly the readouts, and nothing is in the tab order behind a cover
+ * that declares `aria-modal`.
+ *
+ * The readouts themselves stay, deliberately. The cluster name comes from a
+ * kubeconfig the vault never sealed, and the counts come from module-level
+ * stores of work this window started; blanking them would imply the vault had
+ * sealed them, which is the same kind of false claim in the other direction.
  */
 export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const activeId = useActiveCluster();
+  const sealed = useWorkspaceSealed();
   const info = useInfo(activeId);
   const { links } = useWorkspaceView();
   const { setOpen } = useConsole();
@@ -209,5 +227,22 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   }
   end.push({ id: "ask", label: "Ask", tone: "accent", onSelect: () => setOpen(true) });
 
-  return <StatusBar segments={segments} end={end} />;
+  // Stripped in ONE place, at the end, rather than eight `sealed ? … :
+  // undefined` ternaries above. A segment added later gets the guard for free;
+  // eight call sites would be eight chances to forget it, and the one that was
+  // forgotten would be a live way into the workspace from a covered window.
+  return sealed ? (
+    <StatusBar segments={readoutsOnly(segments)} end={readoutsOnly(end)} />
+  ) : (
+    <StatusBar segments={segments} end={end} />
+  );
+}
+
+/** The same readouts with nothing to press — see the note on {@link Status}. */
+function readoutsOnly(segments: StatusSegment[]): StatusSegment[] {
+  return segments.map((segment) => {
+    const readout: StatusSegment = { ...segment };
+    delete readout.onSelect;
+    return readout;
+  });
 }

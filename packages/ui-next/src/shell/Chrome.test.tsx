@@ -12,6 +12,7 @@ import {
   togglePin,
 } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
+import { lockWorkspace, resetLock } from "./LockGate";
 
 // jsdom has no ResizeObserver and Radix's popper watches the trigger with one.
 // The same stub the kit's Radix-backed suites carry, kept here rather than in
@@ -54,6 +55,7 @@ beforeEach(() => {
   // asked for web mode would leak into the next one without this.
   desktop.mockReturnValue(true);
   platform.mockReturnValue(true);
+  resetLock();
 });
 
 const chrome = (props: Partial<Parameters<typeof Chrome>[0]> = {}) =>
@@ -197,5 +199,49 @@ describe("Chrome", () => {
     await userEvent.click(screen.getByRole("button", { name: "New workspace" }));
     expect(onNewWorkspace).toHaveBeenCalledTimes(1);
     expect(getState().workspaces).toHaveLength(1);
+  });
+
+  /**
+   * Spec decision 5, at this component's own boundary. Behind a raised cover
+   * the gear opened `/settings` and the switcher's `onRemove` deleted a
+   * workspace outright — no dialog, no credential — whenever it held one tab,
+   * which is how every workspace starts. `Window`'s suite proves it end to
+   * end; this pins the bar itself, so editing `Chrome` alone cannot undo it.
+   */
+  describe("while the vault is sealed", () => {
+    it("keeps the workspace name as a readout, with nothing to press", () => {
+      const id = createWorkspace("Team", ["prod"]);
+      switchWorkspace(id);
+      lockWorkspace();
+      chrome();
+      expect(screen.queryByRole("button", { name: /^Team/ })).toBeNull();
+      expect(screen.getByText("Team")).toBeDefined();
+      expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+    });
+
+    it("disables the way into Settings, and says why", async () => {
+      lockWorkspace();
+      chrome();
+      const gear = screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement;
+      expect(gear.disabled).toBe(true);
+      expect(gear.getAttribute("title")).toMatch(/unlock/i);
+      await userEvent.click(gear);
+      expect(currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
+    });
+
+    /**
+     * Both of these change how the lock screen LOOKS and nothing else, and a
+     * reader who cannot read the passphrase field cannot unlock. Taking them
+     * away would be a lock-out rather than a lock.
+     */
+    it("still lets the reader make this screen legible", async () => {
+      const onToggleTheme = vi.fn();
+      lockWorkspace();
+      chrome({ onToggleTheme });
+      await userEvent.click(screen.getByRole("button", { name: "Theme" }));
+      expect(onToggleTheme).toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+      expect(scale.apply).toHaveBeenCalled();
+    });
   });
 });

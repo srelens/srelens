@@ -22,6 +22,7 @@ const {
   loadKubeconfigFiles,
   vaultStatus,
   vaultLock,
+  vaultUnlockPassword,
   zoomSpy,
   createWorkspaceSpy,
   switchWorkspaceSpy,
@@ -41,6 +42,7 @@ const {
   loadKubeconfigFiles: vi.fn((): string[] => []),
   vaultStatus: vi.fn(),
   vaultLock: vi.fn(),
+  vaultUnlockPassword: vi.fn(),
   zoomSpy: vi.fn(),
   createWorkspaceSpy: vi.fn(),
   switchWorkspaceSpy: vi.fn(),
@@ -61,6 +63,7 @@ vi.mock("@srelens/core", async (importOriginal) => {
     loadKubeconfigFiles: () => loadKubeconfigFiles(),
     vaultStatus: () => vaultStatus(),
     vaultLock: () => vaultLock(),
+    vaultUnlockPassword: (...a: unknown[]) => vaultUnlockPassword(...a),
   };
 });
 
@@ -172,6 +175,7 @@ beforeEach(() => {
   // for any of them to find.
   vaultStatus.mockReset().mockResolvedValue(VAULT_OPEN);
   vaultLock.mockReset().mockResolvedValue(undefined);
+  vaultUnlockPassword.mockReset().mockResolvedValue(undefined);
   resetLock();
   zoomSpy.mockReset();
   createWorkspaceSpy.mockReset();
@@ -668,5 +672,109 @@ describe("Window lock cover", () => {
     expect(screen.queryByRole("tablist")).toBeNull();
     expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
     expect(screen.queryByRole("button", { name: "seal the workspace" })).toBeNull();
+  });
+});
+
+/**
+ * The half of decision 5 the cover alone does not deliver.
+ *
+ * `LockGate` unmounts the rail, the nav, the strip, every tab body, the drawer
+ * and the console — but `Chrome` and `Status` are its SIBLINGS, outside the
+ * band, and the window's keydown listener had no sealed guard at all. Behind a
+ * raised cover, ⌘T twice took the tabs from 2 to 4 and ⌘W three times took
+ * them to 1; the titlebar gear opened `/settings`; seven status-bar segments
+ * opened tabs; and the workspace switcher's `onRemove` deleted a workspace
+ * outright, with no dialog, whenever it held one tab.
+ *
+ * Decision 5's whole argument is that a cover leaving these live is worse than
+ * no lock, because the window LOOKS sealed. Excluding the titlebar and the
+ * status bar visually is defensible per §25; leaving them interactive is not.
+ */
+describe("Window — what the cover has to take with it", () => {
+  /** Booted with the vault open, then sealed the way `Lock now` seals it. */
+  async function sealed() {
+    await booted();
+    act(() => store.openTab("/k/pods", { clusterName: "prod" }));
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    await screen.findByText("Workspace locked");
+  }
+
+  it("acts on no tab chord while the cover is up", async () => {
+    await sealed();
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+    // Nor the ones that reorder or reopen what is behind it.
+    const activeBefore = store.currentWorkspace().activeId;
+    fireEvent.keyDown(window, { key: "]", metaKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    expect(store.currentWorkspace().activeId).toBe(activeBefore);
+  });
+
+  /**
+   * Zoom is the exception, and the reason is not convenience. Its whole effect
+   * is on the surface the reader is looking at — the lock screen — and a
+   * reader who cannot read the passphrase field cannot unlock. Taking away the
+   * ability to make this screen legible would be a lock-out, not a lock.
+   */
+  it("still zooms while the cover is up, because that is what makes the cover readable", async () => {
+    await sealed();
+    fireEvent.keyDown(window, { key: "=", metaKey: true });
+    expect(zoomSpy).toHaveBeenCalledWith("in");
+  });
+
+  it("offers no way into Settings from the titlebar while the cover is up", async () => {
+    await sealed();
+    const gear = screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement;
+    expect(gear.disabled).toBe(true);
+    await userEvent.click(gear);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
+  });
+
+  /**
+   * The worst of them: `askRemove` deletes a workspace with no dialog when it
+   * holds one tab or fewer, and a workspace is BORN with exactly one. Behind
+   * the cover that was a destructive, undoable action with no credential.
+   */
+  it("puts the workspace switcher out of reach while the cover is up", async () => {
+    await sealed();
+    const before = store.getState().workspaces.length;
+    expect(screen.queryByRole("button", { name: /Default/ })).toBeNull();
+    // The name is still shown — it is not a secret, and blanking it would
+    // imply the vault had sealed it — but there is nothing to press.
+    expect(screen.getByText("Default")).toBeTruthy();
+    expect(store.getState().workspaces).toHaveLength(before);
+  });
+
+  it("leaves the status bar as readouts while the cover is up", async () => {
+    await sealed();
+    const strip = screen.getByRole("group", { name: "Status" });
+    expect(strip.querySelectorAll("button")).toHaveLength(0);
+    // The readouts themselves stay: the cluster name and the counts come from
+    // files and stores the vault never sealed.
+    expect(strip.textContent ?? "").toContain("prod");
+  });
+
+  it("gives every one of those back when the vault opens again", async () => {
+    await sealed();
+    vaultStatus.mockResolvedValue(VAULT_OPEN);
+    // Only an unlock lowers the cover, so this goes through the form.
+    await userEvent.type(screen.getByLabelText("Master passphrase"), "aaaa1111aaaa");
+    await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await screen.findByRole("tablist");
+    expect(
+      (screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Status" }).querySelectorAll("button").length,
+    ).toBeGreaterThan(0);
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(3);
   });
 });

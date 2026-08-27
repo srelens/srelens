@@ -155,6 +155,21 @@ describe("LockGate — the cover", () => {
     expect(document.body.textContent ?? "").not.toMatch(/clusters stay sealed/i);
   });
 
+  /**
+   * The cover claimed `aria-modal="true"` — "there is nothing else on this
+   * window to reach" — while the titlebar's theme and zoom controls stayed in
+   * the tab order on purpose. One of those two statements had to go, and it was
+   * not the Tab key's.
+   */
+  it("does not tell assistive technology that nothing outside it exists", async () => {
+    paint();
+    await screen.findByText("Workspace locked");
+    const cover = screen.getByTestId("lock-cover");
+    expect(cover.getAttribute("role")).toBe("dialog");
+    expect(cover.getAttribute("aria-label")).toBe("Workspace locked");
+    expect(cover.getAttribute("aria-modal")).toBeNull();
+  });
+
   it("asks the vault nothing where there is no vault to ask", async () => {
     // Web mode: every vault command is a Tauri command, so there is nothing to
     // unlock and a cover here would brick the browser build with no way in.

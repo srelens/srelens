@@ -148,6 +148,24 @@ function useSealed(): boolean {
 }
 
 /**
+ * Whether the cover is up, for a component that is NOT behind it.
+ *
+ * The cover replaces the middle band, and the two surfaces §25 leaves outside
+ * it — the titlebar and the status bar — are siblings of this gate rather than
+ * children. Excluding them visually is what §25 asks for; leaving them
+ * INTERACTIVE would make the window look sealed while every control on it still
+ * acted on the workspace, which is decision 5's own argument for why that is
+ * worse than not locking at all. So they subscribe to the same store the cover
+ * reads, and stand down while it is up.
+ *
+ * Exported for exactly those two callers. Anything inside the band is unmounted
+ * and has no use for this.
+ */
+export function useWorkspaceSealed(): boolean {
+  return useSealed();
+}
+
+/**
  * What the OS calls its biometric unlock. Same derivation the Security pane and
  * classic's own settings section use: the platform plugin backs onto Touch ID
  * on macOS and Windows Hello on Windows, and §25's `Touch ID` is right on a Mac
@@ -665,15 +683,23 @@ function LockGlyph() {
  * `absolute inset-0` inside the band the window gives it rather than
  * `fixed inset-0`: the titlebar and the status bar are not part of what §25
  * replaces, and a fixed cover would take the window's own chrome with it.
- * `role="dialog"` with `aria-modal` says what this is to assistive technology —
- * there is nothing behind it to reach, because there is nothing behind it at
- * all.
+ * `role="dialog"` with its own label says what this is to assistive technology.
+ *
+ * **No `aria-modal`, and that is a correction.** It carried `aria-modal="true"`
+ * — "there is nothing else on this window to reach" — while four controls in
+ * the titlebar deliberately stayed in the tab order: the theme toggle and the
+ * three zoom buttons, which are kept usable because a reader who cannot read
+ * the passphrase field cannot unlock (see `Chrome`). Assistive technology was
+ * being told those did not exist while the Tab key went straight to them, and
+ * of the two the Tab key is the one that is right. Everything else on the
+ * chrome stands down while this is up — the switcher, the gear, every status
+ * segment — so the four that remain are the whole of what the markup now has
+ * to admit to.
  */
 function Cover({ children }: { children: ReactNode }) {
   return (
     <div
       role="dialog"
-      aria-modal="true"
       aria-label="Workspace locked"
       data-testid="lock-cover"
       className="absolute inset-0 z-50 flex min-h-0 items-center justify-center overflow-auto p-6"
