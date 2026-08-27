@@ -327,6 +327,39 @@ describe("AppearancePane", () => {
       });
     });
 
+    it("leaves an axis nobody has chosen exactly as boot left it", () => {
+      // `applyNextDesignTheme()` in apps/desktop/src/design.ts runs FIRST and
+      // puts data-theme="dark" on the root for anyone whose classic preference
+      // resolves dark — which is the default. Writing every axis from the
+      // defaults here would spell theme "light", and light is the ABSENCE of
+      // the attribute, so this pass would strip that dark back off and the new
+      // design would boot light for almost every reader.
+      document.documentElement.setAttribute("data-theme", "dark");
+      applyStoredAppearance();
+      expect(rootAttributes()).toEqual({
+        theme: "dark",
+        accent: undefined,
+        density: undefined,
+      });
+    });
+
+    it("still restores every axis for a reader who has chosen, over what boot set", () => {
+      // The other half of the rule above: a document `remember` wrote always
+      // carries all three axes, so a stored choice wins outright — including a
+      // stored light over the dark boot just set.
+      document.documentElement.setAttribute("data-theme", "dark");
+      localStorage.setItem(
+        APPEARANCE_KEY,
+        JSON.stringify({ theme: "light", accent: "teal", density: "comfortable" }),
+      );
+      applyStoredAppearance();
+      expect(rootAttributes()).toEqual({
+        theme: undefined,
+        accent: "teal",
+        density: "comfortable",
+      });
+    });
+
     it("ignores a value no stylesheet defines", () => {
       localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ theme: "neon", accent: 7 }));
       applyStoredAppearance();

@@ -4,6 +4,17 @@ import { Window } from "./shell/Window";
 import { ConsoleProvider } from "./console";
 
 export { ConsoleProvider, useConsole, type ConsoleValue } from "./console";
+/**
+ * The boot half of the Appearance pane, re-exported for the host.
+ *
+ * `apps/desktop/src/main.tsx` calls this beside its own
+ * `applyNextDesignTheme()`, and it has to come from the module the host already
+ * imports dynamically: a static `@srelens/ui-next` import from the entry would
+ * drag this whole tree into the entry chunk that a classic-design boot also
+ * downloads, and a second dynamic `import()` before the `Promise.all` would
+ * serialise the two downloads the comment there keeps parallel.
+ */
+export { applyStoredAppearance } from "./screens/settings/AppearancePane";
 
 function subscribeToHash(onChange: () => void): () => void {
   window.addEventListener("hashchange", onChange);

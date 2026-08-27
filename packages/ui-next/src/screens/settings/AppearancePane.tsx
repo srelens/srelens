@@ -58,14 +58,11 @@ import type { Storage } from "../../lib/tabsPersist";
  * dark. A `MutationObserver` on the root is the same trick `Terminals.tsx`
  * already uses for the one other thing in this app that has to know the theme.
  *
- * **What is NOT finished, and where the seam is.** {@link applyStoredAppearance}
- * is the boot half, and nothing calls it yet: `apps/desktop/src/main.tsx` runs
- * `applyNextDesignTheme()` before the new tree mounts and knows nothing about
- * this key. Until that one line is added, a chosen theme, accent or density
- * takes effect immediately and survives in storage but is not re-applied on the
- * next launch. Nothing on screen claims otherwise, and every state the pane
- * shows is the document's real state — but this is a gap, not a design, and it
- * is reported with the task.
+ * **The boot half is {@link applyStoredAppearance}, and it is wired.**
+ * `apps/desktop/src/main.tsx` calls it after its own `applyNextDesignTheme()`
+ * and before `createRoot`, so a chosen theme, accent or density is back on the
+ * root before the first paint of the next launch. That ordering is not
+ * arbitrary and neither is what the function writes — see its own doc.
  */
 
 /* ------------------------------------------------------------------ *
@@ -153,12 +150,6 @@ interface Appearance {
   density: DensityId;
 }
 
-const DEFAULT_APPEARANCE: Appearance = {
-  theme: BARE.theme,
-  accent: BARE.accent,
-  density: BARE.density,
-};
-
 function asTheme(value: unknown): ThemeId | null {
   return THEMES.find((t) => t.id === value)?.id ?? null;
 }
@@ -238,21 +229,33 @@ function readStored(storage: Storage): Partial<Appearance> {
 /**
  * Put the remembered appearance on the document root.
  *
- * **The boot half of this pane, and the seam this task leaves open.** Every
- * axis here is a preference read once and applied before anything renders,
- * exactly like the design preference itself; the pane is only the place it is
- * chosen. `apps/desktop/src/main.tsx` should call this beside
- * `applyNextDesignTheme()` — after it, so a stored theme wins over the
- * light/dark preference that function derives from classic's store.
+ * **The boot half of this pane.** Every axis here is a preference read once and
+ * applied before anything renders, exactly like the design preference itself;
+ * the pane is only the place it is chosen. `apps/desktop/src/main.tsx` calls
+ * this beside `applyNextDesignTheme()` — after it, so a stored theme wins over
+ * the light/dark preference that function derives from classic's store.
+ *
+ * **Only the axes the stored document actually carries are written**, and that
+ * is the whole reason this is not a three-line spread over
+ * {@link BARE}. `applyNextDesignTheme()` runs first and puts
+ * `data-theme="dark"` on the root for anyone whose classic preference resolves
+ * dark — which is the DEFAULT (`DEFAULT_THEME` in `apps/desktop/src/ui/theme.ts`
+ * is `{ name: "slate", mode: "dark" }`). A pass that wrote every axis would
+ * write `theme: "light"` for every reader who has never opened this pane, and
+ * `writeAxis` spells light as the ABSENCE of the attribute — so it would strip
+ * the dark that boot just set and the new design would come up light for
+ * almost everyone. Writing nothing where nothing was chosen leaves that
+ * preference standing, and a document written by {@link remember} always
+ * carries all three axes, so a reader who HAS chosen still gets all three back.
  *
  * Exported and tested rather than left implicit so that wiring it is one line
  * against a function that already provably works.
  */
 export function applyStoredAppearance(storage: Storage = settingsStorage): void {
-  const stored = { ...DEFAULT_APPEARANCE, ...readStored(storage) };
-  writeAxis("data-theme", stored.theme, BARE.theme);
-  writeAxis("data-accent", stored.accent, BARE.accent);
-  writeAxis("data-density", stored.density, BARE.density);
+  const stored = readStored(storage);
+  if (stored.theme !== undefined) writeAxis("data-theme", stored.theme, BARE.theme);
+  if (stored.accent !== undefined) writeAxis("data-accent", stored.accent, BARE.accent);
+  if (stored.density !== undefined) writeAxis("data-density", stored.density, BARE.density);
 }
 
 /**

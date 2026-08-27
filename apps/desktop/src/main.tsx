@@ -48,10 +48,23 @@ async function bootstrap(root: HTMLElement): Promise<void> {
     // independent downloads, and awaiting one before requesting the other
     // serialised them. index.html links no stylesheet, so the window stays
     // blank until both land — that wait is the whole startup screen.
-    const [, { NextApp }] = await Promise.all([
+    const [, { NextApp, applyStoredAppearance }] = await Promise.all([
       import("@srelens/ui-next/styles"),
       import("@srelens/ui-next"),
     ]);
+    // The Appearance pane's boot half, and it must run AFTER
+    // applyNextDesignTheme above: the theme, accent and density chosen on that
+    // pane are the reader's last word, and this is the only thing that puts
+    // them back on the root after a reload. It writes only the axes the stored
+    // document actually carries, so a reader who has never opened the pane
+    // keeps the light/dark the line above derived from classic's preference —
+    // see `applyStoredAppearance` for why that distinction is load-bearing.
+    // Taken off the chunk already being awaited rather than imported
+    // statically, which would put the whole new tree in the entry chunk that a
+    // classic boot downloads too, or awaited on its own, which would serialise
+    // the stylesheet behind it. Still before `createRoot`, so nothing paints
+    // under the wrong appearance.
+    applyStoredAppearance();
     createRoot(root).render(
       <NextApp
         ported={PORTED_SCREENS.map((s) => s.name)}
