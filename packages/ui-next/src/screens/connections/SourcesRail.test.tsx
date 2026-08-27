@@ -82,9 +82,20 @@ describe("SourcesRail", () => {
     render(<SourcesRail files={["/k/gone.yaml"]} rows={[]} />);
     expect(screen.getByText("/k/gone.yaml")).toBeTruthy();
     expect(screen.getByText("0 contexts")).toBeTruthy();
+    /**
+     * **All four causes, and the likeliest one first.**
+     *
+     * This named three — moved, deleted, emptied — and left out the one a
+     * reader hits immediately after `Add a kubeconfig file`: a file srelens
+     * could not parse. `resolve_contexts` skips an unreadable or invalid
+     * kubeconfig silently (`Kubeconfig::read_from(path).ok()`), so the file is
+     * still on the stored list and still yields nothing. Telling someone who
+     * has just picked a file that it may have been deleted sends them looking
+     * for the wrong problem.
+     */
     expect(
       screen.getByText(
-        "No contexts came from this file. It may have been moved, deleted or emptied since it was added.",
+        "No contexts came from this file. srelens may not have been able to read it as a kubeconfig, or it may have been moved, deleted or emptied since it was added.",
       ),
     ).toBeTruthy();
   });

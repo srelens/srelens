@@ -197,9 +197,19 @@ export function SourcesRail({ rows, files, onAddFile, className }: SourcesRailPr
                   </span>
                   <span className="path text-faint">{countLine(source)}</span>
                   {source.contexts === 0 && (
+                    /* **Four causes, and the likeliest one first.** This named
+                       three and left out the one a reader hits right after
+                       `Add a kubeconfig file`: a file srelens could not parse.
+                       `resolve_contexts` skips an unreadable or invalid
+                       kubeconfig silently (`Kubeconfig::read_from(path).ok()`),
+                       so the path stays on the stored list and still yields
+                       nothing. Telling someone who has just picked a file that
+                       it may have been deleted sends them after the wrong
+                       problem. */
                     <p className="text-[0.8125rem] leading-snug text-muted">
-                      No contexts came from this file. It may have been moved, deleted or emptied
-                      since it was added.
+                      No contexts came from this file. srelens may not have been able to read it as
+                      a kubeconfig, or it may have been moved, deleted or emptied since it was
+                      added.
                     </p>
                   )}
                 </div>
