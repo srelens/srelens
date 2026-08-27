@@ -1,4 +1,4 @@
-import { contextDisplayName, type ClusterContext, type ClusterFacts } from "@srelens/core";
+import { contextDisplayName, plural, type ClusterContext, type ClusterFacts } from "@srelens/core";
 import { Badge, Button, Mark, Table, cx, type Column } from "@srelens/ui-kit";
 import { useMark } from "../../lib/marks";
 import { glyph } from "../../lib/tree";
@@ -175,6 +175,28 @@ function ClusterCell({ row }: { row: ClusterRow }) {
  * no secret starts carrying one.
  */
 export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
+  /**
+   * The rows in the order the table draws them, grouped.
+   *
+   * Taken once and handed to the table, rather than called again for the
+   * headings: the boundary and the rows have to be describing one list.
+   */
+  const ordered = bySource(rows, (row) => row.context.isLocal);
+
+  /**
+   * How many clusters each group holds, for the count in its heading.
+   *
+   * Counted from the rows that are on the screen, which is the rule every count
+   * in this migration now follows — `Releases · 383 in this cluster` over six
+   * rows was the fault, and a heading saying `14 clusters` over a filtered list
+   * would be the same one.
+   */
+  const sizes = new Map<string, number>();
+  for (const row of ordered) {
+    const word = sourceOf(row.context);
+    sizes.set(word, (sizes.get(word) ?? 0) + 1);
+  }
+
   const columns: Column<ClusterRow>[] = [
     {
       key: "cluster",
@@ -317,7 +339,30 @@ export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
     <div data-testid="cluster-table" className={cx("min-w-0", className)}>
       <Table
         columns={columns}
-        data={bySource(rows, (row) => row.context.isLocal)}
+        data={ordered}
+        /**
+         * §6's grouping, drawn as a boundary rather than left to the row order.
+         *
+         * The rows were already ordered — kubeconfig contexts, then local
+         * clusters, never interleaved — and on a real kubeconfig the only cue a
+         * reader had was the `Source` cell's text changing at row 15 of 17.
+         * Ordering is not grouping; this is the line between the two groups,
+         * in the same two words the `Source` cells under it use, so the heading
+         * cannot come to say something the column does not.
+         *
+         * **It stops when the reader sorts, and the kit is what stops it** (see
+         * `rowGroup`): a sort by `Latency` scatters the sources through one
+         * another, and a heading left over that list would be labelling rows
+         * that had moved out from under it. The `Source` column is what carries
+         * the fact from then on, and clearing the sort brings the boundary back.
+         */
+        rowGroup={(row) => {
+          const word = sourceOf(row.context);
+          // Through `joined`, the one separator on this screen — the same
+          // ` · ` the rail's own count lines and the second row of every
+          // cluster cell are assembled with.
+          return { key: word, label: joined([word, plural(sizes.get(word) ?? 0, "cluster")]) };
+        }}
         getRowKey={(row) => row.context.stableId}
         // The keyboard's half of `Open`: Enter on the focused row, or a
         // double-click. The kit's own rule — a pointer-only route to opening a

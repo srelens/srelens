@@ -273,6 +273,38 @@
   .tbl-resized { table-layout: fixed; }
   .tbl-check { width: 36px; text-align: center; }
   .tbl-check input { accent-color: var(--accent); vertical-align: middle; }
+  /* A boundary between two groups of rows, from `Table`'s `rowGroup` — the
+     label for the rows under it, in the head's own voice so the eye reads it as
+     structure rather than as data. Ordering rows alone does not group them: the
+     connections table listed its fourteen kubeconfig contexts before its three
+     local clusters with no header, no rule and no change of spacing, and the
+     only cue a reader had was the `Source` cell's text changing at row 15 of 17.
+     Not interactive, so it takes neither the hover wash nor a cursor. */
+  .tbl tbody tr.tbl-group:hover { background: transparent; }
+  .tbl-group th {
+    padding: 0.5rem 0.7rem 0.3rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    text-align: left;
+    white-space: nowrap;
+  }
+  /* Air above every boundary but the first, which is what makes two groups read
+     as two rather than as one list with labels dropped into it. */
+  .tbl-group:not(:first-child) th { padding-top: 0.95rem; }
+  /* The label follows the horizontal scroll. A cell spanning the whole table
+     cannot itself be pinned — its box is as wide as the table — so the inline
+     label inside it is what sticks. MEASURED: the connections table is 1082px
+     against a 374px pane at a 960px window, so without this every group label
+     sits 700px to the left of what the reader is looking at. */
+  .tbl-group th > span {
+    position: sticky;
+    left: 0.7rem;
+    display: inline-block;
+  }
   /* Holds the space the virtualized rows would occupy, so the scrollbar
      describes the whole list rather than the window being rendered. */
   .tbl-spacer { border: 0 !important; }

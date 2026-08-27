@@ -301,6 +301,112 @@ describe("ClusterTable", () => {
     expect(names).toEqual(["prod-eu", "staging", "kind-dev", "k3d-lab"]);
   });
 
+  /**
+   * **A boundary a reader can see, and one that cannot come to lie.**
+   *
+   * The rows were correctly ordered — fourteen kubeconfig contexts, then three
+   * local clusters, never interleaved — with no header, no rule and no change of
+   * spacing between the two groups. On a real kubeconfig the only cue was the
+   * `Source` cell's text changing at row 15 of 17, which is invisible in
+   * practice; §6 asks for rows GROUPED by credential source, and ordering alone
+   * does not deliver grouping. The rail beside it heads its own sections, which
+   * made the table's silence read as an oversight.
+   *
+   * The heading holds only while the table is in its grouped order. Sorting by
+   * `Latency` scatters the two sources through one another, so the headings go —
+   * the reader sees the grouping stop, and the `Source` column is what still
+   * says where each row comes from. A heading left in place over a sorted list
+   * would be worse than none, which is why the kit drops them rather than this
+   * screen remembering to.
+   */
+  describe("the group boundary", () => {
+    /** Two of each, interleaved on the way in so the order is the table's doing. */
+    const two = [
+      { context: ctx({ stableId: "a#prod", name: "prod-eu" }), probe: { state: "reachable" as const, latencyMs: 41 } },
+      {
+        context: ctx({ stableId: "b#kind", name: "kind-dev", isLocal: true, provider: "kind" }),
+        probe: { state: "reachable" as const, latencyMs: 3 },
+      },
+      { context: ctx({ stableId: "c#staging", name: "staging" }), probe: { state: "reachable" as const, latencyMs: 12 } },
+      {
+        context: ctx({ stableId: "d#k3d", name: "k3d-lab", isLocal: true, provider: "k3d" }),
+        probe: { state: "reachable" as const, latencyMs: 1 },
+      },
+    ];
+
+    const boundaries = (container: HTMLElement) =>
+      [...container.querySelectorAll('[data-slot="table-group"]')].map((el) => el.textContent);
+    const order = () => screen.getAllByTestId(/^cluster-name-/).map((el) => el.textContent);
+    /** The `Source` cell of one row — the second cell, on its own. */
+    const source = (stableId: string) =>
+      screen.getByTestId(`cluster-name-${stableId}`).closest("tr")?.children[1]?.textContent;
+
+    it("heads each group with the word the Source cells under it use, and how many there are", () => {
+      const { container } = render(<ClusterTable rows={two} onOpen={() => {}} />);
+      // Read from the cells rather than restated, so a heading cannot come to
+      // say something the column under it does not.
+      expect(boundaries(container)).toEqual([
+        `${source("a#prod")} · 2 clusters`,
+        `${source("b#kind")} · 2 clusters`,
+      ]);
+      expect(boundaries(container)).toEqual(["Kubeconfig · 2 clusters", "Local · 2 clusters"]);
+    });
+
+    it("puts each boundary directly above the first row of its group", () => {
+      const { container } = render(<ClusterTable rows={two} onOpen={() => {}} />);
+      const body = [...(container.querySelectorAll("tbody tr") ?? [])].map((tr) =>
+        tr.getAttribute("data-slot") === "table-group"
+          ? `GROUP ${tr.textContent}`
+          : (tr.querySelector('[data-testid^="cluster-name-"]')?.textContent ?? "?"),
+      );
+      expect(body).toEqual([
+        "GROUP Kubeconfig · 2 clusters",
+        "prod-eu",
+        "staging",
+        "GROUP Local · 2 clusters",
+        "kind-dev",
+        "k3d-lab",
+      ]);
+    });
+
+    it("counts the rows in its own group, not the whole list", () => {
+      const { container } = render(
+        <ClusterTable
+          rows={[two[0], two[1], two[2], { context: ctx({ stableId: "e#edge", name: "edge-1" }), probe: { state: "unread" } }]}
+          onOpen={() => {}}
+        />,
+      );
+      // Three kubeconfig contexts and one local cluster — and `1 cluster`
+      // singular, through core's own `plural`.
+      expect(boundaries(container)).toEqual(["Kubeconfig · 3 clusters", "Local · 1 cluster"]);
+    });
+
+    it("stops the grouping visibly when the reader sorts, rather than heading a list that has moved", async () => {
+      const { container } = render(<ClusterTable rows={two} onOpen={() => {}} />);
+      expect(boundaries(container)).toHaveLength(2);
+
+      await userEvent.click(screen.getByRole("button", { name: "Sort by Latency" }));
+
+      // The two sources are now interleaved — which is exactly why no heading
+      // may survive it.
+      expect(order()).toEqual(["k3d-lab", "kind-dev", "staging", "prod-eu"]);
+      expect(source("d#k3d")).toBe("Local");
+      expect(source("c#staging")).toBe("Kubeconfig");
+      expect(boundaries(container)).toEqual([]);
+    });
+
+    it("brings the boundary back when the reader clears the sort", async () => {
+      const { container } = render(<ClusterTable rows={two} onOpen={() => {}} />);
+      const byLatency = screen.getByRole("button", { name: "Sort by Latency" });
+      await userEvent.click(byLatency); // ascending
+      await userEvent.click(byLatency); // descending
+      expect(boundaries(container)).toEqual([]);
+      await userEvent.click(byLatency); // cleared — the grouped order is back
+      expect(boundaries(container)).toEqual(["Kubeconfig · 2 clusters", "Local · 2 clusters"]);
+      expect(order()).toEqual(["prod-eu", "staging", "kind-dev", "k3d-lab"]);
+    });
+  });
+
   it("opens the cluster the row belongs to", async () => {
     const onOpen = vi.fn();
     render(<ClusterTable rows={[{ context: ctx(), probe: { state: "unread" } }]} onOpen={onOpen} />);

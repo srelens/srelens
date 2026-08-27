@@ -662,6 +662,126 @@ describe("Table", () => {
   });
 });
 
+/**
+ * Group headings inside the body, and the one rule that makes them honest.
+ *
+ * A grouping describes the ORDER the caller handed the table, so the moment a
+ * header sort reorders the list the headings would be labelling rows that no
+ * longer sit under them. They are dropped for as long as a sort is active and
+ * come back when it is cleared — a heading that silently became wrong under
+ * sort is worse than no heading at all.
+ */
+describe("Table row groups", () => {
+  interface Cluster {
+    name: string;
+    source: string;
+    latency: number;
+  }
+
+  const cols: Column<Cluster>[] = [
+    { key: "name", header: "Name" },
+    { key: "source", header: "Source" },
+    { key: "latency", header: "Latency" },
+  ];
+
+  // Two groups, four rows, and the caller's order already groups them: the
+  // table's job here is to draw the boundary, not to find it.
+  const rows: Cluster[] = [
+    { name: "prod-eu", source: "Kubeconfig", latency: 41 },
+    { name: "staging", source: "Kubeconfig", latency: 12 },
+    { name: "kind-dev", source: "Local", latency: 3 },
+    { name: "k3d-lab", source: "Local", latency: 1 },
+  ];
+
+  const group = (row: Cluster) => ({ key: row.source, label: `${row.source} group` });
+
+  function renderGrouped() {
+    return render(
+      <Table columns={cols} data={rows} getRowKey={(r) => r.name} rowGroup={group} />,
+    );
+  }
+
+  const headings = (container: HTMLElement) =>
+    [...container.querySelectorAll('[data-slot="table-group"]')].map((tr) => tr.textContent);
+
+  it("heads each group once, in the caller's own order", () => {
+    const { container } = renderGrouped();
+    expect(headings(container)).toEqual(["Kubeconfig group", "Local group"]);
+  });
+
+  it("puts each heading directly above the first row of its group", () => {
+    const { container } = renderGrouped();
+    const bodyRows = [...container.querySelectorAll("tbody tr")].map((tr) => [
+      tr.getAttribute("data-slot") === "table-group" ? "GROUP" : "row",
+      tr.textContent,
+    ]);
+    expect(bodyRows).toEqual([
+      ["GROUP", "Kubeconfig group"],
+      ["row", "prod-euKubeconfig41"],
+      ["row", "stagingKubeconfig12"],
+      ["GROUP", "Local group"],
+      ["row", "kind-devLocal3"],
+      ["row", "k3d-labLocal1"],
+    ]);
+  });
+
+  it("spans every column, the checkbox one included", () => {
+    const { container } = render(
+      <Table
+        columns={cols}
+        data={rows}
+        getRowKey={(r) => r.name}
+        rowGroup={group}
+        selection={{ selected: new Set<string>(), onChange: vi.fn() }}
+      />,
+    );
+    const heading = container.querySelector('[data-slot="table-group"] th');
+    expect(heading?.getAttribute("colspan")).toBe("4");
+  });
+
+  it("draws no heading at all without a rowGroup", () => {
+    const { container } = render(<Table columns={cols} data={rows} getRowKey={(r) => r.name} />);
+    expect(headings(container)).toEqual([]);
+  });
+
+  it("drops every heading while a sort is active, because the order it described is gone", () => {
+    const { container } = renderGrouped();
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Latency" }));
+
+    // The rows are reordered across the groups — so the headings have to go.
+    expect(
+      [...container.querySelectorAll("tbody tr.tbl-row")].map((tr) => tr.textContent),
+    ).toEqual(["k3d-labLocal1", "kind-devLocal3", "stagingKubeconfig12", "prod-euKubeconfig41"]);
+    expect(headings(container)).toEqual([]);
+  });
+
+  it("brings them back when the reader clears the sort", () => {
+    const { container } = renderGrouped();
+    const sort = screen.getByRole("button", { name: "Sort by Latency" });
+    fireEvent.click(sort); // ascending
+    fireEvent.click(sort); // descending
+    expect(headings(container)).toEqual([]);
+    fireEvent.click(sort); // cleared — the caller's order is back
+    expect(headings(container)).toEqual(["Kubeconfig group", "Local group"]);
+  });
+
+  it("keeps a heading out of the rows a reader can reach", () => {
+    const { container } = render(
+      <Table
+        columns={cols}
+        data={rows}
+        getRowKey={(r) => r.name}
+        rowGroup={group}
+        onRowActivate={vi.fn()}
+      />,
+    );
+    const heading = container.querySelector('[data-slot="table-group"]');
+    // No tab stop, no `tbl-row`: the arrow keys and Enter walk the data rows.
+    expect(heading?.hasAttribute("tabindex")).toBe(false);
+    expect(heading?.className).not.toContain("tbl-row");
+  });
+});
+
 describe("Table multi-selection", () => {
   const cols: Column<{ name: string }>[] = [{ key: "name", header: "Name" }];
   const rows = [{ name: "a" }, { name: "b" }, { name: "c" }, { name: "d" }];

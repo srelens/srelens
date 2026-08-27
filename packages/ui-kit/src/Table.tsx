@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -142,6 +143,25 @@ export interface TableProps<T> {
    */
   onRowActivate?: (row: T) => void;
   /**
+   * The heading to draw above the group each row belongs to: `key` is what
+   * marks the boundary (a heading appears wherever it differs from the row
+   * before), `label` is what the reader sees.
+   *
+   * Rows are NOT reordered — the caller hands them over already grouped, and
+   * this draws the line between them. Ordering rows and heading their groups
+   * are separate jobs, and a table that quietly re-sorted its data would be
+   * taking the first one away from the screen that owns it.
+   *
+   * **Drawn only while the table is in the caller's own order.** A grouping
+   * describes THAT order, so the moment a header sort reorders the list a
+   * heading would be labelling rows that no longer sit under it — headings are
+   * dropped for as long as a sort is active and come back when it is cleared.
+   * That rule lives here rather than in the caller because the sort may be the
+   * table's own (uncontrolled), which no caller can see. A heading that
+   * silently became wrong under sort is worse than no heading at all.
+   */
+  rowGroup?: (row: T) => { key: string; label: ReactNode };
+  /**
    * The row's context menu. The kit owns the `<tr>`, so the kit owns the menu
    * wrapped around it; a caller cannot reach between the table and its rows.
    */
@@ -247,6 +267,7 @@ export function Table<T>({
   sort: controlledSort,
   onSortChange,
   onRowActivate,
+  rowGroup,
   rowMenu,
   rowMenuLabel,
 }: TableProps<T>) {
@@ -473,6 +494,20 @@ export function Table<T>({
   // must not strand the table with zero tab stops. Falls back to the first
   // rendered row, so there is always exactly one stop whenever there is a row
   // to hold it.
+  /**
+   * The group heading each row belongs to, over the WHOLE list rather than over
+   * the rendered window.
+   *
+   * Index-based, so virtualization cannot invent a boundary: the window's first
+   * row is usually mid-group, and comparing it against nothing would head it as
+   * if its group started there. A group whose first row is scrolled out of the
+   * window keeps its heading out of view with it, which is what the rows do too.
+   *
+   * `null` while a sort is active — see `rowGroup`. `visibleData` is `data`
+   * itself in that case, so these are the caller's own order.
+   */
+  const groups = rowGroup && !sort ? visibleData.map((row) => rowGroup(row)) : null;
+
   const windowKeys = windowRows.map(getRowKey);
   const preferredKey = focusKey ?? selectedKey ?? null;
   const stopKey =
@@ -642,8 +677,13 @@ export function Table<T>({
             <td colSpan={colCount} style={{ height: topPad, padding: 0, border: 0 }} />
           </tr>
         )}
-        {windowRows.map((row) => {
+        {windowRows.map((row, windowIndex) => {
           const rowKey = getRowKey(row);
+          // The row's place in the whole list, which is what the group
+          // boundaries are indexed by.
+          const index = range.start + windowIndex;
+          const group = groups?.[index];
+          const heads = group !== undefined && (index === 0 || groups?.[index - 1].key !== group.key);
           const selected = selectedKey === rowKey;
           const checked = selection?.selected.has(rowKey) ?? false;
           const body = (
@@ -683,12 +723,32 @@ export function Table<T>({
               ))}
             </tr>
           );
-          return rowMenu ? (
+          const rendered = rowMenu ? (
             <ContextMenu key={rowKey} items={rowMenu(row)} label={rowMenuLabel}>
               {body}
             </ContextMenu>
           ) : (
             body
+          );
+          if (!heads) return rendered;
+          return (
+            <Fragment key={`group-${rowKey}`}>
+              {/* Not a `tbl-row`, and no tab stop: the arrows and Enter walk the
+                  rows a reader can act on, and this is a label over them. `th`
+                  with `scope="rowgroup"` so it is announced as the heading of
+                  the rows it introduces rather than as a cell with one word in
+                  it. */}
+              <tr className="tbl-group" data-slot="table-group">
+                <th colSpan={colCount} scope="rowgroup">
+                  {/* The label is the sticky box, not the cell: the cell spans a
+                      table that may be far wider than its pane, so a heading
+                      left in the cell's own corner scrolls off the moment the
+                      reader pans right. */}
+                  <span>{group.label}</span>
+                </th>
+              </tr>
+              {rendered}
+            </Fragment>
           );
         })}
         {bottomPad > 0 && (
