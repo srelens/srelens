@@ -726,6 +726,60 @@ describe("Connections", () => {
   });
 
   /**
+   * **`Refresh all` after the active context was removed from the kubeconfig.**
+   *
+   * The context store was replaced and the workspace was not: it kept an
+   * `activeCluster` naming a context nobody declares any more, so
+   * `useActiveContext()` answered `undefined` and every cluster-scoped screen
+   * fell to its no-cluster state — telling the reader to pick a cluster while
+   * another one sat in the table in front of them. Boot already solved this by
+   * reconciling; a refreshed listing now goes through the same step, inside the
+   * store both screens write to.
+   */
+  it("moves the focus off a cluster Refresh all no longer finds", async () => {
+    const user = userEvent.setup();
+    open();
+    await waitFor(() => expect(drawn().length).toBe(2));
+    expect(store.activeCluster()).toBe(PROD.stableId);
+
+    // PROD has gone from the kubeconfig; STAGING is still there.
+    core.listContexts.mockResolvedValue({ contexts: [STAGING] });
+    await user.click(refreshAll());
+
+    await waitFor(() => expect(drawn().length).toBe(1));
+    expect(store.activeCluster()).toBe(STAGING.stableId);
+    expect(store.currentWorkspace().clusters).toEqual([STAGING.stableId]);
+  });
+
+  /**
+   * **A refresh that came back SHORT WITH A REASON takes nothing away — not the
+   * rows, and not the focus.**
+   *
+   * Partial, deliberately, and this is the only shape of failure that can hold
+   * the property. A WHOLLY failed refresh cannot: `reload` installs
+   * `outcome.contexts ?? getContexts()`, so the list it writes is the one
+   * already on screen and a reconciliation against it would change nothing
+   * whether it ran or not — the test would pass with the guard deleted.
+   * `listContexts` really does answer with some contexts and an error when one
+   * of several merged kubeconfigs is unreadable, and a cluster missing for that
+   * reason has not gone anywhere. `Window` keeps the restored cluster ids on the
+   * same reasoning; a reader whose VPN dropped must not lose the cluster they
+   * were looking at to it.
+   */
+  it("keeps the focus when a refresh comes back short with a reason", async () => {
+    const user = userEvent.setup();
+    open();
+    await waitFor(() => expect(drawn().length).toBe(2));
+
+    core.listContexts.mockResolvedValue({ contexts: [STAGING], error: LIST_FAILURE });
+    await user.click(refreshAll());
+
+    await screen.findByRole("status");
+    expect(store.activeCluster()).toBe(PROD.stableId);
+    expect(store.currentWorkspace().clusters).toEqual([PROD.stableId, STAGING.stableId]);
+  });
+
+  /**
    * **A SECOND cluster opened onto the `/overview` tab the FIRST one made.**
    *
    * `openTab` dedupes by route and returned with `activeId: existing.id`

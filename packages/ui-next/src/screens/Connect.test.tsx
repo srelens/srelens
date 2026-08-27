@@ -458,6 +458,29 @@ describe("Connect", () => {
     });
 
     /**
+     * **`/connect`'s own listing has the same duty as `/connections`'.**
+     *
+     * Both doors here re-list through `reload`, and a reader who has just
+     * pointed srelens at a different kubeconfig is exactly the reader whose
+     * active context can vanish. The reconciliation lives in the contexts store
+     * rather than in either screen, so this passes for the same reason
+     * `/connections`' does — which is the point of putting it there.
+     */
+    it("moves the focus off a cluster a new listing no longer finds", async () => {
+      core.isTauri.mockReturnValue(true);
+      core.pickKubeconfigFiles.mockResolvedValue([EDGE_FILE]);
+      core.listContexts.mockResolvedValue({ contexts: [EDGE] });
+      open();
+      await screen.findByText("Contexts found");
+      expect(store.activeCluster()).toBe(PROD.stableId);
+
+      await userEvent.click(screen.getByRole("button", { name: /Add a kubeconfig file/i }));
+
+      await waitFor(() => expect(store.activeCluster()).toBe(EDGE.stableId));
+      expect(store.currentWorkspace().clusters).toEqual([EDGE.stableId]);
+    });
+
+    /**
      * **A SECOND cluster opened onto an `/overview` tab the FIRST one made.**
      *
      * `openTab` dedupes by route and used to return with `activeId:

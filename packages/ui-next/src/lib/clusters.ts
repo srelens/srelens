@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { ClusterContext } from "@srelens/core";
-import { useActiveCluster } from "./tabsStore";
+import { reconcileClusters, useActiveCluster } from "./tabsStore";
 
 /**
  * The cluster contexts this window knows about.
@@ -74,11 +74,35 @@ export function getContextsError(): string {
  * One call rather than a separate `setContextsError`, so the three states can
  * never be observed half-changed — a list installed before its error, or an
  * error left standing over a list that has since succeeded.
+ *
+ * **A listing that ANSWERED also reconciles the workspaces, and that is part of
+ * this write rather than of its callers.** A replaced context list can invalidate
+ * a workspace's `activeCluster`: remove or rename the active context, press
+ * `Refresh all`, and the workspace went on naming a cluster nobody declares —
+ * `useActiveContext()` answered `undefined` and every cluster-scoped screen fell
+ * to its no-cluster state, telling the reader to pick a cluster while other
+ * clusters sat in the table. `Window` had always reconciled its boot listing;
+ * neither connection screen did. Doing it here is what makes all three callers
+ * consistent at once, rather than leaving the fourth to rediscover it — and it
+ * is the same lesson as {@link ContextsStatus} above: a store write that
+ * invalidates other state has to say so.
+ *
+ * **Only on a clean answer, and the guard is load-bearing.** A listing that
+ * refused — wholly, or partially with some contexts and a reason — has taken
+ * nothing away: the missing clusters may be perfectly present behind an
+ * unreadable file or a dropped VPN. `Window` keeps the restored cluster ids on
+ * exactly that path (see its `saved && failure` branch) precisely so a transient
+ * failure is not persisted as an emptied workspace, and it calls this with an
+ * empty list when it does. Reconciling then would undo it.
  */
 export function setContexts(next: ClusterContext[], error = ""): void {
   contexts = next;
   status = error === "" ? "loaded" : "failed";
   failure = error;
+  // Before this store's own listeners: the tabs store's subscribers read the
+  // active cluster AND this list, and waking them while the two disagree is the
+  // torn render the single-write rule above exists to prevent.
+  if (error === "") reconcileClusters(next);
   for (const listener of listeners) listener();
 }
 

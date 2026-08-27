@@ -1,6 +1,17 @@
 import { useSyncExternalStore } from "react";
+import type { ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import { CLOSED_CAP, defaultState, makeTab, newId, relabel, type Tab, type TabsState, type Workspace } from "./tabs";
+import {
+  CLOSED_CAP,
+  defaultState,
+  makeTab,
+  newId,
+  reconcile,
+  relabel,
+  type Tab,
+  type TabsState,
+  type Workspace,
+} from "./tabs";
 
 /**
  * The tab store: module-level state, one hook, plain functions for actions.
@@ -47,6 +58,29 @@ export function getState(): TabsState {
 /** Replace the whole state — for boot and for tests. */
 export function setState(next: TabsState): void {
   emit(next);
+}
+
+/**
+ * Make every workspace consistent with the clusters that actually exist.
+ *
+ * **Called after a listing that answered, from the contexts store rather than
+ * from a screen.** `Window` does this at boot against the restored state, and
+ * for a while it was the only caller: `/connections`' `Refresh all` and
+ * `/connect`'s `reload` both replaced the context list and left the workspace
+ * pointing at whatever it had, so removing or renaming the ACTIVE context and
+ * refreshing left `activeCluster` naming a context nobody declares —
+ * `useActiveContext()` `undefined`, and every cluster-scoped screen on its
+ * no-cluster state while other clusters sat in the table. `reconcile` is what
+ * picks the first survivor, and it did not run.
+ *
+ * It lives behind the contexts store's own write (see `setContexts`) so that
+ * every listing goes through it, including a fourth caller nobody has written
+ * yet. `reconcile` returns the state untouched when nothing needed changing and
+ * `emit` skips an unchanged state, so a refresh that answers with the same
+ * clusters wakes nobody — one of the subscribers writes a file.
+ */
+export function reconcileClusters(contexts: readonly ClusterContext[]): void {
+  emit(reconcile(cur(), [...contexts]));
 }
 
 export function subscribe(listener: () => void): () => void {
