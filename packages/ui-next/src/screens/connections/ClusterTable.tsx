@@ -3,7 +3,7 @@ import { Badge, Button, Mark, Table, cx, type Column } from "@srelens/ui-kit";
 import { useMark } from "../../lib/marks";
 import { glyph } from "../../lib/tree";
 import type { Probe } from "../../lib/probe";
-import { STATUS, joined, latencyLabel, viaOf } from "./clusterText";
+import { STATUS, bySource, joined, latencyLabel, sourceOf, viaOf } from "./clusterText";
 
 /**
  * One cluster as §6's table draws it: the context, what the last probe said,
@@ -28,25 +28,15 @@ export interface ClusterTableProps {
 }
 
 /**
- * §6's `Source`, and the whole of its vocabulary.
- *
- * Two values, from `isLocal`. **`Team server` is never one of them** — §6's
- * third source signs in to a team server and lists its members with presence,
- * and no capability in core reports either (spec decision 5). A column that
- * could say it would be a column asserting a backend srelens does not have.
- */
-function sourceOf(context: ClusterContext): string {
-  return context.isLocal ? "Local" : "Kubeconfig";
-}
-
-/**
- * The four things this file used to hold — `joined`, `viaOf`,
- * `latencyLabel` and the `STATUS` table — now live in `./clusterText`,
+ * The six things this file used to hold — `joined`, `viaOf`, `latencyLabel`,
+ * the `STATUS` table, `sourceOf` and `bySource` — now live in `./clusterText`,
  * because the Sources rail and §24's first-run card render the same facts: a
- * second latency formatter is how the absent-not-zero rule gets lost, and a
- * second status table is how one screen starts calling a cluster something the
- * other never would. `latencySort` below stays here: it is about how THIS
- * table orders a column, which the rail has no opinion about.
+ * second latency formatter is how the absent-not-zero rule gets lost, a second
+ * status table is how one screen starts calling a cluster something the other
+ * never would, and a second sort is how `/connect` came to list one set of
+ * clusters in a different order from this table. `latencySort` below stays
+ * here: it is about how THIS table orders a column, which the rail has no
+ * opinion about.
  *
  * The number the `Latency` column SORTS on — never the text beside it.
  */
@@ -74,30 +64,6 @@ function latencySort(probe: Probe): number {
    * is `0`, which reaches that same branch on purpose.
    */
   return latencyLabel(probe) === null ? Number.MAX_VALUE : (probe.latencyMs ?? 0);
-}
-
-/**
- * Rows grouped by where the cluster comes from, as §6 groups them.
- *
- * **Kubeconfig contexts first, then local clusters** — §6's own order is
- * `team` → `file` → `local`, and with the team server out of scope (spec
- * decision 5) that leaves file before local. It is also the order Pane 2 lists
- * its sections in (`Kubeconfig · on this machine`, then
- * `Local · runs on this laptop`), so a reader's eye maps a group in the table
- * onto the section beside it.
- *
- * (The brief for this task glossed §6 as "local clusters together, then
- * kubeconfig contexts", which is the reverse of what §6 and Pane 2 both say.
- * The GROUPING is the requirement — rows must not interleave — and this
- * follows the design it cites for the order.)
- *
- * Stable within each group: whatever order the caller listed its clusters in
- * survives, because `listContexts` returns them in the kubeconfig's own order
- * and re-sorting them here would be this file inventing a second opinion about
- * a list the rail already draws one way.
- */
-function bySource(rows: readonly ClusterRow[]): ClusterRow[] {
-  return [...rows.filter((r) => !r.context.isLocal), ...rows.filter((r) => r.context.isLocal)];
 }
 
 /**
@@ -351,7 +317,7 @@ export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
     <div data-testid="cluster-table" className={cx("min-w-0", className)}>
       <Table
         columns={columns}
-        data={bySource(rows)}
+        data={bySource(rows, (row) => row.context.isLocal)}
         getRowKey={(row) => row.context.stableId}
         // The keyboard's half of `Open`: Enter on the focused row, or a
         // double-click. The kit's own rule — a pointer-only route to opening a

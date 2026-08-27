@@ -38,6 +38,56 @@ export function joined(parts: readonly (string | undefined)[]): string {
 }
 
 /**
+ * §6's `Source`, and the whole of its vocabulary.
+ *
+ * Two values, from `isLocal`. **`Team server` is never one of them** — §6's
+ * third source signs in to a team server and lists its members with presence,
+ * and no capability in core reports either (spec decision 5). A column that
+ * could say it would be a column asserting a backend srelens does not have.
+ *
+ * Here rather than in `ClusterTable` because the table now heads each group
+ * with this word as well as printing it in the cell — one word for one fact, so
+ * a heading cannot come to say something the cell under it does not.
+ */
+export function sourceOf(context: ClusterContext): string {
+  return context.isLocal ? "Local" : "Kubeconfig";
+}
+
+/**
+ * Clusters grouped by where they come from, as §6 groups them.
+ *
+ * **Kubeconfig contexts first, then local clusters** — §6's own order is
+ * `team` → `file` → `local`, and with the team server out of scope (spec
+ * decision 5) that leaves file before local. It is also the order the Sources
+ * rail lists its sections in (`Kubeconfig · on this machine`, then
+ * `Local · runs on this laptop`), so a reader's eye maps a group in the table
+ * onto the section beside it.
+ *
+ * **Both screens that draw a cluster list call this**, and that is why it is
+ * here rather than in `ClusterTable` where it began. `/connect` listed in raw
+ * `listContexts` order, so a reader moving between the two screens in one click
+ * met the same clusters in two orders — visible immediately, and with two sorts
+ * for one set it is how they would drift apart again.
+ *
+ * Stable within each group: whatever order the caller listed its clusters in
+ * survives, because `listContexts` returns them in the kubeconfig's own order
+ * and re-sorting them here would be this file inventing a second opinion about
+ * a list the rail already draws one way.
+ *
+ * Takes the predicate rather than a `ClusterContext` accessor: the table groups
+ * rows that HOLD a context, `/connect` groups the contexts themselves, and one
+ * implementation serving both is the whole point.
+ *
+ * The predicate may answer `undefined`, because `ClusterContext.isLocal` is
+ * optional in core and a context that says nothing about it is a kubeconfig
+ * one. Absent reads as "not local" here rather than at each call site, where
+ * three spellings of `=== true` would be three chances to get it wrong.
+ */
+export function bySource<T>(items: readonly T[], isLocal: (item: T) => boolean | undefined): T[] {
+  return [...items.filter((item) => !isLocal(item)), ...items.filter((item) => isLocal(item))];
+}
+
+/**
  * The host a cluster answers on, for a local cluster's `Via`.
  *
  * `new URL` rather than a regexp, and the raw string when it will not parse: a

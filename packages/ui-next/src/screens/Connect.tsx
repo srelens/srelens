@@ -36,7 +36,7 @@ import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
 import { openTab, setActiveCluster, setWorkspaceClusters, useTabs } from "../lib/tabsStore";
 import { glyph } from "../lib/tree";
-import { STATUS, latencyLabel, viaOf } from "./connections/clusterText";
+import { STATUS, bySource, latencyLabel, viaOf } from "./connections/clusterText";
 
 /** §24's copy, verbatim, and in one place so the page and the suite quote one string. */
 const HEADLINE_ONE = "Pick a cluster.";
@@ -503,6 +503,25 @@ export function Connect({ route }: { route: string }) {
       ? `${contexts.length} in ${plural(fileCount(contexts), "file")}`
       : undefined;
 
+  /**
+   * The rows, in the order `/connections` puts the same clusters in.
+   *
+   * **Not `listContexts`' own order, and that is the whole change.** This card
+   * listed raw, so a laptop whose kubeconfig declares a kind cluster between two
+   * remote contexts drew them interleaved here and grouped one click away on
+   * §6's table — two orders for one set, on two screens a reader moves between
+   * in a single gesture. `bySource` is the table's own grouping, imported rather
+   * than restated: a second sort written here is exactly how the two screens
+   * would drift apart again.
+   *
+   * No group HEADING goes with it. §6's table draws one per group because it has
+   * a `Source` column to head; this card is one flat list of eight rows at most
+   * in the ordinary case, and a label over each half of it would be chrome the
+   * first screen a reader ever sees does not need. The order is what the two
+   * screens have to agree on.
+   */
+  const listed = bySource(contexts, (context) => context.isLocal);
+
   const Sparkle = Icons.ask;
 
   return (
@@ -581,7 +600,7 @@ export function Connect({ route }: { route: string }) {
               />
             )}
 
-            {contexts.map((context) => (
+            {listed.map((context) => (
               <ContextRow
                 key={context.stableId}
                 context={context}

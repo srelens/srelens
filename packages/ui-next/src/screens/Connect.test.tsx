@@ -25,6 +25,7 @@ vi.mock("@srelens/core", async (orig) => ({
 
 import { describeError, type ClusterContext, type ClusterInfo } from "@srelens/core";
 import { Connect } from "./Connect";
+import { ClusterTable } from "./connections/ClusterTable";
 import { getKubeconfigFiles, resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { getProbe, resetProbes } from "../lib/probe";
 import { defaultState } from "../lib/tabs";
@@ -408,6 +409,62 @@ describe("Connect", () => {
 
       // The badge and the reading keep their own width whatever the name does.
       expect(row("prod-eu").status.parentElement?.className).toContain("shrink-0");
+    });
+  });
+
+  /**
+   * **One set of clusters, one order, across both screens.**
+   *
+   * `/connections` groups its rows by credential source and `/connect` listed
+   * in raw `listContexts` order, so the same seventeen clusters came out in two
+   * different orders on two screens a reader moves between in one click. The
+   * order itself is `bySource`'s, which now lives in `clusterText` beside the
+   * status words — a second sort written here is how the two screens would
+   * start disagreeing again.
+   */
+  describe("the order it lists in", () => {
+    /**
+     * Interleaved ON PURPOSE: the local cluster sits between two kubeconfig
+     * contexts, so the expected order is not the order it was listed in. With
+     * the local cluster last, a screen that applied no grouping at all would
+     * satisfy this on fixture order alone.
+     */
+    const MIXED = [PROD, LOCAL, STAGING];
+
+    it("lists kubeconfig contexts ahead of local clusters, whatever order they were listed in", async () => {
+      setContexts(MIXED);
+      open();
+      await screen.findByText("Contexts found");
+
+      expect(screen.getAllByTestId(/^connect-name-/).map((el) => el.textContent)).toEqual([
+        "prod-eu",
+        "staging-eu",
+        "kind-lab",
+      ]);
+    });
+
+    it("lists them in the same order the connections table does", async () => {
+      setContexts(MIXED);
+      open();
+      await screen.findByText("Contexts found");
+      const here = screen.getAllByTestId(/^connect-name-/).map((el) => el.textContent);
+
+      // The other screen, from the same contexts. Rendered into its own
+      // container so the two lists cannot read each other's rows.
+      const table = render(
+        <ClusterTable
+          rows={MIXED.map((context) => ({ context, probe: { state: "unread" as const } }))}
+          onOpen={() => {}}
+        />,
+      );
+      const there = within(table.container)
+        .getAllByTestId(/^cluster-name-/)
+        .map((el) => el.textContent);
+
+      expect(here).toEqual(there);
+      // And not the raw listing order — which is what makes the line above a
+      // claim about grouping rather than about two screens both doing nothing.
+      expect(here).not.toEqual(MIXED.map((context) => context.name));
     });
   });
 
