@@ -112,15 +112,83 @@ describe("AgentConsent", () => {
     expect(core.respondToConfirm).not.toHaveBeenCalled();
   });
 
-  it("surfaces a failed response instead of letting the reader believe it landed", async () => {
+  /**
+   * A failed answer is the one thing here the reader has to be told, and this
+   * dialog is the only surface that can tell them. `notify.error` reaches
+   * sonner, whose `<Toaster>` is mounted in classic's `App` — and `main.tsx`
+   * mounts that tree or this one and never both, so a toast raised from this
+   * package is created and rendered nowhere. (#374 item 2)
+   *
+   * So the pin is on the DOM. The version of this test that shipped asserted
+   * the `notify` mock had been called, which was true for the whole time
+   * nothing whatsoever reached the reader — a test that could not fail for the
+   * reason its own name gave.
+   */
+  it("tells the reader, on screen, when their answer did not take effect", async () => {
+    core.respondToConfirm.mockRejectedValue(
+      new Error("that confirmation is no longer waiting (it timed out or was already answered)"),
+    );
+    render(<AgentConsent />);
+    ask("r3", "k8s_deleteResource");
+    await screen.findByText(/k8s_deleteResource/);
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+
+    const said = await screen.findByRole("alert");
+    // What srelens knows for certain, in srelens's own words.
+    expect(said.textContent).toMatch(/not answered by you/i);
+    // And the reason, from the backend rather than invented here.
+    expect(said.textContent).toMatch(/no longer waiting/i);
+    // Not into the invisible sink instead: a toast host this tree does not
+    // have is not a report, and a second copy of the failure would be one
+    // problem said twice the moment #374's sweep mounts one.
+    expect(core.notify.error).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The prompt SURVIVES a failed answer. Dropping the request in `finally` —
+   * which is what shipped — took the question off screen exactly as though it
+   * had been answered, and with the queue entry went the only way to try again.
+   */
+  it("keeps the prompt up when the answer did not land, so it can be tried again", async () => {
     core.respondToConfirm.mockRejectedValue(new Error("already timed out"));
     render(<AgentConsent />);
     ask("r3", "k8s_deleteResource");
     await screen.findByText(/k8s_deleteResource/);
     await userEvent.click(screen.getByRole("button", { name: /approve/i }));
-    await waitFor(() => expect(core.notify.error).toHaveBeenCalled());
-    // Still dropped — there is nothing left here to retry.
-    await waitFor(() => expect(screen.queryByText(/k8s_deleteResource/)).toBeNull());
+    await screen.findByRole("alert");
+
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByText(/k8s_deleteResource/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /approve/i }).hasAttribute("disabled")).toBe(false);
+
+    // And a second press that does land takes the failure down with the prompt.
+    core.respondToConfirm.mockResolvedValue(undefined);
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /**
+   * The failure belongs to the request it happened on, and is held BY ID for
+   * the same reason removal is: `mcp://confirm-resolved` can take the head out
+   * from under this component at any moment — and it always eventually does,
+   * since `ResolveOnDrop` broadcasts on every exit from `confirm`. A failure
+   * kept as a bare string would then be painted under the NEXT agent's
+   * question, telling the reader a call had been refused that never was.
+   */
+  it("does not carry a failure over onto the next request", async () => {
+    core.respondToConfirm.mockRejectedValue(new Error("already timed out"));
+    render(<AgentConsent />);
+    ask("a", "toolA");
+    ask("b", "toolB");
+    await screen.findByText(/toolA/);
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await screen.findByRole("alert");
+
+    // The backend announces the resolution it refused the answer for.
+    emit(RESOLVED, { id: "a" });
+    expect(await screen.findByText(/toolB/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   /**
@@ -228,11 +296,16 @@ describe("AgentConsent", () => {
      */
     it("says nothing to the reader about a refusal it made on their behalf", async () => {
       core.respondToConfirm.mockRejectedValue(new Error("already timed out"));
-      render(<AgentConsent />);
+      const { container } = render(<AgentConsent />);
       act(() => lockWorkspace());
       ask("r9", "k8s_drainNode");
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r9", false));
-      expect(core.notify.error).not.toHaveBeenCalled();
+      // On screen rather than on a spy — the same reason the failure test
+      // above changed. A covered window is the cover's, and this component
+      // draws nothing over it: no prompt, and no failure line either.
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(container.textContent).toBe("");
     });
   });
 });

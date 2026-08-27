@@ -1,13 +1,7 @@
 import { useEffect, useState } from "react";
-import {
-  describeError,
-  isTauri,
-  notify,
-  on,
-  respondToConfirm,
-  type ConfirmRequest,
-} from "@srelens/core";
+import { isTauri, on, respondToConfirm, type ConfirmRequest } from "@srelens/core";
 import { ConfirmDialog } from "@srelens/ui-kit";
+import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
 
 /**
@@ -27,8 +21,8 @@ import { useWorkspaceSealed } from "./LockGate";
  * start the MCP server at all; the pane's Start button changed that, so the
  * issue this branch made reachable is closed here.
  *
- * **A port, not a redesign.** The queue, the resolution listener, the failure
- * report and the two labels are classic's. Requests QUEUE rather than replace
+ * **A port, not a redesign.** The queue, the resolution listener and the two
+ * labels are classic's. Requests QUEUE rather than replace
  * one another: two agents can call concurrently, and dropping one would leave
  * that call hanging until its own timeout denied it. A resolution announced by
  * the backend — answered here, answered on classic's inline assistant card, or
@@ -48,6 +42,41 @@ import { useWorkspaceSealed } from "./LockGate";
  *   a question with `undefined` in it.
  * - The failure detail goes through `describeError`, as everything in this
  *   package does, rather than `String(e)`.
+ *
+ * **A failed answer is REPORTED IN THE DIALOG, and the dialog stays up.** The
+ * port carried classic's `notify.error` across, and in this tree that reports
+ * nothing: `notify`'s sink is installed at `main.tsx` for both designs, but it
+ * calls sonner, and sonner's `<Toaster>` is mounted in classic's `App` — which
+ * `main.tsx` mounts instead of this tree, never beside it. The toast was
+ * created and rendered nowhere, and the `finally` below then dropped the
+ * request, so the reader watched their approval or denial vanish and was left
+ * believing they had answered a call that in fact nobody answered. That is
+ * #374 item 2; the surface here is the same one `index.tsx` and
+ * `ResourceMenu`'s confirmation already use for the same reason, and the
+ * `notify.error` call is gone rather than kept, so there is one report of this
+ * failure and not one visible plus one invisible.
+ *
+ * Two consequences worth stating, because they are the point:
+ *
+ * - **The queue entry survives a failed answer.** A rejection means the call
+ *   was NOT answered as the reader asked, so removing it would take the
+ *   question away exactly as if it had been — and take the retry with it. It
+ *   cannot strand them: `ResolveOnDrop` (`mcp_confirm.rs`) broadcasts
+ *   `mcp://confirm-resolved` on every exit from `confirm` — answered, timed
+ *   out at sixty seconds, or the future dropped — so a request that can no
+ *   longer be answered is always taken out of this queue by the backend,
+ *   whether or not the reader presses anything again.
+ * - **The failure is held BY ID**, for the same reason removal is. That
+ *   broadcast can take the head out from under this component at any moment;
+ *   a failure kept as a bare string would then be drawn under the NEXT
+ *   agent's question, telling the reader a call had been refused that never
+ *   was.
+ *
+ * The copy keeps the distinction the catch block already drew and claims
+ * nothing more. srelens knows one thing for certain — the click did not take
+ * effect — and says exactly that in its own words; WHY comes from the backend
+ * underneath, through `FailureLine`, which is `describeError` plus the folded
+ * original. It is not srelens's sentence, and it is not printed as one.
  *
  * **This is the WINDOW's question, so it is mounted outside every tab.** Since
  * PR #365 the kit's dialogs are scoped to the portal surface they are opened
@@ -116,9 +145,23 @@ function resolvedId(payload: unknown): string | null {
   return typeof id === "string" && id !== "" ? id : null;
 }
 
+/**
+ * A failed answer, and the request it was an answer TO.
+ *
+ * The id is not decoration: see the file comment. The head can be taken out
+ * from under this by `mcp://confirm-resolved` between the rejection and the
+ * next render, so the failure is only drawn while the request it belongs to is
+ * still the one being asked.
+ */
+interface FailedAnswer {
+  id: string;
+  error: unknown;
+}
+
 export function AgentConsent() {
   const [queue, setQueue] = useState<ConfirmRequest[]>([]);
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<FailedAnswer | null>(null);
   // The cover, by either route — a raised lock or a launch check that has not
   // answered. See the file comment for what this component does about it.
   const covered = useWorkspaceSealed();
@@ -180,18 +223,26 @@ export function AgentConsent() {
     if (!current) return;
     const { id } = current;
     setBusy(true);
+    // A previous attempt's failure is no longer what is happening. Cleared as
+    // this one starts rather than when it succeeds, so the line does not sit
+    // under a disabled Approve button describing an answer already superseded.
+    setFailed(null);
     try {
       await respondToConfirm(id, approved);
+      // Only a landed answer takes the question away. By id, not by position —
+      // see the file comment.
+      setQueue((q) => q.filter((r) => r.id !== id));
     } catch (e) {
       // The request timed out server-side, or was answered elsewhere — the
       // click did not take effect. Swallowing this would let the reader believe
       // they approved (or denied) a call that had in fact already been settled
-      // without them.
-      notify.error("Could not respond to that confirmation", describeError(e).detail);
+      // without them; dropping the request would do the same thing more
+      // convincingly. So the prompt stays, carrying this, and the buttons stay
+      // live — and the backend's own `mcp://confirm-resolved` is what takes it
+      // down once the call really is settled.
+      setFailed({ id, error: e });
     } finally {
       setBusy(false);
-      // By id, not by position — see the file comment.
-      setQueue((q) => q.filter((r) => r.id !== id));
     }
   }
 
@@ -212,6 +263,23 @@ export function AgentConsent() {
             <p className="m-0 text-[0.6875rem] text-muted">
               {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
             </p>
+          )}
+          {/*
+            Only for the request it happened on — see {@link FailedAnswer}.
+            `role="alert"` for the reason `NextApp`'s own inline failure has
+            one: the reader pressed a button and the visible result is that
+            nothing happened, so this has to be announced rather than merely
+            drawn. It is safe to announce inside the card because the card is
+            where focus already is.
+          */}
+          {failed?.id === current.id && (
+            <div role="alert" className="text-sev">
+              <p className="m-0">
+                This request was not answered by you: your answer did not take effect. Try
+                again — if the call is no longer waiting, this prompt goes away on its own.
+              </p>
+              <FailureLine error={failed.error} className="mt-1" />
+            </div>
           )}
         </div>
       }
