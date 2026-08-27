@@ -167,12 +167,17 @@ function ClusterCell({ row }: { row: ClusterRow }) {
  * is out of scope and no capability backs it, so `Source` has exactly two
  * values).
  *
- * **`Auth` is a mechanism, never a credential.** `authKind` is rendered
- * verbatim and nothing here reformats it: the Rust side decides what may
- * appear in it — `exec plugin · <basename>`, `token`, `client certificate`, a
- * legacy provider's own name, optionally an account — and a second opinion
+ * **`Auth` is a mechanism, never a credential and never an account.**
+ * `authKind` is rendered verbatim and nothing here reformats it: the Rust side
+ * decides what may appear in it — `exec plugin · <basename>` or bare `exec
+ * plugin`, `token`, `client certificate`, `basic`, `impersonation`, `none`, a
+ * legacy provider's own name or bare `auth provider` — and a second opinion
  * about that string in the UI is how a field whose whole purpose is carrying
- * no secret starts carrying one.
+ * no secret starts carrying one. No account rides along: `crates/kube`'s
+ * `auth_kind_of` used to append the kubeconfig's plain-text `email` and no
+ * longer does, because `k8s.listContexts` is read-only and therefore not
+ * consent-gated, so every field on this row is readable by any connected
+ * agent.
  */
 export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
   /**

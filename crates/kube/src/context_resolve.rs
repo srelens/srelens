@@ -163,38 +163,62 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
 }
 
 /// Map a kubeconfig's `auth-info` to the credential MECHANISM it names —
-/// never the credential. Exec ARGUMENTS are deliberately dropped: they
-/// routinely carry client IDs and, in bad kubeconfigs, secrets, and this
-/// string ends up rendered in a table. The exec COMMAND is reduced to its
-/// basename for the same reason — a generated path can itself carry an
-/// identifier or secret (e.g. a per-account credential directory) and the
-/// basename (`gcloud`, `kubelogin`, `aws-iam-authenticator`) is all a reader
-/// needs to know which plugin authenticates the cluster.
+/// never the credential, and never the account either.
+///
+/// **Nothing from an `auth-provider`'s `config` map is emitted, under any
+/// key.** This used to append `· <email>` when that map carried an
+/// `email`-shaped value, gated by a shape check (`@`, no whitespace, ≤254
+/// bytes). Both halves of that were wrong:
+///
+/// - The check was defeatable. `aws@AKIA….wJalrXUtnFEMI…`, a JWT-shaped blob
+///   with an `@` in it, and `a@b\u{200B}SECRET-BLOB` (a zero-width space is not
+///   `char::is_whitespace`) all walked through it. `@` plus no whitespace plus
+///   254 bytes is a wide door, and 254 bytes fits most secret material.
+/// - The account was never load-bearing. This string exists to say WHICH
+///   MECHANISM authenticates a cluster; the account was decoration. And
+///   `k8s.listContexts` is read-only, so it is not consent-gated: every field
+///   on `ContextDto` reaches any connected agent, the reader's own LLM
+///   included. "Already visible in the kubeconfig" is an argument about a
+///   human reading their own screen, not about that audience.
+///
+/// So the door is removed rather than narrowed.
+///
+/// **The two identifiers that ARE emitted are gated by shape.** An exec
+/// command's basename and an `auth-provider`'s own name are both strings a
+/// kubeconfig author chose, and both land in a table cell:
+///
+/// - Exec ARGUMENTS are dropped whole — they routinely carry client IDs and,
+///   in bad kubeconfigs, secrets.
+/// - The exec COMMAND is reduced to its basename, so a generated path
+///   (`/opt/creds/AKIA…/get-token.sh`) cannot bring its directory along. The
+///   basename (`gcloud`, `kubelogin`, `aws-iam-authenticator`) is the reader's
+///   actual question.
+/// - Whatever survives must still look like a plugin identifier — see
+///   [`identifier`]. A name that does not is dropped and only the mechanism is
+///   named: `exec plugin`, or `auth provider`. Honest and short beats echoing
+///   a string nobody checked.
 ///
 /// A legacy `auth-provider` block (`gcp`, `azure`, `oidc`, or any other name a
-/// plugin registers) is named as exactly what the kubeconfig calls it —
-/// never generalised to `oidc` for all of them, which would assert something
-/// the source doesn't say. The only extra detail ever appended is a plain-text
-/// `email` already sitting in that provider's config map, and only when it
-/// actually looks like one (see [`looks_like_an_email`]) — `config` is a
-/// generic `HashMap<String, String>`, so nothing guarantees a provider ever
-/// puts a real address under that key rather than, say, a refresh token.
-/// Nothing else from that map is ever surfaced, since that's where a refresh
-/// token or client secret would live.
+/// plugin registers) is otherwise named as exactly what the kubeconfig calls
+/// it — never generalised to `oidc` for all of them, which would assert
+/// something the source doesn't say.
 fn auth_kind_of(auth: &AuthInfo) -> String {
     if let Some(exec) = &auth.exec {
-        let command = exec.command.as_deref().unwrap_or("unknown");
+        let command = exec.command.as_deref().unwrap_or_default();
         // Basename only, and split on both separators regardless of host OS
         // (matching `local_cluster::is_cloud_auth`'s cross-platform basename
         // handling) — a kubeconfig authored on Windows and read on macOS/
         // Linux still shouldn't leak its directory structure here.
         let basename = command.rsplit(['/', '\\']).next().unwrap_or(command);
-        return format!("exec plugin · {basename}");
+        return match identifier(basename) {
+            Some(name) => format!("exec plugin · {name}"),
+            None => "exec plugin".to_string(),
+        };
     }
     if let Some(provider) = &auth.auth_provider {
-        return match provider.config.get("email").filter(|value| looks_like_an_email(value)) {
-            Some(account) => format!("{} · {account}", provider.name),
-            None => provider.name.clone(),
+        return match identifier(&provider.name) {
+            Some(name) => name.to_string(),
+            None => "auth provider".to_string(),
         };
     }
     if auth.client_certificate.is_some() || auth.client_certificate_data.is_some() {
@@ -212,19 +236,34 @@ fn auth_kind_of(auth: &AuthInfo) -> String {
     "none".to_string()
 }
 
-/// Whether `value` looks enough like an email address to be safely echoed:
-/// contains `@`, carries no whitespace, and is short enough that a smuggled
-/// credential blob (a token, a JWT, a client secret) can't ride along under
-/// this key instead of a real address. This is a shape check, not proof —
-/// `AuthProviderConfig.config` is a generic `HashMap<String, String>`, and
-/// nothing in the kubeconfig format guarantees any particular value under
-/// `"email"` — but it is exactly what stops a construction like
-/// `"refresh-token:abc.def.SECRET"` (no `@`) from being surfaced verbatim.
-fn looks_like_an_email(value: &str) -> bool {
-    // RFC 5321's mailbox length ceiling; generous for a real address and far
-    // too short for most token/JWT/secret material to slip under.
-    const MAX_EMAIL_LEN: usize = 254;
-    value.len() <= MAX_EMAIL_LEN && value.contains('@') && !value.chars().any(char::is_whitespace)
+/// `value` if it is shaped like a plugin identifier, and nothing otherwise.
+///
+/// An ALLOWLIST, not a denylist, and that is the whole point: a bound on
+/// length plus a ban on control/bidi/zero-width characters still passes
+/// `refresh-token:abc.def.SECRET` — 28 printable ASCII bytes carrying a
+/// credential. Naming what a plugin identifier may contain rejects that by
+/// construction rather than by enumerating what it may not.
+///
+/// The set is what real kubeconfigs actually hold: ASCII alphanumerics plus
+/// `-`, `_` and `.` — enough for `gke-gcloud-auth-plugin`,
+/// `kubectl-oidc_login`, `get-token.sh`, `gke-gcloud-auth-plugin.exe`,
+/// `azure-ad`. Anything else — a space, a colon, a slash that survived the
+/// basename split, a control character, a bidi override, a zero-width space,
+/// any non-ASCII — means this is not a name and the caller says so instead of
+/// echoing it.
+///
+/// The length bound is the second half: a 200-character run of `a` passes
+/// every character test and is still not a name.
+fn identifier(value: &str) -> Option<&str> {
+    /// Generous for every plugin and provider name that exists; far too short
+    /// for token, JWT or client-secret material.
+    const MAX_LEN: usize = 40;
+    let ok = !value.is_empty()
+        && value.len() <= MAX_LEN
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    ok.then_some(value)
 }
 
 /// Read each path and resolve its contexts. Unreadable files are skipped so one
@@ -300,9 +339,9 @@ mod tests {
     }
 
     /// A legacy `auth-provider` block naming `provider`, with an arbitrary
-    /// config map — used to pin that the provider's own name is surfaced
-    /// verbatim, and that nothing from `config` leaks except a plain-text
-    /// `email` when present.
+    /// config map — used to pin that the provider's own name is surfaced when
+    /// it is shaped like one, and that NOTHING from `config` ever leaks,
+    /// under any key.
     fn auth_provider(provider: &str, config: &[(&str, &str)]) -> AuthInfo {
         AuthInfo {
             auth_provider: Some(kube::config::AuthProviderConfig {
@@ -359,61 +398,140 @@ mod tests {
         assert_eq!(auth_kind_of(&auth_provider("my-custom-plugin", &[])), "my-custom-plugin");
     }
 
+    /// **The account is gone, and a real address is the case that proves it.**
+    ///
+    /// `oidc · dana@example.com` used to be emitted whenever a provider's
+    /// config map carried an `email`-shaped value. The auth KIND is the
+    /// load-bearing fact — this screen exists to say which mechanism
+    /// authenticates a cluster — and the account was decoration that cost a
+    /// defeatable shape check plus a PII disclosure on an agent surface
+    /// (`k8s.listContexts` is read-only, so it is not consent-gated and every
+    /// field on the DTO reaches any connected agent, the reader's LLM
+    /// included).
+    ///
+    /// Asserted with a value that WOULD have passed the old check, so this
+    /// test cannot pass by the payload being rejected — only by the account
+    /// never being appended at all.
     #[test]
-    fn auth_provider_without_email_yields_the_bare_kind() {
-        // No plain-text account field present — nothing is invented.
-        let kind = auth_kind_of(&auth_provider("oidc", &[("client-id", "abc123")]));
-        assert_eq!(kind, "oidc");
-    }
-
-    #[test]
-    fn auth_provider_with_email_appends_only_the_email() {
+    fn a_real_address_under_email_is_still_not_named() {
         let kind = auth_kind_of(&auth_provider("oidc", &[("email", "dana@example.com")]));
-        assert_eq!(kind, "oidc · dana@example.com");
-    }
-
-    #[test]
-    fn a_credential_parked_under_the_email_key_fails_the_shape_check() {
-        // The reviewer's construction: a real secret sitting under the one
-        // key meant to carry a plain-text account, with no `@` to give it
-        // away as anything but an address.
-        let kind = auth_kind_of(&auth_provider(
-            "oidc",
-            &[("email", "refresh-token:abc.def.SECRET")],
-        ));
-        assert_eq!(kind, "oidc", "a non-address value under `email` must not be echoed");
-        assert!(!kind.contains("SECRET") && !kind.contains("refresh-token"));
-    }
-
-    #[test]
-    fn an_overlong_value_under_email_fails_the_shape_check() {
-        // Has an `@` and no whitespace, so the naive check alone would pass
-        // it — the length bound is what catches a smuggled blob this shape.
-        let long = format!("{}@example.com", "a".repeat(300));
-        let kind = auth_kind_of(&auth_provider("oidc", &[("email", &long)]));
         assert_eq!(kind, "oidc");
+        assert!(!kind.contains('@'), "no account is ever appended: {kind}");
     }
 
+    /// The payloads that got PAST the old `looks_like_an_email` shape check,
+    /// kept as the record of why it went. Each one has an `@`, no
+    /// `char::is_whitespace`, and fits under 254 bytes — which is most secret
+    /// material. Nothing under any config key is emitted now, so none of them
+    /// has a door to walk through.
     #[test]
-    fn a_value_with_whitespace_under_email_fails_the_shape_check() {
-        let kind = auth_kind_of(&auth_provider("oidc", &[("email", "not an email at all")]));
-        assert_eq!(kind, "oidc");
-    }
+    fn no_value_under_any_config_key_reaches_the_kind() {
+        const AWS_PAIR: &str = "aws@AKIAIOSFODNN7EXAMPLE.wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY";
+        // A JWT-shaped blob with an `@` in it, well under the old 254-byte
+        // ceiling.
+        let jwt = format!("a@{}", "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.".repeat(4));
+        // A zero-width space is not `char::is_whitespace`, so the old check
+        // read this as one unbroken address.
+        const ZERO_WIDTH: &str = "a@b\u{200B}SECRET-BLOB";
 
-    #[test]
-    fn auth_provider_never_surfaces_any_other_config_key() {
-        // Secrets and refresh material live in this map under other keys —
-        // only `email` is ever allowed through, and only its value.
+        for value in [AWS_PAIR, jwt.as_str(), ZERO_WIDTH] {
+            let kind = auth_kind_of(&auth_provider("oidc", &[("email", value)]));
+            assert_eq!(kind, "oidc", "config values are never emitted: {value}");
+        }
+
+        // And the keys that were never allowed through in the first place.
         let kind = auth_kind_of(&auth_provider(
             "oidc",
             &[
                 ("id-token", "eyJ.super.secret"),
                 ("refresh-token", "another-secret"),
                 ("client-secret", "shh"),
+                ("email", "dana@example.com"),
             ],
         ));
-        assert_eq!(kind, "oidc", "no email present, so no key from config should leak in");
-        assert!(!kind.contains("secret"));
+        assert_eq!(kind, "oidc", "no key from config should leak in");
+        assert!(!kind.contains("secret") && !kind.contains('@'));
+    }
+
+    /// **The provider NAME is the other unchecked echo, and for an
+    /// auth-provider the bare kind IS the name** — so "the bare kind is
+    /// returned" is a tautology here and cannot be the assertion. What is
+    /// pinned instead is the SHAPE gate: a name that is not a plugin
+    /// identifier is not named at all.
+    #[test]
+    fn a_provider_name_that_is_not_an_identifier_is_not_named() {
+        // The payload the reviewer put through this door: a credential sitting
+        // where the plugin's name belongs. Short enough for a length bound
+        // alone to pass it, which is why the gate is a character allowlist.
+        let kind = auth_kind_of(&auth_provider("refresh-token:abc.def.SECRET", &[]));
+        assert_eq!(kind, "auth provider");
+        assert!(!kind.contains("SECRET"));
+
+        // Too long to be a name.
+        let long = auth_kind_of(&auth_provider(&"a".repeat(200), &[]));
+        assert_eq!(long, "auth provider");
+
+        // Control, bidi and zero-width characters, which a table renders
+        // invisibly or in reverse.
+        for hostile in ["oi\u{0}dc", "oid\u{202E}c", "oi\u{200B}dc", "oidc\u{FEFF}", "oi dc", "oidc\n"] {
+            let kind = auth_kind_of(&auth_provider(hostile, &[]));
+            assert_eq!(kind, "auth provider", "rejected: {hostile:?}");
+        }
+
+        // And a provider with no name at all is not a blank cell.
+        assert_eq!(auth_kind_of(&auth_provider("", &[])), "auth provider");
+    }
+
+    /// The same gate on the exec basename, the third unchecked echo. A
+    /// basename structurally cannot carry a directory, but it can still carry
+    /// anything a filename can.
+    #[test]
+    fn an_exec_basename_that_is_not_an_identifier_is_not_named() {
+        let kind = auth_kind_of(&exec_auth("/opt/creds/refresh-token:abc.def.SECRET", &[]));
+        assert_eq!(kind, "exec plugin");
+        assert!(!kind.contains("SECRET"));
+
+        let long = auth_kind_of(&exec_auth(&format!("/usr/bin/{}", "a".repeat(200)), &[]));
+        assert_eq!(long, "exec plugin");
+
+        for hostile in ["gcl\u{200B}oud", "gcloud\u{202E}", "gcl\u{0}oud", "get token.sh"] {
+            let kind = auth_kind_of(&exec_auth(hostile, &[]));
+            assert_eq!(kind, "exec plugin", "rejected: {hostile:?}");
+        }
+
+        // An exec block naming no command at all: the mechanism, no invented
+        // plugin name.
+        let nameless = auth_kind_of(&AuthInfo {
+            exec: Some(kube::config::ExecConfig { command: None, ..Default::default() }),
+            ..Default::default()
+        });
+        assert_eq!(nameless, "exec plugin");
+    }
+
+    /// The plugin names a reader actually has, which must all survive the
+    /// gate — a check that rejects real kubeconfigs is worse than none.
+    #[test]
+    fn the_plugin_names_readers_really_have_all_survive_the_gate() {
+        for command in [
+            "gcloud",
+            "gke-gcloud-auth-plugin",
+            "aws-iam-authenticator",
+            "aws",
+            "kubelogin",
+            "kubectl-oidc_login",
+            "get-token.sh",
+            "az",
+            "doctl",
+        ] {
+            assert_eq!(
+                auth_kind_of(&exec_auth(command, &[])),
+                format!("exec plugin · {command}"),
+                "a real plugin name must not be swallowed: {command}"
+            );
+        }
+        for provider in ["gcp", "azure", "oidc", "openstack", "azure-ad", "my-custom-plugin"] {
+            assert_eq!(auth_kind_of(&auth_provider(provider, &[])), provider);
+        }
     }
 
     #[test]

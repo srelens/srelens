@@ -55,16 +55,20 @@ pub struct ContextDto {
     /// so don't reach for that distinction here either.)
     #[serde(rename = "sourceFile")]
     pub source_file: String,
-    /// The credential MECHANISM, never the credential. One of `client
-    /// certificate`, `token`, `basic`, `exec plugin · <command's basename>`,
-    /// `impersonation`, `none`, or a legacy auth-provider's own name (`gcp`,
-    /// `azure`, `oidc`, …) optionally followed by `· <email>` when the
-    /// kubeconfig already carries one in plain text AND it actually looks
-    /// like an address. See `context_resolve::auth_kind_of` for the exact
-    /// mapping. Exec ARGUMENTS, the exec command's directory, and everything
-    /// else in an auth-provider's config map are deliberately excluded: they
-    /// routinely carry client IDs and sometimes secrets, and this string is
-    /// rendered in a table.
+    /// The credential MECHANISM, never the credential and never the account.
+    /// One of `client certificate`, `token`, `basic`, `impersonation`, `none`,
+    /// `exec plugin · <command's basename>` (or bare `exec plugin`), or a
+    /// legacy auth-provider's own name (`gcp`, `azure`, `oidc`, …) — or bare
+    /// `auth provider` when that name is not shaped like an identifier. See
+    /// `context_resolve::auth_kind_of` for the exact mapping and
+    /// `context_resolve::identifier` for the shape gate.
+    ///
+    /// Deliberately excluded: exec ARGUMENTS, the exec command's directory,
+    /// and every value in an auth-provider's config map INCLUDING `email`.
+    /// The account used to be appended and no longer is — `k8s.listContexts`
+    /// is read-only and so not consent-gated, which makes every field here
+    /// readable by any connected agent, and the account was decoration on a
+    /// string whose job is naming a mechanism.
     #[serde(rename = "authKind")]
     pub auth_kind: String,
 }
