@@ -10,7 +10,7 @@ import {
   startMcpHttp,
   stopMcpHttp,
 } from "@srelens/core";
-import { Badge, Button, Panel, SubHead } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Panel, SubHead } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 
 /**
@@ -123,6 +123,26 @@ import { FailureAlert } from "../../lib/errorCopy";
  * is where classic put it too: `McpSettingsSection` never called this, only
  * `SecuritySettingsSection` did.
  *
+ * **Rotate and Revoke ask first**, because both invalidate the credential on
+ * the click and neither is undoable. Rotation restarts a running server so the
+ * new token takes effect, which drops every agent request in flight;
+ * revocation stops the server outright — "it must never serve
+ * unauthenticated" (`mcp.rs`) — and disconnects every HTTP client. Classic has
+ * gated both behind `ConfirmDialog` since it shipped
+ * (`McpSettingsSection.tsx:314-329`) and this pane called straight through, so
+ * a mis-aimed click was an immediate outage. The kit's `ConfirmDialog` is
+ * scoped to the tab it was opened from (#365), which is right here: the
+ * question belongs to the Settings tab it was asked in, not to the window.
+ *
+ * The COPY is classic's, kept where it is still true and sharpened where this
+ * pane knows more. Classic had to hedge — "If the MCP HTTP server is running,
+ * rotating restarts it immediately" — because its dialog had no live status to
+ * read. This pane does: {@link rotateQuestion} and {@link revokeQuestion} say
+ * what will happen when the status read has answered, and fall back to
+ * classic's conditional sentence, verbatim, for the one case where the read is
+ * still loading or refused. A question is the last place to assert a fact from
+ * nothing.
+ *
  * **No port editor** (#374). Changing the port is a second, differently-shaped
  * job — validate, persist, and restart a listener that may be serving an agent
  * mid-call — and this pane has no control for it, so it makes no claim that it
@@ -143,6 +163,41 @@ import { FailureAlert } from "../../lib/errorCopy";
  */
 function wouldBindAt(port: number): string {
   return `http://127.0.0.1:${port}/mcp`;
+}
+
+/**
+ * What rotating costs, from what this pane has actually established about the
+ * listener — `true` running, `false` stopped, `null` not established.
+ *
+ * The `null` sentence is classic's, verbatim
+ * (`apps/desktop/src/components/McpSettingsSection.tsx`), because classic's
+ * dialog never had a live status and its hedge is exactly right for a pane
+ * that has not read one yet. The other two say what will happen instead of
+ * what might, which is the whole advantage this pane has over that one.
+ */
+function rotateQuestion(running: boolean | null): string {
+  if (running === true) {
+    return "The server is running, so rotating restarts it immediately for the new token to take effect — every agent request in flight is dropped. Connected clients need the new value or they stop working.";
+  }
+  if (running === false) {
+    return "The server is not running, so nothing is dropped and nothing disconnects. The old value stops working the moment it is replaced: a client still holding it needs the new value before it can connect again.";
+  }
+  return "If the MCP HTTP server is running, rotating restarts it immediately so the new token takes effect — any in-flight agent request is dropped. Connected clients need the new value or they will stop working.";
+}
+
+/**
+ * What revoking costs, the same three ways. Revoking always stops the server —
+ * it must never serve unauthenticated (`mcp.rs`) — so the difference between
+ * the first two is who is disconnected by it, and what is left afterwards.
+ */
+function revokeQuestion(running: boolean | null): string {
+  if (running === true) {
+    return "The server is running, and revoking stops it — it never serves without a valid token — so every client connected over HTTP disconnects and any request in flight is dropped. Starting the server again mints a new token.";
+  }
+  if (running === false) {
+    return "The server is not running, so nothing disconnects. Revoking leaves srelens with no bearer token at all: nothing can connect over HTTP until a start mints a new one.";
+  }
+  return "Revoking also stops the MCP HTTP server: it never serves without a valid token. Any clients connected over HTTP will disconnect.";
 }
 
 /**
@@ -179,6 +234,8 @@ export function McpServer() {
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
+  /** Which of the two destructive token actions has been asked about, if any. */
+  const [asking, setAsking] = useState<null | "rotate" | "revoke">(null);
   const [serverError, setServerError] = useState<{ verb: "started" | "stopped"; error: unknown } | null>(
     null,
   );
@@ -234,6 +291,10 @@ export function McpServer() {
   const token = tokenRead.kind === "ready" ? tokenRead.value : null;
   const hasToken = tokenRead.kind === "ready" && tokenRead.value !== null;
   const running = statusRead.kind === "ready" && statusRead.value !== null;
+  /** Whether a listener is up, as the THREE states the status read actually
+   *  has: `null` is "not established", which is not the same claim as "not
+   *  running" and is what the confirmations are worded from. */
+  const listening: boolean | null = statusRead.kind === "ready" ? statusRead.value !== null : null;
   /** The one address claim this pane makes: the live URL when there is one, and
    *  otherwise what Start would bind. */
   const address = statusRead.kind === "ready" ? (statusRead.value ?? wouldBindAt(port)) : null;
@@ -320,6 +381,10 @@ export function McpServer() {
       setActionError(e);
     } finally {
       setBusy(false);
+      // Closed on a refusal as well as on success: the failure is reported by
+      // this pane's own alert, and an alert behind a dialog that is still
+      // asking the question it answered is two states at once.
+      setAsking(null);
     }
   }
 
@@ -341,6 +406,7 @@ export function McpServer() {
       setActionError(e);
     } finally {
       setBusy(false);
+      setAsking(null);
     }
   }
 
@@ -416,10 +482,10 @@ export function McpServer() {
             <Button variant="ghost" size="sm" onClick={() => void copyToken()}>
               Copy
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={() => void rotate()}>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => setAsking("rotate")}>
               Rotate
             </Button>
-            <Button variant="danger" size="sm" disabled={busy} onClick={() => void revoke()}>
+            <Button variant="danger" size="sm" disabled={busy} onClick={() => setAsking("revoke")}>
               Revoke
             </Button>
           </div>
@@ -456,6 +522,24 @@ export function McpServer() {
         srelens cannot say which clients are connected right now — it only generates configuration for a client to
         paste elsewhere, and never learns who used it.
       </p>
+
+      {asking !== null && (
+        <ConfirmDialog
+          title={asking === "rotate" ? "Rotate the bearer token?" : "Revoke the bearer token?"}
+          message={asking === "rotate" ? rotateQuestion(listening) : revokeQuestion(listening)}
+          confirmLabel={asking === "rotate" ? "Rotate" : "Revoke"}
+          // `danger` on the one that leaves no credential at all. Rotating is
+          // disruptive and reversible-by-another-rotation; revoking takes the
+          // server down with it and leaves nothing to connect with — the same
+          // split classic draws.
+          danger={asking === "revoke"}
+          // Blocks every dismissal path while the call is in flight, so a
+          // half-done rotation cannot be walked away from.
+          busy={busy}
+          onConfirm={() => void (asking === "rotate" ? rotate() : revoke())}
+          onCancel={() => setAsking(null)}
+        />
+      )}
     </Panel>
   );
 }

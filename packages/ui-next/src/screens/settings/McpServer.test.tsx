@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
@@ -128,6 +128,7 @@ describe("McpServer", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Reveal" }));
     expect(screen.getByText(TOKEN)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Rotate" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Rotate" }));
     expect(core.rotateMcpToken).toHaveBeenCalledTimes(1);
     // Rotating re-masks: the reader saw the OLD value, not the new one, so
     // the pane must not carry it forward revealed.
@@ -140,6 +141,7 @@ describe("McpServer", () => {
     render(<McpServer />);
     await screen.findByText(/^•+$/);
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Revoke" }));
     expect(core.revokeMcpToken).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("not running")).toBeTruthy();
     expect(screen.queryByText("running")).toBeNull();
@@ -250,6 +252,7 @@ describe("McpServer", () => {
     // The token read settles (buttons appear); the mount's own status read
     // is still in flight — the Revoke button never waits on it.
     await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Revoke" }));
     expect(core.revokeMcpToken).toHaveBeenCalledTimes(1);
 
     // Revoke's own, authoritative write has already landed.
@@ -391,6 +394,170 @@ describe("McpServer", () => {
       expect(note.textContent).toMatch(/start/i);
       // And the action it names is really here, in this tree, one click away.
       expect(screen.getByRole("button", { name: "Start server" })).toBeTruthy();
+    });
+  });
+
+  // ---- Confirming rotate and revoke -----------------------------------
+
+  /**
+   * Both controls invalidate the credential on the click. Rotation restarts a
+   * running server and drops every request in flight; revocation stops it and
+   * disconnects every HTTP client. Classic has gated both behind
+   * `ConfirmDialog` since it shipped (`apps/desktop/src/components/
+   * McpSettingsSection.tsx:314-329`) and this pane called straight through, so
+   * one accidental click was an immediate outage with no way back.
+   */
+  describe("confirming before the token is invalidated", () => {
+    /** The question on screen, or a failure saying the click did not ask one. */
+    function question(): string {
+      return screen.getByRole("dialog").textContent ?? "";
+    }
+
+    /** The dialog's own control, which shares its name with the pane's. */
+    function answer(name: "Rotate" | "Revoke" | "Cancel"): HTMLElement {
+      return within(screen.getByRole("dialog")).getByRole("button", { name });
+    }
+
+    it("does not rotate on the first click", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      expect(core.rotateMcpToken).not.toHaveBeenCalled();
+      expect(question()).toMatch(/rotate/i);
+    });
+
+    it("does not revoke on the first click", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+      expect(core.revokeMcpToken).not.toHaveBeenCalled();
+      expect(question()).toMatch(/revoke/i);
+    });
+
+    it("leaves the token alone when the rotate question is cancelled", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      await userEvent.click(answer("Cancel"));
+      expect(core.rotateMcpToken).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      // And the control is still there to press again.
+      expect(screen.getByRole("button", { name: "Rotate" })).toBeTruthy();
+    });
+
+    it("leaves the token alone when the revoke question is cancelled", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+      await userEvent.click(answer("Cancel"));
+      expect(core.revokeMcpToken).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy();
+      // The credential itself is untouched: still a token, still masked.
+      expect(screen.getByText(/^•+$/)).toBeTruthy();
+    });
+
+    it("rotates once, and only once the reader has confirmed", async () => {
+      core.rotateMcpToken.mockResolvedValue(ROTATED);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      await userEvent.click(answer("Rotate"));
+      expect(core.rotateMcpToken).toHaveBeenCalledTimes(1);
+      // The question is answered and gone, not left standing over the result.
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("revokes once, and only once the reader has confirmed", async () => {
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+      await userEvent.click(answer("Revoke"));
+      expect(core.revokeMcpToken).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    /**
+     * The pane knows something classic did not: whether the server is up right
+     * now. So the question says what will happen rather than what might —
+     * classic's own sentence is kept for the one case where the pane genuinely
+     * cannot tell (below).
+     */
+    it("tells a reader with a running server that rotating restarts it", async () => {
+      core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      const text = question();
+      expect(text).toMatch(/server is running/i);
+      expect(text).toMatch(/restarts it/i);
+      expect(text).toMatch(/in flight/i);
+      expect(text).toMatch(/connected clients/i);
+      // Not the conditional: this pane read the status and the answer was yes.
+      expect(text).not.toMatch(/if the mcp http server is running/i);
+    });
+
+    it("tells a reader with a stopped server that nothing is dropped", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      const text = question();
+      expect(text).toMatch(/not running/i);
+      expect(text).toMatch(/nothing is dropped/i);
+      // A restart is not what happens to a server that is not up.
+      expect(text).not.toMatch(/restarts it/i);
+      // The half that is true either way: the old value stops working.
+      expect(text).toMatch(/needs the new value/i);
+    });
+
+    it("falls back to classic's conditional wording while the status is unknown", async () => {
+      // A status read that never settles: the pane has established neither
+      // state, and a question that claimed one would be a claim from nothing.
+      core.mcpHttpStatus.mockReturnValue(new Promise<string | null>(() => {}));
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      const text = question();
+      expect(text).toMatch(/if the mcp http server is running/i);
+      expect(text).not.toMatch(/server is not running/i);
+    });
+
+    it("tells a reader with a running server that revoking disconnects its clients", async () => {
+      core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+      const text = question();
+      expect(text).toMatch(/server is running/i);
+      expect(text).toMatch(/disconnects/i);
+      expect(text).not.toMatch(/nothing disconnects/i);
+    });
+
+    it("tells a reader with a stopped server what revoking leaves behind", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+      const text = question();
+      expect(text).toMatch(/nothing disconnects/i);
+      expect(text).toMatch(/no bearer token at all/i);
+      expect(text).toMatch(/mints a new one/i);
+    });
+
+    it("falls back to classic's conditional wording for revoke too", async () => {
+      core.mcpHttpStatus.mockReturnValue(new Promise<string | null>(() => {}));
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+      const text = question();
+      expect(text).toMatch(/also stops the mcp http server/i);
+      expect(text).not.toMatch(/server is running/i);
+      expect(text).not.toMatch(/nothing disconnects/i);
+    });
+
+    /**
+     * The two questions are not interchangeable: a dialog that named the wrong
+     * consequence would be worse than none, because the reader would confirm
+     * having been told about a different action.
+     */
+    it("asks the question that belongs to the control that was pressed", async () => {
+      core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
+      render(<McpServer />);
+      await userEvent.click(await screen.findByRole("button", { name: "Rotate" }));
+      expect(question()).not.toMatch(/revoking/i);
+      await userEvent.click(answer("Cancel"));
+      await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
+      expect(question()).toMatch(/revoking/i);
+      expect(question()).not.toMatch(/rotating/i);
     });
   });
 
