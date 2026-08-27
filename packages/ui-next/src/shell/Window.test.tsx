@@ -760,6 +760,30 @@ describe("Window — what the cover has to take with it", () => {
     expect(strip.textContent ?? "").toContain("prod");
   });
 
+  /**
+   * The titlebar's `Lock workspace` control, through the real window: it must
+   * reach `lockNow` — the same function `⌘⇧L` fires — and not a second lock path
+   * of its own.
+   */
+  it("locks from the titlebar through the same path as the chord", async () => {
+    await booted();
+    await userEvent.click(screen.getByRole("button", { name: "Lock workspace" }));
+    expect(vaultLock).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    // And it is gone once the cover is up, like the rest of the bar.
+    expect(screen.queryByRole("button", { name: "Lock workspace" })).toBeNull();
+  });
+
+  it("covers nothing from the titlebar when the lock is refused", async () => {
+    vaultLock.mockRejectedValue(new Error("there is no vault to lock"));
+    await booted();
+    await userEvent.click(screen.getByRole("button", { name: "Lock workspace" }));
+    await waitFor(() => expect(vaultLock).toHaveBeenCalled());
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+  });
+
   it("gives every one of those back when the vault opens again", async () => {
     await sealed();
     vaultStatus.mockResolvedValue(VAULT_OPEN);

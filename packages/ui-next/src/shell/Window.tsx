@@ -418,6 +418,10 @@ export function Window({
           clusterName={activeCtx?.name}
           onToggleTheme={onToggleTheme}
           onNewWorkspace={openNewWorkspace}
+          // The same function `⌘⇧L` fires, handed over rather than reimplemented
+          // — see `lockNow` for the ordering it owns and `ChromeProps.onLock`
+          // for why a second copy would be a second door.
+          onLock={lockNow}
         />
       )}
       {/* `relative`, because §25's cover is `absolute inset-0` inside this band

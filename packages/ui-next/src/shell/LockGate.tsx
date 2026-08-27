@@ -92,6 +92,23 @@ import { FailureAlert, friendly } from "../lib/errorCopy";
  * vault. Cover first; reconcile after.
  */
 let sealed = false;
+
+/**
+ * The mode the last successful `vaultStatus()` reported, or null if none has
+ * landed yet.
+ *
+ * Recorded here so the titlebar's `Lock workspace` control can decide whether
+ * to draw itself WITHOUT taking a second `vaultStatus()` read of its own. Two
+ * readers of the same fact is how two surfaces start disagreeing about it, and
+ * this gate is already reading it at launch and after every attempt. Held
+ * beside `sealed` because the two are answers to one question — whether there
+ * is a vault, and whether it is open.
+ *
+ * `null` on a failed read as well as before the first one: a refusal is not a
+ * mode, and the previous value is not evidence about now. Both cases resolve
+ * the same way at the call site — no control is offered.
+ */
+let knownMode: VaultStatus["mode"] | null = null;
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -104,6 +121,22 @@ function subscribe(listener: () => void): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/**
+ * Record what the last `vaultStatus()` said, and tell the subscribers.
+ *
+ * It notifies on its own rather than leaning on the `lockWorkspace()` /
+ * `unsealWorkspace()` call that follows it: both of those are no-ops when the
+ * cover is already in the state they want, so on the ordinary launch read of an
+ * open vault nothing would have been emitted and the titlebar would never have
+ * learned there was a vault to lock. Guarded on the value so a re-read that
+ * changes nothing wakes nobody.
+ */
+function rememberMode(mode: VaultStatus["mode"] | null): void {
+  if (knownMode === mode) return;
+  knownMode = mode;
+  emit();
 }
 
 /**
@@ -142,7 +175,24 @@ function unsealWorkspace(): void {
  */
 export function resetLock(): void {
   sealed = false;
+  knownMode = null;
   emit();
+}
+
+/**
+ * Put a vault mode into the store, for a test of a component that reads it but
+ * does not perform the read.
+ *
+ * `Chrome` draws `Lock workspace` from {@link useCanLockWorkspace}, and the
+ * only thing that fills that store is this gate's own `vaultStatus()` read — so
+ * a `Chrome` test rendered on its own has no way to reach the four states it
+ * has to tell apart. The alternative was a prop threaded from `Window` purely
+ * so a test could set it, which is a shape the app does not need. Underscored
+ * and documented as test support, like `resetLock` above it; nothing shipped
+ * calls it.
+ */
+export function __setKnownVaultMode(mode: VaultStatus["mode"] | null): void {
+  rememberMode(mode);
 }
 
 /**
@@ -174,6 +224,30 @@ function useSealed(): boolean {
  */
 export function useWorkspaceSealed(): boolean {
   return useSealed();
+}
+
+/**
+ * Whether there is an open vault for the titlebar's control to lock.
+ *
+ * Three conditions, and each of them is a control this project would otherwise
+ * have drawn dead:
+ *
+ * - a vault that has never been set up REFUSES to lock. `lock_core`
+ *   (`apps/desktop/src-tauri/src/vault_password.rs`) says so with a sentence,
+ *   because a machine-key vault resolves its key once at open and discarding it
+ *   would strand the process until restart. `mode === "setup-required"` is that
+ *   state, and a button refused by design is not offered.
+ * - a vault whose state has never been read is not known to be lockable. `null`
+ *   covers both "the launch read has not answered" and "it refused".
+ * - a vault already sealed has nothing to lock, and the cover is up over it.
+ *
+ * Only `unlocked` passes. Read off this module's own store rather than from a
+ * `vaultStatus()` call of the caller's, so there is one read of this fact and
+ * one answer to it.
+ */
+export function useCanLockWorkspace(): boolean {
+  const snapshot = () => knownMode === "unlocked" && !sealed;
+  return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
 /**
@@ -322,6 +396,7 @@ export function LockGate({ children }: { children: ReactNode }) {
       const next = await vaultStatus();
       setStatus(next);
       setStatusError(null);
+      rememberMode(next.mode);
       if (next.mode === "unlocked") {
         if (mayOpen) unsealWorkspace();
       } else {
@@ -334,6 +409,10 @@ export function LockGate({ children }: { children: ReactNode }) {
       // `checking` went to false behind it, and the window came up live over a
       // vault whose state srelens had never managed to read. `VaultGate` keeps
       // its gate shut for the same reason, in the same words.
+      // Forgotten, unlike `status` below: a refusal is not a mode, and a
+      // titlebar control offered on the strength of a read that failed would be
+      // a control drawn on a guess.
+      rememberMode(null);
       lockWorkspace();
       // The last known status is kept rather than dropped. Only a launch read
       // that never answered leaves `status` null, and that is the one case

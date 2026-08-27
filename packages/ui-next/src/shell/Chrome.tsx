@@ -3,8 +3,9 @@ import { ConfirmDialog, IconButton, Titlebar, WorkspaceSwitcher } from "@srelens
 import { applyUiScale, getUiScale, isApplePlatform, isTauri, setUiScale, stepUiScale } from "@srelens/core";
 import { rememberTheme } from "../lib/appearance";
 import { Icons } from "../lib/icons";
+import { hint } from "../lib/shortcuts";
 import { openTab, removeWorkspace, switchWorkspace, useTabs } from "../lib/tabsStore";
-import { useWorkspaceSealed } from "./LockGate";
+import { useCanLockWorkspace, useWorkspaceSealed } from "./LockGate";
 
 export interface ChromeProps {
   controls: "macos" | "none";
@@ -13,6 +14,20 @@ export interface ChromeProps {
   onToggleTheme: () => void;
   /** The window owns the create dialog; the chip only asks for it. */
   onNewWorkspace: () => void;
+  /**
+   * Seal the vault and cover the window.
+   *
+   * This is `Window`'s own `lockNow` — the same function `⌘⇧L` fires, not a
+   * second path to the same place. It orders `vaultLock()` before
+   * `lockWorkspace()`, returns early when the cover is already up, and skips
+   * web mode entirely; a copy of that here would be a second door, and two
+   * doors are how they start disagreeing.
+   *
+   * Optional because the component gallery renders this bar with no window
+   * behind it. Where it is absent the control is not drawn — the same rule as
+   * every other absent affordance in this bar.
+   */
+  onLock?: () => void;
 }
 
 /**
@@ -65,15 +80,35 @@ export function zoom(action: "in" | "out" | "reset") {
  * whenever it held one tab — which is how every workspace starts. A cover that
  * leaves those live is worse than no lock, because the window LOOKS sealed.
  *
- * So the switcher becomes a readout and the gear is disabled with a reason.
- * Theme and zoom stay: both change only how this screen LOOKS, and a reader
- * who cannot read the passphrase field cannot unlock. The names stay too —
- * they come from a kubeconfig and a tab store the vault never sealed, and
- * blanking them would imply it had.
+ * So the switcher becomes a readout, the gear is disabled with a reason, and
+ * `Lock workspace` is not drawn at all — it would be absurd for the lock to be
+ * the one live control on a locked window. Theme and zoom stay: both change only
+ * how this screen LOOKS, and a reader who cannot read the passphrase field
+ * cannot unlock. The names stay too — they come from a kubeconfig and a tab
+ * store the vault never sealed, and blanking them would imply it had.
  */
-export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace }: ChromeProps) {
+export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, onLock }: ChromeProps) {
   const { workspace, workspaces } = useTabs();
   const sealed = useWorkspaceSealed();
+  /**
+   * Whether to draw `Lock workspace` at all.
+   *
+   * `⌘⇧L` has been bound since Task 9 and NOTHING on screen offered it: the
+   * only ways to lock were a chord and a button inside Settings → Security.
+   * This is the discoverable door.
+   *
+   * Three absences rather than a disabled state, and each is this project's
+   * existing rule rather than a new one. No handler, no control. Web mode —
+   * every vault command is a raw `invoke` and rejects there, which is why the
+   * `Security` nav entry and the toolbox's install column are not drawn
+   * either. And no open vault: {@link useCanLockWorkspace} is false before the
+   * launch read answers, when it refused, when the vault has never been set up
+   * (locking one is refused by design) and when it is already sealed — which is
+   * also what makes this control inert behind the cover, alongside the switcher
+   * and the gear.
+   */
+  const lockable = useCanLockWorkspace();
+  const chord = hint("lock", isApplePlatform());
   const [removing, setRemoving] = useState<string | null>(null);
   // Found rather than held, so the dialog reads the live workspace: the count
   // in its message would otherwise be whatever it was when the dialog opened.
@@ -144,6 +179,24 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace }:
             {desktop && <IconButton icon={Icons.zoomOut} label="Zoom out" onClick={() => zoom("out")} />}
             {desktop && <IconButton icon={Icons.zoomReset} label="Reset zoom" onClick={() => zoom("reset")} />}
             {desktop && <IconButton icon={Icons.zoomIn} label="Zoom in" onClick={() => zoom("in")} />}
+            {onLock !== undefined && desktop && lockable && (
+              <IconButton
+                icon={Icons.lock}
+                // A real name, not a glyph: this is the one control in the bar
+                // whose mistaken press replaces the window. The chord rides in
+                // the tooltip rather than the name, so what is announced is the
+                // action and not a run of modifier glyphs.
+                label="Lock workspace"
+                // From the table that binds it (`lib/shortcuts.ts`), never
+                // typed here — a glyph written by hand is wrong the moment the
+                // binding moves and stays wrong until somebody notices. `hint`
+                // returns "" for an unbound action, so an unbound chord leaves
+                // the tooltip as the label rather than trailing a bare
+                // separator.
+                title={chord === "" ? "Lock workspace" : `Lock workspace · ${chord}`}
+                onClick={onLock}
+              />
+            )}
             <IconButton
               icon={Icons.sun}
               label="Theme"
