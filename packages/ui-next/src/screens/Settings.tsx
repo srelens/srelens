@@ -1,0 +1,271 @@
+import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { isTauri } from "@srelens/core";
+import { Screen } from "@srelens/ui-kit";
+import type { RoutedScreenProps } from "../lib/routes";
+import { AgentAccess } from "./settings/AgentAccess";
+import { AppearancePane } from "./settings/AppearancePane";
+import { AuditPane } from "./settings/AuditPane";
+import { McpServer } from "./settings/McpServer";
+import { SecurityPane } from "./settings/SecurityPane";
+import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/SmallPanes";
+
+/**
+ * §23's `/settings`: a 196px nav rail on the left, and one section's panes
+ * beside it.
+ *
+ * **The shell only. Every pane is its own file** — the six of them were built
+ * and reviewed one at a time, and each carries the record of what §23 asked
+ * for, what srelens can actually do, and which issue holds the difference.
+ * This file adds no copy about any of them; the one sentence it does own is
+ * about a section it does not draw, below.
+ *
+ * **`Deep links` is not here, and its absence is a decision** (spec decision 2,
+ * #370). `srelens://` exists nowhere in this repo — no scheme registered in
+ * `tauri.conf.json`, no handler in the desktop, no parser in core — so the
+ * pane behind that entry would be empty. An empty pane behind a nav item reads
+ * as srelens being broken, where a missing entry reads as a section that has
+ * not arrived; #370 adds the entry together with its content. The suite asserts
+ * the nav has no `Deep links` tab, so restoring it needs a reason rather than a
+ * moment of tidying against the mock.
+ *
+ * **`Security` is not drawn on the web** — see {@link SECTIONS}.
+ *
+ * **The nav is a vertical tablist, hand-rolled.** The kit's `Tabs` is
+ * horizontal by construction: three skins that are all rows, `ArrowLeft` and
+ * `ArrowRight`, and no orientation. Adding a fourth mode to it for one call
+ * site would be a second layout inside a component whose whole shape is a
+ * strip; the roving tabindex and the arrow contract are copied from it
+ * verbatim instead, because a `role="tablist"` that promises assistive
+ * technology arrow keys it does not have is worse than a run of buttons.
+ */
+
+/** §23's rail width for this screen, and this screen's alone (§A.1's table). */
+const NAV_WIDTH = 196;
+
+type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "clusters";
+
+/**
+ * §23's nav, in §23's order, minus `Deep links`.
+ *
+ * `desktopOnly` is carried here rather than checked at the render site so the
+ * order lives in exactly one list: a second array for the web build is a
+ * second thing to keep in step, and the two would drift the first time a
+ * section is added.
+ *
+ * **`Security` is desktop-only because every vault command is a Tauri
+ * command.** `vaultLock`, `vaultBiometricStatus`/`Enable`/`Disable` and
+ * `vaultChangePassword` (`packages/core/src/lib/mcpSecurity.ts`) all go through
+ * `invoke` from `@tauri-apps/api/core` — not through the transport layer that
+ * has a web half — so in a browser every one of them rejects before it reaches
+ * a server. The pane would render an honest run of failure states over
+ * controls that cannot act, which is the shape this project has twice decided
+ * against: the toolbox draws no install column on the web and says why once,
+ * and Connections offers no file adding there for the same reason. A control
+ * that cannot work is not drawn, and the reason is said once — in the rail,
+ * where the missing entry would have been.
+ */
+const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
+  { id: "agent", label: "Agent & MCP" },
+  { id: "security", label: "Security", desktopOnly: true },
+  { id: "appearance", label: "Appearance" },
+  { id: "accessibility", label: "Accessibility" },
+  { id: "shortcuts", label: "Shortcuts" },
+  { id: "clusters", label: "Clusters" },
+];
+
+export interface SettingsProps extends RoutedScreenProps {
+  /**
+   * ════════════════════════════════════════════════════════════════════
+   * SEAM — Task 9's lock surface. Not built here, deliberately.
+   * ════════════════════════════════════════════════════════════════════
+   *
+   * `SecurityPane` calls this after `vaultLock()` has resolved, and only then:
+   * the vault is sealed by the time it fires, and a refusal keeps the window
+   * exactly as it was.
+   *
+   * **A lock has to cover the WINDOW, not this tab.** Since #365 a dialog is
+   * mounted in the tab it was opened from, which is right for a dialog and
+   * exactly wrong for a lock: the cluster rail, the tab strip and every other
+   * open tab would stay live over a sealed vault, which is worse than not
+   * locking at all because the screen would say it had. So this is a callback
+   * that leaves this file rather than anything drawn in it — `LockGate` in
+   * `shell/Window.tsx` is where the cover belongs, above the tab strip, and it
+   * is Task 9's to build.
+   *
+   * **Optional, and nothing is drawn without it.** `/settings` has no route
+   * entry yet (Task 10 adds one), so no reader can reach `Lock now` in a
+   * shipped build before the surface exists. Until then an omitted handler is
+   * reported rather than swallowed — see {@link lockedWithNoCover} — because
+   * the one thing worse than a lock that does not cover the window is a lock
+   * that fails quietly.
+   */
+  onLocked?: () => void;
+}
+
+/**
+ * What happens when the vault is sealed and nothing exists to cover the window.
+ *
+ * Console rather than a toast: the toast host lives in the classic tree
+ * (`NextApp` says so where it renders its own failure at the window root), so a
+ * `notify` here would go nowhere and read as handled.
+ */
+function lockedWithNoCover(): void {
+  console.error(
+    "the vault is locked, but no lock surface is mounted — the window is still showing what it had already read",
+  );
+}
+
+export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps) {
+  const desktop = isTauri();
+  const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
+
+  const [active, setActive] = useState<SectionId>(SECTIONS[0].id);
+  const headId = useId();
+  const tabBase = useId();
+  const tabId = (id: SectionId) => `${tabBase}-${id}`;
+  const refs = useRef(new Map<SectionId, HTMLButtonElement>());
+
+  function focus(id: SectionId) {
+    setActive(id);
+    // Selection follows focus, as it does in the kit's own `Tabs`: the panes
+    // are already mounted-on-demand and cheap to switch, and this is what tabs
+    // whose panels are not expensive are expected to do.
+    refs.current.get(id)?.focus();
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    // Computed from what is FOCUSED, not from `active` — the kit's `Tabs`
+    // learned this in #323 review: a parent that has not committed the change
+    // yet sent the second arrow key off from a tab the reader had left.
+    const focused = visible.findIndex((s) => refs.current.get(s.id) === document.activeElement);
+    const index = focused >= 0 ? focused : visible.findIndex((s) => s.id === active);
+    if (index < 0) return;
+    let next: number | null = null;
+    // Down and Up, not Right and Left: the rail is a column, and it says so
+    // with `aria-orientation`.
+    if (event.key === "ArrowDown") next = (index + 1) % visible.length;
+    else if (event.key === "ArrowUp") next = (index - 1 + visible.length) % visible.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = visible.length - 1;
+    if (next === null) return;
+    // Otherwise Up/Down also scroll the rail and Home/End jump the page.
+    event.preventDefault();
+    focus(visible[next].id);
+  }
+
+  function pane(id: SectionId): ReactNode {
+    switch (id) {
+      case "agent":
+        // §23's one section over three panes, in §23's order: what the agent
+        // may do, the server it is reached through, and what it has done.
+        return (
+          <div className="flex flex-col gap-4">
+            <AgentAccess />
+            <McpServer />
+            <AuditPane />
+          </div>
+        );
+      case "security":
+        return <SecurityPane onLocked={onLocked ?? lockedWithNoCover} />;
+      case "appearance":
+        return <AppearancePane ported={ported} onSwitchToClassic={onSwitchToClassic} />;
+      case "accessibility":
+        return <AccessibilityPane />;
+      case "shortcuts":
+        return <ShortcutsPane />;
+      case "clusters":
+        return <ClustersPane />;
+    }
+  }
+
+  return (
+    <Screen title="Settings" eyebrow="workspace" fill>
+      <div className="flex min-h-0 flex-1">
+        {/* Not `SideRail`: that component puts its rail on the RIGHT, with a
+            `border-left` and the main region first, and §A.1's table lists
+            Settings among the three screens whose rail is on the left. A `side`
+            flag on a component whose whole subject is "a main region beside a
+            fixed rail" would be a second layout inside it, and this is a nav
+            rather than the "About this kind" material `SideRail` is for.
+            A `complementary` landmark all the same, named by its own head, for
+            the reason `SideRail` gives: this is material a reader may want to
+            jump to and may equally want to skip. */}
+        <aside
+          aria-labelledby={headId}
+          className="flex min-h-0 shrink-0 flex-col border-r border-rule bg-surface"
+          style={{ width: NAV_WIDTH }}
+        >
+          <div id={headId} className="pane-head">
+            Settings
+          </div>
+          <div className="scroll min-h-0 flex-1 p-1.5">
+            <div
+              role="tablist"
+              aria-orientation="vertical"
+              aria-label="Settings sections"
+              className="flex flex-col gap-0.5"
+              onKeyDown={onKeyDown}
+            >
+              {visible.map((section) => (
+                <button
+                  key={section.id}
+                  id={tabId(section.id)}
+                  type="button"
+                  role="tab"
+                  className="nav-item"
+                  data-active={section.id === active}
+                  aria-selected={section.id === active}
+                  aria-controls={`${tabBase}-panel`}
+                  // Roving tabindex: the rail is one Tab stop, and Tab from it
+                  // moves past the rail rather than through six sections.
+                  tabIndex={section.id === active ? 0 : -1}
+                  ref={(node) => {
+                    if (node) refs.current.set(section.id, node);
+                    else refs.current.delete(section.id);
+                  }}
+                  onClick={() => setActive(section.id)}
+                >
+                  {section.label}
+                </button>
+              ))}
+            </div>
+            {!desktop && (
+              /* Said ONCE, here, where the entry would have been — the same
+                 shape the toolbox uses for its absent install column. Not an
+                 `Alert`: this is not a fault and not about the section on
+                 screen, it is the footnote to a nav that is one entry shorter
+                 than the desktop's. */
+              <p
+                data-testid="no-security"
+                className="mt-3 border-t border-rule px-2 pt-2 text-[0.6875rem] leading-snug text-muted"
+              >
+                Security lives in the srelens desktop app. The master passphrase, locking and Touch
+                ID are all desktop commands, so there is nothing here for them to act on.
+              </p>
+            )}
+          </div>
+        </aside>
+        {/* `min-w-0` as well as `min-h-0`. A flex item's implicit
+            `min-width: auto` refuses to shrink below its content, and the audit
+            table is as wide as its widest target — so without it a long
+            namespace-qualified name widens this column and pushes the 196px
+            rail off the window instead of scrolling inside the pane. That exact
+            defect has shipped twice on this migration and jsdom shows none of
+            it, which is why the suite asserts the property rather than the
+            layout. */}
+        <div
+          data-slot="settings-content"
+          id={`${tabBase}-panel`}
+          role="tabpanel"
+          aria-labelledby={tabId(active)}
+          // The one Tab stop into the pane's own content, so a reader arrowing
+          // to a section can Tab straight into it.
+          tabIndex={0}
+          className="scroll min-h-0 min-w-0 flex-1 p-3"
+        >
+          {pane(active)}
+        </div>
+      </div>
+    </Screen>
+  );
+}

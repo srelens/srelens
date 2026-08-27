@@ -3,7 +3,13 @@
 // it evaluates. A route table that can name every screen necessarily imports
 // browser-only code, so the environment has to be one.
 import { describe as suite, it, expect } from "vitest";
-import { describe, isBuiltInKind, screenFor } from "./routes";
+import {
+  describe,
+  isBuiltInKind,
+  screenFor,
+  type RoutedScreenProps,
+  type ScreenComponent,
+} from "./routes";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
 import { Connections } from "../screens/Connections";
@@ -314,5 +320,42 @@ suite("describe against inherited keys", () => {
     expect(describe("constructor", "c")).toMatchObject({ title: "constructor", kind: "control" });
     expect(describe("/constructor", "c")).toMatchObject({ title: "constructor", kind: "control" });
     expect(describe("toString", "c").title).toBe("toString");
+  });
+});
+
+suite("ScreenComponent", () => {
+  /**
+   * Compile-time, and that is the whole point of it: these two assertions are
+   * checked by `tsc --noEmit`, not by the runtime expectation under them.
+   *
+   * `Settings` needs `ported` and `onSwitchToClassic`, and ui-next CANNOT
+   * import them — this package depends on `@srelens/core` and
+   * `@srelens/ui-kit`, `apps/desktop` depends on this package, so
+   * `apps/desktop/src/design` is a genuine cycle with no alias to shortcut it.
+   * They arrive by root injection instead, down the path `Placeholder` already
+   * uses: `main.tsx` → `NextApp` → `Window` → `Body` → the screen.
+   *
+   * Narrowing `ScreenComponent` back to `{ route: string }` therefore fails
+   * the typecheck HERE, next to the reason, rather than at the one call site
+   * that happens to need the props.
+   */
+  it("carries what the host injects, so a screen can ask for it", () => {
+    const injected: ScreenComponent = (props: RoutedScreenProps) => {
+      void props.route;
+      void props.ported.join(", ");
+      void props.onSwitchToClassic;
+      return null;
+    };
+    expect(injected).toBeTypeOf("function");
+  });
+
+  it("still accepts a screen that wants nothing but its route", () => {
+    // The other fourteen screens take `{ route }` alone and must keep doing
+    // so: widening the table's type is not a demand on every entry in it.
+    const plain: ScreenComponent = ({ route }: { route: string }) => {
+      void route;
+      return null;
+    };
+    expect(plain).toBeTypeOf("function");
   });
 });

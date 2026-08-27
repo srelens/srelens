@@ -41,9 +41,16 @@ function declaredActionTypes(): string[] {
  * drive `hint` with a different action set."
  */
 const shortcutsDouble = vi.hoisted(() => ({
-  hint: vi.fn<(type: string, apple: boolean) => string>(),
+  // Typed as the real `hint`, whose first parameter is a `WindowAction` and
+  // not a `string`. A widened signature here broke `tsc --noEmit` while the
+  // suite stayed green, because a double that accepts more than the module
+  // does is not assignable to it.
+  hint: vi.fn<typeof import("../../lib/shortcuts").hint>(),
 }));
-let realHint: (type: string, apple: boolean) => string;
+// The module's own signature, not a widened copy of it: `hint` takes a
+// `WindowAction`, and a `(type: string, …)` annotation here does not accept it
+// — which is why this line broke `tsc --noEmit` while the suite stayed green.
+let realHint: typeof import("../../lib/shortcuts").hint;
 vi.mock("../../lib/shortcuts", async (orig) => {
   const actual = await orig<typeof import("../../lib/shortcuts")>();
   return { ...actual, hint: shortcutsDouble.hint };

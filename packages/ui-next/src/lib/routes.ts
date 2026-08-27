@@ -132,7 +132,45 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   return { route, title: route.replace(/^\//, "") || "Untitled", sub, kind: "control" };
 }
 
-export type ScreenComponent = ComponentType<{ route: string }>;
+/**
+ * What every routed screen is handed.
+ *
+ * `route` is the screen's own; the other two are the HOST's, injected from the
+ * root — and they are here rather than imported because ui-next **cannot**
+ * import them. This package depends on `@srelens/core` and `@srelens/ui-kit`;
+ * `apps/desktop` depends on this package, so reaching `apps/desktop/src/design`
+ * from here is a genuine cycle across a package boundary with no alias to
+ * shortcut it.
+ *
+ * The path already exists, and this widening only extends it by one hop:
+ * `main.tsx` passes `PORTED_SCREENS.map((s) => s.name)` and a closure over
+ * `switchDesign("classic")` into `NextApp`, which passes them to `Window`,
+ * which passes them to `Body` — where `Placeholder` has consumed exactly these
+ * two since #305. `Body` now hands the same pair to the screen it renders
+ * instead of only to the Placeholder, so there is one injection path in this
+ * package and not two.
+ *
+ * **Required, not optional, on purpose.** `Settings` renders the Appearance
+ * pane, whose `Design` panel is the only way back to the classic design; an
+ * optional prop with a default would have let `Body` drop it and left that
+ * panel listing nothing behind an inert button. Required means the typecheck
+ * fails at the call site instead. Screens that want nothing but their route
+ * still declare `{ route: string }` and are still assignable here — a wider
+ * props type is not a demand on the fourteen entries that ignore it.
+ *
+ * Both are step-11 scaffolding and leave with it: when migration step 11
+ * deletes `apps/desktop/src/design.ts` and `shell/Placeholder.tsx`, these two
+ * fields and `Body`'s forwarding of them go too, and this is `{ route }` again.
+ */
+export interface RoutedScreenProps {
+  route: string;
+  /** Display names of the screens that exist in the new design. */
+  ported: readonly string[];
+  /** Leave the new design, from the route the reader is on. */
+  onSwitchToClassic: () => void;
+}
+
+export type ScreenComponent = ComponentType<RoutedScreenProps>;
 
 /**
  * The only place that knows which screens exist. Adding a screen is one entry
