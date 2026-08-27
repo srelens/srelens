@@ -30,6 +30,7 @@ import {
   AppearancePane,
   applyStoredAppearance,
 } from "./AppearancePane";
+import { rememberTheme } from "../../lib/appearance";
 
 /**
  * The stylesheet that actually defines the themes, accents and densities this
@@ -358,6 +359,60 @@ describe("AppearancePane", () => {
         accent: "teal",
         density: "comfortable",
       });
+    });
+
+    /**
+     * Finding 7. `remember` read the three axes off the DOCUMENT, so choosing
+     * an accent stored whatever `data-theme` happened to be there — and boot
+     * (`applyNextDesignTheme()`) puts dark there for every reader whose classic
+     * preference resolves dark, which is the default. The stray value then won
+     * at the next launch, because `applyStoredAppearance` runs after boot's
+     * own pass.
+     */
+    it("stores only the axis the reader actually chose", async () => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const { user } = paint();
+      await user.click(screen.getByRole("radio", { name: /Teal/ }));
+      expect(stored()).toEqual({ accent: "teal" });
+    });
+
+    /**
+     * The whole scenario, end to end: pick an accent, then use the titlebar's
+     * light/dark button, then boot. The reader's most recent explicit theme
+     * choice has to be the one that comes back — and it was not: boot applied
+     * light and the accent-pick's stray `theme: "dark"` put dark back over it,
+     * with nothing on screen to say why.
+     */
+    it("keeps the reader's most recent theme choice across the next launch", async () => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const { user } = paint();
+      await user.click(screen.getByRole("radio", { name: /Teal/ }));
+
+      // The titlebar's button, as `Chrome` calls it: the host writes the root,
+      // then the record follows what landed there. Light is the bare root.
+      document.documentElement.removeAttribute("data-theme");
+      rememberTheme();
+
+      // The next launch: boot's own pass puts dark on first, then the store.
+      document.documentElement.setAttribute("data-theme", "dark");
+      applyStoredAppearance();
+      expect(rootAttributes()).toEqual({
+        theme: undefined,
+        accent: "teal",
+        density: undefined,
+      });
+    });
+
+    it("lets the pane have the last word when the pane is what wrote last", async () => {
+      // The mirror of the test above, so neither writer is privileged: the same
+      // two writes in the other order end on the pane's theme.
+      document.documentElement.removeAttribute("data-theme");
+      rememberTheme();
+      const { user } = paint();
+      await user.click(screen.getByRole("radio", { name: /Midnight/ }));
+      document.documentElement.setAttribute("data-theme", "dark");
+      applyStoredAppearance();
+      expect(rootAttributes().theme).toBe("midnight");
     });
 
     it("ignores a value no stylesheet defines", () => {

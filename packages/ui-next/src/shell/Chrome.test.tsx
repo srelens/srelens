@@ -12,6 +12,7 @@ import {
   togglePin,
 } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
+import { APPEARANCE_KEY } from "../lib/appearance";
 import { lockWorkspace, resetLock } from "./LockGate";
 
 // jsdom has no ResizeObserver and Radix's popper watches the trigger with one.
@@ -190,6 +191,28 @@ describe("Chrome", () => {
     expect(onToggleTheme).toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Appearance settings" }));
     expect(currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(true);
+  });
+
+  /**
+   * Finding 7's other half. The Appearance pane's store was the only writer of
+   * the appearance record, so this button — which is the other thing a reader
+   * can change `data-theme` with — was remembered nowhere, and boot put the
+   * pane's older theme back over it at the next launch. Its choice is recorded
+   * now, and recorded AFTER the host has written the root, so what is stored is
+   * the value that actually landed.
+   */
+  it("records the theme the host put on the root, so the next launch keeps it", async () => {
+    localStorage.removeItem(APPEARANCE_KEY);
+    document.documentElement.setAttribute("data-theme", "dark");
+    chrome({
+      onToggleTheme: () => {
+        // What `toggleNextDesignTheme` does: writes the root itself. Light is
+        // the bare root, so the attribute comes off.
+        document.documentElement.removeAttribute("data-theme");
+      },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Theme" }));
+    expect(JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "null")).toEqual({ theme: "light" });
   });
 
   it("asks the switcher for a new workspace rather than making one itself", async () => {

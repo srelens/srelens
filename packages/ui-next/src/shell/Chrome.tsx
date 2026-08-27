@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ConfirmDialog, IconButton, Titlebar, WorkspaceSwitcher } from "@srelens/ui-kit";
 import { applyUiScale, getUiScale, isApplePlatform, isTauri, setUiScale, stepUiScale } from "@srelens/core";
+import { rememberTheme } from "../lib/appearance";
 import { Icons } from "../lib/icons";
 import { openTab, removeWorkspace, switchWorkspace, useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "./LockGate";
@@ -143,7 +144,24 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace }:
             {desktop && <IconButton icon={Icons.zoomOut} label="Zoom out" onClick={() => zoom("out")} />}
             {desktop && <IconButton icon={Icons.zoomReset} label="Reset zoom" onClick={() => zoom("reset")} />}
             {desktop && <IconButton icon={Icons.zoomIn} label="Zoom in" onClick={() => zoom("in")} />}
-            <IconButton icon={Icons.sun} label="Theme" onClick={onToggleTheme} />
+            <IconButton
+              icon={Icons.sun}
+              label="Theme"
+              // Recorded, not just applied. The handler is the host's
+              // (`toggleNextDesignTheme` writes classic's preference and
+              // re-asserts ui-next's `data-theme`), and the Appearance pane's
+              // store used to be the only thing that wrote the appearance
+              // record — so this button's choice was remembered nowhere and
+              // boot put the pane's older theme back over it at the next
+              // launch. `rememberTheme` reads whatever the host just put on
+              // the root, so it stores the value that actually landed rather
+              // than a mode this package guessed at. After the toggle, not
+              // before.
+              onClick={() => {
+                onToggleTheme();
+                rememberTheme();
+              }}
+            />
             <IconButton
               icon={Icons.settings}
               label="Appearance settings"

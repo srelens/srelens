@@ -6,11 +6,27 @@ import {
   isApplePlatform,
   isTauri,
   setUiScale,
-  settingsStorage,
 } from "@srelens/core";
 import { Button, Panel } from "@srelens/ui-kit";
+import {
+  ACCENTS,
+  APPEARANCE_KEY,
+  BARE,
+  DENSITIES,
+  THEMES,
+  ZOOM_STEPS,
+  applyStoredAppearance,
+  readRootAccent,
+  readRootDensity,
+  readRootTheme,
+  remember,
+  subscribeToRoot,
+  writeAxis,
+  type AccentId,
+  type DensityId,
+  type ThemeId,
+} from "../../lib/appearance";
 import { hint as chordHint } from "../../lib/shortcuts";
-import type { Storage } from "../../lib/tabsPersist";
 
 /**
  * §23's `Appearance` pane: which theme the window wears, which accent, how big
@@ -89,197 +105,21 @@ import type { Storage } from "../../lib/tabsPersist";
  * takes the only way back to a working design with it.
  * ------------------------------------------------------------------ */
 
-export type ThemeId = "light" | "paper" | "dark" | "midnight" | "contrast";
-export type AccentId = "violet" | "blue" | "teal" | "amber" | "rose";
-export type DensityId = "compact" | "default" | "comfortable";
-
-/** Where the three appearance choices are remembered, as one document. */
-export const APPEARANCE_KEY = "srelens.next.appearance";
-
 /**
- * §23's five themes, in §23's order, with §23's hints verbatim. Each id is the
- * `data-theme` value its token block is keyed on — `light` excepted, which is
- * the bare `:root` and so has no value at all.
- */
-export const THEMES: ReadonlyArray<{ id: ThemeId; label: string; hint: string }> = [
-  { id: "light", label: "Light", hint: "lavender paper, the default" },
-  { id: "paper", label: "Paper", hint: "warm light, easier under office lighting" },
-  { id: "dark", label: "Dark", hint: "ink violet control room" },
-  { id: "midnight", label: "Midnight", hint: "near black, for a dark room" },
-  { id: "contrast", label: "High contrast", hint: "AAA text, heavier rules, no washes" },
-];
-
-/** §23's five accents, in §23's order. `violet` is `:root`'s own `--accent`. */
-export const ACCENTS: ReadonlyArray<{ id: AccentId; label: string }> = [
-  { id: "violet", label: "Violet" },
-  { id: "blue", label: "Blue" },
-  { id: "teal", label: "Teal" },
-  { id: "amber", label: "Amber" },
-  { id: "rose", label: "Rose" },
-];
-
-/** §23's three densities. `default` is `:root`'s own row height. */
-export const DENSITIES: ReadonlyArray<{ id: DensityId; label: string }> = [
-  { id: "compact", label: "Compact" },
-  { id: "default", label: "Default" },
-  { id: "comfortable", label: "Comfortable" },
-];
-
-/**
- * The scales the app can actually be set to, from core's own bounds.
+ * The three axes, their tables, and the store they are remembered in all live
+ * in `lib/appearance.ts` — because this pane is not the only writer.
  *
- * `MAX` is appended when the range does not land on it, so widening
- * `UI_SCALE.MAX` to a value off the step grid cannot silently drop the top of
- * the range out of this control.
+ * `data-theme` also has the titlebar's light/dark button behind it
+ * (`shell/Chrome`). With the store in this file only this pane could write it,
+ * so the titlebar's choice was recorded nowhere and boot's
+ * `applyStoredAppearance` put this pane's older value back over it at the next
+ * launch — the reader's most recent explicit theme choice, discarded with
+ * nothing to say why. One module, two writers, one record per axis. The
+ * re-exports below keep this file the name the rest of the tree imports these
+ * by.
  */
-export const ZOOM_STEPS: readonly number[] = (() => {
-  const steps: number[] = [];
-  for (let percent = UI_SCALE.MIN; percent <= UI_SCALE.MAX; percent += UI_SCALE.STEP) {
-    steps.push(percent);
-  }
-  if (steps[steps.length - 1] !== UI_SCALE.MAX) steps.push(UI_SCALE.MAX);
-  return steps;
-})();
-
-/** The value that means "no attribute", per axis. */
-const BARE = { theme: "light", accent: "violet", density: "default" } as const;
-
-interface Appearance {
-  theme: ThemeId;
-  accent: AccentId;
-  density: DensityId;
-}
-
-function asTheme(value: unknown): ThemeId | null {
-  return THEMES.find((t) => t.id === value)?.id ?? null;
-}
-
-function asAccent(value: unknown): AccentId | null {
-  return ACCENTS.find((a) => a.id === value)?.id ?? null;
-}
-
-function asDensity(value: unknown): DensityId | null {
-  return DENSITIES.find((d) => d.id === value)?.id ?? null;
-}
-
-/**
- * Write one axis onto the document root. The bare value removes the attribute
- * rather than writing itself, because `[data-theme="light"]`,
- * `[data-accent="violet"]` and `[data-density="default"]` are selectors no rule
- * in the stylesheet matches — the defaults live on `:root`.
- */
-function writeAxis(attribute: string, value: string, bare: string): void {
-  const root = document.documentElement;
-  if (value === bare) root.removeAttribute(attribute);
-  else root.setAttribute(attribute, value);
-}
-
-function readRootTheme(): ThemeId {
-  return asTheme(document.documentElement.getAttribute("data-theme")) ?? BARE.theme;
-}
-
-function readRootAccent(): AccentId {
-  return asAccent(document.documentElement.getAttribute("data-accent")) ?? BARE.accent;
-}
-
-function readRootDensity(): DensityId {
-  return asDensity(document.documentElement.getAttribute("data-density")) ?? BARE.density;
-}
-
-/**
- * Watch the three attributes this pane and its two co-writers share.
- *
- * One observer per subscriber, torn down with it. The alternative — a
- * module-level observer — would outlive the pane and keep the document under
- * observation for the rest of the session for nothing.
- */
-function subscribeToRoot(onChange: () => void): () => void {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["data-theme", "data-accent", "data-density"],
-  });
-  return () => observer.disconnect();
-}
-
-function readStored(storage: Storage): Partial<Appearance> {
-  let doc: unknown;
-  try {
-    const raw = storage.getItem(APPEARANCE_KEY);
-    if (raw === null) return {};
-    doc = JSON.parse(raw);
-  } catch {
-    // Unreadable storage, or a document this build cannot parse. An appearance
-    // that falls back to the design's default costs nothing; failing here
-    // would cost the boot that calls this.
-    return {};
-  }
-  if (typeof doc !== "object" || doc === null) return {};
-  const record = doc as Record<string, unknown>;
-  const theme = asTheme(record.theme);
-  const accent = asAccent(record.accent);
-  const density = asDensity(record.density);
-  return {
-    ...(theme === null ? {} : { theme }),
-    ...(accent === null ? {} : { accent }),
-    ...(density === null ? {} : { density }),
-  };
-}
-
-/**
- * Put the remembered appearance on the document root.
- *
- * **The boot half of this pane.** Every axis here is a preference read once and
- * applied before anything renders, exactly like the design preference itself;
- * the pane is only the place it is chosen. `apps/desktop/src/main.tsx` calls
- * this beside `applyNextDesignTheme()` — after it, so a stored theme wins over
- * the light/dark preference that function derives from classic's store.
- *
- * **Only the axes the stored document actually carries are written**, and that
- * is the whole reason this is not a three-line spread over
- * {@link BARE}. `applyNextDesignTheme()` runs first and puts
- * `data-theme="dark"` on the root for anyone whose classic preference resolves
- * dark — which is the DEFAULT (`DEFAULT_THEME` in `apps/desktop/src/ui/theme.ts`
- * is `{ name: "slate", mode: "dark" }`). A pass that wrote every axis would
- * write `theme: "light"` for every reader who has never opened this pane, and
- * `writeAxis` spells light as the ABSENCE of the attribute — so it would strip
- * the dark that boot just set and the new design would come up light for
- * almost everyone. Writing nothing where nothing was chosen leaves that
- * preference standing, and a document written by {@link remember} always
- * carries all three axes, so a reader who HAS chosen still gets all three back.
- *
- * Exported and tested rather than left implicit so that wiring it is one line
- * against a function that already provably works.
- */
-export function applyStoredAppearance(storage: Storage = settingsStorage): void {
-  const stored = readStored(storage);
-  if (stored.theme !== undefined) writeAxis("data-theme", stored.theme, BARE.theme);
-  if (stored.accent !== undefined) writeAxis("data-accent", stored.accent, BARE.accent);
-  if (stored.density !== undefined) writeAxis("data-density", stored.density, BARE.density);
-}
-
-/**
- * Remember one axis, keeping the other two as they are on the document.
- *
- * Read-modify-write against the document rather than against a cached copy:
- * the titlebar's theme button can have moved `data-theme` since this pane
- * mounted, and a blind spread would write the stale value back over it.
- */
-function remember(patch: Partial<Appearance>, storage: Storage = settingsStorage): void {
-  const next: Appearance = {
-    theme: readRootTheme(),
-    accent: readRootAccent(),
-    density: readRootDensity(),
-    ...patch,
-  };
-  try {
-    storage.setItem(APPEARANCE_KEY, JSON.stringify(next));
-  } catch (error) {
-    // Best-effort, as every other preference in this package is: a choice that
-    // does not outlive the session beats a choice that cannot be made.
-    console.error("could not persist the appearance preferences", error);
-  }
-}
+export { APPEARANCE_KEY, ACCENTS, DENSITIES, THEMES, ZOOM_STEPS, applyStoredAppearance };
+export type { AccentId, DensityId, ThemeId };
 
 /**
  * The pixel size of the body text at a given zoom, for §23's hint.
