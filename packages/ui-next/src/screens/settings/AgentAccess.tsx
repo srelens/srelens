@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { gatedCapabilityIds, isTauri } from "@srelens/core";
 import { Panel, SubHead, Switch } from "@srelens/ui-kit";
 
 /**
@@ -30,22 +32,44 @@ import { Panel, SubHead, Switch } from "@srelens/ui-kit";
  * A disabled switch for either of the excluded two would read as "not yet
  * wired up" rather than "does not exist", which is the wrong claim to make
  * about a control this screen can never grow. So this pane draws one real
- * switch, the six capabilities that are always confirm-gated, and a plain
- * sentence about what free reading means — worded to agree with, not quote,
- * the same fact `/connect`'s footer tells its reader one page over.
+ * switch, the confirm-gated capabilities, and a plain sentence about what free
+ * reading means — worded to agree with, not quote, the same fact `/connect`'s
+ * footer tells its reader one page over.
+ *
+ * **The chips are read from the registry, not transcribed from §23.** This
+ * pane shipped §23's six labels verbatim — `node.drain`, `pod.evict`,
+ * `resource.delete`, `workload.scale`, `rollout.undo`, `helm.uninstall` — and
+ * NOT ONE is a capability srelens registers. The real ids are
+ * `k8s.drainNode`, `k8s.evictPod`, `k8s.deleteResource`, `k8s.scale`. Six was
+ * not the set either: {@link gatedCapabilityIds} finds twenty-eight. Two
+ * separate falsehoods came of that. Under a heading claiming completeness, six
+ * chips told a reader that `k8s.applyManifest` is ungated, and it is not; and
+ * `AuditPane`, one panel below on this same screen, renders the ids the
+ * backend actually recorded — so `resource.delete` and `k8s.deleteResource`
+ * appeared six inches apart.
+ *
+ * The list now comes from `packages/core/src/lib/capabilities.ts`, over the
+ * generated catalog that `capability_catalog_json_is_in_sync`
+ * (`crates/registry/src/lib.rs`) holds equal to the live Rust registry. A
+ * capability added, renamed or re-annotated cannot ship without this pane
+ * following it.
+ *
+ * **All of them, not a sample.** Twenty-eight `code` chips is a wall, and it
+ * was tempting to show a handful and say "and others". A handful is what was
+ * wrong here: the heading promises that nothing outside this set runs
+ * unconfirmed, so a reader must be able to look an id up and find it. The
+ * count is stated beside them, from the rendered array's own length, so the
+ * sentence cannot drift from the chips.
  */
 
-/** §23's order, verbatim — the mutating capabilities that always confirm. */
-const GATED_CAPABILITIES = [
-  "node.drain",
-  "pod.evict",
-  "resource.delete",
-  "workload.scale",
-  "rollout.undo",
-  "helm.uninstall",
-] as const;
-
 export function AgentAccess() {
+  // `isTauri()` rather than the catalog wholesale: a web build does not
+  // register the host settings capabilities
+  // (`web_registry_omits_host_desktop_settings`, `crates/registry/src/lib.rs`),
+  // and naming an id the running build has no entry for would be this pane
+  // inventing one again — one instead of six.
+  const gated = useMemo(() => gatedCapabilityIds(isTauri() ? "desktop" : "web"), []);
+
   return (
     <Panel
       title="Agent access"
@@ -64,8 +88,17 @@ export function AgentAccess() {
       <SubHead className="mt-4" variant="caps">
         Never without confirmation
       </SubHead>
+      {/* The count comes from the array that draws the chips, so the two
+          cannot disagree. Both kinds are named, because the set is not just
+          "the destructive ones": `k8s.getSecret` changes nothing and is gated,
+          and `k8s.scale` changes something without being destructive. */}
+      <p data-testid="gated-count" className="mt-1 text-[0.75rem] leading-relaxed text-muted">
+        All {gated.length} of them — every capability that changes anything, and the one that returns
+        Secret values. The list is srelens&apos;s own capability registry, not a selection: nothing
+        here can be switched off, and nothing outside it needs a confirmation.
+      </p>
       <div className="mt-2 flex flex-wrap gap-2">
-        {GATED_CAPABILITIES.map((capability) => (
+        {gated.map((capability) => (
           <code
             key={capability}
             data-testid="gated-capability"
