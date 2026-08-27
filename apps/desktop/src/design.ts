@@ -138,19 +138,58 @@ export async function switchDesign(design: Design): Promise<SwitchResult> {
  * Light is the absence of the attribute, matching ui-next's `:root` tokens.
  */
 /**
- * The new design's reading of the stored preference, as an attribute on the
- * root. Shared by boot, the system-appearance listener and the toggle — three
- * writers of one convention is two too many.
+ * One side of light/dark, as an attribute on the root. The only writer of that
+ * convention here — boot, the system-appearance listener and the toggle all go
+ * through it, because three spellings of one convention is two too many.
+ *
+ * Takes the side rather than reading it, so the toggle can write the side it
+ * just chose instead of asking the store, which `applyTheme` persists to only
+ * best-effort.
  *
  * Light is the absence of the attribute, matching ui-next's `:root` tokens.
  */
-function applyNextThemeAttribute(): void {
+function writeNextThemeAttribute(lightness: "dark" | "light"): void {
   const root = document.documentElement;
-  if (resolvedThemeMode(getInitialTheme().mode) === "dark") {
-    root.dataset.theme = "dark";
-  } else {
-    delete root.dataset.theme;
-  }
+  if (lightness === "dark") root.dataset.theme = "dark";
+  else delete root.dataset.theme;
+}
+
+/** The new design's reading of classic's stored light/dark preference. */
+function applyNextThemeAttribute(): void {
+  writeNextThemeAttribute(resolvedThemeMode(getInitialTheme().mode));
+}
+
+/**
+ * The named themes whose token block paints a DARK ground.
+ *
+ * ui-next offers five themes and this module can only spell two of them, so the
+ * light/dark button needs to know which side each of the other three is on
+ * before it can flip away from one. That answer belongs to the stylesheet:
+ * `packages/ui-kit/src/styles/tokens.css` gives `dark` and `midnight` a canvas
+ * darker than their ink and groups the two of them wherever a rule is for the
+ * dark grounds — the mark palette, every accent override — while `paper` and
+ * `contrast` and the bare `:root` are light grounds.
+ *
+ * Copied here rather than imported because importing `@srelens/ui-kit` from
+ * this module would drag the whole kit into the chunk a CLASSIC boot downloads
+ * — the same wall the design toggle and `brandMarkSrc` hit. So the copy is
+ * PINNED: `design.theme.test.ts` parses that stylesheet, derives the dark side
+ * from the `--canvas`/`--ink` pair each block declares, and fails if this set
+ * and the stylesheet ever disagree. A theme added to `tokens.css` fails that
+ * test rather than quietly being treated as light here.
+ */
+export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight"]);
+
+/**
+ * The lightness of the theme the reader can actually SEE.
+ *
+ * Anything this build does not recognise counts as light, because that is what
+ * the stylesheet does with it: no `[data-theme]` block matches, so `:root`'s
+ * light tokens are what gets painted. A bare root is light for the same reason.
+ */
+function visibleLightness(): "dark" | "light" {
+  const named = document.documentElement.getAttribute("data-theme");
+  return named !== null && DARK_NEXT_THEMES.has(named) ? "dark" : "light";
 }
 
 /**
@@ -197,17 +236,48 @@ export function applyNextDesignTheme(themeChosen: () => boolean = () => false): 
 /**
  * Flip light/dark for both designs at once.
  *
+ * **The direction comes off the document, not out of classic's store.** It used
+ * to come from the stored mode, and a named theme never writes that mode:
+ * `pickTheme` lives in `packages/ui-next`, classic's mode store lives here in
+ * the package that DEPENDS on it, and a static import upward is a cycle across
+ * that boundary. So a reader on the classic default — `dark` — who picks Paper
+ * has a light window and a store still saying `dark`, and one click of this
+ * button flipped that stale `dark` to `light`: the window stayed light, Paper
+ * was deleted, and the reader who asked to go dark got neither the dark they
+ * asked for nor the theme they had. (#373 review, round 5)
+ *
+ * **Which side a theme is on is the stylesheet's answer**, read through
+ * {@link DARK_NEXT_THEMES}.
+ *
+ * **What it flips TO is the plain pair — `dark`, or the bare root.** Paper and
+ * High contrast both land on `dark`, Midnight lands on bare light. There is no
+ * dark counterpart of Paper and no dark High contrast in `tokens.css` to land
+ * on, and nothing anywhere remembers which dark theme this reader would have
+ * wanted, so inventing a pairing would be this module guessing at a design
+ * decision §23 has not made. Naming one of the five is the Appearance pane's
+ * job; this button's job is the lightness, and it says so — it is a sun, not a
+ * theme carousel.
+ *
  * The write goes through classic's `applyTheme`, so one stored preference
- * drives both designs; but that write leaves classic's conventions on the root
- * (`data-theme` = palette name), which ui-next reads as a mode. Re-asserting
- * our own attribute afterwards keeps the two designs' readings from fighting
- * over the same element.
+ * drives both designs and they agree about light and dark after the click even
+ * when they did not before. But that write leaves classic's conventions on the
+ * root (`data-theme` = palette name), which ui-next reads as a mode, so the new
+ * design's attribute is asserted afterwards — from the side just chosen rather
+ * than re-read through the store, which `applyTheme` persists to only
+ * best-effort. Re-reading put the OLD side back on the root for the reader
+ * whose device refuses to save preferences.
+ *
+ * `Chrome` calls ui-next's `rememberTheme()` straight after this, which stores
+ * whatever landed on the root — so the record follows the visible flip, and
+ * `hasChosenTheme` stands the OS follower down on the side the reader chose. A
+ * click is an explicit answer about lightness, which is why recording it is a
+ * choice and not the derivation `appearance.ts` warns against.
  */
 export function toggleNextDesignTheme(): void {
   const current = getInitialTheme();
-  const mode = resolvedThemeMode(current.mode);
-  applyTheme({ ...current, mode: mode === "dark" ? "light" : "dark" });
-  applyNextThemeAttribute();
+  const next = visibleLightness() === "dark" ? "light" : "dark";
+  applyTheme({ ...current, mode: next });
+  writeNextThemeAttribute(next);
 }
 
 /**
