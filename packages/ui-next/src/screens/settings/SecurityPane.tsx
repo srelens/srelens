@@ -17,25 +17,51 @@ import { hint } from "../../lib/shortcuts";
  * §23's `Security` pane: the passphrase that seals the vault, the button that
  * discards its key, and the biometric skip.
  *
- * **The paragraph is not §23's, and that is deliberate.** The design's copy
+ * **The paragraph names what the vault holds, and §23's did not.** §23 says
+ * "Kubeconfigs and cluster tokens are sealed at rest with a key derived from
+ * your master passphrase", and that is false. `Secrets`
+ * (`apps/desktop/src-tauri/src/vault.rs:43-50`) has exactly two fields:
+ * `mcp_token` and `llm_keys`. A kubeconfig never enters the vault —
+ * `all_kubeconfig_paths()` (`crates/registry/src/lib.rs:65`) returns
+ * `~/.kube/config` plus the managed files, `kubeconfig_files_in()`
+ * (`crates/kube/src/connect.rs:100`) enumerates them as plain files, and there
+ * is no `encrypt`, `aes` or `chacha` anywhere in `crates/kube` or
+ * `crates/registry`. Classic's `VaultGate`
+ * (`apps/desktop/src/components/VaultGate.tsx:145`) has said it correctly
+ * since it shipped — "srelens encrypts its stored secrets (MCP token,
+ * assistant API keys)" — so the new design replaced an accurate sentence with
+ * the mock's inaccurate one, on a Security pane. That is worse than a new
+ * screen being vague, and the pane says what is actually sealed instead.
+ *
+ * **The three ways in are all named, because the passphrase is not the only
+ * one.** "Anything that needs to read a sealed secret again asks for your
+ * passphrase first" was untrue twice: `vault_biometric_enable`
+ * (`apps/desktop/src-tauri/src/vault_biometric.rs:75-81`) writes
+ * `to_hex(&key)` into the platform biometric store, and
+ * `recover_password_core` (`vault_password.rs:212-246`) reads the OS keychain
+ * and opens the vault with nothing typed at all. The phrase "the key is never
+ * written down" is gone with them: this pane said it nineteen lines below the
+ * hint describing the store it is written into.
+ *
+ * **What locking does NOT do is still said.** The design's copy
  * ends "locking the workspace discards it, and nothing is readable again until
- * you unlock." That is false as written. `vault_lock`
+ * you unlock." That is false as written too. `vault_lock`
  * (`apps/desktop/src-tauri/src/vault_password.rs`) discards the derived key and
  * touches nothing else — verified while it was built: a bearer token the
  * running MCP server has already issued stays valid in its memory, and cluster
  * clients built from an already-read kubeconfig keep working, until srelens
- * restarts. So this pane says what locking does — the vault is sealed, and
- * anything that needs the key again asks for the passphrase — and says plainly
- * what it does NOT do. Nine strings claiming more than srelens knows have been
+ * restarts. So this pane says what locking does — the vault is sealed, and a
+ * sealed secret cannot be read again until the key is derived or unwrapped
+ * again — and says plainly what it does NOT do. Nine strings claiming more than srelens knows have been
  * removed from this migration; one inside a Security pane, quoting the design,
  * is the worst place to add the tenth. Closing live clients on lock is a real
  * feature and belongs with #367.
  *
  * **No `Lock on launch` switch, no `Lock when idle` select** (#367). Neither
  * exists, and they are opposites in an important way. Locking on launch is not
- * a preference — it is unconditional: the key lives in memory only, so
- * `VaultGate` (`apps/desktop/src/components/VaultGate.tsx`) reports `locked`
- * on every start and asks before the vault opens. A switch for it would imply
+ * a preference — it is unconditional: nothing carries the key in memory across
+ * a launch, so `VaultGate` (`apps/desktop/src/components/VaultGate.tsx`)
+ * reports `locked` on every start and asks before the vault opens. A switch for it would imply
  * it could be turned off. An idle lock, by contrast, does not exist at all —
  * there is no timer anywhere in the desktop, the core or this package. The
  * pane states both facts in one line rather than drawing a control for either,
@@ -212,9 +238,16 @@ export function SecurityPane({ onLocked }: SecurityPaneProps) {
     <div className="flex flex-col gap-4">
       <Panel title="Vault">
         <p className="text-[0.75rem] leading-relaxed text-muted">
-          Kubeconfigs and cluster tokens are sealed at rest with a key derived from your master
-          passphrase. The key lives in memory only — locking the workspace discards it, so anything
-          that needs to read a sealed secret again asks for your passphrase first.
+          srelens seals its own stored secrets — the MCP bearer token and your assistant API keys —
+          with a key derived from your master passphrase. Your kubeconfigs are not sealed: srelens
+          reads them as ordinary files, and what protects them is whatever protects them on your
+          machine already.
+        </p>
+        <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
+          The key is derived, not stored — locking the workspace discards it, and a sealed secret
+          cannot be read again until it is derived again. That takes your passphrase, or{" "}
+          {BIOMETRIC_LABEL} if you allowed it below, or the recovery copy if you kept one in this
+          machine&apos;s keychain at setup.
         </p>
         {/* The half of the sentence §23 leaves out. #367 is where closing live
             clients on lock belongs; until then this says which of them stay. */}
@@ -345,7 +378,7 @@ export function SecurityPane({ onLocked }: SecurityPaneProps) {
               // passphrase still works" is kept and is true: enabling leaves
               // `vault.json` in place, and `vault_unlock_password` derives the
               // key from it without consulting the gate.
-              hint={`Unwraps the same key from this machine's biometric store. Your passphrase still works.`}
+              hint={`Puts a copy of the derived key in this machine's biometric store and unwraps it from there. Your passphrase still works.`}
             />
           ) : (
             <p className="text-[0.75rem] leading-relaxed text-muted">
@@ -364,9 +397,10 @@ export function SecurityPane({ onLocked }: SecurityPaneProps) {
         {/* #367: neither of §23's other two controls is drawn. See the note at
             the top of this file for why the two absences are different. */}
         <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
-          srelens starts locked every time — the key is never written down, so every launch asks
-          before the vault opens. It does not lock itself when idle, though: there is no idle timer,
-          and a workspace left unlocked stays unlocked until you lock it.
+          srelens starts locked every time: nothing carries the key in memory across a launch, so
+          every start asks for it — your passphrase, or {BIOMETRIC_LABEL} where that is allowed. It
+          does not lock itself when idle, though: there is no idle timer, and a workspace left
+          unlocked stays unlocked until you lock it.
         </p>
       </Panel>
     </div>

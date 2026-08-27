@@ -58,9 +58,11 @@ import { FailureAlert, friendly } from "../lib/errorCopy";
  * title, a pre-filled field).
  *
  * **Auto-lock is not built** (#367): no idle timer, and no `Lock on launch`
- * switch — the derived key lives in memory only, so the vault is *always*
- * sealed at launch and this gate always asks. That is not a missing preference;
- * a switch for it would imply it could be turned off.
+ * switch — no process carries the derived key across a launch, so the vault is
+ * *always* sealed at launch and this gate always asks (for the passphrase, or
+ * for the biometric skip where a copy of the key was put in the platform
+ * store). That is not a missing preference; a switch for it would imply it
+ * could be turned off.
  */
 
 /**
@@ -165,9 +167,31 @@ const BIOMETRIC_LABEL =
  */
 const MIN_PASSPHRASE_LENGTH = 8;
 
-/** §25's lede, verbatim. */
+/**
+ * The lede, and it is NOT §25's, which said: "Your kubeconfigs and cluster
+ * tokens are sealed on this machine. Unlock to derive the key — it is never
+ * written to disk." Both halves are false.
+ *
+ * `Secrets` (`apps/desktop/src-tauri/src/vault.rs:43-50`) holds exactly two
+ * fields, `mcp_token` and `llm_keys`. A kubeconfig never enters the vault:
+ * `all_kubeconfig_paths()` (`crates/registry/src/lib.rs:65`) returns
+ * `~/.kube/config` plus the managed files, `kubeconfig_files_in()`
+ * (`crates/kube/src/connect.rs:100`) enumerates them as plain files, and there
+ * is no `encrypt`, `aes` or `chacha` anywhere in `crates/kube` or
+ * `crates/registry`. Classic's `VaultGate` has said this correctly since it
+ * shipped, so §25's sentence was a truthfulness REGRESSION against what
+ * already ships.
+ *
+ * And "never written to disk" is refuted by the button three inches below it:
+ * `vault_biometric_enable` (`vault_biometric.rs:75-81`) writes `to_hex(&key)`
+ * into the platform biometric store, which is where `Unlock with Touch ID`
+ * unwraps it from. So this lede makes no claim about where the key is not —
+ * the true claim ("the key is derived, not stored") stops being true the
+ * moment a reader allows the biometric skip, and a lock screen is the last
+ * place to put a sentence that a preference can falsify.
+ */
 const LEDE =
-  "Your kubeconfigs and cluster tokens are sealed on this machine. Unlock to derive the key — it is never written to disk.";
+  "srelens's stored secrets — the MCP bearer token and your assistant API keys — are sealed on this machine. Unlock to derive the key that opens them.";
 
 /**
  * §25's escalation, verbatim, and the reason the raw refusal is kept beside it.
@@ -188,13 +212,27 @@ function escalate(failures: number): string {
   return failures >= 3 ? `${first} Nothing is unsealed after a failed attempt.` : first;
 }
 
-/** §25's footer: how much is sealed, and how many attempts have missed. */
+/**
+ * The footer: what the cover puts beyond reach, and how many attempts have
+ * missed.
+ *
+ * §25 words the first half "N clusters sealed". The number is a count of kube
+ * CONTEXTS, and not one of them is sealed by anything — the vault holds the
+ * MCP bearer and the assistant keys, and a kubeconfig is a plain file on disk.
+ * The count was right and the word beside it was a claim about encryption that
+ * does not exist.
+ *
+ * It is not dropped, because the number is worth saying: what IS true while
+ * this cover is up is that the window those clusters are reached through has
+ * been replaced by this one, so they are out of reach until it lifts. That is
+ * the fact the reader is looking at, and it is the one the footer states.
+ */
 function footer(clusters: number, failures: number): string {
   const parts: string[] = [];
-  // Omitted at zero rather than rendered as "0 clusters sealed", which reads as
-  // a count that failed. A locked vault is also the state in which the cluster
-  // list is least likely to have been read at all.
-  if (clusters > 0) parts.push(`${clusters} ${clusters === 1 ? "cluster" : "clusters"} sealed`);
+  // Omitted at zero rather than rendered as "0 clusters out of reach", which
+  // reads as a count that failed. A locked vault is also the state in which the
+  // cluster list is least likely to have been read at all.
+  if (clusters > 0) parts.push(`${clusters} ${clusters === 1 ? "cluster" : "clusters"} out of reach`);
   parts.push(
     failures === 0
       ? "no failed attempts"
@@ -429,7 +467,7 @@ export function LockGate({ children }: { children: ReactNode }) {
             </h1>
             <p className="mt-2 text-[0.8125rem] leading-relaxed text-muted">
               {setup
-                ? "srelens seals your kubeconfigs and cluster tokens with a key derived from a master passphrase you choose. The key lives in memory only, so you will be asked for the passphrase every time srelens starts."
+                ? "srelens seals its stored secrets — the MCP bearer token and your assistant API keys — with a key derived from a master passphrase you choose. Your kubeconfigs are not sealed: srelens reads them as ordinary files. The key is derived from the passphrase rather than kept, so srelens asks for it every time it starts."
                 : LEDE}
             </p>
           </header>
@@ -670,7 +708,7 @@ function Unreachable({ error, onRetry }: { error: unknown; onRetry: () => void }
       <h1 className="text-[1.375rem] font-semibold tracking-[-0.01em]">Secrets unavailable</h1>
       <p className="mt-2 text-[0.8125rem] leading-relaxed text-muted">
         srelens could not reach its secrets vault, so it cannot tell whether the workspace is
-        sealed. Your clusters stay sealed until this resolves — retry, or restart srelens.
+        sealed. This cover stays up until that is answered — retry, or restart srelens.
       </p>
       <FailureAlert
         tone="sev"
@@ -686,13 +724,22 @@ function Unreachable({ error, onRetry }: { error: unknown; onRetry: () => void }
 }
 
 /**
- * The keychain recovery copy, shown once.
+ * The keychain recovery copy, printed because the reader asked for it.
  *
  * The vault is already unlocked by the time this renders — `vault_recover_password`
  * opens it as a side effect — so the cover is staying up purely so the reader
  * can read this before it goes. Ported from `VaultGate` unchanged in substance:
  * the one place in srelens that prints a passphrase does it because the reader
  * explicitly asked for it and has nowhere else to read it from.
+ *
+ * **Not "shown once".** §25's line is "This is the only time srelens shows
+ * it", and that is false: `recover_password_core`
+ * (`apps/desktop/src-tauri/src/vault_password.rs:212-246`) reads the same
+ * keychain copy and returns the same value every time `Forgot your
+ * passphrase?` is pressed, with no credential typed at all — the marker file
+ * is the only gate. So the copy says what is actually true, and says the part
+ * that matters more than either: a reader who kept a recovery copy has a
+ * passphrase that whatever can read that keychain can read too.
  */
 function Recovered({ value, onContinue }: { value: string; onContinue: () => void }) {
   return (
@@ -706,8 +753,9 @@ function Recovered({ value, onContinue }: { value: string; onContinue: () => voi
         {value}
       </code>
       <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
-        Note it somewhere safe, or change it under Settings → Security. This is the only time
-        srelens shows it.
+        Note it somewhere safe, or change it under Settings → Security. srelens shows it nowhere
+        else — but this screen reads it back from the recovery copy in this machine&apos;s keychain
+        every time you ask, so anything that can read that keychain can read this.
       </p>
       <Button variant="primary" className="mt-4 w-full" onClick={onContinue}>
         Continue

@@ -90,13 +90,69 @@ describe("SecurityPane", () => {
     expect(body?.textContent ?? "").not.toContain("handler error");
   });
 
-  it("keeps the design's sentence about what the key seals", async () => {
+  /**
+   * The sentence this replaced was §23's, and it was false. `Secrets`
+   * (`apps/desktop/src-tauri/src/vault.rs:43-50`) holds exactly two fields —
+   * `mcp_token` and `llm_keys`. Kubeconfigs never enter the vault:
+   * `all_kubeconfig_paths()` returns `~/.kube/config` plus the managed files
+   * and `kubeconfig_files_in()` enumerates them as plain files, with no
+   * encryption anywhere in `crates/kube` or `crates/registry`. Classic's
+   * `VaultGate` said it correctly and the new design replaced an accurate
+   * sentence with the mock's inaccurate one.
+   *
+   * The old test's NAME asserted a truth property; its body only checked that
+   * a particular string was on screen, which is why the string being false
+   * cost nothing. This body checks both halves: what is sealed is named, and
+   * the claim about kubeconfigs is not made.
+   */
+  it("names what the vault seals, and does not count kubeconfigs among it", async () => {
     render(<SecurityPane onLocked={() => {}} />);
-    expect(
-      await screen.findByText(
-        /Kubeconfigs and cluster tokens are sealed at rest with a key derived from your master passphrase/i,
-      ),
-    ).toBeTruthy();
+    await screen.findByRole("button", { name: /lock now/i });
+    const text = document.body.textContent ?? "";
+    expect(text).toMatch(/MCP bearer token/i);
+    expect(text).toMatch(/assistant API keys/i);
+    // The affirmative claim, in every wording that made it: "Kubeconfigs and
+    // cluster tokens are sealed", "your kubeconfigs are sealed", "seals your
+    // kubeconfigs".
+    expect(text).not.toMatch(/kubeconfigs[^.]*\bare sealed\b/i);
+    expect(text).not.toMatch(/seals?\s+(your\s+)?kubeconfigs/i);
+    expect(text).not.toMatch(/cluster tokens are sealed/i);
+    // And the fact stated positively, so a reader is told rather than merely
+    // not misled.
+    expect(text).toMatch(/kubeconfigs are not sealed/i);
+  });
+
+  /**
+   * Finding 6: `vault_biometric_enable`
+   * (`apps/desktop/src-tauri/src/vault_biometric.rs:75-81`) writes
+   * `to_hex(&key)` into the platform biometric store. This pane said so at one
+   * line and said "the key is never written down" nineteen lines later, in one
+   * viewport.
+   */
+  it("does not claim the key is never written down", async () => {
+    core.vaultBiometricStatus.mockResolvedValue(SENSOR_ON);
+    render(<SecurityPane onLocked={() => {}} />);
+    await screen.findByRole("switch");
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/never written/i);
+    expect(text).not.toMatch(/key is never/i);
+  });
+
+  /**
+   * "Anything that needs to read a sealed secret again asks for your
+   * passphrase first" is untrue twice over: with Touch ID allowed the key is
+   * unwrapped from the biometric store, and `recover_password_core`
+   * (`vault_password.rs:212-246`) reads the OS keychain and unlocks with no
+   * credential typed at all.
+   */
+  it("names the two ways in that are not the passphrase", async () => {
+    core.vaultBiometricStatus.mockResolvedValue(SENSOR_ON);
+    render(<SecurityPane onLocked={() => {}} />);
+    await screen.findByRole("switch");
+    const text = document.body.textContent ?? "";
+    expect(text).toMatch(/recovery copy/i);
+    expect(text).toMatch(/Touch ID|Windows Hello/);
+    expect(text).not.toMatch(/asks for your passphrase first/i);
   });
 
   /**

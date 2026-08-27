@@ -149,6 +149,10 @@ describe("LockGate — the cover", () => {
     expect(await screen.findByText("Secrets unavailable")).toBeTruthy();
     expect(screen.queryByTestId("body")).toBeNull();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    // "Your clusters stay sealed until this resolves" was the wrong claim in
+    // the wrong direction: nothing seals a cluster, and what is actually true
+    // is that this cover is not coming down.
+    expect(document.body.textContent ?? "").not.toMatch(/clusters stay sealed/i);
   });
 
   it("asks the vault nothing where there is no vault to ask", async () => {
@@ -217,14 +221,64 @@ describe("LockGate — raising the cover", () => {
 });
 
 describe("LockGate — §25's copy", () => {
-  it("says what is sealed and that the key is never written down", async () => {
+  /**
+   * §25's lede was "Your kubeconfigs and cluster tokens are sealed on this
+   * machine. Unlock to derive the key — it is never written to disk." Both
+   * halves were false. `Secrets` (`apps/desktop/src-tauri/src/vault.rs:43-50`)
+   * holds `mcp_token` and `llm_keys` and nothing else; a kubeconfig is a plain
+   * file. And `vault_biometric_enable` (`vault_biometric.rs:75-81`) writes
+   * `to_hex(&key)` into the platform biometric store, so "never written to
+   * disk" was contradicted by the `Unlock with Touch ID` button directly
+   * underneath it.
+   *
+   * The old test's NAME claimed both properties; its body only checked that
+   * one particular string was on screen, so the string being false cost
+   * nothing. This one checks the properties.
+   */
+  it("names what is sealed, and claims nothing about where the key is not", async () => {
     paint();
     await screen.findByText("Workspace locked");
-    expect(
-      screen.getByText(
-        "Your kubeconfigs and cluster tokens are sealed on this machine. Unlock to derive the key — it is never written to disk.",
-      ),
-    ).toBeTruthy();
+    const text = document.body.textContent ?? "";
+    expect(text).toMatch(/MCP bearer token/i);
+    expect(text).toMatch(/assistant API keys/i);
+    expect(text).not.toMatch(/kubeconfigs[^.]*\bare sealed\b/i);
+    expect(text).not.toMatch(/seals?\s+(your\s+)?kubeconfigs/i);
+    expect(text).not.toMatch(/cluster tokens are sealed/i);
+    expect(text).not.toMatch(/never written/i);
+  });
+
+  /**
+   * The direct contradiction, in one viewport: the claim and the button that
+   * refutes it. Asserted with the biometric skip actually enrolled, which is
+   * the state §25's lede shipped above.
+   */
+  it("makes no claim the Touch ID button standing under it refutes", async () => {
+    core.vaultStatus.mockResolvedValue(SEALED_WITH_BIOMETRIC);
+    core.vaultBiometricUnlock.mockRejectedValue(new Error("the user cancelled"));
+    paint();
+    await screen.findByText("Workspace locked");
+    await waitFor(() => expect(core.vaultBiometricUnlock).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: /Unlock with Touch ID/ })).toBeTruthy();
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/never written/i);
+    expect(text).not.toMatch(/memory only/i);
+  });
+
+  /**
+   * The setup form's own paragraph, which said "srelens seals your kubeconfigs
+   * and cluster tokens with a key derived from a master passphrase you
+   * choose." Same falsehood as the lede, on the one screen a reader sees
+   * before they have chosen anything.
+   */
+  it("tells a first-time reader what they are protecting, correctly", async () => {
+    core.vaultStatus.mockResolvedValue(NEVER_SET_UP);
+    paint();
+    await screen.findByText("Protect your workspace");
+    const text = document.body.textContent ?? "";
+    expect(text).toMatch(/MCP bearer token/i);
+    expect(text).toMatch(/assistant API keys/i);
+    expect(text).not.toMatch(/seals?\s+(your\s+)?kubeconfigs/i);
+    expect(text).toMatch(/kubeconfigs are not sealed/i);
   });
 
   it("hardens its wording once a reader has failed twice", async () => {
@@ -256,16 +310,32 @@ describe("LockGate — §25's copy", () => {
     }
   });
 
-  it("counts the sealed clusters and the failed attempts in its footer", async () => {
+  /**
+   * §25's footer says "N clusters sealed". The number is a count of kube
+   * contexts, and not one of them is sealed by anything — so the count was
+   * right and the word beside it was a claim about encryption that does not
+   * exist. What IS true of those clusters while this cover is up is that the
+   * window they are reached through has been replaced, so they are out of
+   * reach. That is what the footer says now.
+   */
+  it("says what is true of the clusters it counts, and does not call them sealed", async () => {
     const user = userEvent.setup();
     act(() => setContexts([ctx("prod"), ctx("dev")]));
     paint();
     await screen.findByText("Workspace locked");
-    expect(screen.getByText("2 clusters sealed · no failed attempts")).toBeTruthy();
+    expect(screen.getByText("2 clusters out of reach · no failed attempts")).toBeTruthy();
+    expect(document.body.textContent ?? "").not.toMatch(/clusters? sealed/i);
     await failOnce(user);
-    expect(screen.getByText("2 clusters sealed · 1 failed attempt")).toBeTruthy();
+    expect(screen.getByText("2 clusters out of reach · 1 failed attempt")).toBeTruthy();
     await failOnce(user);
-    expect(screen.getByText("2 clusters sealed · 2 failed attempts")).toBeTruthy();
+    expect(screen.getByText("2 clusters out of reach · 2 failed attempts")).toBeTruthy();
+  });
+
+  it("omits the count rather than reporting a cluster list it never read", async () => {
+    paint();
+    await screen.findByText("Workspace locked");
+    expect(screen.getByText("no failed attempts")).toBeTruthy();
+    expect(document.body.textContent ?? "").not.toMatch(/0 clusters/);
   });
 
   it("keeps the original refusal, folded, under §25's sentence", async () => {
@@ -362,6 +432,28 @@ describe("LockGate — recovery", () => {
     expect(screen.queryByTestId("body")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(await screen.findByTestId("body")).toBeTruthy();
+  });
+
+  /**
+   * "This is the only time srelens shows it" is false: `Forgot your
+   * passphrase?` reads the same keychain copy and prints the same value every
+   * time it is asked, with no credential typed
+   * (`recover_password_core`, `vault_password.rs:212-246`). A reader told
+   * otherwise would take no note of a passphrase they could have recovered —
+   * or, worse, would believe a copy exists nowhere when one does.
+   */
+  it("does not claim this is the only time the passphrase can be read", async () => {
+    const user = userEvent.setup();
+    paint();
+    await screen.findByText("Workspace locked");
+    core.vaultStatus.mockResolvedValue(OPEN);
+    await user.click(screen.getByRole("button", { name: "Forgot your passphrase?" }));
+    await screen.findByText("recovered-value");
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/only time/i);
+    // What is true instead: this came out of the recovery copy, and the copy is
+    // still there.
+    expect(text).toMatch(/recovery copy/i);
   });
 
   it("says so when there is no recovery copy to read", async () => {
