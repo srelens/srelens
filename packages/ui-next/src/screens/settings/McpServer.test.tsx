@@ -135,7 +135,28 @@ describe("McpServer", () => {
     expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Rotate" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
-    expect(screen.getByText(/not accepting connections/i)).toBeTruthy();
+    expect(screen.getByTestId("no-token-note").textContent).toMatch(/nothing to reveal/i);
+  });
+
+  /**
+   * "No bearer token has been generated, so the MCP server is not accepting
+   * connections" printed regardless of `statusRead` — the badge-level version
+   * of this was fixed in an earlier round and it survived in prose. It is also
+   * not implied by the absence of a token: `mcp_http_start`
+   * (`apps/desktop/src-tauri/src/mcp.rs:206-212`) MINTS one when none exists,
+   * so a server can be brought up from this state. The sentence now says only
+   * what the absent token establishes.
+   */
+  it("makes no claim about the server from the absence of a token", async () => {
+    core.getMcpToken.mockResolvedValue(null);
+    // A status read that never settles, so nothing on screen may assert
+    // anything about whether the server is listening.
+    core.mcpHttpStatus.mockReturnValue(new Promise<string | null>(() => {}));
+    render(<McpServer />);
+    const note = await screen.findByTestId("no-token-note");
+    expect(note.textContent).not.toMatch(/not accepting connections/i);
+    expect(note.textContent).not.toMatch(/not (currently )?listening/i);
+    expect(screen.queryByText("not running")).toBeNull();
   });
 
   it("does not read the badge as running just because a token exists", async () => {
@@ -161,8 +182,7 @@ describe("McpServer", () => {
     core.getMcpToken.mockRejectedValue(new Error("boom"));
     render(<McpServer />);
     expect(await screen.findByText(/could not be read/i)).toBeTruthy();
-    expect(screen.queryByText(/no bearer token has been generated/i)).toBeNull();
-    expect(screen.queryByText(/not accepting connections/i)).toBeNull();
+    expect(screen.queryByTestId("no-token-note")).toBeNull();
     // Unknown, not "definitely absent": no controls implying either.
     expect(screen.queryByRole("button", { name: "Reveal" })).toBeNull();
   });

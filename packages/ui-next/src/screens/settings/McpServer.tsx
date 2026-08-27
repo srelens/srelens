@@ -67,14 +67,21 @@ import { FailureAlert } from "../../lib/errorCopy";
  * and revoke against each other, so no second guard is load-bearing here.
  *
  * **`getMcpTokenStorage()` is deliberately NOT read here**, despite being
- * named for this file. Its own doc comment says what it actually reports:
- * where the *secrets vault's master key* lives (keychain / file / locked) —
- * `mcp_token_storage` (`mcp.rs`) returns `vault.key_source()`. The MCP bearer
- * itself is a plain `FileTokenStore` (`crates/mcp/src/auth.rs`), unrelated to
- * the vault; captioning this pane with the vault's key source would tell the
- * reader something false about how THIS credential is protected. Classic's
- * `McpSettingsSection` never called it either — only `SecuritySettingsSection`
- * did, and that pane (not this one) is where vault key storage belongs.
+ * named for this file — but the reason first written down was wrong. It said
+ * the MCP bearer "is a plain `FileTokenStore` (`crates/mcp/src/auth.rs`),
+ * unrelated to the vault". In the desktop it is not: `main.rs:184` and
+ * `lib.rs:405-406` register a `VaultTokenStore`, so the bearer is one of the
+ * two secrets the vault actually seals (`Secrets.mcp_token`,
+ * `apps/desktop/src-tauri/src/vault.rs`).
+ *
+ * The refusal stands, for the opposite reason. `mcp_token_storage` (`mcp.rs`)
+ * returns `vault.key_source()` — where the vault's MASTER KEY lives (keychain /
+ * file / locked / biometric), which is a fact about the vault and not about
+ * this credential. Captioning a `Bearer token` panel with it would answer a
+ * question the reader did not ask with a value that looks like an answer to the
+ * one they did. Where the master key lives belongs on the Security pane, which
+ * is where classic put it too: `McpSettingsSection` never called this, only
+ * `SecuritySettingsSection` did.
  *
  * **`Clients` is not drawn** (#369): `mcpClientConfig` generates configuration
  * *for* a client to paste elsewhere; srelens does not track who connects.
@@ -259,9 +266,9 @@ export function McpServer() {
           )}
         </>
       ) : tokenRead.kind === "ready" ? (
-        <p className="text-[0.75rem] leading-relaxed text-muted">
-          No bearer token has been generated, so the MCP server is not accepting connections — there is nothing to
-          reveal, copy or rotate yet.
+        <p data-testid="no-token-note" className="text-[0.75rem] leading-relaxed text-muted">
+          No bearer token has been minted yet, so there is nothing to reveal, copy or rotate. One is
+          minted when the loopback HTTP server starts.
         </p>
       ) : null}
 

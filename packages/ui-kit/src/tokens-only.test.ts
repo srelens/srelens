@@ -111,3 +111,70 @@ describe("a table cell's figures", () => {
     expect(body).toContain("font-variant-numeric: tabular-nums");
   });
 });
+
+/**
+ * The `contrast` theme's own promise, computed rather than asserted in prose.
+ *
+ * ui-next's Accessibility pane tells its reader that High contrast "raises
+ * every text pair above 7:1", and nothing anywhere computed a ratio — the pane
+ * stated a numeric property of this stylesheet, and a test pinned the number
+ * without ever checking it. One pair did not hold: `--ink-faint` on
+ * `--surface-sunk` came to 6.56:1.
+ *
+ * So the ratios are computed here, from the block itself, over every
+ * ink-on-ground and tone-on-wash pair the theme defines. WCAG's own formula
+ * (relative luminance, sRGB linearisation), and 7:1 is its AAA threshold for
+ * body text. A token edited into a prettier grey fails this rather than quietly
+ * making a sentence in another package false.
+ */
+describe("the high-contrast theme", () => {
+  /** WCAG 2.x relative luminance of a `#rrggbb` value. */
+  function luminance(hex: string): number {
+    const channel = (pair: string) => {
+      const value = Number.parseInt(pair, 16) / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    };
+    const bare = hex.replace("#", "");
+    const [r, g, b] = [bare.slice(0, 2), bare.slice(2, 4), bare.slice(4, 6)].map(channel);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  function contrast(a: string, b: string): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  /** The theme's own declarations, read off the stylesheet. */
+  function tokens(): Record<string, string> {
+    const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+    const start = css.indexOf('[data-theme="contrast"] {');
+    expect(start).toBeGreaterThan(-1);
+    const body = css.slice(start, css.indexOf("}", start));
+    const out: Record<string, string> = {};
+    for (const [, name, value] of body.matchAll(/(--[a-z-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) {
+      out[name] = value;
+    }
+    return out;
+  }
+
+  it("clears AAA on every text pair it defines", () => {
+    const t = tokens();
+    const inks = ["--ink", "--ink-soft", "--ink-muted", "--ink-faint"];
+    const grounds = ["--canvas", "--canvas-deep", "--surface", "--surface-sunk", "--surface-raised"];
+    const tones = ["--accent", "--sev", "--warn", "--ok", "--info"];
+    const pairs: Array<[string, string]> = [];
+    for (const ink of [...inks, ...tones]) for (const ground of grounds) pairs.push([ink, ground]);
+    // A tone on its own wash, which is where a badge's label sits.
+    for (const tone of tones) pairs.push([tone, `${tone}-wash`]);
+    pairs.push(["--accent-ink", "--accent"]);
+
+    const failures = pairs
+      .filter(([a, b]) => t[a] !== undefined && t[b] !== undefined)
+      .map(([a, b]) => [a, b, contrast(t[a], t[b])] as const)
+      .filter(([, , ratio]) => ratio < 7)
+      .map(([a, b, ratio]) => `${a} on ${b} = ${ratio.toFixed(2)}:1`);
+    expect(failures).toEqual([]);
+    // Guards the guard: a typo in a token name would silently compare nothing.
+    expect(pairs.length).toBeGreaterThan(40);
+  });
+});

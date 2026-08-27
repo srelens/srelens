@@ -136,9 +136,13 @@ export function describe(route: string, clusterName?: string): RouteInfo {
 /**
  * What every routed screen is handed.
  *
- * `route` is the screen's own; the other two are the HOST's, injected from the
- * root — and they are here rather than imported because ui-next **cannot**
- * import them. This package depends on `@srelens/core` and `@srelens/ui-kit`;
+ * `route` is the screen's own. `ported` and `onSwitchToClassic` are the HOST's,
+ * injected from the root — and they are here rather than imported because
+ * ui-next **cannot** import them. `onLocked` is neither: it is this package's
+ * own, `shell/LockGate`'s `lockWorkspace` handed down by `Window`, and it is
+ * declared beside the other two because it travels the same path. Three fields
+ * now, two of them the host's; the sentence said "the other two are the HOST's"
+ * when there were only two, and kept saying it once there were three. This package depends on `@srelens/core` and `@srelens/ui-kit`;
  * `apps/desktop` depends on this package, so reaching `apps/desktop/src/design`
  * from here is a genuine cycle across a package boundary with no alias to
  * shortcut it.
@@ -151,7 +155,7 @@ export function describe(route: string, clusterName?: string): RouteInfo {
  * instead of only to the Placeholder, so there is one injection path in this
  * package and not two.
  *
- * **Required, not optional, on purpose.** `Settings` renders the Appearance
+ * **Required, not optional, on purpose** — all three. `Settings` renders the Appearance
  * pane, whose `Design` panel is the only way back to the classic design; an
  * optional prop with a default would have let `Body` drop it and left that
  * panel listing nothing behind an inert button. Required means the typecheck
@@ -159,9 +163,11 @@ export function describe(route: string, clusterName?: string): RouteInfo {
  * still declare `{ route: string }` and are still assignable here — a wider
  * props type is not a demand on the fourteen entries that ignore it.
  *
- * Both are step-11 scaffolding and leave with it: when migration step 11
- * deletes `apps/desktop/src/design.ts` and `shell/Placeholder.tsx`, these two
- * fields and `Body`'s forwarding of them go too, and this is `{ route }` again.
+ * `ported` and `onSwitchToClassic` are step-11 scaffolding and leave with it:
+ * when migration step 11 deletes `apps/desktop/src/design.ts` and
+ * `shell/Placeholder.tsx`, those two fields and `Body`'s forwarding of them go
+ * too. `onLocked` stays — the lock surface is not scaffolding — so this becomes
+ * `{ route, onLocked }` rather than `{ route }`.
  */
 export interface RoutedScreenProps {
   route: string;

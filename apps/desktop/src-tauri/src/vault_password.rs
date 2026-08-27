@@ -682,7 +682,7 @@ mod tests {
     fn locking_forgets_the_key_and_leaves_the_vault_intact() {
         let (vault, dir) = a_set_up_unlocked_vault();
         assert!(vault.is_unlocked());
-        lock_core(&vault);
+        lock_core(&vault).expect("an unlocked vault can be locked");
         assert!(!vault.is_unlocked(), "locking must discard the key");
         // The sealed bytes are untouched: the same passphrase still opens it.
         assert!(unlock_core(&vault, &dir, "correct horse").is_ok());
@@ -699,7 +699,12 @@ mod tests {
     fn locking_never_rekeys() {
         let (vault, dir) = a_set_up_unlocked_vault();
         let before = sealed_bytes(&dir);
-        lock_core(&vault);
+        // `.unwrap()`, not a bare call. This test asserts an ABSENCE of change,
+        // so a `lock_core` that returned `Err` and did nothing at all would
+        // pass it — and this is the sole guard of the sealed bytes' identity.
+        // (It also clears the `unused_must_use` warning the bare call raised.)
+        lock_core(&vault).expect("an unlocked vault can be locked");
+        assert!(!vault.is_unlocked(), "and the key really was discarded");
         assert_eq!(sealed_bytes(&dir), before, "locking must not rewrite the vault");
     }
 

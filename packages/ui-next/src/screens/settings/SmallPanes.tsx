@@ -141,9 +141,11 @@ export function AccessibilityPane() {
       </Panel>
 
       <Panel title="Screen readers">
-        <p className="text-[0.75rem] leading-relaxed text-muted">
-          Tabs expose <code className="code">role=&quot;tab&quot;</code> with selected state; the
-          console announces agent replies through a live region.
+        <p data-testid="live-region-note" className="text-[0.75rem] leading-relaxed text-muted">
+          Tabs expose <code className="code">role=&quot;tab&quot;</code> with selected state, and
+          every failure surface is a live region that reads itself out when it appears. The console
+          announces nothing yet: the agent is not in the new design, so there are no replies for it
+          to read.
         </p>
         <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
           Every icon-only control carries a label, switches report{" "}

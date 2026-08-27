@@ -50,10 +50,13 @@ function useHash(): string {
  * than a screen, so it is a hash and not a route. The way *in* is on the
  * Placeholder, because that is the screen every un-ported route renders.
  *
- * `onExit` is the way back to the classic design. Settings does not exist in
- * this tree yet, so without it someone who opts in would have no route out of
- * the app except editing localStorage — which is why the Placeholder's "Open in
- * classic" is wired to it rather than to a per-route handoff, which is PR 3.
+ * `onExit` is the way back to the classic design, and it is now reached from
+ * two places rather than one. It shipped when `Settings` did not exist in this
+ * tree, so without it someone who opted in had no route out of the app except
+ * editing localStorage — which is why the Placeholder's "Open in classic" is
+ * wired to it. `screens/Settings.tsx` exists now, and its Appearance pane's
+ * `Design` panel is the way out a reader will actually look for; both go
+ * through this one callback, so there is one exit and not two.
  */
 export function NextApp({
   onExit,

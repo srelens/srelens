@@ -159,15 +159,45 @@ describe("AccessibilityPane", () => {
     expect(note.textContent).toMatch(/system/i);
   });
 
-  it("carries §23's contrast paragraph", () => {
+  /**
+   * The 7:1 in this sentence is a numeric property of `ui-kit`'s stylesheet, and
+   * for most of this branch NOTHING computed it — this test pinned the number
+   * while the claim was false: `--ink-faint` on `--surface-sunk` came to
+   * 6.56:1 in the `contrast` theme. The token was darkened and the floor is now
+   * computed over every pair the theme defines, in
+   * `packages/ui-kit/src/tokens-only.test.ts` ("the high-contrast theme"). This
+   * assertion is only worth keeping because that one exists; if the guard is
+   * ever removed, the sentence goes with it.
+   */
+  it("carries §23's contrast paragraph, which ui-kit's own guard makes true", () => {
     render(<AccessibilityPane />);
     expect(screen.getByText(/raises every text pair above 7:1/i)).toBeTruthy();
     expect(screen.getByText(/dashed stroke as well as colour/i)).toBeTruthy();
   });
 
-  it("carries §23's screen-reader paragraphs", () => {
+  /**
+   * §23 says "the console announces agent replies through a live region".
+   * `shell/Console.tsx` has no `aria-live`, no `role="status"` and no
+   * `role="log"` — and it says on screen that the agent is not in the new
+   * design, so there are no replies to announce either. What IS true is that
+   * every failure surface in this package is a live region (`Alert` carries
+   * `role="alert"` for `sev` and `role="status"` otherwise), which is what the
+   * pane claims instead.
+   */
+  it("does not claim the console announces anything", () => {
     render(<AccessibilityPane />);
-    expect(screen.getByText(/live region/i)).toBeTruthy();
+    const note = screen.getByTestId("live-region-note").textContent ?? "";
+    expect(note).toMatch(/live region/i);
+    expect(note).not.toMatch(/console announces agent replies/i);
+    expect(note).toMatch(/console announces nothing yet/i);
+    // The source of the claim, so this cannot pass on a reworded promise: no
+    // live-region markup exists in the console at all.
+    const console_ = readFileSync(join(HERE, "../../shell/Console.tsx"), "utf8");
+    expect(console_).not.toMatch(/aria-live|role="status"|role="log"/);
+  });
+
+  it("carries §23's other screen-reader paragraph", () => {
+    render(<AccessibilityPane />);
     expect(screen.getByText(/traps escape/i)).toBeTruthy();
   });
 });
