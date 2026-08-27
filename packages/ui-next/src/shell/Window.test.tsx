@@ -754,7 +754,7 @@ describe("Window — what the cover has to take with it", () => {
 
   it("offers no way into Settings from the titlebar while the cover is up", async () => {
     await sealed();
-    const gear = screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement;
+    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
     expect(gear.disabled).toBe(true);
     await userEvent.click(gear);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
@@ -816,7 +816,7 @@ describe("Window — what the cover has to take with it", () => {
     await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
     await screen.findByRole("tablist");
     expect(
-      (screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
     expect(
@@ -870,7 +870,7 @@ describe("Window — the launch check, before the vault has answered", () => {
 
   it("offers no way into Settings for the whole check", async () => {
     await stillChecking();
-    const gear = screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement;
+    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
     expect(gear.disabled).toBe(true);
     await userEvent.click(gear);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
@@ -903,7 +903,7 @@ describe("Window — the launch check, before the vault has answered", () => {
   it("gives every one of those back once the launch read says the vault is open", async () => {
     await booted();
     expect(
-      (screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
     expect(

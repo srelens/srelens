@@ -217,7 +217,27 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
             />
             <IconButton
               icon={Icons.settings}
-              label="Appearance settings"
+              // `Settings`, and not `Appearance settings`, which is what this
+              // said while it opened `/settings` — a route whose screen opens
+              // on `Agent & MCP`. A control's accessible name is a promise
+              // about where it goes, and it is the ONLY thing a keyboard or
+              // screen-reader user has to go on, so it was the one reader the
+              // wrong name misled.
+              //
+              // Renamed rather than re-pointed, deliberately. Opening the
+              // Appearance section directly would be the better fix if the
+              // destination could be named in the route, and it cannot be
+              // honestly yet: `/settings` carries no section, the rail's
+              // selection is state local to the screen, and a `/settings/
+              // appearance` route would keep the promise on the first press and
+              // break it on the second — `openTab` focuses the tab that route
+              // already opened, wherever the reader has since arrowed to. Making
+              // it hold needs the rail to write its section back into the tab's
+              // route and `openTab` to dedupe Settings by prefix, which is
+              // three coupled changes across the screen, the router and the tab
+              // store. Until then the honest name is the whole of what it
+              // opens.
+              label="Settings"
               // Disabled rather than removed: the reader can see the way in is
               // still there and be told why it will not open, which a control
               // that vanished could not do. `title` is what `IconButton`

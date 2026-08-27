@@ -209,13 +209,34 @@ describe("Chrome", () => {
     expect(screen.getByRole("button", { name: "Theme" })).toBeDefined();
   });
 
-  it("opens Settings from the appearance action and calls the theme toggle", async () => {
+  it("opens Settings from the gear and calls the theme toggle", async () => {
     const onToggleTheme = vi.fn();
     chrome({ onToggleTheme });
     await userEvent.click(screen.getByRole("button", { name: "Theme" }));
     expect(onToggleTheme).toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "Appearance settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(true);
+  });
+
+  /**
+   * The name and the destination, held together.
+   *
+   * This control was called `Appearance settings` and opened `/settings`, which
+   * opens on `Agent & MCP` — so the one reader who has nothing but the name to
+   * go on, a keyboard or screen-reader user, was told where they were going and
+   * then taken somewhere else. The name is the fixable half: `/settings` takes
+   * no section, the rail's own selection is local to the screen, and a route
+   * that named one would still be contradicted the second time this button
+   * focused a Settings tab the reader had since arrowed to another section.
+   */
+  it("names where it goes, not one section of what it opens", async () => {
+    chrome();
+    expect(screen.queryByRole("button", { name: /appearance/i })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const tab = currentWorkspace().tabs.find((t) => t.route === "/settings");
+    expect(tab).toBeDefined();
+    // And the tab it opens calls itself the same thing the control did.
+    expect(tab?.title).toBe("Settings");
   });
 
   /**
@@ -270,7 +291,7 @@ describe("Chrome", () => {
     it("disables the way into Settings, and says why", async () => {
       lockWorkspace();
       chrome();
-      const gear = screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement;
+      const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
       expect(gear.disabled).toBe(true);
       expect(gear.getAttribute("title")).toMatch(/unlock/i);
       await userEvent.click(gear);
