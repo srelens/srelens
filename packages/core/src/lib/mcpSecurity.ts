@@ -119,13 +119,29 @@ export async function vaultChangePassword(current: string, next: string): Promis
   return await invoke<string | null>("vault_change_password", { current, new: next });
 }
 
-/** Newest first. Returns [] rather than throwing: a missing log is not an error. */
+/**
+ * The newest `limit` capability calls, newest first.
+ *
+ * **Rejects when the trail cannot be read**, and that is a deliberate change
+ * from what this used to do. It caught every refusal and returned `[]`, which
+ * left "no agent has called anything" and "srelens could not read what the
+ * agent called" as the same value — so a caller could only ever draw the
+ * first. That collapse shipped: the new design's `Audit` pane rendered "No
+ * capability calls yet · A fresh install has made none — this is not an error"
+ * over a failed read, guaranteed on the web build where every `invoke`
+ * rejects, on the one screen whose whole purpose is answering "what did the
+ * agent do?" after an incident.
+ *
+ * What an empty result still means, said exactly: `srelens_mcp::audit::tail`
+ * (`crates/mcp/src/audit.rs:92-110`) returns an empty vector for a log file it
+ * cannot open, seek or read as well as for one that does not exist yet, so a
+ * resolved `[]` is "the backend found no entries" and not "the backend
+ * answered". What reaches a caller's `catch` is a refusal at the command
+ * boundary — no such command, an IPC failure, or the web build, where every
+ * `invoke` rejects because there is no Tauri host behind it.
+ */
 export async function auditTail(limit: number): Promise<AuditEntry[]> {
-  try {
-    return await invoke<AuditEntry[]>("mcp_audit_tail", { limit });
-  } catch {
-    return [];
-  }
+  return await invoke<AuditEntry[]>("mcp_audit_tail", { limit });
 }
 
 /** A prompt file srelens could not load, and why. */

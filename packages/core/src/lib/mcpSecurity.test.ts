@@ -32,9 +32,23 @@ describe("mcpSecurity", () => {
     await expect(rotateMcpToken()).resolves.toHaveLength(64);
   });
 
-  it("returns an empty list when the audit log is unreadable", async () => {
+  it("returns the entries the backend sent, newest first", async () => {
+    invoke.mockResolvedValue([{ ts: 2, tool: "b" }, { ts: 1, tool: "a" }]);
+    await expect(auditTail(10)).resolves.toEqual([{ ts: 2, tool: "b" }, { ts: 1, tool: "a" }]);
+    expect(invoke).toHaveBeenCalledWith("mcp_audit_tail", { limit: 10 });
+  });
+
+  /**
+   * A trail that could not be read must not arrive as a trail with nothing in
+   * it. This wrapper used to catch and return `[]`, which made "no agent has
+   * called anything" and "srelens cannot read what the agent called"
+   * indistinguishable to every caller — on the web build, where every `invoke`
+   * rejects, the audit pane stated the first as fact for the second. The
+   * refusal propagates, and each caller draws the difference.
+   */
+  it("rejects when the audit log cannot be read, rather than reporting an empty trail", async () => {
     invoke.mockRejectedValueOnce(new Error("nope"));
-    await expect(auditTail(10)).resolves.toEqual([]);
+    await expect(auditTail(10)).rejects.toThrow(/nope/);
   });
 
   it("reports which backend holds the token", async () => {

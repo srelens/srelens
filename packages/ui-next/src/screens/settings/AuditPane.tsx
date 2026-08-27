@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { auditTail, describeError, type AuditEntry } from "@srelens/core";
-import { LoadingState, Panel, Section, Table, toneColor, type Column, type Tone } from "@srelens/ui-kit";
+import { Button, LoadingState, Panel, Section, Table, toneColor, type Column, type Tone } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 
 /**
@@ -25,6 +25,22 @@ import { FailureState } from "../../lib/errorCopy";
  * Only a load that actually failed — `auditTail` itself rejecting — reaches
  * {@link FailureState}, which is the one place on this pane an `alert` is
  * drawn.
+ *
+ * **And until this wave, `auditTail` could not reject.** It caught every
+ * refusal and resolved to `[]`, so the branch above was unreachable and an
+ * unreadable trail rendered "A fresh install has made none — this is not an
+ * error." as fact, with no alert — guaranteed on the web build, where every
+ * `invoke` rejects. The wrapper propagates now (`packages/core/src/lib/
+ * mcpSecurity.ts`), which is what makes the three states here real rather than
+ * decorative.
+ *
+ * **It re-reads on demand**, because classic's `McpAuditList` wrote the reason
+ * down and this pane lost it: "a list read once on mount quietly goes stale —
+ * an operator looking for an agent's action would conclude it never happened."
+ * Settings sits open while agents keep calling. There is no poll — a trail
+ * that refreshed itself under a reader scrolling it is worse than one they ask
+ * for — so the rows on screen are always the answer to a read the reader
+ * asked for.
  *
  * **Every verdict word and colour below comes from the entry**, via
  * {@link verdictOf} — see its comment for why that one small mapping exists
@@ -88,12 +104,20 @@ const columns: Column<AuditEntry>[] = [
   {
     key: "ts",
     header: "Time",
+    // Dated, not just clocked. The on-disk log is capped at 5 MB and rotates
+    // past that, so the window this pane shows routinely spans days —
+    // `14:02:11` alone cannot answer which day a call landed on, which is the
+    // first question an operator reading this after an incident has. Local
+    // time and the reader's own zone, like every other timestamp in this
+    // package: the entry carries a Unix second and nothing about where it was
+    // recorded.
     render: (entry) => {
       const d = new Date(entry.ts * 1000);
       const pad = (n: number) => String(n).padStart(2, "0");
       return (
-        <span className="tabular-nums text-muted">
-          {pad(d.getHours())}:{pad(d.getMinutes())}:{pad(d.getSeconds())}
+        <span data-testid={`audit-time-${entry.ts}`} className="whitespace-nowrap tabular-nums text-muted">
+          {d.getFullYear()}-{pad(d.getMonth() + 1)}-{pad(d.getDate())} {pad(d.getHours())}:
+          {pad(d.getMinutes())}:{pad(d.getSeconds())}
         </span>
       );
     },
@@ -101,10 +125,12 @@ const columns: Column<AuditEntry>[] = [
   },
   {
     key: "transport",
-    header: "Client",
-    // `AuditEntry` names the transport a call arrived on, not who used it —
-    // the MCP server pane draws the same line for the same reason (#369):
-    // srelens does not track which client connected.
+    // Named for the value, which is `"stdio"` or `"http"`. §23's header is
+    // `Client` over rows of product names, and #369 says plainly that srelens
+    // does not track which client connected — so a `Client` header over a
+    // transport claims exactly what that issue says srelens cannot know. The
+    // MCP server pane declines to draw a clients list for the same reason.
+    header: "Transport",
     render: (entry) => <span>{entry.transport}</span>,
   },
   {
@@ -153,15 +179,34 @@ export function AuditPane() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>(null);
+  /**
+   * Bumped to re-run the read, the same shape classic's `McpAuditList` uses.
+   * A nonce rather than a function the button calls directly, so the effect
+   * stays the only place that touches these three pieces of state and its
+   * `cancelled` flag keeps applying — a click during an in-flight read
+   * supersedes it instead of racing it.
+   */
+  const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     auditTail(LIMIT)
       .then((rows) => {
-        if (!cancelled) setEntries(rows);
+        if (cancelled) return;
+        // Cleared on success as well as set on failure: a re-read that worked
+        // must not leave the previous refusal's alert standing over the rows
+        // it just fetched.
+        setError(null);
+        setEntries(rows);
       })
       .catch((e) => {
-        if (!cancelled) setError(e);
+        if (cancelled) return;
+        // The rows go with it. A refusal that left the last good read on
+        // screen would show a stale trail under an alert saying the trail
+        // could not be read — two answers to one question.
+        setEntries([]);
+        setError(e);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -169,13 +214,27 @@ export function AuditPane() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [nonce]);
 
   return (
     <Panel title="Audit · every capability call, allowed or not">
-      <p className="text-[0.75rem] leading-relaxed text-muted">
-        Showing the most recent {LIMIT} capability calls. Older calls exist only in the log file itself, not here.
-      </p>
+      {/* flex-wrap rather than a fixed row: the sentence is the long half and
+          grows in translation, and a flex child with nothing to stop it
+          shrinking is where `min-width: auto` has cost this migration eight
+          defects. */}
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="min-w-0 flex-1 text-[0.75rem] leading-relaxed text-muted">
+          Showing the most recent {LIMIT} capability calls. Older calls exist only in the log file itself, not here.
+        </p>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={loading}
+          onClick={() => setNonce((n) => n + 1)}
+        >
+          {loading ? "Reading…" : "Refresh"}
+        </Button>
+      </div>
       {loading ? (
         <LoadingState label="Reading the audit trail" />
       ) : error !== null ? (

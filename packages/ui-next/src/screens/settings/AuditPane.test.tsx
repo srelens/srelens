@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
   auditTail: vi.fn(),
@@ -89,5 +90,77 @@ describe("AuditPane", () => {
       "mcp_audit_tail failed",
     );
     expect(alert.querySelector("details")?.textContent).toContain("mcp_audit_tail failed");
+  });
+
+  /**
+   * The pair the pane exists to keep apart, asserted as a pair. `auditTail`
+   * used to catch every refusal and resolve to `[]`, so an unreadable trail
+   * rendered "A fresh install has made none — this is not an error." as fact,
+   * with no alert — guaranteed on the web build, where every `invoke` rejects.
+   * The reject test above proves the alert appears; this one proves the empty
+   * state does NOT, which is the half that was actually broken.
+   */
+  it("never says the trail is empty when it could not be read", async () => {
+    core.auditTail.mockRejectedValue(new Error("no such command"));
+    render(<AuditPane />);
+    await screen.findByRole("alert");
+    expect(screen.queryByText(/no capability calls/i)).toBeNull();
+    expect(screen.queryByText(/a fresh install has made none/i)).toBeNull();
+  });
+
+  /**
+   * Classic's `McpAuditList` wrote the reason down and the new pane lost it:
+   * "a list read once on mount quietly goes stale — an operator looking for an
+   * agent's action would conclude it never happened."
+   */
+  it("re-reads the trail when asked, rather than answering from mount", async () => {
+    const user = userEvent.setup();
+    render(<AuditPane />);
+    await screen.findByText("secret.read");
+    expect(core.auditTail).toHaveBeenCalledTimes(1);
+    core.auditTail.mockResolvedValue([{ ...ALLOWED, tool: "node.cordon" }]);
+    await user.click(screen.getByRole("button", { name: /refresh/i }));
+    expect(await screen.findByText("node.cordon")).toBeTruthy();
+    expect(core.auditTail).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers from a refusal when the trail is re-read", async () => {
+    const user = userEvent.setup();
+    core.auditTail.mockRejectedValueOnce(new Error("no such command"));
+    render(<AuditPane />);
+    await screen.findByRole("alert");
+    core.auditTail.mockResolvedValue([ALLOWED]);
+    await user.click(screen.getByRole("button", { name: /refresh/i }));
+    expect(await screen.findByText("resource.list")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /**
+   * The log rotates at 5 MB and spans days, so `14:02:11` alone cannot say
+   * which day a call landed on — the one question an operator reading this
+   * after an incident actually has.
+   */
+  it("dates each call, not just the time of day", async () => {
+    render(<AuditPane />);
+    const cell = await screen.findByTestId("audit-time-1700000100");
+    const stamp = new Date(1_700_000_100 * 1000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    expect(cell.textContent).toContain(
+      `${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())}`,
+    );
+    expect(cell.textContent).toContain(`${pad(stamp.getHours())}:${pad(stamp.getMinutes())}`);
+  });
+
+  /**
+   * #369: srelens does not track which client connected, and `AuditEntry`
+   * carries the transport a call arrived on. A `Client` header over `stdio` /
+   * `http` claims exactly what the issue says srelens cannot know.
+   */
+  it("names the transport column for the value it holds", async () => {
+    render(<AuditPane />);
+    await screen.findByText("secret.read");
+    const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toContain("Transport");
+    expect(headers).not.toContain("Client");
   });
 });
