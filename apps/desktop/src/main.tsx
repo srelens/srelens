@@ -6,6 +6,7 @@ import { initializeSettingsStorage } from "@srelens/core";
 // The service layer says what to notify; this decides how. Installed before
 // render so a toast raised during startup is not dropped on the floor.
 import { installToastNotifier } from "./ui/notifier";
+import srelensMark from "./assets/srelens-mark.svg";
 import {
   PORTED_SCREENS,
   applyNextDesignChrome,
@@ -68,6 +69,13 @@ async function bootstrap(root: HTMLElement): Promise<void> {
     createRoot(root).render(
       <NextApp
         ported={PORTED_SCREENS.map((s) => s.name)}
+        // The lock surface draws srelens's own mark, and ui-next cannot reach
+        // this asset: `apps/desktop` depends on that package, so the import
+        // would be a cycle across the boundary — the same wall the design
+        // toggle hit, answered the same way. The same file classic's landing
+        // page and login screen import, so there is one brand asset and vite
+        // fingerprints it once.
+        brandMarkSrc={srelensMark}
         // The overlay keeps macOS's real traffic lights, so the painted set
         // would double them (found in smoke testing); the picture is only for
         // an Apple browser, which has no window chrome of its own in the page.

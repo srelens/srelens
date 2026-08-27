@@ -27,7 +27,6 @@ import {
   TextInput,
 } from "@srelens/ui-kit";
 import { useContexts } from "../lib/clusters";
-import { Icons } from "../lib/icons";
 import { FailureAlert, friendly } from "../lib/errorCopy";
 
 /**
@@ -350,7 +349,17 @@ interface Trouble {
   error: unknown;
 }
 
-export function LockGate({ children }: { children: ReactNode }) {
+export interface LockGateProps {
+  children: ReactNode;
+  /**
+   * A URL for srelens's brand mark. The host's asset, injected — see
+   * {@link BrandLockMark} for why this package cannot import it, and what is
+   * drawn when it is absent or will not load.
+   */
+  brandMarkSrc?: string;
+}
+
+export function LockGate({ children, brandMarkSrc }: LockGateProps) {
   // Read once. Every vault command is a Tauri command (`invoke` from
   // `@tauri-apps/api/core`, not the transport layer that has a web half), so in
   // a browser there is no vault to seal and nothing that could unlock one — a
@@ -591,7 +600,7 @@ export function LockGate({ children }: { children: ReactNode }) {
               checkbox are all left-aligned prose that a centre would only make
               harder to read. */}
           <header className="text-center">
-            <LockGlyph />
+            <BrandLockMark src={brandMarkSrc} />
             <h1 className="mt-3 text-[1.375rem] font-semibold tracking-[-0.01em]">
               {setup ? "Protect your workspace" : "Workspace locked"}
             </h1>
@@ -772,7 +781,7 @@ export function LockGate({ children }: { children: ReactNode }) {
 }
 
 /**
- * §25's first bullet: "a dark rounded lock tile".
+ * §25's first bullet — "a dark rounded lock tile" — as the app's own mark.
  *
  * **It was rendering as an empty pale box, and the cause was a token that does
  * not exist.** The tile drew its own inline `<svg>` whose two strokes were
@@ -785,37 +794,75 @@ export function LockGate({ children }: { children: ReactNode }) {
  * deliberately never raises), and those were the only two `var(--muted)` in the
  * whole source tree.
  *
- * **The kit's own `Mark`, not a second inline SVG.** `Mark` is what the cluster
- * rail draws its squares with: a rounded solid square, a glyph centred in it,
- * both colours from tokens, and an accessible name or `aria-hidden` — every
- * property this tile needed and had hand-rolled. `AgentMark` is the agent's
- * animated signal and `CustomizeMark` is the mark EDITOR; `NavIcon` is a bare
- * sized glyph with no tile at all. `Mark` is the fit.
+ * **THE MARK ALONE, AND NO PADLOCK — A DELIBERATE DEVIATION FROM §25.** §25
+ * asks for "a dark rounded lock tile". There is no lock in this tile, and that
+ * is a decision rather than an oversight: `<h1>Workspace locked` sits eighteen
+ * pixels beneath it and says the state in words, so a padlock here repeats in a
+ * picture exactly what the heading already carries. The mark identifies the
+ * application; the heading carries the state; two glyphs were competing for one
+ * job. **Do not add a lock back to this tile without reading the rest of this
+ * paragraph.**
  *
- * **The padlock is new, and had to be.** Nothing in `@srelens/ui-kit` carries
- * one — the kit takes no dependency on an icon set by design — and
- * `lib/icons.ts` had no `lock` either; this file's inline SVG was the only
- * padlock in the tree. It is an entry in `Icons` now, so it is drawn from the
- * one place every other glyph in this design comes from.
+ * Four arrangements went in front of the only reviewer this surface has — #372
+ * means nobody else can see it — and only the last was accepted. An empty box
+ * (the `--muted` bug above). A padlock alone, which said the state twice and
+ * identified nothing. The brand mark with a padlock beside it, which read as two
+ * unrelated icons that happened to be adjacent: a full-colour hexagon and a
+ * thin monochrome outline, with a gap and nothing relating them. And the mark
+ * on its own, which is this.
  *
- * **"Dark" cannot be honoured in all five themes, and is not attempted.** The
- * token axis inverts: no token is dark under Light, Paper AND Dark, Midnight,
- * and naming a colour is forbidden here. §25's "dark" describes the one theme
- * the mock was drawn in. What the axis can honour is the kit's own rule for a
- * solid mark — `--accent` for the tile, `--surface` for its ink — which reads
- * as intentional in every theme and lands the glyph-on-tile contrast between
- * 5.78:1 (Dark) and 11.51:1 (High contrast), well clear of the 3:1 a non-text
- * glyph needs. On Light, Paper and High contrast the accent IS the dark half of
- * that pair, so those three are literally §25's tile.
+ * **`Mark`'s `withBadge` could not have fixed that**, which is worth writing
+ * down because it looks as though it should. It rides `short` — TEXT, the
+ * initials, uppercased — along the bottom edge of a glyph or image mark, so it
+ * can badge a mark with letters and not with a padlock. Corner-badging a state
+ * glyph would be a new kit API, and that is a design-system decision rather
+ * than something to settle inside a lock screen.
+ *
+ * **The kit's `Mark`, not a hand-rolled `<img>`.** It is what the cluster rail
+ * draws its squares with, and it owns every property this tile had hand-rolled:
+ * the rounded square, a centred image or fallback, colours from tokens, and a
+ * name or `aria-hidden`.
+ *
+ * **The asset is the host's and is injected.** `apps/desktop/src/assets/
+ * srelens-mark.svg` is the mark classic's landing page and login screen already
+ * import; this package cannot reach it (`apps/desktop` depends on ui-next, so
+ * the import would be a cycle), and a literal `/srelens-mark.svg` would be a
+ * host path hardcoded into a package that must not know the host — right in the
+ * desktop app and wrong in the kit's gallery. It arrives down the path `ported`
+ * and `onSwitchToClassic` already travel: `main.tsx` -> `NextApp` -> `Window` ->
+ * here.
+ *
+ * **A missing or broken image degrades, and never to an empty box.** With no
+ * `src` — the gallery, a host that passes none — or an image that will not
+ * load, `Mark` falls through to the initials derived from its name, on the
+ * accent, in `--surface` ink. Its own words: "an image that will not load is a
+ * state, not an error to report". That fallback is why this is a `Mark`.
+ *
+ * **Colour.** Nothing here names one. The fallback's two colours are `--accent`
+ * and `--surface`, `Mark`'s own, so it follows the reader's accent rather than
+ * assuming Violet. The brand SVG carries its own gradients — violet through
+ * magenta to orange, over a dark glass hexagon — and that is the one place a
+ * baked colour is right rather than a token violation: a brand mark that
+ * re-coloured per theme would not be the brand mark. Being self-contained, with
+ * a dark interior and a bright stroke, it reads on the light grounds (Light,
+ * Paper, High contrast) and the dark ones (Dark, Midnight) alike.
  */
-function LockGlyph() {
+function BrandLockMark({ src }: { src?: string }) {
   return (
-    // Named by the `<h1>` directly beneath it, so the mark is decorative:
+    // Decorative: the `<h1>` directly beneath says "Workspace locked", and
     // `Mark`'s own note is that an unnamed `role="img"` announces as "image"
-    // and tells the listener nothing, and a second "Workspace locked" would be
-    // no better.
-    <span data-testid="lock-mark">
-      <Mark name="Workspace locked" icon={Icons.lock} size="lg" withBadge={false} decorative />
+    // and tells the listener nothing. A second "srelens" would be no better —
+    // the window's titlebar is already named.
+    <span data-testid="lock-mark" className="inline-flex">
+      <Mark
+        name="srelens"
+        imageSrc={src}
+        size="lg"
+        // The badge rides the initials along the bottom edge of the brand mark,
+        // which is the app's name twice.
+        withBadge={false}
+        decorative
+      />
     </span>
   );
 }

@@ -63,12 +63,29 @@ export function NextApp({
   ported = [],
   onToggleTheme = () => {},
   controls = "none",
+  brandMarkSrc,
 }: {
   onExit: (route: string, context?: string) => Promise<string | null> | string | null;
   /** Display names of the screens that exist in the new design. */
   ported?: string[];
   onToggleTheme?: () => void;
   controls?: "macos" | "none";
+  /**
+   * A URL for srelens's own brand mark, drawn on the lock surface.
+   *
+   * Injected rather than imported, for the reason `ported` and
+   * `onSwitchToClassic` are: the asset lives in `apps/desktop/src/assets`, this
+   * package depends on `@srelens/core` and `@srelens/ui-kit` and nothing else,
+   * and `apps/desktop` depends on THIS package — so an import the other way is
+   * a cycle across a package boundary. A literal `/srelens-mark.svg` would
+   * have been a host path hardcoded into a package that must not know the host,
+   * and wrong for the kit's gallery or any other consumer.
+   *
+   * Optional, and its absence is drawn rather than crashed: `Mark` falls
+   * through to initials when it has no image or the image will not load, which
+   * is what its own comment calls "a state, not an error to report".
+   */
+  brandMarkSrc?: string;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -108,6 +125,7 @@ export function NextApp({
             ported={ported}
             active={!gallery}
             controls={controls}
+            brandMarkSrc={brandMarkSrc}
             onToggleTheme={onToggleTheme}
             onOpenInClassic={leave}
             onOpenGallery={() => {

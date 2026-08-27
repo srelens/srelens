@@ -62,6 +62,11 @@ export interface WindowProps {
   onToggleTheme?: () => void;
   controls?: "macos" | "none";
   /**
+   * A URL for srelens's brand mark, forwarded to the lock surface. The host's,
+   * for the reason `ported` is — see `NextApp`.
+   */
+  brandMarkSrc?: string;
+  /**
    * False while the gallery is up: the chrome comes down and the accelerators
    * stop listening, but the tab bodies stay mounted so the session survives.
    */
@@ -87,6 +92,7 @@ export function Window({
   onOpenGallery,
   onToggleTheme = () => {},
   controls = "none",
+  brandMarkSrc,
   active = true,
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
@@ -440,7 +446,7 @@ export function Window({
 
             Unconditional rather than `active &&`: whether the component gallery
             is up is a developer surface's business, not the vault's. */}
-        <LockGate>
+        <LockGate brandMarkSrc={brandMarkSrc}>
           {active && (
             <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
           )}

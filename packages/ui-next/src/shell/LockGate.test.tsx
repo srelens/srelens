@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, act, waitFor } from "@testing-library/react";
+import { render, screen, act, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { UserEvent } from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
@@ -84,9 +84,17 @@ function Behind() {
   );
 }
 
-function paint() {
+/**
+ * The brand mark is the HOST's asset, injected down `NextApp` -> `Window` ->
+ * `LockGate` because this package cannot import from `apps/desktop`. A value
+ * that is obviously not a real path, so nothing can pass by recognising the
+ * real filename, and jsdom never fetches it either way.
+ */
+const BRAND = "/aardvark-ledger-mark.svg";
+
+function paint(props: { brandMarkSrc?: string } = {}) {
   render(
-    <LockGate>
+    <LockGate brandMarkSrc={props.brandMarkSrc}>
       <Behind />
     </LockGate>,
   );
@@ -179,24 +187,71 @@ describe("LockGate — the cover", () => {
    * `stroke="var(--muted)"`, and there is no `--muted` token — it is
    * `--ink-muted` — so neither path painted.
    *
-   * jsdom attaches no stylesheet and computes no layout, so what this can
-   * defend is that the tile CONTAINS a glyph rather than being an empty box, and
-   * that the glyph is the kit's mark rather than a second hand-rolled SVG.
-   * Whether it LOOKS right, in five themes, is not testable here and is not
-   * claimed: only a screenshot can say, and until #372 the user is the only one
-   * who can take one.
+   * **What these tests cannot defend.** jsdom attaches no stylesheet, computes
+   * no layout and fetches no image, and per #372 the screenshot harness cannot
+   * reach this surface at all — so whether the composition LOOKS like one
+   * object, in five themes and five accents, is not covered here and is not
+   * claimed. The user is the only reviewer this screen has, and three
+   * arrangements have now been put in front of them. What IS covered is that
+   * the tile has something in it in each of its three states, and that nothing
+   * in it is announced over the heading.
    */
-  it("draws a mark with a glyph in it, not an empty tile", async () => {
+  it("draws the app's own mark", async () => {
+    paint({ brandMarkSrc: BRAND });
+    await screen.findByText("Workspace locked");
+    const mark = screen.getByTestId("lock-mark");
+    expect(mark.querySelector("img")?.getAttribute("src")).toBe(BRAND);
+  });
+
+  /**
+   * The padlock that used to sit beside it. It identified nothing, it read as a
+   * second unrelated icon, and it repeated the heading eighteen pixels below it
+   * in a picture. Asserted as an absence so it cannot drift back in.
+   */
+  it("draws no second glyph beside it, because the heading says the state", async () => {
+    paint({ brandMarkSrc: BRAND });
+    await screen.findByText("Workspace locked");
+    const mark = screen.getByTestId("lock-mark");
+    expect(mark.querySelectorAll("svg")).toHaveLength(0);
+    expect(mark.querySelectorAll("img")).toHaveLength(1);
+    expect(screen.getAllByText("Workspace locked")).toHaveLength(1);
+  });
+
+  /**
+   * `Mark`'s own contract, and the reason this is a `Mark` and not an `<img>`:
+   * "an image that will not load is a state, not an error to report". A host
+   * that passes no asset, and an asset that will not load, both have to land on
+   * something — an empty box is exactly what the user was looking at three
+   * screenshots ago.
+   */
+  it("falls through to the mark's initials when there is no asset", async () => {
     paint();
     await screen.findByText("Workspace locked");
     const mark = screen.getByTestId("lock-mark");
-    expect(mark.querySelector('[data-slot="chip-mark"]')).not.toBeNull();
-    expect(mark.querySelector("svg")).not.toBeNull();
-    // The mark is decorative — the `<h1>` under it says "Workspace locked", and
-    // `Mark`'s own note is that a second name would announce it twice.
+    expect(mark.querySelector("img")).toBeNull();
+    expect(mark.querySelector('[data-slot="chip-mark"]')?.textContent).not.toBe("");
+  });
+
+  it("falls through the same way when the asset will not load", async () => {
+    paint({ brandMarkSrc: BRAND });
+    await screen.findByText("Workspace locked");
+    const image = screen.getByTestId("lock-mark").querySelector("img");
+    expect(image).not.toBeNull();
+    act(() => {
+      fireEvent.error(image as HTMLImageElement);
+    });
+    const mark = screen.getByTestId("lock-mark");
+    expect(mark.querySelector("img")).toBeNull();
+    expect(mark.querySelector('[data-slot="chip-mark"]')?.textContent).not.toBe("");
+  });
+
+  it("says nothing the heading under it already says", async () => {
+    paint({ brandMarkSrc: BRAND });
+    await screen.findByText("Workspace locked");
+    const mark = screen.getByTestId("lock-mark");
     expect(mark.querySelector('[aria-hidden="true"]')).not.toBeNull();
-    // The badge would ride the initials under the glyph, which is not a thing
-    // this tile has to say.
+    expect(mark.querySelector('[role="img"]')).toBeNull();
+    // The badge would ride the initials under the mark — the app's name twice.
     expect(mark.querySelector('[data-slot="chip-badge"]')).toBeNull();
   });
 
