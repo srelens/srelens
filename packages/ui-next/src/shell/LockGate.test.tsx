@@ -19,7 +19,13 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import type { VaultStatus } from "@srelens/core";
-import { LockGate, lockWorkspace, resetLock } from "./LockGate";
+import {
+  isWorkspaceSealed,
+  LockGate,
+  lockWorkspace,
+  resetLock,
+  useWorkspaceSealed,
+} from "./LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
 
 /**
@@ -98,6 +104,32 @@ function paint(props: { brandMarkSrc?: string } = {}) {
       <Behind />
     </LockGate>,
   );
+}
+
+/**
+ * A sibling of the gate, the way `Chrome` and `Status` are: outside the band
+ * the cover replaces, reading the same store to decide whether to stand down.
+ * Its two words are the whole question — is this control live over a window
+ * that looks sealed?
+ */
+function Outside() {
+  const sealed = useWorkspaceSealed();
+  return <span data-testid="outside">{sealed ? "standing down" : "live"}</span>;
+}
+
+function paintWithSibling() {
+  render(
+    <>
+      <Outside />
+      <LockGate>
+        <Behind />
+      </LockGate>
+    </>,
+  );
+}
+
+function outside(): string {
+  return screen.getByTestId("outside").textContent ?? "";
 }
 
 function field(): HTMLElement {
@@ -654,5 +686,107 @@ describe("LockGate — a vault that was never set up", () => {
     );
     expect(screen.getByText("The two entries do not match.")).toBeTruthy();
     expect(core.vaultSetupPassword).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The launch gap, which is the same fail-open this file already closes for a
+ * refused read, one step earlier.
+ *
+ * On every desktop launch `checking` starts true and the band is covered, but
+ * the module store said `sealed === false` until `vaultStatus()` answered — so
+ * `Chrome` and `Status`, which are siblings of this gate and disable their
+ * handlers from that store, stayed live for the whole check. The workspace
+ * switcher was among them, and its `onRemove` deletes a workspace outright with
+ * no dialog when it holds one tab or fewer, which is how every workspace
+ * starts. A slow or hung status read is that window held open.
+ *
+ * The doc comment on `sealed` already names the principle — "every await
+ * between 'the vault is sealed' and 'the window is covered' is a window of live
+ * UI over a sealed vault". This is that await, at launch, and the safe default
+ * is sealed.
+ */
+describe("LockGate — the launch check", () => {
+  it("stands its siblings down for the whole check, not just once the vault answers", async () => {
+    // A read that never settles: the check is the entire test.
+    core.vaultStatus.mockReturnValue(new Promise<VaultStatus>(() => {}));
+    paintWithSibling();
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    expect(outside()).toBe("standing down");
+  });
+
+  /**
+   * `Window` installs its keydown listener once and asks this at the
+   * keystroke, so the answer has to be true during the check and not only
+   * inside a render.
+   */
+  it("answers the same to a caller that is not in a render", () => {
+    core.vaultStatus.mockReturnValue(new Promise<VaultStatus>(() => {}));
+    paintWithSibling();
+    expect(isWorkspaceSealed()).toBe(true);
+  });
+
+  it("gives them back once the vault reports itself open", async () => {
+    core.vaultStatus.mockResolvedValue(OPEN);
+    paintWithSibling();
+    expect(await screen.findByTestId("body")).toBeTruthy();
+    expect(outside()).toBe("live");
+    expect(isWorkspaceSealed()).toBe(false);
+  });
+
+  it("keeps them down when the check comes back sealed", async () => {
+    core.vaultStatus.mockResolvedValue(SEALED);
+    paintWithSibling();
+    await screen.findByText("Workspace locked");
+    expect(outside()).toBe("standing down");
+  });
+
+  it("keeps them down when the check refuses to answer at all", async () => {
+    core.vaultStatus.mockRejectedValue(new Error("vault state unavailable"));
+    paintWithSibling();
+    await screen.findByText("Secrets unavailable");
+    expect(outside()).toBe("standing down");
+  });
+
+  /**
+   * Web mode has no vault to check and this gate never covers anything there,
+   * so nothing may stand down either — the positive control for every
+   * assertion above, and the reason "always sealed" is not the answer.
+   */
+  it("stands nothing down where there is no vault to check", async () => {
+    core.isTauri.mockReturnValue(false);
+    paintWithSibling();
+    expect(await screen.findByTestId("body")).toBeTruthy();
+    expect(outside()).toBe("live");
+    expect(isWorkspaceSealed()).toBe(false);
+    expect(core.vaultStatus).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The reconcile read exists for a cover raised from OUTSIDE, with no status
+   * behind it. Publishing the launch check as sealed makes `raised` true at
+   * launch too, so without a guard that effect would fire a second, competing
+   * `vaultStatus()` — one that may not lower the cover — alongside the launch
+   * read that may.
+   */
+  it("takes exactly one read at launch, whatever the cover says", async () => {
+    core.vaultStatus.mockResolvedValue(OPEN);
+    paintWithSibling();
+    expect(await screen.findByTestId("body")).toBeTruthy();
+    await waitFor(() => expect(core.vaultStatus).toHaveBeenCalledTimes(1));
+    expect(core.vaultStatus).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * And the reader is told the truth while it happens: the passphrase form is a
+   * claim that the vault is set up and locked, which a check that has not
+   * answered has not established.
+   */
+  it("shows the check, not an unlock form it cannot yet justify", async () => {
+    core.vaultStatus.mockReturnValue(new Promise<VaultStatus>(() => {}));
+    paintWithSibling();
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    expect(screen.queryByLabelText("Master passphrase")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Unlock workspace" })).toBeNull();
   });
 });

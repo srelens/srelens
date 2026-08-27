@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -93,6 +94,30 @@ import { FailureAlert, friendly } from "../lib/errorCopy";
 let sealed = false;
 
 /**
+ * Whether the launch check is still in flight, published beside
+ * {@link sealed} because for anyone OUTSIDE the band the two answer one
+ * question: is this window covered?
+ *
+ * **The second half of the same fail-open.** On every desktop launch the band
+ * is covered before anything has been read, but `sealed` stayed false until
+ * `vaultStatus()` answered — and `Chrome` and `Status` are siblings of this
+ * gate that stand down from this store. So for the whole of a slow or hung
+ * status check the workspace switcher, the Settings gear, the status links and
+ * every tab chord were live over a window that already showed a blocking
+ * cover. The switcher's `onRemove` deletes a workspace outright, with no
+ * dialog, when it holds one tab or fewer — which is how every workspace starts
+ * — so a passer-by could remove one over a window that looked sealed.
+ *
+ * Kept separate from `sealed` rather than folded into it, because the two are
+ * different facts to this component: `sealed` is a cover somebody RAISED, and
+ * only a real unlock may lower it, while this one is lowered by the read
+ * itself. The gate's own screen tells them apart too — a check that has not
+ * answered gets "Checking whether the workspace is sealed" and not a passphrase
+ * form, which would be a claim that the vault is set up and locked.
+ */
+let checkingLaunch = false;
+
+/**
  * The mode the last successful `vaultStatus()` reported, or null if none has
  * landed yet.
  *
@@ -109,6 +134,15 @@ let sealed = false;
  */
 let knownMode: VaultStatus["mode"] | null = null;
 const listeners = new Set<() => void>();
+
+/**
+ * Whether the cover is up, by either route. This — not `sealed` — is what every
+ * caller outside the band asks, because "the vault is sealed" and "the vault
+ * has not answered" put exactly the same controls out of reach.
+ */
+function isCovered(): boolean {
+  return sealed || checkingLaunch;
+}
 
 function emit(): void {
   // A copy, because a listener may unsubscribe while this is running.
@@ -139,6 +173,29 @@ function rememberMode(mode: VaultStatus["mode"] | null): void {
 }
 
 /**
+ * The launch check has started, and the window is covered until it answers.
+ * Called from a LAYOUT effect so the siblings have stood down before the first
+ * paint rather than one frame into it.
+ */
+function beginLaunchCheck(): void {
+  if (checkingLaunch) return;
+  checkingLaunch = true;
+  emit();
+}
+
+/**
+ * It has answered — whatever it said. `read` has already put the answer into
+ * `sealed`, so ending the check reveals that value rather than lowering
+ * anything: a launch read of a sealed or unreadable vault leaves the cover up
+ * on its own account.
+ */
+function endLaunchCheck(): void {
+  if (!checkingLaunch) return;
+  checkingLaunch = false;
+  emit();
+}
+
+/**
  * Raise the cover over the window. Idempotent, because `Lock now` can be
  * double-clicked and the chord can be held down — a second raise over a cover
  * that is already up notifies nobody and changes nothing.
@@ -149,9 +206,14 @@ export function lockWorkspace(): void {
   emit();
 }
 
-/** Whether the cover is already up, for a caller deciding whether to lock. */
+/**
+ * Whether the cover is already up, for a caller deciding whether to act on the
+ * workspace at all. `Window` reads this at the keystroke from a listener it
+ * installed once, so it must answer for the launch check too — a tab chord
+ * during it is the same live control over a covered window as a click.
+ */
 export function isWorkspaceSealed(): boolean {
-  return sealed;
+  return isCovered();
 }
 
 /**
@@ -174,6 +236,7 @@ function unsealWorkspace(): void {
  */
 export function resetLock(): void {
   sealed = false;
+  checkingLaunch = false;
   knownMode = null;
   emit();
 }
@@ -220,9 +283,14 @@ function useSealed(): boolean {
  *
  * Exported for exactly those two callers. Anything inside the band is unmounted
  * and has no use for this.
+ *
+ * Answers for the launch check as well as for a raised cover — see
+ * {@link checkingLaunch}. The band is covered for the whole of that read, so a
+ * sibling that stayed live for it would be the same untrue window, at the one
+ * moment it happens on every single launch.
  */
 export function useWorkspaceSealed(): boolean {
-  return useSealed();
+  return useSyncExternalStore(subscribe, isCovered, isCovered);
 }
 
 /**
@@ -238,14 +306,22 @@ export function useWorkspaceSealed(): boolean {
  *   state, and a button refused by design is not offered.
  * - a vault whose state has never been read is not known to be lockable. `null`
  *   covers both "the launch read has not answered" and "it refused".
- * - a vault already sealed has nothing to lock, and the cover is up over it.
+ * - a vault already sealed has nothing to lock, and the cover is up over it —
+ *   as it is for the launch check, which has established no mode anyway.
  *
  * Only `unlocked` passes. Read off this module's own store rather than from a
  * `vaultStatus()` call of the caller's, so there is one read of this fact and
  * one answer to it.
+ *
+ * The cover it consults is {@link isCovered}, not `sealed`, so that "covered"
+ * has one definition in this file. No test can tell the two apart and the
+ * mutation pass says so plainly: nothing has established a mode while the
+ * launch check is in flight, so the first condition already refuses. It is
+ * written this way for the day something re-checks a vault whose mode is
+ * already known, which is exactly the shape the launch fail-open had.
  */
 export function useCanLockWorkspace(): boolean {
-  const snapshot = () => knownMode === "unlocked" && !sealed;
+  const snapshot = () => knownMode === "unlocked" && !isCovered();
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
@@ -432,6 +508,25 @@ export function LockGate({ children, brandMarkSrc }: LockGateProps) {
       return null;
     }
   }
+
+  /**
+   * Publish the launch check as a cover, for the siblings outside the band.
+   *
+   * A LAYOUT effect, not an ordinary one: it runs after the commit and before
+   * the browser paints, so there is no painted frame in which `Chrome`'s
+   * switcher and gear are live over a band that is already covered. And an
+   * effect rather than a write during render — a store `useSyncExternalStore`
+   * subscribers read must not be mutated mid-render.
+   *
+   * The cleanup ends the check on unmount as well as when `checking` clears:
+   * this store outlives the component, and a gate torn down mid-read would
+   * otherwise leave the whole window standing down for good.
+   */
+  useLayoutEffect(() => {
+    if (checking) beginLaunchCheck();
+    else endLaunchCheck();
+    return endLaunchCheck;
+  }, [checking]);
 
   useEffect(() => {
     if (!desktop) return;

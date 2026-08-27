@@ -802,3 +802,91 @@ describe("Window — what the cover has to take with it", () => {
     expect(store.currentWorkspace().tabs).toHaveLength(3);
   });
 });
+
+/**
+ * The same gap as the block above, at LAUNCH — the second fail-open of this
+ * shape on this branch. The first was a refused launch read leaving the window
+ * live; this one is the read that has not answered yet.
+ *
+ * `checking` starts true on every desktop launch and the band is already
+ * covered, but the lock store's `sealed` stayed false until `vaultStatus()`
+ * came back, and `Chrome` and `Status` disable their handlers from that store.
+ * So for the whole of a slow or hung status check the workspace switcher, the
+ * Settings gear, the status links and every tab chord were live over a window
+ * that already showed a blocking cover — and the switcher's `onRemove` deletes
+ * a workspace outright, with no dialog, whenever it holds one tab or fewer.
+ */
+describe("Window — the launch check, before the vault has answered", () => {
+  /** Booted with a `vaultStatus()` that never answers: the cover is up and
+   *  nothing about the vault has been established. */
+  async function stillChecking() {
+    vaultStatus.mockReturnValue(new Promise(() => {}));
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    // The band is covered for the whole of it, which is the half that already
+    // worked and the reason the rest is a lie if it stays live.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    // Boot has run, so the switcher has a workspace to have offered.
+    await screen.findByText("Default");
+  }
+
+  it("puts the workspace switcher out of reach for the whole check", async () => {
+    await stillChecking();
+    const before = store.getState().workspaces.length;
+    expect(screen.queryByRole("button", { name: /Default/ })).toBeNull();
+    // The name is still shown — nothing sealed it — but there is nothing to
+    // press, and so nothing that can remove a workspace.
+    expect(screen.getByText("Default")).toBeTruthy();
+    expect(store.getState().workspaces).toHaveLength(before);
+  });
+
+  it("offers no way into Settings for the whole check", async () => {
+    await stillChecking();
+    const gear = screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement;
+    expect(gear.disabled).toBe(true);
+    await userEvent.click(gear);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
+  });
+
+  it("leaves the status bar as readouts for the whole check", async () => {
+    await stillChecking();
+    expect(screen.getByRole("group", { name: "Status" }).querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("acts on no tab chord for the whole check", async () => {
+    await stillChecking();
+    const before = store.currentWorkspace().tabs.length;
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(before);
+  });
+
+  it("does not offer the lock control over a vault it has not read", async () => {
+    await stillChecking();
+    expect(screen.queryByRole("button", { name: "Lock workspace" })).toBeNull();
+  });
+
+  /**
+   * The positive control for all five: with the vault open the same window is
+   * live again, so their absences above are the cover's doing and not a chrome
+   * that never worked.
+   */
+  it("gives every one of those back once the launch read says the vault is open", async () => {
+    await booted();
+    expect(
+      (screen.getByRole("button", { name: "Appearance settings" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Status" }).querySelectorAll("button").length,
+    ).toBeGreaterThan(0);
+    const before = store.currentWorkspace().tabs.length;
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(before + 1);
+  });
+});
