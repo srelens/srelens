@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { render, screen } from "@testing-library/react";
 
 /**
@@ -88,5 +91,80 @@ describe("AgentAccess", () => {
   it("tells the reader the agent can read without asking", () => {
     render(<AgentAccess />);
     expect(screen.getByText(/read .*without asking|reads .*without asking/i)).toBeTruthy();
+  });
+
+  // ---- The consent prompt this design does not have (#374) -------------
+
+  /**
+   * The sentence read "every change it proposes stops at a confirmation
+   * prompt" — true of classic, false here. `McpConfirmDialog`
+   * (`apps/desktop/src/App.tsx`) is the only listener for
+   * `mcp://confirm-request`, and `main.tsx` mounts that tree or this one and
+   * never both, so under the new design a destructive call blocks and is
+   * DENIED on timeout with nothing on screen. A reader waiting to approve it
+   * would have waited forever.
+   */
+  it("promises no approval prompt, because there is none to give it in", () => {
+    render(<AgentAccess />);
+    const consent = screen.getByTestId("agent-consent").textContent ?? "";
+    expect(consent).not.toMatch(/stops at a confirmation prompt/i);
+    // Not "you will be asked", not "prompt" as something the reader will see.
+    expect(consent).toMatch(/no prompt/i);
+    // And what actually happens instead is stated, not left out.
+    expect(consent).toMatch(/refused/i);
+  });
+
+  it("still says the approval is required, which is the half that is true", () => {
+    render(<AgentAccess />);
+    const consent = screen.getByTestId("agent-consent").textContent ?? "";
+    expect(consent).toMatch(/without approval/i);
+    expect(consent).toMatch(/reads cluster state without asking/i);
+  });
+
+  /**
+   * The copy assertions above are only as good as the fact behind them, and a
+   * comment cannot fail. This scans the package for a consumer of the consent
+   * event — the shape `Settings.test.tsx` uses to hold the `Deep links`
+   * exclusion, which has now caught two rounds of drift on this branch.
+   *
+   * Whoever wires the listener in step 9 fails THIS test, and has to put the
+   * promise of a prompt back deliberately — in the same commit, with the copy
+   * corrected — rather than leaving a pane that quietly stopped being true.
+   */
+  it("has no consent-prompt consumer of its own, which is why the sentence says none", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const consumers: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
+        // Comments stripped: this very absence is discussed in prose in
+        // `AgentAccess.tsx`, and a scan that read prose would find itself.
+        //
+        // `(?<!:)` on the line-comment half, unlike the sibling scan in
+        // `Settings.test.tsx`. The mutation pass caught the naive form letting
+        // a real consumer through: the tokens here contain `//`, so
+        // `"mcp://confirm-request"` was read as a line comment from its own
+        // scheme separator onwards and stripped down to `"mcp:` — the event
+        // names could never match. Deep links needed no such care; none of its
+        // tokens carry a slash.
+        const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/.*/g, "");
+        // Both halves of a wiring, so half of one is caught too: the event a
+        // listener subscribes to, and the call and type any answer needs.
+        if (
+          /mcp:\/\/confirm-request|mcp:\/\/confirm-resolved|respondToConfirm|ConfirmRequest/.test(
+            source,
+          )
+        ) {
+          consumers.push(relative(root, path));
+        }
+      }
+    };
+    walk(root);
+    expect(consumers).toEqual([]);
   });
 });
