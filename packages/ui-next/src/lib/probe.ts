@@ -140,7 +140,13 @@ export function probeCluster(
   const running = reading.get(ctx.stableId);
   if (running) return running;
   const run = read(ctx, connect, now).finally(() => {
-    reading.delete(ctx.stableId);
+    // **By identity, not by key.** A read that {@link resetProbes} forgot
+    // still lands, and deleting by key alone would clear whatever is under
+    // that key by then — which is the CURRENT read. That silently reopens the
+    // guard and the next caller starts a third concurrent read of one cluster,
+    // the exact case this map exists to prevent. Only the entry this read
+    // installed is its to remove.
+    if (reading.get(ctx.stableId) === run) reading.delete(ctx.stableId);
   });
   reading.set(ctx.stableId, run);
   return run;

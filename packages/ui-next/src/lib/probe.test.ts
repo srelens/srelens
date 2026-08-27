@@ -218,4 +218,49 @@ describe("one read per cluster", () => {
     void probeCluster(ctx, connect as never, () => 0);
     expect(connect).toHaveBeenCalledTimes(2);
   });
+
+  /**
+   * **A read that lands late clears its OWN entry, not whatever is under its
+   * key.**
+   *
+   * The test above stops at "a second read starts". This is what happens next:
+   * the forgotten first read still lands, and its `.finally` ran
+   * `reading.delete(stableId)` — by KEY, which by then holds the SECOND read.
+   * That silently reopens the guard, and the next caller starts a THIRD
+   * concurrent read of one cluster: exactly the two-unordered-writes case this
+   * map exists to prevent, and the losing write is not recoverable from here.
+   *
+   * `connect` called 3 times where 2 is correct is what that looked like.
+   */
+  it("does not reopen the guard when a forgotten read finally lands", async () => {
+    const settles: ((v: unknown) => void)[] = [];
+    const connect = vi.fn(() => new Promise<never>((r) => { settles.push(r as never); }));
+
+    const first = probeCluster(ctx, connect as never, () => 0);
+    // The read the store no longer knows about.
+    resetProbes();
+    const second = probeCluster(ctx, connect as never, () => 0);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(second).not.toBe(first);
+
+    // The forgotten read answers, out of order, after the current one started.
+    settles[0]({ context: "prod-eu", reachable: true, version: "v1.31.2" });
+    await act(async () => {
+      await first;
+    });
+
+    // The current read is still the one in flight, so a third caller joins it.
+    const third = probeCluster(ctx, connect as never, () => 0);
+    expect(third).toBe(second);
+    expect(connect).toHaveBeenCalledTimes(2);
+
+    settles[1]({ context: "prod-eu", reachable: true, version: "v1.31.2" });
+    await act(async () => {
+      await second;
+    });
+    // And once the current read has landed the guard opens again, as it must.
+    settles.length = 0;
+    void probeCluster(ctx, connect as never, () => 0);
+    expect(connect).toHaveBeenCalledTimes(3);
+  });
 });
