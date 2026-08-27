@@ -12,8 +12,18 @@ import { useActiveCluster } from "./tabsStore";
  * list in `useState` and passed it as props to the two components that needed
  * it.
  *
- * `Window` is still the only writer; it sets this from the same `listContexts`
- * call it already makes, and reads it back rather than keeping a second copy.
+ * **Three writers, not one.** `Window` sets it at boot from the `listContexts`
+ * call it already makes; `Connections.reload()` and `Connect.reload()` both
+ * write their own listing back through {@link setContexts}, which is what makes
+ * `Refresh all` and either door shared rather than private — the rail, the
+ * status bar and every other screen see the list those screens are drawing.
+ *
+ * This comment said "Window is still the only writer" while both screens wrote
+ * to it, and this branch was already bitten once by a screen depending on a
+ * store invariant the store knew nothing about (`/connections` cleared its
+ * in-flight facts only on its OWN reload, latent purely because Window's write
+ * sits behind `if (!booted)`). So: any writer must assume another may write
+ * next, and nothing here promises otherwise.
  */
 let contexts: ClusterContext[] = [];
 const listeners = new Set<() => void>();
@@ -74,8 +84,15 @@ export function setContexts(next: ClusterContext[], error = ""): void {
 
 /**
  * The kubeconfig files the backend must know about before a client can be built
- * for a context that came from one of them. Resolved once at boot and read by
- * every core call that takes them.
+ * for a context that came from one of them. Read by every core call that takes
+ * them.
+ *
+ * **Not resolved once at boot, which this said.** It is seeded at boot and
+ * written again by `Connections.addFile()` and by `Connect.remember()` — a file
+ * the reader has just picked has to be here before the listing that follows,
+ * or the backend cannot build a client for any context in it. Deliberately not
+ * reactive: every writer re-lists in the same breath, and the listing is what
+ * re-renders the screens.
  */
 let files: string[] = [];
 
