@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
@@ -184,5 +184,45 @@ describe("McpServer", () => {
     // The badge asserts neither state while the status is genuinely unknown.
     expect(screen.queryByText("running")).toBeNull();
     expect(screen.queryByText("not running")).toBeNull();
+  });
+
+  /**
+   * The stale-response guard, pinned the way the sibling branch (a late
+   * answer is never believed — `cachedResource.test.tsx`) learned to: the
+   * stale value resolves AFTER the newer state is already set. Resolving in
+   * mount order would prove nothing — that's the passing case even with no
+   * guard at all.
+   */
+  it("does not let a late status response overwrite an accurate post-revoke state", async () => {
+    core.getMcpToken.mockResolvedValue(TOKEN);
+    let answerStatus!: (url: string | null) => void;
+    core.mcpHttpStatus.mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          answerStatus = resolve;
+        }),
+    );
+    render(<McpServer />);
+
+    // The token read settles (buttons appear); the mount's own status read
+    // is still in flight — the Revoke button never waits on it.
+    await userEvent.click(await screen.findByRole("button", { name: "Revoke" }));
+    expect(core.revokeMcpToken).toHaveBeenCalledTimes(1);
+
+    // Revoke's own, authoritative write has already landed.
+    expect(await screen.findByText("not running")).toBeTruthy();
+
+    // NOW the stale in-flight response from mount arrives, claiming the
+    // server IS listening — strictly after the newer, correct state.
+    // Flushed inside `act`: an update scheduled outside it would never reach
+    // the DOM before the assertion below, and this test would pass with the
+    // guard removed.
+    await act(async () => {
+      answerStatus(STATUS_URL);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("running")).toBeNull();
+    expect(screen.getByText("not running")).toBeTruthy();
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getMcpToken, mcpHttpStatus, notify, revokeMcpToken, rotateMcpToken } from "@srelens/core";
 import { Badge, Button, Panel, SubHead } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
@@ -45,6 +45,26 @@ import { FailureAlert } from "../../lib/errorCopy";
  * controls are gated on the token being known and present, not on `running`.
  * A token that's present while the server reads not-running still shows its
  * row, plus one sentence saying the server isn't listening right now.
+ *
+ * **A late status response cannot un-say what `revoke()` just established.**
+ * `revoke()` sets `statusRead` to `{ ready, false }` directly, because
+ * revoking a token is guaranteed to stop the server (`mcp.rs`) — that is not
+ * a guess. But the mount effect's own `mcpHttpStatus()` call can still be in
+ * flight when that happens (the Revoke button only waits on the TOKEN read,
+ * not the status read), and if it resolves afterwards it would otherwise
+ * overwrite the accurate post-revoke value with a stale one. `statusSeq`
+ * guards exactly that: every write that establishes the status — the fetch
+ * starting, and `revoke()`'s direct set — bumps it, and a fetch only applies
+ * its result if nothing has superseded it since it started. One source, one
+ * sequence — this pane has one status read to protect, not the three-guard
+ * shape a listing-plus-per-item read needs.
+ *
+ * **`rotate()` does not need the same guard.** It sets `tokenRead` directly
+ * too, but the Rotate button only exists once `tokenRead.kind === "ready"`
+ * — which means the mount effect's `getMcpToken()` call has already
+ * resolved by the time a click is even possible. There is no in-flight
+ * initial read left to race against, and `busy` already serializes rotate
+ * and revoke against each other, so no second guard is load-bearing here.
  *
  * **`getMcpTokenStorage()` is deliberately NOT read here**, despite being
  * named for this file. Its own doc comment says what it actually reports:
@@ -95,6 +115,13 @@ export function McpServer() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
 
+  /** Bumped by anything that authoritatively establishes `statusRead` — the
+   * fetch below starting, and `revoke()`'s direct set. A fetch's result is
+   * only applied if this still reads the value it captured when it started,
+   * so a response that belongs to a superseded read is discarded rather than
+   * applied over a newer, already-correct state. */
+  const statusSeq = useRef(0);
+
   // Two independent effects, not one `Promise.all` — a status failure must
   // not cost an already-resolved token, and a token failure must not cost an
   // already-resolved status. See the file-level comment.
@@ -114,12 +141,15 @@ export function McpServer() {
 
   useEffect(() => {
     let cancelled = false;
+    const seq = ++statusSeq.current;
     mcpHttpStatus()
       .then((url) => {
-        if (!cancelled) setStatusRead({ kind: "ready", value: url !== null });
+        if (cancelled || statusSeq.current !== seq) return;
+        setStatusRead({ kind: "ready", value: url !== null });
       })
       .catch((e) => {
-        if (!cancelled) setStatusRead({ kind: "error", error: e });
+        if (cancelled || statusSeq.current !== seq) return;
+        setStatusRead({ kind: "error", error: e });
       });
     return () => {
       cancelled = true;
@@ -167,6 +197,10 @@ export function McpServer() {
       setRevealed(false);
       // Revoking always stops the server too — "it must never serve
       // unauthenticated" (`mcp.rs`) — so this is a known fact, not a guess.
+      // Bump the sequence FIRST: a still-in-flight initial status fetch must
+      // be told it's been superseded before this authoritative value lands,
+      // or its late response can overwrite it right back.
+      statusSeq.current += 1;
       setStatusRead({ kind: "ready", value: false });
     } catch (e) {
       setActionError(e);
