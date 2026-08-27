@@ -19,14 +19,36 @@ import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/Small
  * This file adds no copy about any of them; the one sentence it does own is
  * about a section it does not draw, below.
  *
- * **`Deep links` is not here, and its absence is a decision** (spec decision 2,
- * #370). `srelens://` exists nowhere in this repo — no scheme registered in
- * `tauri.conf.json`, no handler in the desktop, no parser in core — so the
- * pane behind that entry would be empty. An empty pane behind a nav item reads
- * as srelens being broken, where a missing entry reads as a section that has
- * not arrived; #370 adds the entry together with its content. The suite asserts
- * the nav has no `Deep links` tab, so restoring it needs a reason rather than a
- * moment of tidying against the mock.
+ * **`Deep links` is not here, and the reason this file used to give was
+ * false.** It said `srelens://` "exists nowhere in this repo — no scheme
+ * registered in `tauri.conf.json`, no handler in the desktop, no parser in
+ * core". All three claims are wrong, and the feature is shipped END TO END:
+ *
+ * - the scheme — `apps/desktop/src-tauri/tauri.conf.json:37-43`
+ * - the parser — `parseDeepLink` and `dedupeDeepLinkTargets`
+ *   (`packages/core/src/lib/deepLink.ts:66,103`), with their own suite
+ * - the handler — `apps/desktop/src-tauri/src/deep_link.rs`, 103 lines, wired
+ *   at `lib.rs:284,292,335,440`
+ * - the frontend — `apps/desktop/src/App.tsx:240,297,328` drains the queue,
+ *   validates each target against the live contexts and opens it
+ *
+ * **The true reason it is excluded is that the last of those five is
+ * classic's.** `App.tsx` is the CLASSIC tree; `main.tsx` mounts either it or
+ * `NextApp`, never both, and nothing in this package or in `NextApp` calls
+ * `take_pending_deep_links` or `parseDeepLink`. So while the new design is the
+ * one running, a `srelens://` link is queued by the backend (up to
+ * `MAX_PENDING_LINKS`) and NOTHING opens it. §23's pane leads with "A link in a
+ * browser, chat message, runbook or alert opens the exact thing it refers to",
+ * and drawing that here would be this migration's signature defect one more
+ * time — a pane documenting, in the design where they do not work, a set of
+ * links that work in the other one.
+ *
+ * The grammar itself is drawable truthfully today, so the pane is a small job
+ * once the drain moves into this tree; both belong in #370 together, and in
+ * that order. `Settings.test.tsx` asserts the absence, and — because a comment
+ * cannot fail — also asserts that no file in this package has begun consuming
+ * deep links: whoever wires the drain fails that test and adds the pane in the
+ * same commit.
  *
  * **`Security` is not drawn on the web** — see {@link SECTIONS}.
  *

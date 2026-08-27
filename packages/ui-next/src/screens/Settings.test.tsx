@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -107,10 +110,48 @@ describe("Settings", () => {
   it("lists every section, in order, and no section it cannot fill", () => {
     paint();
     expect(sections()).toEqual(DESKTOP_SECTIONS);
-    // Decision 2: `srelens://` exists nowhere, and an empty pane behind a nav
-    // item reads as broken rather than as absent. Restoring the entry needs a
-    // reason, and this is the test that asks for one.
     expect(screen.queryByRole("tab", { name: /deep links/i })).toBeNull();
+  });
+
+  /**
+   * The reason the `Deep links` entry is absent, pinned as a property rather
+   * than asserted in a comment.
+   *
+   * The comment this replaces said `srelens://` "exists nowhere in this repo —
+   * no scheme, no handler, no parser". All three were false: the scheme is in
+   * `tauri.conf.json`, the parser is `deepLink.ts` with its own suite, the
+   * handler is `deep_link.rs` wired in four places, and `App.tsx` drains and
+   * routes. What is actually true is that the consumer is CLASSIC's:
+   * `main.tsx` mounts `App` or `NextApp` and never both, and nothing in this
+   * package touches deep links — so under the new design a link is queued and
+   * nothing opens it. A pane leading with §23's "opens the exact thing it
+   * refers to" would be false in the design a reader is reading it in.
+   *
+   * This scans the package for a consumer instead of trusting the comment.
+   * Whoever wires the drain into this tree fails this test, and adds the pane
+   * and its nav entry in the same commit (#370).
+   */
+  it("has no deep-link consumer of its own, which is why the section is absent", () => {
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const consumers: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(path);
+          continue;
+        }
+        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
+        // Comments stripped: this very absence is discussed in prose in
+        // `Settings.tsx`, and a scan that read prose would find itself.
+        const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+        if (/parseDeepLink|take_pending_deep_links|deep-link-pending/.test(source)) {
+          consumers.push(relative(root, path));
+        }
+      }
+    };
+    walk(root);
+    expect(consumers).toEqual([]);
   });
 
   it("names the rail Settings and holds it at the design's 196px", () => {
