@@ -27,16 +27,13 @@ import { ClusterTable, type ClusterRow } from "./connections/ClusterTable";
 import { SourcesRail } from "./connections/SourcesRail";
 
 /**
- * **The route the `Add connection` control opens — and the seam this screen
- * leaves for it.**
+ * **The route the `Add connection` control opens.**
  *
- * `/connect` is already in `lib/routes`'s app-scoped table (it has a title and
- * a tab kind), and it has no entry in that file's `SCREENS` map yet, so opening
- * it today lands on the `Placeholder`. That is deliberate: the tab, its title
- * and both ways in exist and are tested from here, and the next task adds one
- * line — `"/connect": Connect` in `SCREENS` — with nothing on this screen to
- * change. An import of a component that does not exist would not compile, and
- * a route invented here would be a second name for the one that table holds.
+ * `/connect` is in `lib/routes`'s app-scoped table, which gives it a title and
+ * a tab kind, and in that file's `SCREENS` map, which is what renders the
+ * first-run card rather than the `Placeholder`. Both entries live there and
+ * nothing about them is restated here: a route invented in this file would be a
+ * second name for the one that table holds.
  */
 const CONNECT = "/connect";
 

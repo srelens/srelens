@@ -233,6 +233,15 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // managed kubectl, helm and krew under ~/.srelens/bin, and what the active
   // context's exec-auth needs on PATH.
   { route: "/toolbox", name: "Toolbox" },
+  // Every cluster srelens can see at once, rather than one of them: the file
+  // each context was read from, which credential it uses, and what the last
+  // reachability probe said. Reached from the cluster rail's
+  // `Connection details`.
+  { route: "/connections", name: "Connections" },
+  // The first-run door, and the only screen here a reader can be on with no
+  // cluster connected at all. Listed after connections because that is where
+  // both ways in are — the `Add connection` control and the empty state's own.
+  { route: "/connect", name: "Connect a cluster" },
 ];
 
 /**
