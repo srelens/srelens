@@ -58,7 +58,13 @@ const {
   respondToConfirm: vi.fn<(id: string, approved: boolean) => Promise<void>>(async () => {}),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
-  bus: new Map<string, (payload: unknown) => void>(),
+  //
+  // A SET of handlers per channel, not one. Tauri's `listen` — which core's
+  // `on` wraps — delivers to every subscriber, and a mock that kept only the
+  // last one would quietly absorb a second mount of a listener: two
+  // `AgentConsent`s would look exactly like one. The mount point is the whole
+  // of that component's design, so the mock has to be able to show it wrong.
+  bus: new Map<string, Set<(payload: unknown) => void>>(),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => {
@@ -81,8 +87,12 @@ vi.mock("@srelens/core", async (importOriginal) => {
     startMcpHttp: (port: number) => startMcpHttp(port),
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
     on: (channel: string, handler: (payload: unknown) => void) => {
-      bus.set(channel, handler);
-      return () => bus.delete(channel);
+      const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
+      handlers.add(handler);
+      bus.set(channel, handlers);
+      return () => {
+        handlers.delete(handler);
+      };
     },
   };
 });
@@ -930,9 +940,12 @@ describe("Window — the launch check, before the vault has answered", () => {
  */
 describe("Window, and an agent asking to change something", () => {
   const ask = (id: string, tool: string, args: Record<string, unknown> = {}) => {
-    const handler = bus.get("mcp://confirm-request");
-    if (!handler) throw new Error("nothing subscribed to mcp://confirm-request");
-    act(() => handler({ id, tool, args }));
+    const handlers = bus.get("mcp://confirm-request");
+    if (!handlers || handlers.size === 0) throw new Error("nothing subscribed to mcp://confirm-request");
+    // Every subscriber, as `listen` does — a copy, since answering unsubscribes.
+    act(() => {
+      for (const handler of [...handlers]) handler({ id, tool, args });
+    });
   };
 
   it("puts the question to the reader instead of letting the call time out", async () => {
@@ -963,6 +976,53 @@ describe("Window, and an agent asking to change something", () => {
     // opposite of what a tab-scoped one does: `queryByRole` therefore cannot
     // see it, and the DOM is where the claim has to be read.
     expect(document.querySelector('[role="tablist"]')).toBeTruthy();
+  });
+
+  /**
+   * And while the window is still BOOTING, which is the one state the mount
+   * point had left uncovered.
+   *
+   * Boot is an `await listContexts(files)` — a kubeconfig with many contexts,
+   * or a cluster list over a slow API server, and it is seconds. The request
+   * is emitted exactly ONCE when the gate raises it (`mcp_confirm.rs:106`,
+   * a `Mutex<HashMap<String, oneshot::Sender<bool>>>` with no replay), so a
+   * listener that appears afterwards is handed nothing: the call waited out
+   * its full sixty seconds and was denied with nothing ever on screen. This
+   * branch is what made that reachable — auto-start now brings an enabled
+   * server up, and a design switch or a reload leaves it serving while the
+   * new window boots.
+   *
+   * So the surface is mounted ABOVE the boot gate, and the boot check chooses
+   * only the body. Mounted once, not once per branch: two listeners on one
+   * channel are two answers to one request.
+   */
+  it("puts it even while the window is still booting", async () => {
+    let finishBoot: () => void = () => {};
+    listContexts.mockReturnValue(
+      new Promise((resolve) => {
+        finishBoot = () => resolve({ contexts: [ctx("prod")] });
+      }),
+    );
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    // Still a spinner: no tab strip, no rail, nothing of the band yet.
+    expect(await screen.findByText("Loading")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    ask("r4", "k8s_scale", { name: "api" });
+    expect(await screen.findByText(/k8s_scale/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r4", true));
+    // Answered ONCE. A second mount of the listener inside the booted branch
+    // would answer this request twice over.
+    expect(respondToConfirm.mock.calls.filter(([id]) => id === "r4")).toHaveLength(1);
+    // Let boot land, so the test does not end over a promise nothing settles.
+    await act(async () => {
+      finishBoot();
+    });
+    expect(await screen.findByRole("tablist")).toBeTruthy();
   });
 
   it("refuses rather than prompting over a sealed window", async () => {

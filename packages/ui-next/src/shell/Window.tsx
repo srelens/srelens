@@ -454,9 +454,20 @@ export function Window({
     setCreating(false);
   }
 
-  if (!booted) return <LoadingState label="Loading" />;
-
-  return (
+  /**
+   * The window, once boot has read the contexts and restored the workspaces —
+   * or the spinner it shows until then.
+   *
+   * A value rather than an early `return`, and this is the whole reason: the
+   * boot check gets to choose the BODY and nothing else, so the app-wide
+   * surfaces below it stay mounted throughout. It used to be
+   * `if (!booted) return <LoadingState .../>` above the one return, which took
+   * `AgentConsent` down with the band for the whole of `listContexts()` — and
+   * the confirm gate emits its request exactly once, with no replay for a
+   * subscriber that turns up later (`mcp_confirm.rs`), so a call raised during
+   * boot waited out its sixty seconds and was denied with nothing on screen.
+   */
+  const body = booted ? (
     <div className="flex h-full min-h-0 flex-col">
       {active && (
         <Chrome
@@ -564,6 +575,14 @@ export function Window({
         </LockGate>
       </div>
       {active && <Status contexts={contexts} />}
+    </div>
+  ) : (
+    <LoadingState label="Loading" />
+  );
+
+  return (
+    <>
+      {body}
       {/*
         An agent's confirmation, at the level `Chrome` and `Status` sit at —
         OUTSIDE the band, and so outside every `TabSurface`'s portal scope.
@@ -575,14 +594,23 @@ export function Window({
         the kit's `ConfirmDialog` is the document-wide modal it was before #365,
         which is what an app-wide question needs.
 
-        Outside `LockGate` rather than among its children, and unconditional
-        rather than `active &&`, for two different reasons. It must stay
-        subscribed while the cover is up — it REFUSES the call in that state,
-        and a listener unmounted with the band could not; see `AgentConsent` for
-        why refusing is the answer. And whether the component gallery is up is a
-        developer surface's business: a call the backend is blocking on is not.
+        Outside `LockGate` rather than among its children, outside `body` rather
+        than inside it, and unconditional rather than `active &&` — three
+        different reasons, and every one of them is a state in which this must
+        still be listening. It must stay subscribed while the cover is up: it
+        REFUSES the call in that state, and a listener unmounted with the band
+        could not; see `AgentConsent` for why refusing is the answer. It must
+        stay subscribed while the window is still BOOTING, because the request
+        is emitted once and never replayed — a listener mounted after the fact
+        is handed nothing, and the call is denied on timeout with nothing ever
+        drawn. And whether the component gallery is up is a developer surface's
+        business: a call the backend is blocking on is not.
+
+        ONE mount, here. Not one per branch of the boot check: two listeners on
+        `mcp://confirm-request` are two prompts and two answers to a request
+        that has a single `oneshot::Sender` waiting on it.
       */}
       <AgentConsent />
-    </div>
+    </>
   );
 }
