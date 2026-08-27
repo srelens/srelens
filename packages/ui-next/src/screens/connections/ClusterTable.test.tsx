@@ -379,4 +379,60 @@ describe("ClusterTable", () => {
     expect(frame.className).toContain("min-w-0");
     expect(frame.className).toContain("flex-1");
   });
+  /**
+   * **Which end a cluster with no reading sorts to, in both directions.**
+   *
+   * There was no test for this column's order at all, and the comment beside
+   * `latencySort` claimed the wrong thing — that an unread cluster "sorts last
+   * however the column is turned". `Table` compares numbers as `left - right`
+   * and multiplies the result by `-1` for a descending column, so a sentinel
+   * above every reading LEADS the list when the reader reverses it. These pin
+   * what actually happens, so the sentence and the behaviour cannot drift apart
+   * again.
+   */
+  describe("the Latency column's order", () => {
+    const mixed: { context: ClusterContext; probe: Probe }[] = [
+      { context: ctx({ stableId: "a#alpha", name: "alpha" }), probe: { state: "reachable", latencyMs: 41 } },
+      { context: ctx({ stableId: "b#bravo", name: "bravo" }), probe: { state: "unread" } },
+      { context: ctx({ stableId: "c#charlie", name: "charlie" }), probe: { state: "reachable", latencyMs: 12 } },
+      // Unreachable, and so also without a reading: `latencyLabel` gates on the
+      // state as well as on the number.
+      { context: ctx({ stableId: "d#delta", name: "delta" }), probe: { state: "unreachable", error: "no route" } },
+    ];
+    const order = () => screen.getAllByTestId(/^cluster-name-/).map((el) => el.textContent);
+    const byLatency = () => screen.getByRole("button", { name: "Sort by Latency" });
+
+    it("puts a cluster with no reading after every reading, ascending", async () => {
+      render(<ClusterTable rows={mixed} onOpen={() => {}} />);
+      await userEvent.click(byLatency());
+      expect(order()).toEqual(["charlie", "alpha", "bravo", "delta"]);
+    });
+
+    it("and before them when the column is reversed", async () => {
+      render(<ClusterTable rows={mixed} onOpen={() => {}} />);
+      await userEvent.click(byLatency());
+      await userEvent.click(byLatency());
+      expect(order()).toEqual(["bravo", "delta", "alpha", "charlie"]);
+    });
+
+    /**
+     * The ordinary first paint is every cluster unread, so this is the case the
+     * column meets most often. `Infinity - Infinity` is `NaN`, which the kit
+     * treats as "equal" only because NaN is falsy; the sentinel is
+     * `Number.MAX_VALUE` so the comparison is `0` and that stable tiebreak is
+     * reached on purpose.
+     */
+    it("keeps clusters with no reading in the order they were given", async () => {
+      const unread: { context: ClusterContext; probe: Probe }[] = [
+        { context: ctx({ stableId: "a#alpha", name: "alpha" }), probe: { state: "unread" } },
+        { context: ctx({ stableId: "b#bravo", name: "bravo" }), probe: { state: "unread" } },
+        { context: ctx({ stableId: "c#charlie", name: "charlie" }), probe: { state: "unread" } },
+      ];
+      render(<ClusterTable rows={unread} onOpen={() => {}} />);
+      await userEvent.click(byLatency());
+      expect(order()).toEqual(["alpha", "bravo", "charlie"]);
+      await userEvent.click(byLatency());
+      expect(order()).toEqual(["alpha", "bravo", "charlie"]);
+    });
+  });
 });

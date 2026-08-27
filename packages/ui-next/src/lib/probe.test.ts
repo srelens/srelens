@@ -162,3 +162,60 @@ describe("useProbes", () => {
     expect(result.current).not.toBe(before);
   });
 });
+
+/**
+ * **One cluster, one read in flight — the rule two callers who cannot see each
+ * other both depend on.**
+ *
+ * `shell/Window.tsx` probes the workspace's clusters on every change to its
+ * contexts, skipping any that already has an answer (`if (getInfo(id))
+ * continue`); the connections screen probes every context it lists and re-reads
+ * them all on `Refresh all`. `getInfo` only fills in once the round trip is
+ * over, so for the whole length of a slow cluster both see "no answer yet".
+ * Without the join in `probeCluster` that is two reads whose writes land in
+ * whatever order they finish, and the loser is not recoverable from here.
+ */
+describe("one read per cluster", () => {
+  it("joins the read already out rather than starting a second", async () => {
+    let settle!: (v: unknown) => void;
+    const connect = vi.fn(() => new Promise<never>((r) => { settle = r as never; }));
+    const first = probeCluster(ctx, connect as never, () => 0);
+    // A second caller while the first is still out. The same transport, so the
+    // count is what says only one read was started.
+    const second = probeCluster(ctx, connect as never, () => 0);
+    expect(connect).toHaveBeenCalledTimes(1);
+    // Not merely deduped: the joining caller is handed the SAME read, so its
+    // own `await` resolves when the reading is in — which is what lets it do
+    // more work with the answer.
+    expect(second).toBe(first);
+    settle({ context: "prod-eu", reachable: true, version: "v1.31.2" });
+    await act(async () => {
+      await second;
+    });
+    expect(getProbe("prod").state).toBe("reachable");
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads again once the last one has landed", async () => {
+    const connect = vi.fn().mockResolvedValue({ context: "prod-eu", reachable: true });
+    await probeCluster(ctx, connect as never, () => 0);
+    await probeCluster(ctx, connect as never, () => 0);
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads two different clusters at once", async () => {
+    const connect = vi.fn(() => new Promise<never>(() => {}));
+    void probeCluster(ctx, connect as never, () => 0);
+    void probeCluster({ ...ctx, stableId: "staging", name: "staging-eu" }, connect as never, () => 0);
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  /** Or the read left hanging by one test would be joined by the next. */
+  it("forgets a read still out when the store is reset", async () => {
+    const connect = vi.fn(() => new Promise<never>(() => {}));
+    void probeCluster(ctx, connect as never, () => 0);
+    resetProbes();
+    void probeCluster(ctx, connect as never, () => 0);
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+});

@@ -47,9 +47,21 @@ const PROD: ClusterContext = {
   authKind: "exec plugin · gcloud",
 };
 
+/**
+ * **A context whose `stableId` is not its `name`** — the production shape, and
+ * the one thing that keeps the two keys from being conflated in every
+ * assertion below.
+ *
+ * A stableId is the declaring file plus the context's name within it, so this is
+ * what every context looks like once a second kubeconfig declares a name the
+ * first one already had. The screen writes facts under the stableId, reads them
+ * under the stableId, and calls `clusterFacts` with the NAME; with fixtures
+ * where the two strings are equal, keying the answers by name passed all 23
+ * tests and would have emptied the second line of every row in production.
+ */
 const STAGING: ClusterContext = {
   name: "staging-eu",
-  stableId: "staging-eu",
+  stableId: `${CONFIG}#staging-eu`,
   cluster: "staging",
   server: "https://staging-eu.example:6443",
   isCurrent: false,
@@ -67,7 +79,7 @@ const STAGING: ClusterContext = {
  */
 const EDGE: ClusterContext = {
   name: "edge-1",
-  stableId: "edge-1",
+  stableId: "/home/dana/work/edge.yaml#edge-1",
   cluster: "edge",
   server: "https://edge-1.example:6443",
   isCurrent: false,
@@ -184,6 +196,16 @@ const rowFor = (name: string) =>
 const sourceRows = () => Array.from(document.querySelectorAll('[data-testid="source-file"]'));
 
 const refreshAll = () => screen.getByRole("button", { name: "Refresh all" });
+
+/**
+ * The second line of a cluster's row, found by the id the cell is keyed by.
+ *
+ * `ClusterTable` builds that testid out of the `stableId`, so asking for it is
+ * what pins the key the facts were filed under — a text query would find the
+ * line wherever it landed.
+ */
+const detailFor = (context: ClusterContext) =>
+  document.querySelector(`[data-testid="cluster-detail-${context.stableId}"]`)?.textContent ?? null;
 
 describe("Connections", () => {
   it("counts the clusters it is showing, and the files they came from", async () => {
@@ -382,33 +404,107 @@ describe("Connections", () => {
   });
 
   /**
-   * The same guard on the second round trip. Facts are per cluster and land
-   * after their probe, so a slow one can answer under a listing that has since
-   * been replaced.
+   * **A read that spans two listings still gets its facts.**
+   *
+   * This was the defect that took the screen back for review, and it needed one
+   * click to reach. `listContexts` is a local file read and answers in a
+   * millisecond, so `Refresh all` pressed while the clusters are still
+   * connecting starts a round in which every cluster already has a read out.
+   * The old code skipped those clusters ("its own reader will follow through")
+   * and its own round counter then made that reader bail — so nobody asked for
+   * the facts, and twenty rows settled `reachable` with no provider and no
+   * region until a second `Refresh all` after the probes had landed. Nothing on
+   * screen said so: a row with no facts line is the ordinary first paint.
+   *
+   * Now the second round JOINS the read already out (in `probeCluster`, where
+   * both callers can see it) and follows through when it lands.
    */
-  it("a facts answer that arrives after a re-listing cannot paint over it", async () => {
-    const slow = deferred<ClusterFacts>();
-    // Only the FIRST read of staging is slow. A double that stayed slow would
-    // hand the second round the same pending promise, and settling it would
-    // then be a fresh answer arriving — which tests nothing.
-    let staged = 0;
-    core.clusterFacts.mockImplementation(async (context: string) =>
-      context === "staging-eu" && ++staged === 1 ? slow.promise : facts({ context }),
-    );
+  it("fetches the facts of a cluster whose read spanned two listings", async () => {
+    const slow = deferred<ClusterInfo>();
+    core.connectCluster.mockImplementation(async (name: string) => {
+      if (name === "staging-eu") return slow.promise;
+      clock += LATENCY[name] ?? 0;
+      return REACHABLE[name];
+    });
     const user = userEvent.setup();
     open();
     await waitFor(() => expect(drawn().length).toBe(2));
 
-    core.listContexts.mockResolvedValue({ contexts: [PROD, STAGING] });
+    // The new listing lands while staging is still connecting. Waited on prod's
+    // SECOND read rather than on the listing call: that is what proves the new
+    // round actually ran, over a cluster whose read was already out.
     await user.click(refreshAll());
-    await waitFor(() => expect(core.connectCluster).toHaveBeenCalledTimes(4));
+    await waitFor(() =>
+      expect(core.connectCluster.mock.calls.filter((c) => c[0] === "prod-eu").length).toBe(2),
+    );
+    expect(core.clusterFacts).not.toHaveBeenCalledWith("staging-eu");
+    expect(detailFor(STAGING)).toBeNull();
 
     await act(async () => {
-      slow.settle(facts({ context: "staging-eu", provider: "eks", region: "eu-west-1" }));
+      clock += 12;
+      slow.settle(REACHABLE["staging-eu"]);
     });
-    // The round that asked for it has been superseded, so its answer is dropped
-    // rather than drawn under a listing it does not belong to.
-    expect(screen.queryByText(/eks/)).toBeNull();
+
+    expect(within(rowFor("staging-eu")).getByText("reachable")).toBeTruthy();
+    await waitFor(() => expect(detailFor(STAGING)).toBe("gke · v1.30.6 · europe-west4"));
+    // Once, not twice: the two rounds' readers joined one read and then one
+    // facts fetch, rather than each making their own.
+    expect(core.connectCluster.mock.calls.filter((c) => c[0] === "staging-eu").length).toBe(1);
+    expect(core.clusterFacts.mock.calls.filter((c) => c[0] === "staging-eu").length).toBe(1);
+  });
+
+  /**
+   * **A listing this screen did not make.**
+   *
+   * The guards used to be per ROUND, and a round was bumped by any change to
+   * the contexts store while only this screen's own `reload()` set the "re-read
+   * everything" flag. So a write from anywhere else — `Window` re-listing after
+   * a kubeconfig change — dropped whatever was in flight and then refused to
+   * ask again, because the cluster was already marked as asked for. The screen
+   * was depending on an invariant the store knows nothing about: that every
+   * write comes paired with that flag.
+   *
+   * The guards are per cluster now and there is no round, so this is simply a
+   * re-render over work that is still perfectly good.
+   */
+  it("keeps the facts a listing it did not make interrupted", async () => {
+    const slow = deferred<ClusterFacts>();
+    let asked = 0;
+    core.clusterFacts.mockImplementation(async (context: string) =>
+      context === "staging-eu" && ++asked === 1 ? slow.promise : facts({ context }),
+    );
+    open();
+    await waitFor(() => expect(core.clusterFacts).toHaveBeenCalledWith("staging-eu"));
+
+    // Somebody else lists the contexts. No `reload()`, no re-read flag — just a
+    // write to the store this screen reads.
+    await act(async () => {
+      setContexts([PROD, STAGING]);
+    });
+
+    await act(async () => {
+      slow.settle(facts({ context: "staging-eu" }));
+    });
+    await waitFor(() => expect(detailFor(STAGING)).toBe("gke · v1.30.6 · europe-west4"));
+    // And it was not asked for a second time either: the answer already coming
+    // is the answer.
+    expect(core.clusterFacts.mock.calls.filter((c) => c[0] === "staging-eu").length).toBe(1);
+  });
+
+  /**
+   * **The facts are filed under the id the row is keyed by, not the name the
+   * capability is called with.**
+   *
+   * Both strings exist for every cluster and they are equal only in a fixture
+   * that has not thought about it. See {@link STAGING}.
+   */
+  it("files a cluster's facts under its stableId, not its name", async () => {
+    expect(STAGING.stableId).not.toBe(STAGING.name);
+    open();
+    await waitFor(() => expect(detailFor(STAGING)).toBe("gke · v1.30.6 · europe-west4"));
+    // The capability takes a context name, and that is what it was handed.
+    expect(core.clusterFacts).toHaveBeenCalledWith(STAGING.name);
+    expect(core.clusterFacts).not.toHaveBeenCalledWith(STAGING.stableId);
   });
 
   /**
@@ -523,9 +619,10 @@ describe("Connections", () => {
     await waitFor(() => expect(drawn().length).toBe(2));
 
     await user.click(within(rowFor("staging-eu")).getByRole("button", { name: "Open" }));
-    expect(store.activeCluster()).toBe("staging-eu");
+    // The stableId, never the name — the workspace is keyed by id (#265).
+    expect(store.activeCluster()).toBe(STAGING.stableId);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/overview")).toBe(true);
-    expect(store.currentWorkspace().clusters).toContain("staging-eu");
+    expect(store.currentWorkspace().clusters).toContain(STAGING.stableId);
   });
 
   /**

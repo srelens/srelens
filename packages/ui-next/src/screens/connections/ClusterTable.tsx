@@ -76,9 +76,29 @@ function sourceOf(context: ClusterContext): string {
  * The number the `Latency` column SORTS on — never the text beside it.
  */
 function latencySort(probe: Probe): number {
-  // A cluster with no reading sorts last however the column is turned, rather
-  // than ordering as the text "—" happens to collate.
-  return latencyLabel(probe) === null ? Number.POSITIVE_INFINITY : (probe.latencyMs ?? 0);
+  /**
+   * A cluster with no reading sorts **after every reading when the column is
+   * ascending, and before them when it is reversed** — never as the text `—`
+   * happens to collate, which is the thing this exists to prevent.
+   *
+   * It said "sorts last however the column is turned", and that was wrong.
+   * `Table` compares two numbers as `left - right` and then multiplies the
+   * result by `-1` for a descending column, so a sentinel that is larger than
+   * every reading leads the list when the reader reverses it. Nothing here can
+   * change that: a `getSortValue` returns a value, and the direction is applied
+   * to the comparison afterwards. Sorting a column of missing values to one end
+   * in both directions would be the kit's to offer, and it offers no such
+   * thing — so the honest fix is to say what happens. Pinned in both directions
+   * in the suite, so the next reader meets the behaviour rather than the claim.
+   *
+   * `Number.MAX_VALUE` rather than `Number.POSITIVE_INFINITY`, and it matters
+   * for the ordinary first paint where several clusters have no reading yet:
+   * `Infinity - Infinity` is `NaN`, and two unread rows then compared as NaN.
+   * The kit falls through to a stable index compare for any falsy result, so
+   * NaN happened to work — by accident, and invisibly. `MAX_VALUE - MAX_VALUE`
+   * is `0`, which reaches that same branch on purpose.
+   */
+  return latencyLabel(probe) === null ? Number.MAX_VALUE : (probe.latencyMs ?? 0);
 }
 
 /**

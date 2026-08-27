@@ -102,8 +102,27 @@ export function Connections({ route }: { route: string }) {
   const files = getKubeconfigFiles();
   const { workspace } = useTabs();
 
-  /** Provider and region per cluster, from the second round trip. */
+  /**
+   * Provider and region per cluster, from the second round trip, **keyed by
+   * `stableId`**.
+   *
+   * The same key the probes are under and the same key the rows read. Not the
+   * context NAME, which is what `clusterFacts` is CALLED with: in production a
+   * stableId is the declaring file plus the name (it gains that prefix as soon
+   * as two kubeconfigs declare the same context), so keying the answers by name
+   * would file every cluster's facts under something no row looks up and empty
+   * the second line of every row on every platform. The suite carries a fixture
+   * whose stableId differs from its name so the two cannot be conflated.
+   */
   const [facts, setFacts] = useState<Record<string, ClusterFacts>>({});
+  /**
+   * The same record, readable synchronously.
+   *
+   * The decision "do we already have this cluster's facts" is made inside an
+   * async read, where the `facts` state variable is whatever it was when that
+   * read started. `putFacts` is the only writer of either.
+   */
+  const known = useRef<Record<string, ClusterFacts>>({});
   /** A listing asked for by the reader, still out. */
   const [busy, setBusy] = useState(false);
   /** Why a kubeconfig file could not be added, when one could not. */
@@ -120,30 +139,51 @@ export function Connections({ route }: { route: string }) {
   const listSeq = useRef(0);
 
   /**
-   * Which round of readings the work in flight belongs to.
+   * **Every guard below is per CLUSTER, and that is the whole design.**
    *
-   * The probes and the facts are per cluster and land one at a time, so a round
-   * that has been superseded — the reader re-listed while it was out — must not
-   * write what it finds. Bumped once per run of the effect below, which is once
-   * per listing.
+   * There was a round counter here, bumped once per listing, and it was the
+   * wrong unit for the work: a probe and a facts read belong to one cluster,
+   * and a re-listing says the LIST may have changed — not that a reading of a
+   * cluster still on it is worthless. Judging per-cluster work by a round
+   * number cost the facts outright. `listContexts` is a local file read and
+   * answers in a millisecond, so pressing `Refresh all` while twenty clusters
+   * are still connecting started a round that skipped every one of them (a read
+   * was already out) and abandoned every reader of the round before it (its
+   * round number had moved). Twenty rows settled `reachable` with no provider
+   * and no region, permanently, until a second `Refresh all` after the probes
+   * had landed. Nothing on screen said so — a row with no facts line is the
+   * ordinary first paint.
+   *
+   * It also made the screen depend on an invariant the store knows nothing
+   * about: "every write to the contexts store comes paired with `forceNext`".
+   * Any other writer — `Window` re-listing after a kubeconfig change — re-ran
+   * the effect, dropped whatever was in flight and then refused to ask again.
+   *
+   * So there is no round counter. A read is judged by two questions that are
+   * both about the cluster: is there already a read of THIS cluster out (join
+   * it), and is this the newest read of THIS cluster (only then may it write).
    */
-  const readSeq = useRef(0);
 
   /**
-   * The clusters being read right now.
+   * The facts read in flight per cluster, so every other reader joins it.
    *
-   * **This is what keeps two unordered writes of one cluster's reading from
-   * happening at all.** `probeCluster` writes to a module store this screen
-   * cannot un-write, so a sequence check after the fact could not undo a stale
-   * answer — a 30-second timeout from the first round would land on top of the
-   * second round's `12 ms` and the row would say `unreachable` about a cluster
-   * that had answered. A reading already on its way IS the fresh reading, so a
-   * second one is not started for it.
+   * **This is the whole ordering guard, and it works by there never being two.**
+   * The same shape as `probeCluster`'s own join, for the same reason: two reads
+   * of one cluster answering out of order would draw the older answer over the
+   * newer one, and no check after the fact can put that right. So a second read
+   * of a cluster is not started — a reader that wants the facts joins the read
+   * already out and gets its answer. With at most one read per cluster in
+   * flight, the writes cannot arrive out of order and there is nothing left for
+   * a sequence number to guard. (There was one here. It could not fire, and an
+   * unfireable guard is worse than none: it reads as protection.)
    */
-  const reading = useRef<Set<string>>(new Set());
+  const factsOut = useRef<Map<string, Promise<void>>>(new Map());
 
-  /** The clusters whose facts have been asked for in this round. */
-  const factsAsked = useRef<Set<string>>(new Set());
+  /** The one writer of the facts, state and synchronous mirror together. */
+  function putFacts(id: string, answer: ClusterFacts) {
+    known.current = { ...known.current, [id]: answer };
+    setFacts(known.current);
+  }
 
   /**
    * Whether the next round re-reads every cluster or only the unread ones.
@@ -203,30 +243,56 @@ export function Connections({ route }: { route: string }) {
   useEffect(() => {
     const force = forceNext.current;
     forceNext.current = false;
-    if (force) factsAsked.current.clear();
-    const seq = ++readSeq.current;
 
     async function read(context: ClusterContext) {
       const id = context.stableId;
-      // Its own reader will follow through to the facts — see `reading`.
-      if (reading.current.has(id)) return;
-      if (force || getProbe(id).state === "unread") {
-        reading.current.add(id);
-        try {
-          await probeCluster(context);
-        } finally {
-          reading.current.delete(id);
-        }
-        if (seq !== readSeq.current) return;
-      }
+      /**
+       * **Awaited, never skipped.**
+       *
+       * `probeCluster` joins the read already out for this cluster rather than
+       * starting a second (see its own note — the rule has to live there
+       * because `Window` probes too and neither caller can see the other's
+       * guard). So this `await` resolves when the reading is IN, whether this
+       * call took it or joined it, and the facts below are asked for either
+       * way. Walking away from a cluster whose read was already out is what
+       * left the facts unfetched whenever a read spanned two listings.
+       */
+      if (force || getProbe(id).state === "unread") await probeCluster(context);
+      // Not reachable: `provider` and `region` come from the API server, so
+      // asking buys a second timeout for a row that already says why it is
+      // empty. A later reading that DOES answer comes back through here.
       if (getProbe(id).state !== "reachable") return;
-      if (factsAsked.current.has(id)) return;
-      factsAsked.current.add(id);
-      // `clusterFacts` never rejects; a failure comes back as empty facts plus
-      // a reason, and the cell simply has nothing to add to the row.
-      const answer = await clusterFacts(context.name);
-      if (seq !== readSeq.current) return;
-      setFacts((current) => ({ ...current, [id]: answer }));
+
+      const out = factsOut.current.get(id);
+      /**
+       * A read already out is the answer arriving; joining it is what stops a
+       * second listing asking again for what the first is already fetching.
+       *
+       * **Joined even by a forced read**, which is not obvious. A facts read in
+       * flight was started when this cluster's reading landed, moments ago —
+       * there is no such thing as a stale one, so `Refresh all` has nothing to
+       * gain from a second round trip and the reader would pay for twenty of
+       * them. What `force` overrides is the line below: facts already IN HAND
+       * are re-read, because those can be as old as the window.
+       */
+      if (out) return out;
+      if (!force && known.current[id] !== undefined) return;
+
+      const run = (async () => {
+        // `clusterFacts` never rejects; a failure comes back as empty facts
+        // plus a reason, and the cell simply has nothing to add to the row.
+        const answer = await clusterFacts(context.name);
+        // Keyed by stableId — see `facts`. `clusterFacts` takes the NAME.
+        putFacts(id, answer);
+      })();
+      // Set before this reader yields, which is what makes the join above
+      // reliable rather than a matter of scheduling luck.
+      factsOut.current.set(id, run);
+      try {
+        await run;
+      } finally {
+        factsOut.current.delete(id);
+      }
     }
 
     for (const context of contexts) void read(context);
@@ -271,10 +337,17 @@ export function Connections({ route }: { route: string }) {
   /**
    * §6's sub: `<n> clusters · <n> sources`.
    *
-   * **Absent until there is something to count.** A number over a spinner, an
-   * error card or the `/connect` nudge would be a count of nothing asserted as
-   * a fact — the same fault as a count that disagrees with its rows, which is
-   * what `Releases · 383 in this cluster` over six rows was.
+   * **Absent until there is something to count, and this guard is what makes it
+   * so.** A number over a spinner, an error card or the `/connect` nudge would
+   * be a count of nothing asserted as a fact — the same fault as a count that
+   * disagrees with its rows, which is what `Releases · 383 in this cluster`
+   * over six rows was.
+   *
+   * Every `Screen` below is handed `eyebrow={sub}`, deliberately: the rule
+   * lives here, in one expression, rather than in which of four call sites
+   * remembered to leave the prop off. It was the other way round and the guard
+   * was dead code — the early returns were doing the work, so removing this
+   * `rows.length > 0` cost nothing and no test noticed.
    */
   const sub =
     rows.length > 0 ? `${plural(rows.length, "cluster")} · ${plural(sources, "source")}` : undefined;
@@ -364,7 +437,7 @@ export function Connections({ route }: { route: string }) {
    */
   if (status === "loaded" && rows.length === 0) {
     return (
-      <Screen title={title} fill actions={actions}>
+      <Screen title={title} eyebrow={sub} fill actions={actions}>
         <EmptyState
           className="flex-1"
           title="No clusters yet"
@@ -381,7 +454,7 @@ export function Connections({ route }: { route: string }) {
 
   if (status === "loading" && rows.length === 0) {
     return (
-      <Screen title={title} fill actions={actions}>
+      <Screen title={title} eyebrow={sub} fill actions={actions}>
         <LoadingState label="Loading clusters" className="flex-1" />
       </Screen>
     );
@@ -391,7 +464,7 @@ export function Connections({ route }: { route: string }) {
   // is about, so with none of them the failure takes the whole body.
   if (rows.length === 0) {
     return (
-      <Screen title={title} fill actions={actions}>
+      <Screen title={title} eyebrow={sub} fill actions={actions}>
         <FailureState
           className="my-auto"
           title="Could not list your clusters"
