@@ -104,6 +104,24 @@ export interface Column<T> {
    *  thing and `right` would not. Defaults to `start` — set `end` for numeric
    *  columns (READY, RESTARTS, CPU, MEMORY, AGE) so their digits line up. */
   align?: "start" | "end";
+  /**
+   * Pin this column to the end of the table, so it stays on screen when the
+   * table is wider than the pane it scrolls in.
+   *
+   * For the column holding a row's primary action, and measured before it was
+   * added: the connections table's columns sum to 1082px against a 1014px pane
+   * at a 1600px window, so its `Open` button sat at x=1311 with the pane's
+   * right edge at 1308 — off screen on every row, and the window had to reach
+   * 1668px before it appeared. At the 960px minimum the overflow is 711px,
+   * which no column cap can shave away: shaving fits one window size and fails
+   * the other, and pinning works at both.
+   *
+   * `end`, not `right`: the same logical value `align` takes, for the same
+   * reason. The stylesheet does the pinning (`kit.css`, `[data-sticky="end"]`)
+   * — including painting the cell, which a sticky cell must do or the columns
+   * are visible sliding under it.
+   */
+  sticky?: "end";
   minWidth?: number;
 }
 
@@ -612,7 +630,13 @@ export function Table<T>({
             </th>
           )}
           {columns.map((c) => (
-            <th key={c.key} data-align={c.align === "end" ? "end" : undefined}>
+            <th
+              key={c.key}
+              data-align={c.align === "end" ? "end" : undefined}
+              // Sticky in both axes at once for a pinned column: `top` from
+              // `.tbl thead th`, `right` from `[data-sticky="end"]`.
+              data-sticky={c.sticky}
+            >
               <div className="th-head">
                 <button
                   type="button"
@@ -717,7 +741,11 @@ export function Table<T>({
                 </td>
               )}
               {columns.map((c) => (
-                <td key={c.key} data-align={c.align === "end" ? "end" : undefined}>
+                <td
+                  key={c.key}
+                  data-align={c.align === "end" ? "end" : undefined}
+                  data-sticky={c.sticky}
+                >
                   {c.render ? c.render(row) : String((row as Record<string, unknown>)[c.key])}
                 </td>
               ))}

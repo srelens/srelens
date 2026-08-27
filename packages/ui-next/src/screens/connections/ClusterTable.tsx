@@ -302,6 +302,24 @@ export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
       sortable: false,
       filterable: false,
       align: "end",
+      /**
+       * Pinned to the end of the table, and this is the whole of §6's primary
+       * row action being reachable.
+       *
+       * MEASURED in Chrome, seventeen clusters on a real kubeconfig: the seven
+       * columns sum to 1082px, the pane is 1014px wide at the default 1600px
+       * window, and this button's rect was x=1311…1355 against a visible right
+       * edge of 1308 — off screen on every row, with the window having to reach
+       * 1668px before it appeared. At the 960px minimum the pane is 374px and
+       * the overflow 711px.
+       *
+       * **Pinned rather than capped**, deliberately: shaving the two capped text
+       * columns can fit 1600px and cannot fit 960px, where 711px of overflow
+       * puts the button past the scroll however narrow the text gets. A pinned
+       * column works at every width. Enter and double-click already opened the
+       * row, so what was missing was the CONTROL, not the action.
+       */
+      sticky: "end",
       minWidth: 80,
       render: (row) => (
         // `shrink-0` and `whitespace-nowrap`: flex items shrink by default, and

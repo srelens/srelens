@@ -474,6 +474,48 @@ describe("ClusterTable", () => {
     expect(cell.firstElementChild?.className).toContain("shrink-0");
   });
 
+  /**
+   * **`Open` stays on screen at the window the app actually opens at.**
+   *
+   * Measured in Chrome against a real kubeconfig: the seven columns sum to
+   * 1082px, the pane is 1014px wide at a 1600px window, and `Open`'s rect was
+   * x=1311…1355 against a visible right edge of 1308 — off screen on every one
+   * of seventeen rows, with the window having to reach 1668px before the button
+   * appeared. Enter and double-click still opened the row, so the ACTION was
+   * reachable and the CONTROL was not. At the 960px minimum the pane is 374px
+   * and the overflow 711px, which is why the column is pinned rather than
+   * capped: a cap fits one window and cannot fit both.
+   *
+   * **jsdom has no layout, so this asserts the plumbing only** — that the
+   * action column asks the kit to pin it, and that the kit's attribute reaches
+   * the header and every row's cell. The rects are browser facts, in the task
+   * report; nothing here can stand in for them.
+   */
+  it("pins the action column to the end of the table, so its control cannot leave the pane", () => {
+    const { container } = render(
+      <ClusterTable
+        rows={[
+          { context: ctx(), probe: { state: "unread" } },
+          { context: ctx({ stableId: "b#staging", name: "staging" }), probe: { state: "unread" } },
+        ]}
+        onOpen={() => {}}
+      />,
+    );
+
+    // The last column, and only it: one header cell and one cell per row.
+    const pinned = [...container.querySelectorAll('[data-sticky="end"]')];
+    expect(pinned.map((el) => el.tagName)).toEqual(["TH", "TD", "TD"]);
+    // Each pinned cell is the one holding that row's `Open`.
+    for (const cell of pinned.slice(1)) {
+      expect(cell.querySelector("button")?.textContent).toBe("Open");
+    }
+    // And it is the LAST cell of its row — a column pinned to the end that is
+    // not at the end would sit over the columns after it.
+    for (const cell of pinned.slice(1)) {
+      expect(cell.nextElementSibling).toBeNull();
+    }
+  });
+
   it("keeps its own frame shrinkable, and takes the caller's classes", () => {
     render(
       <ClusterTable

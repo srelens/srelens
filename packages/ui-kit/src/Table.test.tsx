@@ -671,6 +671,44 @@ describe("Table", () => {
  * come back when it is cleared — a heading that silently became wrong under
  * sort is worse than no heading at all.
  */
+/**
+ * A column pinned to the end of the table.
+ *
+ * **jsdom has no layout, so this is the plumbing and nothing more**: that the
+ * attribute the stylesheet pins on reaches both the header cell and every body
+ * cell of that column, and no other. Whether the cell actually stays on screen
+ * is a browser fact, measured in one (see the task report), and no assertion
+ * here can stand in for it.
+ */
+describe("Table sticky columns", () => {
+  const cols: Column<{ name: string }>[] = [
+    { key: "name", header: "Name" },
+    { key: "actions", header: "", sticky: "end" },
+  ];
+  const rows = [{ name: "a" }, { name: "b" }];
+
+  it("marks the pinned column's header and every one of its cells", () => {
+    const { container } = render(<Table columns={cols} data={rows} getRowKey={(r) => r.name} />);
+    const pinned = container.querySelectorAll('[data-sticky="end"]');
+    // One `th`, one `td` per row — and nothing else in the table.
+    expect([...pinned].map((el) => el.tagName)).toEqual(["TH", "TD", "TD"]);
+  });
+
+  it("leaves every other column unmarked", () => {
+    const { container } = render(<Table columns={cols} data={rows} getRowKey={(r) => r.name} />);
+    const first = container.querySelector("tbody tr td");
+    expect(first?.hasAttribute("data-sticky")).toBe(false);
+    expect(container.querySelector("thead th")?.hasAttribute("data-sticky")).toBe(false);
+  });
+
+  it("marks nothing when no column asks to be pinned", () => {
+    const { container } = render(
+      <Table columns={[{ key: "name", header: "Name" }]} data={rows} getRowKey={(r) => r.name} />,
+    );
+    expect(container.querySelectorAll("[data-sticky]")).toHaveLength(0);
+  });
+});
+
 describe("Table row groups", () => {
   interface Cluster {
     name: string;
