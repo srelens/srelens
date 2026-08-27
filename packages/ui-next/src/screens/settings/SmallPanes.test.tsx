@@ -25,10 +25,10 @@ function declaredActionTypes(): string[] {
   const types = Array.from(union[1].matchAll(/type:\s*"([a-z-]+)"/g)).map((m) => m[1]);
   // `select-tab`'s member carries a second field after its own `;`
   // (`{ type: "select-tab"; index: number }`), so a naive "stop at the first
-  // semicolon" cut would silently drop console and every zoom action — this
-  // asserts the fixture itself still has all ten before trusting it.
-  if (types.length !== 10) {
-    throw new Error(`expected 10 window action types in the union, read ${types.length}`);
+  // semicolon" cut would silently drop console, the lock and every zoom action
+  // — this asserts the fixture itself still has all eleven before trusting it.
+  if (types.length !== 11) {
+    throw new Error(`expected 11 window action types in the union, read ${types.length}`);
   }
   return types;
 }

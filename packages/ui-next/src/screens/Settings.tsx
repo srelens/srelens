@@ -73,47 +73,18 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "clusters", label: "Clusters" },
 ];
 
-export interface SettingsProps extends RoutedScreenProps {
-  /**
-   * ════════════════════════════════════════════════════════════════════
-   * SEAM — Task 9's lock surface. Not built here, deliberately.
-   * ════════════════════════════════════════════════════════════════════
-   *
-   * `SecurityPane` calls this after `vaultLock()` has resolved, and only then:
-   * the vault is sealed by the time it fires, and a refusal keeps the window
-   * exactly as it was.
-   *
-   * **A lock has to cover the WINDOW, not this tab.** Since #365 a dialog is
-   * mounted in the tab it was opened from, which is right for a dialog and
-   * exactly wrong for a lock: the cluster rail, the tab strip and every other
-   * open tab would stay live over a sealed vault, which is worse than not
-   * locking at all because the screen would say it had. So this is a callback
-   * that leaves this file rather than anything drawn in it — `LockGate` in
-   * `shell/Window.tsx` is where the cover belongs, above the tab strip, and it
-   * is Task 9's to build.
-   *
-   * **Optional, and nothing is drawn without it.** `/settings` has no route
-   * entry yet (Task 10 adds one), so no reader can reach `Lock now` in a
-   * shipped build before the surface exists. Until then an omitted handler is
-   * reported rather than swallowed — see {@link lockedWithNoCover} — because
-   * the one thing worse than a lock that does not cover the window is a lock
-   * that fails quietly.
-   */
-  onLocked?: () => void;
-}
-
 /**
- * What happens when the vault is sealed and nothing exists to cover the window.
- *
- * Console rather than a toast: the toast host lives in the classic tree
- * (`NextApp` says so where it renders its own failure at the window root), so a
- * `notify` here would go nowhere and read as handled.
+ * Nothing of its own. The four fields every routed screen is handed —
+ * `route`, `ported`, `onSwitchToClassic` and `onLocked` — are the only props
+ * this screen takes, and `onLocked` is the one it is here for:
+ * `RoutedScreenProps` declares it, `Body` forwards it, and `LockGate` above the
+ * tab strip is what it raises. It used to be declared here as an OPTIONAL prop with a
+ * `console.error` stand-in, because the surface did not exist yet; it exists
+ * now, so the stand-in is gone and an omitted handler is a typecheck failure at
+ * the call site rather than a lock button that reports itself to a console
+ * nobody is reading.
  */
-function lockedWithNoCover(): void {
-  console.error(
-    "the vault is locked, but no lock surface is mounted — the window is still showing what it had already read",
-  );
-}
+export type SettingsProps = RoutedScreenProps;
 
 export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps) {
   const desktop = isTauri();
@@ -166,7 +137,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
           </div>
         );
       case "security":
-        return <SecurityPane onLocked={onLocked ?? lockedWithNoCover} />;
+        return <SecurityPane onLocked={onLocked} />;
       case "appearance":
         return <AppearancePane ported={ported} onSwitchToClassic={onSwitchToClassic} />;
       case "accessibility":

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  isApplePlatform,
   notify,
   vaultBiometricDisable,
   vaultBiometricEnable,
@@ -10,6 +11,7 @@ import {
 } from "@srelens/core";
 import { Alert, Button, Field, LoadingState, Panel, Switch, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
+import { hint } from "../../lib/shortcuts";
 
 /**
  * §23's `Security` pane: the passphrase that seals the vault, the button that
@@ -40,13 +42,16 @@ import { FailureAlert } from "../../lib/errorCopy";
  * because a reader who came here expecting an idle timeout should be told it is
  * not built instead of hunting for it.
  *
- * **No `⌘⇧L` kbd beside `Lock now`.** §23 draws one and §T lists the chord,
- * but `BINDINGS` in `packages/ui-next/src/lib/shortcuts.ts` has no
- * `Mod+Shift+L` row — the window binds close/new/reopen tab, tab selection,
- * the console and zoom, and nothing else. A hint for a chord that does nothing
- * is the same kind of false claim as the paragraph above, in three characters.
- * Pinned by a test, so whoever binds the chord fails it and removes it in the
- * same commit.
+ * **The `⌘⇧L` kbd beside `Lock now` is read from `lib/shortcuts.ts`, not
+ * typed here.** For most of this branch there was no hint at all: `BINDINGS`
+ * had no `Mod+Shift+L` row, so §23's kbd would have promised a key that did
+ * nothing — the same kind of false claim as the paragraph above, in three
+ * characters — and the absence was pinned by a test so that whoever bound the
+ * chord would fail it and add the hint in the same commit. The chord is bound
+ * now (`{ type: "lock" }`, handled in `shell/Window.tsx`), so the hint is
+ * drawn. It comes from {@link hint} for the reason the Shortcuts pane gives at
+ * length: a glyph typed out by hand is wrong the moment the binding moves, and
+ * stays wrong until somebody notices.
  *
  * **`vaultStatus()` is deliberately not read here.** Two of its four fields
  * (`biometricAvailable`, `biometricEnrolled`) duplicate
@@ -102,6 +107,7 @@ export interface SecurityPaneProps {
 }
 
 export function SecurityPane({ onLocked }: SecurityPaneProps) {
+  const apple = useMemo(() => isApplePlatform(), []);
   const [biometric, setBiometric] = useState<Read<VaultBiometricStatus>>({ kind: "loading" });
   const [biometricBusy, setBiometricBusy] = useState(false);
   const [biometricError, setBiometricError] = useState<unknown>(null);
@@ -222,9 +228,15 @@ export function SecurityPane({ onLocked }: SecurityPaneProps) {
             stop it shrinking is where `min-width: auto` has cost this migration
             eight defects. Wrapping is the behaviour that stays legible. */}
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button disabled={locking} onClick={() => void lock()}>
-            {locking ? "Locking…" : "Lock now"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button disabled={locking} onClick={() => void lock()}>
+              {locking ? "Locking…" : "Lock now"}
+            </Button>
+            {/* Beside the button rather than inside it: the chord is not part of
+                the button's accessible name, and a `kbd` in there would be read
+                out as one. */}
+            <kbd className="kbd shrink-0">{hint("lock", apple)}</kbd>
+          </div>
           {!changing && (
             <Button variant="secondary" onClick={() => setChanging(true)}>
               Change passphrase

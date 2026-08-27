@@ -67,10 +67,19 @@ const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security");
 
 function paint(props: { onLocked?: () => void } = {}) {
   const onSwitchToClassic = vi.fn();
+  // `onLocked` is required on `RoutedScreenProps` now that `shell/LockGate`
+  // exists to raise, so every render supplies one — the tests that care about
+  // it pass their own spy in and read it back.
+  const onLocked = props.onLocked ?? vi.fn();
   render(
-    <Settings route={ROUTE} ported={PORTED} onSwitchToClassic={onSwitchToClassic} {...props} />,
+    <Settings
+      route={ROUTE}
+      ported={PORTED}
+      onSwitchToClassic={onSwitchToClassic}
+      onLocked={onLocked}
+    />,
   );
-  return { onSwitchToClassic, user: userEvent.setup() };
+  return { onSwitchToClassic, onLocked, user: userEvent.setup() };
 }
 
 function sections(): string[] {

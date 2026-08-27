@@ -168,6 +168,29 @@ export interface RoutedScreenProps {
   ported: readonly string[];
   /** Leave the new design, from the route the reader is on. */
   onSwitchToClassic: () => void;
+  /**
+   * Raise the lock surface over the whole window.
+   *
+   * The third field, and the only one that is NOT step-11 scaffolding: this one
+   * stays. `Settings`'s Security pane is the one screen that calls it, after
+   * `vaultLock()` has resolved, and what it needs raised is `shell/LockGate` —
+   * which is mounted above the tab strip and the cluster rail, because since
+   * PR #365 anything mounted inside a tab covers only that tab. A lock that did
+   * that would leave the rail and every other tab live over a sealed vault,
+   * which is worse than no lock because the window would look sealed.
+   *
+   * **Zero-argument, synchronous, non-throwing, fire-and-forget, idempotent.**
+   * A caller must be able to invoke it from a click handler and move on: no
+   * promise to await, nothing to catch, and `Lock now` may be double-clicked.
+   * It reads no vault state before covering — every await between the vault
+   * being sealed and the window being covered is a window of live UI over a
+   * sealed vault.
+   *
+   * **Required, for the reason the two above it are.** An optional handler with
+   * a default is how a screen ends up drawing a lock button behind nothing;
+   * required means the typecheck fails at the call site instead.
+   */
+  onLocked: () => void;
 }
 
 export type ScreenComponent = ComponentType<RoutedScreenProps>;

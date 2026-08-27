@@ -20,6 +20,8 @@ const {
   isApplePlatform,
   isTauri,
   loadKubeconfigFiles,
+  vaultStatus,
+  vaultLock,
   zoomSpy,
   createWorkspaceSpy,
   switchWorkspaceSpy,
@@ -37,6 +39,8 @@ const {
   isApplePlatform: vi.fn(() => true),
   isTauri: vi.fn(() => true),
   loadKubeconfigFiles: vi.fn((): string[] => []),
+  vaultStatus: vi.fn(),
+  vaultLock: vi.fn(),
   zoomSpy: vi.fn(),
   createWorkspaceSpy: vi.fn(),
   switchWorkspaceSpy: vi.fn(),
@@ -55,6 +59,8 @@ vi.mock("@srelens/core", async (importOriginal) => {
     isApplePlatform: () => isApplePlatform(),
     isTauri: () => isTauri(),
     loadKubeconfigFiles: () => loadKubeconfigFiles(),
+    vaultStatus: () => vaultStatus(),
+    vaultLock: () => vaultLock(),
   };
 });
 
@@ -84,6 +90,31 @@ vi.mock("../lib/tabsStore", async (importOriginal) => {
   };
 });
 
+/**
+ * One extra route, and nothing else changed.
+ *
+ * `/settings` has no entry in the real `SCREENS` table yet (Task 10 adds it),
+ * so the only screen a reader can reach through this window is the
+ * Placeholder — and the Placeholder is handed no `onLocked`. Diverting a route
+ * that does not otherwise exist is what lets this file prove the whole
+ * injection path Task 8 specified (`Window` -> `Body` -> the screen's
+ * `onLocked`) without replacing `Body`, `screenFor` or the routes table for
+ * the other forty tests here, every one of which still resolves its routes for
+ * real.
+ */
+vi.mock("../lib/routes", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../lib/routes")>();
+  const LockProbe = ({ onLocked }: import("../lib/routes").RoutedScreenProps) => (
+    <button type="button" onClick={onLocked}>
+      seal the workspace
+    </button>
+  );
+  return {
+    ...real,
+    screenFor: (route: string) => (route === "/lock-probe" ? LockProbe : real.screenFor(route)),
+  };
+});
+
 // jsdom has no ResizeObserver; TabStrip's overflow Popover wants one.
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
@@ -101,6 +132,23 @@ import { resetView } from "../lib/workspace";
 import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
+import { resetLock } from "./LockGate";
+
+/** An open vault: the state every test in this file but the lock ones needs. */
+const VAULT_OPEN = {
+  mode: "unlocked" as const,
+  keySource: "password" as const,
+  biometricAvailable: false,
+  biometricEnrolled: false,
+};
+
+/** A sealed one. `biometricEnrolled` is false so no Touch ID sheet is raised. */
+const VAULT_SEALED = {
+  mode: "locked" as const,
+  keySource: "password-locked" as const,
+  biometricAvailable: false,
+  biometricEnrolled: false,
+};
 
 const ctx = (stableId: string, name = stableId) => ({
   name, stableId, cluster: name, server: "", isCurrent: false,
@@ -118,6 +166,13 @@ beforeEach(() => {
   isApplePlatform.mockReset().mockReturnValue(true);
   isTauri.mockReset().mockReturnValue(true);
   loadKubeconfigFiles.mockReset().mockReturnValue(["/home/u/.kube/config", "/home/u/.kube/other"]);
+  // Every test in this file but the lock ones runs with an OPEN vault: the
+  // gate mounted above the tab strip covers the whole middle band while the
+  // vault is sealed, so a file-wide default of `locked` would leave no strip
+  // for any of them to find.
+  vaultStatus.mockReset().mockResolvedValue(VAULT_OPEN);
+  vaultLock.mockReset().mockResolvedValue(undefined);
+  resetLock();
   zoomSpy.mockReset();
   createWorkspaceSpy.mockReset();
   switchWorkspaceSpy.mockReset();
@@ -470,9 +525,12 @@ describe("Window new workspace", () => {
     await userEvent.click(screen.getByRole("button", { name: /Default/ }));
     await userEvent.click(await screen.findByRole("button", { name: "New workspace" }));
     const drawer = await screen.findByRole("complementary", { name: "Details" });
-    // The row is the middle `flex min-h-0 flex-1` that holds Rail/Nav/the tab
-    // column — an exact class match, since that string is unique to it.
-    const row = document.querySelector('div[class="flex min-h-0 flex-1"]');
+    // The row is the middle band that holds Rail/Nav/the tab column — an exact
+    // class match, since that string is unique to it. `relative` joined it when
+    // §25's cover was mounted here: the cover is `absolute inset-0` inside this
+    // band rather than `fixed`, because the titlebar and the status bar are not
+    // part of what a lock replaces.
+    const row = document.querySelector('div[class="relative flex min-h-0 flex-1"]');
     expect(row).not.toBeNull();
     expect(drawer.parentElement).toBe(row);
   });
@@ -530,5 +588,85 @@ describe("Window — what boot has to ask for", () => {
     // proxies still answer. Boot is the only place that runs regardless.
     await booted();
     await waitFor(() => expect(rehydrateForwards).toHaveBeenCalled());
+  });
+});
+
+/**
+ * §25's cover, proved against the real chrome rather than against a tile.
+ *
+ * The tab strip and the cluster rail are what PR #365 deliberately made
+ * reachable while a dialog is open, which is right for a dialog and exactly
+ * wrong for a lock: a cover that left them live would be worse than no lock,
+ * because the window would look sealed and every other tab would still be
+ * running over a sealed vault. So these tests name both by the role and the
+ * accessible name the shell actually gives them — `TabStrip`'s `tablist` and
+ * `ClusterRail`'s `nav aria-label="Clusters"` — and the first test in the file
+ * is its own positive control: the same two queries have to FIND them with the
+ * vault open, or their absence below would prove nothing.
+ */
+describe("Window lock cover", () => {
+  it("leaves the whole window alone while the vault is open", async () => {
+    await booted();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Clusters" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Control room");
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+  });
+
+  it("covers the tab strip and the cluster rail when the vault is sealed", async () => {
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
+    // The screen under the strip is gone too — including from the hidden tab
+    // surfaces, which stay mounted for every other reason.
+    expect(screen.queryByRole("heading", { level: 1, hidden: true, name: "Control room" })).toBeNull();
+  });
+
+  it("seals and covers on the lock chord", async () => {
+    await booted();
+    act(() => store.openTab("/k/pods", { clusterName: "prod" }));
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    expect(vaultLock).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
+    // The tabs themselves survive: this covers the window, it does not close
+    // the session the reader comes back to.
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+  });
+
+  it("covers nothing when the chord's lock is refused", async () => {
+    vaultLock.mockRejectedValue(new Error("there is no vault to lock"));
+    await booted();
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    await waitFor(() => expect(vaultLock).toHaveBeenCalled());
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+  });
+
+  it("leaves the lock chord to the browser in web mode, where there is no vault", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    expect(vaultLock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+  });
+
+  it("hands a screen the raise function, and it covers the window rather than the tab", async () => {
+    await booted();
+    act(() => store.openTab("/lock-probe", { clusterName: "prod" }));
+    await userEvent.click(screen.getByRole("button", { name: "seal the workspace" }));
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    // The point of the whole seam: not this tab, the window.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "seal the workspace" })).toBeNull();
   });
 });

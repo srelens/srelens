@@ -14,7 +14,8 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
-import { setNotifier, type VaultBiometricStatus } from "@srelens/core";
+import { isApplePlatform, setNotifier, type VaultBiometricStatus } from "@srelens/core";
+import { hint } from "../../lib/shortcuts";
 import { MIN_PASSPHRASE_LENGTH, SecurityPane } from "./SecurityPane";
 
 /**
@@ -290,15 +291,25 @@ describe("SecurityPane", () => {
   });
 
   /**
-   * §23 draws a `⌘⇧L` kbd beside `Lock now`, and no such chord is bound:
-   * `BINDINGS` in `packages/ui-next/src/lib/shortcuts.ts` has no `Mod+Shift+L`
-   * row, so the hint would promise a key that does nothing. Whoever binds it
-   * should fail this test and delete it in the same commit.
+   * The other half of the test this replaces. §23 draws a `⌘⇧L` kbd beside
+   * `Lock now`, and until `BINDINGS` grew a `Mod+Shift+L` row this pane
+   * deliberately drew none: a hint for a chord that does nothing is a false
+   * claim in three characters, and the absence was pinned so whoever bound the
+   * chord would fail here and add the hint in the same commit. The chord is
+   * bound now (`lib/shortcuts.ts`), so the hint is drawn — and it is read from
+   * `hint` rather than typed out, so it cannot outlive a rebinding.
+   *
+   * `not.toBe("")` is the load-bearing line. `hint` answers with the empty
+   * string for an action nothing binds, so without it this test would pass
+   * just as happily against an unbound chord and an empty `kbd`.
    */
-  it("promises no keyboard shortcut for locking, because none is bound", async () => {
+  it("names the chord that locks, from the table that binds it", async () => {
     const { container } = render(<SecurityPane onLocked={() => {}} />);
     await screen.findByRole("button", { name: /lock now/i });
-    expect(container.textContent ?? "").not.toContain("⌘");
-    expect(container.querySelector("kbd")).toBeNull();
+    const chord = container.querySelector("kbd");
+    expect(chord).not.toBeNull();
+    expect(chord?.textContent).not.toBe("");
+    expect(chord?.textContent).toBe(hint("lock", isApplePlatform()));
+    expect(chord?.textContent).toMatch(/⌘⇧L|Ctrl\+Shift\+L/);
   });
 });

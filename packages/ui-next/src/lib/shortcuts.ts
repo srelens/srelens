@@ -8,6 +8,7 @@ export type WindowAction =
   | { type: "next-tab" }
   | { type: "select-tab"; index: number }
   | { type: "console" }
+  | { type: "lock" }
   | { type: "zoom-in" }
   | { type: "zoom-out" }
   | { type: "zoom-reset" };
@@ -32,6 +33,13 @@ const BINDINGS: Binding[] = [
     action: { type: "select-tab", index: i } as WindowAction,
   })),
   { chord: ["Mod", "K"], action: { type: "console" }, whileTyping: true },
+  // §23 draws this beside `Lock now` and §25 names it. `whileTyping`, unlike
+  // every other chord here: a reader who reaches for the lock with the caret
+  // in a filter box, a YAML editor or a terminal is asking for the vault to be
+  // sealed, and a security chord that quietly stood down because something had
+  // focus is the kind of surprise that gets discovered after it mattered. The
+  // window's own handler is what turns this into `vault_lock` — see `Window`.
+  { chord: ["Mod", "Shift", "L"], action: { type: "lock" }, whileTyping: true },
   { chord: ["Mod", "="], action: { type: "zoom-in" } },
   // `+` is Shift+= on US/UK layouts, so the keydown really carries Shift; a
   // chord without the token would be a row that can never fire.

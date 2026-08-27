@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cleanErrorMessage,
+  describeError,
   isApplePlatform,
   isTauri,
   listContexts,
   loadKubeconfigFiles,
   rehydrateForwards,
+  vaultLock,
   type ClusterContext,
 } from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
@@ -46,6 +48,7 @@ import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { Body } from "./Body";
 import { Chrome, zoom } from "./Chrome";
 import { Console } from "./Console";
+import { isWorkspaceSealed, LockGate, lockWorkspace } from "./LockGate";
 import { Nav } from "./Nav";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
@@ -266,6 +269,8 @@ export function Window({
         return selectIndex(action.index);
       case "console":
         return setOpen(true);
+      case "lock":
+        return lockNow();
       case "zoom-in":
         return zoom("in");
       case "zoom-out":
@@ -273,6 +278,34 @@ export function Window({
       case "zoom-reset":
         return zoom("reset");
     }
+  }
+
+  /**
+   * §23's and §25's `⌘⇧L`: seal the vault, then cover the window.
+   *
+   * In that order, which is the order the Security pane's `Lock now` already
+   * uses: the cover goes up only once `vault_lock` has actually discarded the
+   * key, because a cover over a vault that is still open says something untrue
+   * in one direction and a sealed vault under a live window says it in the
+   * other.
+   *
+   * **A refusal goes to the console, and that is not a good answer.** The toast
+   * host lives in the classic tree — `NextApp` renders its own failure at the
+   * window root for exactly this reason — so `notify` from here reaches nobody.
+   * The Security pane's button has a `sev` alert of its own beside it and needs
+   * no such path; a chord does, and #367, which owns the rest of the locking
+   * story, is where a shell-level surface for it belongs.
+   */
+  function lockNow(): void {
+    // Already covered: the chord can be pressed again on the lock screen
+    // itself, and `vault_lock` with no key to discard rejects — an error the
+    // reader would have caused by pressing a key that had already worked.
+    if (isWorkspaceSealed()) return;
+    void vaultLock()
+      .then(() => lockWorkspace())
+      .catch((error) => {
+        console.error("the workspace could not be locked:", describeError(error).title, error);
+      });
   }
 
   // Read at call time rather than closed over: an effect installed once must
@@ -303,6 +336,10 @@ export function Window({
         action.type === "new-tab" ||
         action.type === "select-tab";
       if (browserOwned && !desktop) return;
+      // Not browser-owned — nothing in a browser answers ⌘⇧L — but every vault
+      // command is a Tauri command, so in web mode there is no vault to seal
+      // and the chord could only log a refusal. It falls through untouched.
+      if (action.type === "lock" && !desktop) return;
       e.preventDefault();
       runRef.current(action);
     }
@@ -351,74 +388,98 @@ export function Window({
           onNewWorkspace={openNewWorkspace}
         />
       )}
-      <div className="flex min-h-0 flex-1">
-        {active && (
-          <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
-        )}
-        {active && <Nav contexts={contexts} />}
-        {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
-            and the screen, and a flex item's implicit `min-width: auto`
-            refuses to shrink below its content — so a wide screen widens the
-            column, and `TabStrip`'s `overflow-x-auto` never engages because
-            the box it would scroll inside has grown to fit. The strip then
-            pushes its own new-tab and overflow controls off the window, which
-            is where the user meets it. */}
-        <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* `relative`, because §25's cover is `absolute inset-0` inside this band
+          rather than `fixed`: the titlebar above it and the status bar below it
+          are not part of what a lock replaces. */}
+      <div className="relative flex min-h-0 flex-1">
+        {/* The lock surface goes HERE and not one level in — above the tab
+            strip, and above the cluster rail with it. Since PR #365 a dialog is
+            mounted in the tab it was opened from, so the rail, the strip and
+            every other tab stay reachable behind it. That is right for a dialog
+            and exactly wrong for a lock: a cover inside the screen column would
+            leave the rail live and every other tab running over a sealed vault,
+            which is worse than not locking at all, because the window would
+            look sealed. `Window.test.tsx` pins the rail and the strip by name
+            for that reason.
+
+            Unconditional rather than `active &&`: whether the component gallery
+            is up is a developer surface's business, not the vault's. */}
+        <LockGate>
           {active && (
-            <TabStrip
-              tabs={tabs}
-              activeId={activeId}
-              onSelect={activateTab}
-              onClose={closeTab}
-              menuFor={menuFor}
-              onNew={() => run({ type: "new-tab" })}
-              newHint={hint("new-tab", apple)}
-              label="Open tabs"
-            />
+            <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
           )}
-          <div className="relative min-h-0 flex-1">
-            {tabs.map((tab) => (
-              <TabSurface key={tab.id} visible={tab.id === activeId}>
-                {/* A placeholder tab without a cluster of its own still leaves
-                    via the cluster this window is looking at — that is the
-                    context classic reopens onto. */}
-                <Body
-                  route={tab.route}
-                  clusterName={tab.sub ?? activeCtx?.name}
-                  ported={ported}
-                  onOpenInClassic={onOpenInClassic}
-                  onOpenGallery={onOpenGallery}
-                />
-              </TabSurface>
-            ))}
-          </div>
-          {active && <Console apple={apple} />}
-        </div>
-        <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
-          <div className="flex flex-col gap-3 px-3 py-3">
-            <TextInput value={name} onValueChange={setName} placeholder="Workspace name" aria-label="Workspace name" />
-            {contexts.map((c) => (
-              <Checkbox
-                key={c.stableId}
-                checked={picked.has(c.stableId)}
-                onChange={(checked) =>
-                  setPicked((prev) => {
-                    const next = new Set(prev);
-                    if (checked) next.add(c.stableId);
-                    else next.delete(c.stableId);
-                    return next;
-                  })
-                }
-                label={c.name}
+          {active && <Nav contexts={contexts} />}
+          {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
+              and the screen, and a flex item's implicit `min-width: auto`
+              refuses to shrink below its content — so a wide screen widens the
+              column, and `TabStrip`'s `overflow-x-auto` never engages because
+              the box it would scroll inside has grown to fit. The strip then
+              pushes its own new-tab and overflow controls off the window, which
+              is where the user meets it. */}
+          <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {active && (
+              <TabStrip
+                tabs={tabs}
+                activeId={activeId}
+                onSelect={activateTab}
+                onClose={closeTab}
+                menuFor={menuFor}
+                onNew={() => run({ type: "new-tab" })}
+                newHint={hint("new-tab", apple)}
+                label="Open tabs"
               />
-            ))}
-            <div className="flex justify-end">
-              <Button variant="primary" size="sm" onClick={() => create()}>
-                Create
-              </Button>
+            )}
+            <div className="relative min-h-0 flex-1">
+              {tabs.map((tab) => (
+                <TabSurface key={tab.id} visible={tab.id === activeId}>
+                  {/* A placeholder tab without a cluster of its own still leaves
+                      via the cluster this window is looking at — that is the
+                      context classic reopens onto. */}
+                  <Body
+                    route={tab.route}
+                    clusterName={tab.sub ?? activeCtx?.name}
+                    ported={ported}
+                    onOpenInClassic={onOpenInClassic}
+                    onOpenGallery={onOpenGallery}
+                    // The raise itself, not a wrapper around it. `Settings`'s
+                    // `Lock now` calls this once `vaultLock()` has resolved,
+                    // and what it has to raise is the cover over the WINDOW —
+                    // the `LockGate` above this strip — rather than anything
+                    // drawn inside this tab. Zero-argument, synchronous,
+                    // non-throwing and idempotent: the whole of the contract.
+                    onLocked={lockWorkspace}
+                  />
+                </TabSurface>
+              ))}
             </div>
+            {active && <Console apple={apple} />}
           </div>
-        </Drawer>
+          <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
+            <div className="flex flex-col gap-3 px-3 py-3">
+              <TextInput value={name} onValueChange={setName} placeholder="Workspace name" aria-label="Workspace name" />
+              {contexts.map((c) => (
+                <Checkbox
+                  key={c.stableId}
+                  checked={picked.has(c.stableId)}
+                  onChange={(checked) =>
+                    setPicked((prev) => {
+                      const next = new Set(prev);
+                      if (checked) next.add(c.stableId);
+                      else next.delete(c.stableId);
+                      return next;
+                    })
+                  }
+                  label={c.name}
+                />
+              ))}
+              <div className="flex justify-end">
+                <Button variant="primary" size="sm" onClick={() => create()}>
+                  Create
+                </Button>
+              </div>
+            </div>
+          </Drawer>
+        </LockGate>
       </div>
       {active && <Status contexts={contexts} />}
     </div>

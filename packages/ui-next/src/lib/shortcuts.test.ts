@@ -23,6 +23,25 @@ describe("matchWindowKey", () => {
     expect(matchWindowKey(ev("=", { metaKey: true }), true)).toEqual({ type: "zoom-in" });
     expect(matchWindowKey(ev("-", { metaKey: true }), true)).toEqual({ type: "zoom-out" });
     expect(matchWindowKey(ev("0", { metaKey: true }), true)).toEqual({ type: "zoom-reset" });
+    // Shift is really held, so `e.key` is the capital.
+    expect(matchWindowKey(ev("L", { metaKey: true, shiftKey: true }), true)).toEqual({
+      type: "lock",
+    });
+  });
+
+  it("locks from a typing target too", () => {
+    // Every other chord here stands down inside an input. This one must not:
+    // a reader who reaches for the lock while the caret is in a filter box or
+    // a terminal is asking for the vault to be sealed, and a chord that
+    // quietly did nothing there is a security surprise.
+    const input = document.createElement("input");
+    expect(matchWindowKey({ ...ev("L", { metaKey: true, shiftKey: true }), target: input }, true)).toEqual({
+      type: "lock",
+    });
+  });
+
+  it("does not lock on the unshifted key, which belongs to nothing here", () => {
+    expect(matchWindowKey(ev("l", { metaKey: true }), true)).toBeNull();
   });
 
   it("zooms in on the shifted plus, which is how the key is really typed", () => {
@@ -65,5 +84,9 @@ describe("matchWindowKey", () => {
     // The `=` row stays first, so the hint stays the unshifted form.
     expect(hint("zoom-in", true)).toBe("⌘=");
     expect(hint("zoom-in", false)).toBe("Ctrl+=");
+    // §23 draws this one beside `Lock now`, and §25 names it. The Security
+    // pane reads it from here, so the two cannot disagree.
+    expect(hint("lock", true)).toBe("⌘⇧L");
+    expect(hint("lock", false)).toBe("Ctrl+Shift+L");
   });
 });
