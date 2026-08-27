@@ -88,6 +88,26 @@ const EDGE: ClusterContext = {
 };
 
 /**
+ * A cluster that runs on whichever host read the kubeconfig.
+ *
+ * The only fixture with `isLocal`, and the one the rail's second section needs
+ * to be drawn at all — the rail skips that section entirely when nothing is
+ * local, so a heading assertion without this passes for the wrong reason (no
+ * heading, and none expected).
+ */
+const LOCAL: ClusterContext = {
+  name: "kind-dev",
+  stableId: "kind-dev",
+  cluster: "kind-dev",
+  server: "https://127.0.0.1:6443",
+  isCurrent: false,
+  isLocal: true,
+  provider: "kind",
+  sourceFile: CONFIG,
+  authKind: "client certificate",
+};
+
+/**
  * **No stored kubeconfig files**, which is web mode's own shape (`Window.tsx`
  * hands it `[]`) and the one that separates "count the stored list" from "count
  * what the rail draws". The desktop tests set their own.
@@ -583,6 +603,37 @@ describe("Connections", () => {
     open();
     expect(await screen.findByRole("button", { name: "Add" })).toBeTruthy();
     expect(screen.queryByText(/added on the desktop/)).toBeNull();
+  });
+
+  /**
+   * **The other fact the rail cannot ask for itself — whose machine it is.**
+   *
+   * The rail's two section headings are claims about a LOCATION ("on this
+   * machine", "runs on this laptop"), and in web mode the location is the
+   * server's host: the kubeconfig is the one that server was started with, and
+   * a kind or minikube cluster it declares runs there, not on the machine the
+   * browser is on. `SourcesRail` takes `desktop` as a prop for the same reason
+   * it takes `onAddFile` — so both wordings are reachable from a fixture — and
+   * a screen that forgets to pass it defaults to the server wording and tells
+   * a desktop reader their own laptop is somebody else's server.
+   *
+   * Both directions asserted, because the fault this replaces was a heading
+   * that was right on one platform and unconditional.
+   */
+  it("tells the rail whose machine it is, on the desktop", async () => {
+    core.isTauri.mockReturnValue(true);
+    setContexts([PROD, LOCAL]);
+    open();
+    expect(await screen.findByText("Kubeconfig · on this machine")).toBeTruthy();
+    expect(screen.getByText("Local · runs on this laptop")).toBeTruthy();
+  });
+
+  it("tells the rail whose machine it is, in the browser", async () => {
+    setContexts([PROD, LOCAL]);
+    open();
+    expect(await screen.findByText("Kubeconfig · on the server's host")).toBeTruthy();
+    expect(screen.getByText("Local · runs on the server's host")).toBeTruthy();
+    expect(screen.queryByText("Local · runs on this laptop")).toBeNull();
   });
 
   it("says why there is no file picker in the browser", async () => {

@@ -76,10 +76,13 @@ const UNREAD: Probe = { state: "unread" };
  *    and one that never answers holds up none of the others.
  * 3. A late answer cannot paint over a fresh one, on both round trips. Helm's
  *    `listSeq` idiom, twice: once on the listing and once on the readings.
- * 4. `onAddFile` is passed whenever there is a filesystem to browse. The rail
- *    reads its absence as "there is none" and prints that instead of the
- *    control, so forgetting it here would lose the button on the desktop with
- *    nothing on screen saying why.
+ * 4. Both of the rail's platform facts are passed down. `onAddFile` is handed
+ *    over whenever there is a filesystem to browse — the rail reads its absence
+ *    as "there is none" and prints that instead of the control, so forgetting it
+ *    here would lose the button on the desktop with nothing on screen saying
+ *    why — and `desktop` is what lets its two headings say WHOSE machine the
+ *    kubeconfigs and the local clusters are on, which in web mode is the
+ *    server's host and not the reader's.
  */
 export function Connections({ route }: { route: string }) {
   // The routes table's own title, so the tab strip and the `h1` cannot drift.
@@ -393,9 +396,11 @@ export function Connections({ route }: { route: string }) {
   /**
    * The desktop's own question, asked once, here.
    *
-   * The rail takes a callback rather than asking itself, so both of its states
-   * are reachable from a fixture — `Toolbox.tsx:188` makes the same split for
-   * its install column.
+   * The rail takes a callback and a `desktop` flag rather than asking itself, so
+   * both of its states are reachable from a fixture — `Toolbox.tsx:188` makes
+   * the same split for its install column. It is asked once here and spent on
+   * two props, which is what keeps the file picker and the rail's "whose
+   * machine" headings from ever disagreeing about which build this is.
    */
   const desktop = isTauri();
 
@@ -526,6 +531,11 @@ export function Connections({ route }: { route: string }) {
           // **Passed whenever there is a filesystem to browse.** Absent, the
           // rail says why there is no control rather than drawing a dead one.
           onAddFile={desktop ? () => void addFile() : undefined}
+          // And whose machine the rail's two headings are about. A second prop
+          // rather than the rail reading `onAddFile`: one says what this caller
+          // can DO, the other where the reader IS, and the rail refuses to
+          // derive a location claim from a button (see its own note).
+          desktop={desktop}
         />
       </div>
     </Screen>

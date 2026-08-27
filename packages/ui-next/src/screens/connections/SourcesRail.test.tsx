@@ -143,6 +143,55 @@ describe("SourcesRail", () => {
     expect(onAddFile).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * **"this laptop" is the reader's machine, and in web mode it is not the
+   * machine anything on this rail runs on.**
+   *
+   * The server's kubeconfig can perfectly well declare a kind or minikube
+   * cluster; `isLocal` is then true and the cluster runs on the SERVER's host,
+   * which may be a shared box in another building. Both headings said "this
+   * machine"/"this laptop" unconditionally, one of them directly above the
+   * paragraph that tells a web reader kubeconfig files are added "on the
+   * desktop".
+   *
+   * `desktop` is passed IN rather than read here, exactly as `onAddFile` is:
+   * a component that asks `isTauri()` itself cannot be drawn both ways from a
+   * fixture. It is a second prop rather than `onAddFile !== undefined` on
+   * purpose — this file's own note forbids deriving platform claims from a UI
+   * callback, and a caller may one day pass a picker in web mode or withhold
+   * one on the desktop.
+   *
+   * Asserted as EXACT headings both ways round, so a branch that added the
+   * web wording while leaving the laptop claim standing fails here. The
+   * heading strings are used rather than a `/this laptop/` pattern because the
+   * agent section's own sentence — "whether the cluster runs on this laptop or
+   * across the internet", a claim about the GATE being uniform rather than
+   * about where anything runs — contains the same words.
+   */
+  const LOCAL_DESKTOP = "Local · runs on this laptop";
+  const LOCAL_WEB = "Local · runs on the server's host";
+  const FILES_DESKTOP = "Kubeconfig · on this machine";
+  const FILES_WEB = "Kubeconfig · on the server's host";
+
+  /** One local cluster, so the second section is drawn at all. */
+  const LOCAL_ROW = row({ name: "kind-dev", isLocal: true, provider: "kind" });
+
+  it("heads both sections with the reader's own machine on the desktop", () => {
+    render(<SourcesRail files={["/k/config"]} rows={[LOCAL_ROW]} desktop />);
+    expect(screen.getByText(FILES_DESKTOP)).toBeTruthy();
+    expect(screen.getByText(LOCAL_DESKTOP)).toBeTruthy();
+    expect(screen.queryByText(FILES_WEB)).toBeNull();
+    expect(screen.queryByText(LOCAL_WEB)).toBeNull();
+  });
+
+  it("does not tell a web reader that the server's clusters run on their laptop", () => {
+    render(<SourcesRail files={["/k/config"]} rows={[LOCAL_ROW]} />);
+    expect(screen.queryByText(FILES_DESKTOP)).toBeNull();
+    expect(screen.queryByText(LOCAL_DESKTOP)).toBeNull();
+    expect(screen.getByText(FILES_WEB)).toBeTruthy();
+    expect(screen.getByText(LOCAL_WEB)).toBeTruthy();
+  });
+
   it("draws no local section when no cluster runs on this laptop", () => {
     render(<SourcesRail files={["/k/config"]} rows={[row({ sourceFile: "/k/config" })]} />);
     expect(screen.queryByTestId("sources-local")).toBeNull();

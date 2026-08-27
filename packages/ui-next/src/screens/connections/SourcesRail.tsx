@@ -23,6 +23,24 @@ export interface SourcesRailProps {
    * {@link SourcesRail}.
    */
   onAddFile?: () => void;
+  /**
+   * Whether the reader is looking at the desktop app, so the two section
+   * headings can say WHOSE machine they are about.
+   *
+   * **A fact, passed in like {@link SourcesRailProps.onAddFile} and for the
+   * same reason** — a component that calls `isTauri()` itself cannot be drawn
+   * both ways from a fixture. Deliberately NOT derived from `onAddFile`: this
+   * file's own note refuses to read a platform claim out of a UI callback, and
+   * the two can legitimately diverge (a caller that has a file picker but no
+   * local clusters, or the reverse).
+   *
+   * Absent means the browser, which is the conservative default: the headings
+   * then say "the server's host", which is true of a shared server and merely
+   * pedantic if a reader happens to be running one on their own machine — the
+   * other way round the rail states a falsehood about where somebody's
+   * cluster runs.
+   */
+  desktop?: boolean;
   className?: string;
 }
 
@@ -111,8 +129,10 @@ function countLine({ contexts, inUse }: FileRow): string {
  * §6's right-hand rail: where srelens reads each cluster from.
  *
  * **Driven entirely by props**, like the table beside it — no fetch, no store,
- * no `isTauri()`. The screen owns the contexts, the probes and the stored file
- * list, so every state of this rail is reachable from a fixture.
+ * no `isTauri()`. The screen owns the contexts, the probes, the stored file
+ * list AND the platform, so every state of this rail is reachable from a
+ * fixture; see {@link SourcesRailProps.desktop} for why the platform is a prop
+ * rather than a call.
  *
  * Three sections, and the third is not the one the mock draws.
  *
@@ -142,16 +162,36 @@ function countLine({ contexts, inUse }: FileRow): string {
  * quietly contradicting a comment.
  *
  * The web build's capability denylist IS a real distinction, and it is
- * deliberately not mentioned here: it is a fact about the platform, and this
- * component's only platform signal is whether `onAddFile` was passed. That
- * prop says "this caller can open a file picker" — deriving "and therefore the
- * server refuses nine capabilities" from it would be inventing a platform
- * claim out of a UI callback. The Toolbox says that where it is true.
+ * deliberately not mentioned here even though `desktop` now says which build
+ * this is: the denylist is the SERVER's configuration, not a consequence of
+ * being served over HTTP, and the Toolbox says it where it is checked. What
+ * `desktop` may be spent on is whose machine a thing is on — nothing more. It
+ * is also why the platform is its own prop and not read off `onAddFile`, which
+ * says only "this caller can open a file picker": deriving "and therefore the
+ * server refuses nine capabilities" from a UI callback would be inventing a
+ * platform claim out of a button.
  */
-export function SourcesRail({ rows, files, onAddFile, className }: SourcesRailProps) {
+export function SourcesRail({ rows, files, onAddFile, desktop, className }: SourcesRailProps) {
   const headId = useId();
   const sources = fileRows(files, rows);
   const local = rows.filter((row) => row.context.isLocal);
+  /**
+   * Whose machine the two headings are about.
+   *
+   * Both said "this machine" / "this laptop" unconditionally, and in web mode
+   * neither is the reader's: the kubeconfig is the one the server was started
+   * with, and a kind or minikube cluster it declares runs on the SERVER's host
+   * — possibly a shared box in another building. The `Kubeconfig` heading sat
+   * directly above the paragraph telling that same reader files are added "on
+   * the desktop, where srelens has a filesystem to browse", so the rail
+   * contradicted itself two lines apart.
+   *
+   * The agent section's sentence is left alone: "whether the cluster runs on
+   * this laptop or across the internet" is a claim about the GATE being the
+   * same near and far, not about where any cluster runs.
+   */
+  const filesHead = desktop ? "Kubeconfig · on this machine" : "Kubeconfig · on the server's host";
+  const localHead = desktop ? "Local · runs on this laptop" : "Local · runs on the server's host";
 
   return (
     // The frame is fixed and does not scroll; the body does, exactly as
@@ -172,7 +212,7 @@ export function SourcesRail({ rows, files, onAddFile, className }: SourcesRailPr
           each row inert. Eight defects on this migration, none of them visible
           in jsdom — hence the class assertions in the suite. */}
       <div data-slot="rail-body" className="side-rail-body min-w-0">
-        <Section title="Kubeconfig · on this machine">
+        <Section title={filesHead}>
           <div className="flex min-w-0 flex-col gap-2.5">
             {sources.length === 0 ? (
               <p className="text-[0.8125rem] leading-snug text-muted">No kubeconfig files.</p>
@@ -247,7 +287,7 @@ export function SourcesRail({ rows, files, onAddFile, className }: SourcesRailPr
             box is a thing the reader has to look at and dismiss, and §6's own
             rail has no "you have no local clusters" state. */}
         {local.length > 0 && (
-          <Section title="Local · runs on this laptop">
+          <Section title={localHead}>
             <div data-testid="sources-local" className="flex min-w-0 flex-col gap-2.5">
               {local.map(({ context, probe }) => {
                 const via = viaOf(context);
