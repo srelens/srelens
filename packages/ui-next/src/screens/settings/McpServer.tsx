@@ -30,13 +30,20 @@ import { FailureAlert } from "../../lib/errorCopy";
  * the same token re-read after a start (`mcp_http_start` mints one when none
  * exists), and the same revert-to-disabled when a start is refused.
  *
- * **It does not come back up on its own** (#374). The auto-start effect is
- * still classic's (`App.tsx:771`, gated on the vault gate reporting ready), and
- * moving it belongs with the rest of that tree's launch work rather than to a
- * settings pane — so this pane says, once, that a start lasts the session. The PREFERENCE is
- * persisted all the same: `McpSettings` is one record shared with classic, and
- * a reader who starts the server here and switches designs should not find the
- * toggle over there disagreeing with the server they are talking to.
+ * **And it does come back up on its own now** (#374 item 2). For one round it did
+ * not: the auto-start effect was still classic's (`App.tsx:763-775`, gated on
+ * its vault gate reporting ready), moving it belonged with that tree's launch
+ * work rather than with a settings pane, and so this pane had to say once that a
+ * start lasted the session. `Window` reads the persisted `enabled` back itself
+ * now, once `LockGate` reports the vault usable — see the effect there for why
+ * that ordering, and not a mount effect, is what the vault requires — so the
+ * sentence is gone. It was half of the same defect rather than a caveat about
+ * it: `start()` has always persisted `enabled: true`, and nothing read it.
+ *
+ * The PREFERENCE was always persisted, and still is for the second reason as
+ * well: `McpSettings` is one record shared with classic, and a reader who starts
+ * the server here and switches designs should not find the toggle over there
+ * disagreeing with the server they are talking to.
  *
  * **The address is read, not written.** `mcpHttpStatus()` returns the running
  * server's URL and this pane used to discard it into a boolean while printing a
@@ -446,10 +453,6 @@ export function McpServer() {
               <code className="code break-all rounded px-1.5 py-0.5 text-[0.6875rem]">{address}</code>
             </span>
           </div>
-          <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
-            A start lasts this session — srelens does not bring the server back up for you on the
-            next launch.
-          </p>
         </>
       )}
 

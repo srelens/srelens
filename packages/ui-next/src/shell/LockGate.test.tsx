@@ -98,9 +98,9 @@ function Behind() {
  */
 const BRAND = "/aardvark-ledger-mark.svg";
 
-function paint(props: { brandMarkSrc?: string } = {}) {
+function paint(props: { brandMarkSrc?: string; onReady?: () => void } = {}) {
   render(
-    <LockGate brandMarkSrc={props.brandMarkSrc}>
+    <LockGate brandMarkSrc={props.brandMarkSrc} onReady={props.onReady}>
       <Behind />
     </LockGate>,
   );
@@ -788,5 +788,106 @@ describe("LockGate — the launch check", () => {
     expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
     expect(screen.queryByLabelText("Master passphrase")).toBeNull();
     expect(screen.queryByRole("button", { name: "Unlock workspace" })).toBeNull();
+  });
+});
+
+/**
+ * `onReady`: the vault is usable, which is a different claim from "the cover is
+ * down" and is why it is a callback rather than a store read.
+ *
+ * Its one consumer is the MCP auto-start (`Window`), and classic has had the
+ * same callback on `VaultGate` since the vault shipped. The bearer token is
+ * sealed in the vault, so a start before this cannot read or mint one and
+ * nothing retries — the ordering is the whole reason it exists.
+ */
+describe("LockGate, reporting that the vault is usable", () => {
+  it("says so once the launch read finds the vault open", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockResolvedValue(OPEN);
+    paint({ onReady });
+    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+  });
+
+  it("says nothing while the vault is sealed", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockResolvedValue(SEALED);
+    paint({ onReady });
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    await act(async () => {});
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("says nothing about a vault that has never been set up", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockResolvedValue(NEVER_SET_UP);
+    paint({ onReady });
+    expect(await screen.findByRole("heading", { name: "Protect your workspace" })).toBeTruthy();
+    await act(async () => {});
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("says nothing when the read refused, which is not the same as an open vault", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockRejectedValue(new Error("the vault state was never managed"));
+    paint({ onReady });
+    expect(await screen.findByTestId("lock-cover")).toBeTruthy();
+    await act(async () => {});
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("says so when the reader unlocks", async () => {
+    const onReady = vi.fn();
+    const user = userEvent.setup();
+    core.vaultStatus.mockResolvedValue(SEALED);
+    core.vaultUnlockPassword.mockResolvedValue(undefined);
+    paint({ onReady });
+    await screen.findByRole("heading", { name: "Workspace locked" });
+    core.vaultStatus.mockResolvedValue(OPEN);
+    await user.type(field(), TYPED);
+    await user.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+  });
+
+  /**
+   * Not from the reconcile read that follows a deliberate lock. That read is
+   * taken with `mayOpen: false` precisely because a stale or racing `unlocked`
+   * must not lower the cover — and it must not announce a usable vault either,
+   * or the consumer would act behind a window that is showing the lock screen.
+   */
+  it("says nothing from the read that follows a lock", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockRejectedValueOnce(new Error("the vault state was never managed"));
+    core.vaultStatus.mockResolvedValue(OPEN);
+    paint({ onReady });
+    expect(await screen.findByTestId("lock-cover")).toBeTruthy();
+    // The reconcile read has run — a `null` status behind a raised cover is
+    // exactly the case that takes it — and it came back `unlocked`.
+    await waitFor(() => expect(core.vaultStatus.mock.calls.length).toBeGreaterThan(1));
+    expect(screen.getByTestId("lock-cover")).toBeTruthy();
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Once per window, not once per read. The consumer is a launch action:
+   * `mcp_http_start` on a listener that is already bound is not a no-op, so a
+   * second report after a relock and a second unlock would be a second start.
+   */
+  it("says so once, however many times the vault is opened", async () => {
+    const onReady = vi.fn();
+    const user = userEvent.setup();
+    core.vaultStatus.mockResolvedValue(OPEN);
+    core.vaultUnlockPassword.mockResolvedValue(undefined);
+    paint({ onReady });
+    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    // Sealed from outside, the way `Lock now` and the chord do it, then opened
+    // again with the passphrase.
+    core.vaultStatus.mockResolvedValue(SEALED);
+    act(() => lockWorkspace());
+    await screen.findByRole("heading", { name: "Workspace locked" });
+    core.vaultStatus.mockResolvedValue(OPEN);
+    await user.type(field(), TYPED);
+    await user.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await waitFor(() => expect(screen.getByTestId("body")).toBeTruthy());
+    expect(onReady).toHaveBeenCalledTimes(1);
   });
 });

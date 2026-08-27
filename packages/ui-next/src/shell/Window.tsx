@@ -6,7 +6,9 @@ import {
   isTauri,
   listContexts,
   loadKubeconfigFiles,
+  loadMcpSettings,
   rehydrateForwards,
+  startMcpHttp,
   vaultLock,
   type ClusterContext,
 } from "@srelens/core";
@@ -97,6 +99,12 @@ export function Window({
   active = true,
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
+  /**
+   * The vault is usable, as `LockGate` reports it — classic's `vaultReady`, by
+   * the same name and for the same one consumer. Flipped once per window; see
+   * `LockGateProps.onReady`.
+   */
+  const [vaultReady, setVaultReady] = useState(false);
   // Kept from boot because half the chrome wants it: the rail resolves ids to
   // names, the sidebar looks up CRDs by name, and the new-tab action turns the
   // active cluster's id into the name a tab carries. Held in the shared store
@@ -386,6 +394,37 @@ export function Window({
     return () => window.removeEventListener("keydown", onKey);
   }, [active, apple, desktop]);
 
+  /**
+   * #374 item 2: bring the MCP server back up when the reader left it enabled.
+   *
+   * `McpServer`'s Start persists `enabled: true`, and until now nothing in this
+   * tree read it back — so the endpoint stayed offline until Settings was opened
+   * by hand, and the pane had to say so. Classic has done this since the vault
+   * shipped (`App.tsx:763-775`) and the ORDERING is the whole of it: the bearer
+   * token is sealed in the vault (`VaultTokenStore`, `main.rs:184`), so a start
+   * over a locked vault cannot read or mint one and nothing retries. Hence the
+   * gate's `onReady` rather than an effect on mount.
+   *
+   * The refusal is swallowed, as classic swallows it. There is no shell-level
+   * surface to report it on — `notify` reaches nobody in this tree, which is the
+   * same gap `lockNow` names — and the pane's own Start button is where a reader
+   * finds out and tries again. What must not happen is an unhandled rejection
+   * out of an effect on the way in.
+   *
+   * **No `isTauri()` check of its own**, unlike every other desktop-only path in
+   * this file. There is no vault in a browser, so `LockGate` takes no read there
+   * and reports readiness never — this effect cannot run in web mode, and a
+   * guard here would be a second answer to a question already settled one
+   * component away. The mutation pass says so plainly: removing it fails
+   * nothing, and the web-mode test that passes either way is passing on the
+   * gate's behaviour, which is where it belongs.
+   */
+  useEffect(() => {
+    if (!vaultReady) return;
+    const mcp = loadMcpSettings();
+    if (mcp.enabled) void startMcpHttp(mcp.port).catch(() => {});
+  }, [vaultReady]);
+
   function menuFor(tab: StripTab): ContextMenuItem[] {
     return [
       { label: "Duplicate", onPick: () => duplicateTab(tab.id) },
@@ -447,7 +486,7 @@ export function Window({
 
             Unconditional rather than `active &&`: whether the component gallery
             is up is a developer surface's business, not the vault's. */}
-        <LockGate brandMarkSrc={brandMarkSrc}>
+        <LockGate brandMarkSrc={brandMarkSrc} onReady={() => setVaultReady(true)}>
           {active && (
             <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
           )}

@@ -433,9 +433,30 @@ export interface LockGateProps {
    * drawn when it is absent or will not load.
    */
   brandMarkSrc?: string;
+  /**
+   * The vault is usable — set up, open, and this gate has read it that way.
+   *
+   * Classic's `VaultGate` has had exactly this callback since the vault shipped
+   * (`onReady`, `apps/desktop/src/components/VaultGate.tsx`), and `App.tsx`
+   * uses it for one thing: starting the MCP HTTP server the reader left
+   * enabled. It cannot be done any earlier. The bearer token is one of the two
+   * secrets the vault actually seals (`VaultTokenStore`, `main.rs:184`), so a
+   * start over a sealed vault fails to persist a token and nothing retries —
+   * which is the whole reason the callback exists rather than an effect on
+   * mount.
+   *
+   * **Fires at most once per window**, like classic's, and only from a read
+   * that was allowed to open the cover: the launch read of an open vault, or an
+   * unlock. The reconcile read that follows a deliberate lock is not one — a
+   * stale `unlocked` there would report a usable vault over a window the reader
+   * just sealed. A relock and a second unlock do not fire it again either: the
+   * consumer is a launch action, and `mcp_http_start` on a listener that is
+   * already bound is not an idempotent no-op.
+   */
+  onReady?: () => void;
 }
 
-export function LockGate({ children, brandMarkSrc }: LockGateProps) {
+export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
   // Read once. Every vault command is a Tauri command (`invoke` from
   // `@tauri-apps/api/core`, not the transport layer that has a web half), so in
   // a browser there is no vault to seal and nothing that could unlock one — a
@@ -464,6 +485,12 @@ export function LockGate({ children, brandMarkSrc }: LockGateProps) {
   const [recovered, setRecovered] = useState<string | null>(null);
   // The uninvited biometric sheet fires once per launch, not once per render.
   const autoPrompted = useRef(false);
+  // And `onReady` fires once per window, not once per read — see the prop.
+  const readyNotified = useRef(false);
+  // Read at call time rather than closed over by `read`, which is re-created
+  // every render and called from handlers that were not.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   const covered = raised || checking;
 
@@ -483,7 +510,16 @@ export function LockGate({ children, brandMarkSrc }: LockGateProps) {
       setStatusError(null);
       rememberMode(next.mode);
       if (next.mode === "unlocked") {
-        if (mayOpen) unsealWorkspace();
+        if (mayOpen) {
+          unsealWorkspace();
+          // Inside `mayOpen`, deliberately: the reconcile read after a
+          // deliberate lock also lands here, and a stale `unlocked` there would
+          // announce a usable vault over a window the reader just sealed.
+          if (!readyNotified.current) {
+            readyNotified.current = true;
+            onReadyRef.current?.();
+          }
+        }
       } else {
         lockWorkspace();
       }

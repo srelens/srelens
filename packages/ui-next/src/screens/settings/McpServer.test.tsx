@@ -386,6 +386,27 @@ describe("McpServer", () => {
       expect(core.mcpHttpStatus).toHaveBeenCalledTimes(1);
     });
 
+    /**
+     * #374 item 2: the pane used to say, in its own words, that "a start lasts this
+     * session — srelens does not bring the server back up for you on the next
+     * launch". That was true and is not any more: `Window` reads the persisted
+     * `enabled` back once `LockGate` reports the vault usable, exactly as
+     * classic's `App.tsx` does. A sentence that outlived the defect it described
+     * would send a reader to Settings on every launch to do something already
+     * done, so it is gone — and pinned gone, because copy that is merely
+     * deleted is copy that comes back.
+     */
+    it("makes no claim that the reader has to start it again next launch", async () => {
+      render(<McpServer />);
+      await screen.findByRole("button", { name: "Stop server" });
+      // The whole pane: the claim could sit under the control, beside the
+      // address, or in the note about clients, and none of those is a testid.
+      const text = document.body.textContent ?? "";
+      expect(text).not.toMatch(/lasts this session/i);
+      expect(text).not.toMatch(/next launch/i);
+      expect(text).not.toMatch(/does not bring the server back up/i);
+    });
+
     it("points the empty-token note at the control this pane actually has", async () => {
       core.getMcpToken.mockResolvedValue(null);
       core.mcpHttpStatus.mockResolvedValue(null);

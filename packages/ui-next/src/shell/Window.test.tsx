@@ -26,6 +26,8 @@ const {
   zoomSpy,
   createWorkspaceSpy,
   switchWorkspaceSpy,
+  loadMcpSettings,
+  startMcpHttp,
   respondToConfirm,
   bus,
 } = vi.hoisted(() => ({
@@ -48,6 +50,11 @@ const {
   zoomSpy: vi.fn(),
   createWorkspaceSpy: vi.fn(),
   switchWorkspaceSpy: vi.fn(),
+  loadMcpSettings: vi.fn<() => { enabled: boolean; port: number }>(() => ({
+    enabled: false,
+    port: 8765,
+  })),
+  startMcpHttp: vi.fn<(port: number) => Promise<string>>(async () => "http://127.0.0.1:8765/mcp"),
   respondToConfirm: vi.fn<(id: string, approved: boolean) => Promise<void>>(async () => {}),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
@@ -70,6 +77,8 @@ vi.mock("@srelens/core", async (importOriginal) => {
     vaultStatus: () => vaultStatus(),
     vaultLock: () => vaultLock(),
     vaultUnlockPassword: (...a: unknown[]) => vaultUnlockPassword(...a),
+    loadMcpSettings: () => loadMcpSettings(),
+    startMcpHttp: (port: number) => startMcpHttp(port),
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
     on: (channel: string, handler: (payload: unknown) => void) => {
       bus.set(channel, handler);
@@ -187,6 +196,8 @@ beforeEach(() => {
   vaultStatus.mockReset().mockResolvedValue(VAULT_OPEN);
   vaultLock.mockReset().mockResolvedValue(undefined);
   vaultUnlockPassword.mockReset().mockResolvedValue(undefined);
+  loadMcpSettings.mockReset().mockReturnValue({ enabled: false, port: 8765 });
+  startMcpHttp.mockReset().mockResolvedValue("http://127.0.0.1:8765/mcp");
   respondToConfirm.mockReset().mockResolvedValue(undefined);
   bus.clear();
   resetLock();
@@ -967,5 +978,124 @@ describe("Window, and an agent asking to change something", () => {
     // By name, not by role: the cover itself is a `role="dialog"`.
     expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
     expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
+  });
+});
+
+/**
+ * #374 item 2: `start()` persists `enabled: true` and the next launch ignored it, so
+ * the endpoint stayed offline until Settings was opened by hand. Classic waits
+ * for its `VaultGate` to report the vault usable and then starts the enabled
+ * server (`App.tsx:763-775`); the MCP bearer is one of the two secrets the
+ * vault seals, so starting before it is open would fail to persist a token and
+ * silently never retry.
+ */
+describe("Window, and the MCP server the reader left enabled", () => {
+  it("starts it once the vault is open, on the port that was persisted", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+    expect(startMcpHttp).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves it alone when the reader did not leave it enabled", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: false, port: 8765 });
+    await booted();
+    // A beat for any effect that was going to fire.
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The ordering classic's `onReady` exists for. The bearer is sealed in the
+   * vault (`VaultTokenStore`, `main.rs:184`), so a start over a locked vault
+   * cannot mint or read one — and nothing would retry.
+   */
+  it("does not start it over a sealed vault", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  it("does not start it while the launch check has not answered", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus.mockReturnValue(new Promise(() => {}));
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  it("starts it when the reader unlocks, not only when the launch read finds it open", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    const field = await screen.findByLabelText("Master passphrase");
+    vaultStatus.mockResolvedValue(VAULT_OPEN);
+    await userEvent.type(field, "correct horse battery");
+    await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+  });
+
+  it("starts nothing in web mode, where there is no vault and no server", async () => {
+    isTauri.mockReturnValue(false);
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    await booted();
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The `mayOpen` half of it. A launch read that REFUSED leaves the cover up and
+   * the vault's state unread (it fails closed), and the reconcile read that
+   * follows can then land an `unlocked` the cover is deliberately not allowed to
+   * act on. Reporting readiness from it would start the server behind a window
+   * that is still showing the lock screen — the one place this ordering can go
+   * wrong that is not simply "too early".
+   */
+  it("does not report readiness from a read the cover was not allowed to open on", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus
+      .mockRejectedValueOnce(new Error("the vault state was never managed"))
+      .mockResolvedValue(VAULT_OPEN);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    // The cover is up and stays up: only a read that followed a real unlock
+    // attempt may lower it.
+    expect(await screen.findByTestId("lock-cover")).toBeTruthy();
+    await act(async () => {});
+    expect(vaultStatus.mock.calls.length).toBeGreaterThan(1);
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A refused start is reported nowhere and retried nowhere, exactly as
+   * classic's `.catch(() => {})` leaves it: the window must not come up on a
+   * failed auto-start, and the pane's own Start button is where a reader finds
+   * out and tries again. Without the catch this is an unhandled rejection.
+   */
+  it("comes up anyway when the start is refused", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    startMcpHttp.mockRejectedValue(new Error("address already in use"));
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalled());
+    expect(screen.getByRole("tablist")).toBeTruthy();
   });
 });
