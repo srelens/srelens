@@ -45,6 +45,7 @@ import {
 import { useConsole } from "../console";
 import { getInfo, probeCluster } from "../lib/probe";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
+import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
 import { Chrome, zoom } from "./Chrome";
 import { Console } from "./Console";
@@ -524,6 +525,25 @@ export function Window({
         </LockGate>
       </div>
       {active && <Status contexts={contexts} />}
+      {/*
+        An agent's confirmation, at the level `Chrome` and `Status` sit at —
+        OUTSIDE the band, and so outside every `TabSurface`'s portal scope.
+        That mount point is the design decision, not a detail: since PR #365 a
+        dialog is mounted in the tab it was opened from, and this question is
+        not a tab's. A reader could switch away from the tab that happened to be
+        in front when the call arrived, and the prompt would go with it while the
+        backend blocked on an answer for sixty seconds. With no scope around it
+        the kit's `ConfirmDialog` is the document-wide modal it was before #365,
+        which is what an app-wide question needs.
+
+        Outside `LockGate` rather than among its children, and unconditional
+        rather than `active &&`, for two different reasons. It must stay
+        subscribed while the cover is up — it REFUSES the call in that state,
+        and a listener unmounted with the band could not; see `AgentConsent` for
+        why refusing is the answer. And whether the component gallery is up is a
+        developer surface's business: a call the backend is blocking on is not.
+      */}
+      <AgentConsent />
     </div>
   );
 }

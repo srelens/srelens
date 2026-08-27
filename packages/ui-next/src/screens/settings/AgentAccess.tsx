@@ -20,27 +20,29 @@ import { Panel, SubHead, Switch } from "@srelens/ui-kit";
  * there is no preference anywhere that widens or narrows that gate, so a
  * switch for it would imply a control that has nothing to control.
  *
- * **And the prompt behind that gate is classic's, so this pane does not
- * promise one** (#374). The sentence here read "every change it proposes stops
- * at a confirmation prompt", which is true of the classic tree and false of
- * this one: `McpConfirmDialog` (`apps/desktop/src/App.tsx`) is the only thing
- * that listens for `mcp://confirm-request` and answers with
- * `respondToConfirm`, and `main.tsx` mounts that tree or this one, never both.
- * So under the new design a destructive capability call blocks in Rust, raises
- * nothing, and is DENIED when it times out.
+ * **And the prompt behind that gate now exists in this design, so the sentence
+ * promises it again.** For two rounds it could not: `McpConfirmDialog`
+ * (`apps/desktop/src/App.tsx`) was the only listener for
+ * `mcp://confirm-request`, `main.tsx` mounts that tree or this one and never
+ * both, and so a destructive call in the new design blocked in Rust, raised
+ * nothing, and was DENIED sixty seconds later with nothing on screen. The
+ * sentence was corrected to say so — the approval still required, the prompt to
+ * give it in not built yet, the call refused rather than offered — and the gap
+ * was filed as #374 item 1.
  *
- * The security property is intact — the gate fails closed, which is the half
- * that matters — but a reader waiting to approve something would have waited
- * for a prompt that was never coming and then been told it was refused. The
- * sentence now says that: the approval is still required, the prompt to give it
- * in is not built here yet, and the call is refused rather than offered. The
- * read-freedom half is unchanged, because it is true in both designs.
+ * It is filed no longer. `shell/AgentConsent.tsx` is the port, mounted app-wide
+ * beside `Chrome` and `Status`, and the claim this pane makes is back to the
+ * true one: a change stops at a confirmation prompt. What made the difference
+ * was this branch, not the issue — while the new design could not start the MCP
+ * server at all, an unreachable gap was defensible; the MCP pane's Start button
+ * made it reachable, so closing it came with the branch that opened it.
  *
- * Wiring the listener belongs with the agent dock rather than with a settings
- * pane, so it is #374's. `AgentAccess.test.tsx` scans this package for a
- * consumer of that event — the shape `Settings.test.tsx` uses to hold the
- * `Deep links` exclusion — so whoever wires it fails that test and has to put
- * the promise back deliberately, in the same commit.
+ * `AgentAccess.test.tsx` still scans this package for a consumer of that event
+ * — the shape `Settings.test.tsx` uses to hold the `Deep links` exclusion — but
+ * INVERTED: it asserts that exactly one file wires the listener, and names it.
+ * The pin's direction follows the sentence. Whoever deletes or moves that
+ * surface fails the test and has to decide, deliberately and in the same
+ * commit, what this pane is allowed to promise.
  *
  * **`Read Secrets`** is half real: `ConsentKind::SensitiveRead`
  * (`crates/mcp/src/policy.rs:21-31`) is a genuine gate, but the only thing on
@@ -57,15 +59,13 @@ import { Panel, SubHead, Switch } from "@srelens/ui-kit";
  * switch, the confirm-gated capabilities, and a plain sentence about what free
  * reading means.
  *
- * That sentence used to be described here as "worded to agree with, not quote,
- * the same fact `/connect`'s footer tells its reader one page over". It no
- * longer agrees, deliberately, and the disagreement is worth naming rather
- * than leaving for the next reader to trip over: `Connect.tsx:129` and
- * `connections/SourcesRail.tsx:333` both still say every agent change "stops
- * at a confirmation prompt", which is the same claim this pane just stopped
- * making. They are two other screens' copy on two other surfaces, so they are
- * not corrected from here — they are listed on #374, and all three should end
- * up saying one thing.
+ * That sentence is once again worded to agree with, not quote, the same fact
+ * `/connect`'s footer tells its reader one page over. `Connect.tsx:129` and
+ * `connections/SourcesRail.tsx:333` both say every agent change "stops at a
+ * confirmation prompt"; for two rounds this pane was the only one of the three
+ * that did not, and the disagreement was named here rather than left for the
+ * next reader to trip over. All three say one thing again, and it is now the
+ * true one.
  *
  * **The chips are read from the registry, not transcribed from §23.** This
  * pane shipped §23's six labels verbatim — `node.drain`, `pod.evict`,
@@ -114,8 +114,8 @@ export function AgentAccess() {
       />
       <p data-testid="agent-consent" className="mt-3 text-[0.75rem] leading-relaxed text-muted">
         A connected agent reads cluster state without asking first. Nothing it proposes to change
-        runs without approval — and this design has no prompt to give that approval in yet, so a
-        change it proposes is refused rather than put to you.
+        runs without approval — every change stops at a confirmation prompt in this window, and so
+        does the one capability that returns Secret values.
       </p>
       <SubHead className="mt-4" variant="caps">
         Never without confirmation

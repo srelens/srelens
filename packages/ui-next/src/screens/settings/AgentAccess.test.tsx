@@ -93,28 +93,28 @@ describe("AgentAccess", () => {
     expect(screen.getByText(/read .*without asking|reads .*without asking/i)).toBeTruthy();
   });
 
-  // ---- The consent prompt this design does not have (#374) -------------
+  // ---- The consent prompt this design now has (#374 item 1) --------------
 
   /**
-   * The sentence read "every change it proposes stops at a confirmation
-   * prompt" — true of classic, false here. `McpConfirmDialog`
-   * (`apps/desktop/src/App.tsx`) is the only listener for
-   * `mcp://confirm-request`, and `main.tsx` mounts that tree or this one and
-   * never both, so under the new design a destructive call blocks and is
-   * DENIED on timeout with nothing on screen. A reader waiting to approve it
-   * would have waited forever.
+   * For two rounds this sentence had to say the opposite. `McpConfirmDialog`
+   * (`apps/desktop/src/App.tsx`) was the only listener for
+   * `mcp://confirm-request`, `main.tsx` mounts that tree or this one and never
+   * both, so a destructive call in the new design blocked and was DENIED on
+   * timeout with nothing on screen — and a reader waiting to approve it would
+   * have waited forever. `shell/AgentConsent.tsx` is the port, so the true
+   * claim is back, and the assertions are inverted with it rather than deleted:
+   * the pane must not drift back to hedging about a prompt that now exists.
    */
-  it("promises no approval prompt, because there is none to give it in", () => {
+  it("promises the approval prompt, because there is one to give it in", () => {
     render(<AgentAccess />);
     const consent = screen.getByTestId("agent-consent").textContent ?? "";
-    expect(consent).not.toMatch(/stops at a confirmation prompt/i);
-    // Not "you will be asked", not "prompt" as something the reader will see.
-    expect(consent).toMatch(/no prompt/i);
-    // And what actually happens instead is stated, not left out.
-    expect(consent).toMatch(/refused/i);
+    expect(consent).toMatch(/stops at a confirmation prompt/i);
+    // And no leftover hedge from the round where there was none.
+    expect(consent).not.toMatch(/no prompt/i);
+    expect(consent).not.toMatch(/refused/i);
   });
 
-  it("still says the approval is required, which is the half that is true", () => {
+  it("still says the approval is required, which was true throughout", () => {
     render(<AgentAccess />);
     const consent = screen.getByTestId("agent-consent").textContent ?? "";
     expect(consent).toMatch(/without approval/i);
@@ -122,16 +122,25 @@ describe("AgentAccess", () => {
   });
 
   /**
-   * The copy assertions above are only as good as the fact behind them, and a
+   * The copy assertion above is only as good as the fact behind it, and a
    * comment cannot fail. This scans the package for a consumer of the consent
    * event — the shape `Settings.test.tsx` uses to hold the `Deep links`
-   * exclusion, which has now caught two rounds of drift on this branch.
+   * exclusion, which has now caught three rounds of drift on this branch.
    *
-   * Whoever wires the listener in step 9 fails THIS test, and has to put the
-   * promise of a prompt back deliberately — in the same commit, with the copy
-   * corrected — rather than leaving a pane that quietly stopped being true.
+   * **The direction is inverted, not the test removed.** It used to assert
+   * `[]`, so that whoever wired a listener would fail it and have to put the
+   * promise of a prompt back deliberately. That happened. What it holds now is
+   * the other half of the same seam: exactly ONE file in this package wires the
+   * listener, and it is named — so deleting or moving that surface fails this
+   * test, and whoever does it has to decide what the pane is allowed to promise
+   * rather than leaving a sentence that quietly stopped being true.
+   *
+   * One and not "at least one", deliberately. Two listeners would both answer
+   * one request, and only the winner's answer reaches the agent; the backend
+   * broadcasts `mcp://confirm-resolved` precisely so a second surface can drop
+   * a request it did not answer, and adding one is a decision, not a detail.
    */
-  it("has no consent-prompt consumer of its own, which is why the sentence says none", () => {
+  it("has exactly one consent-prompt consumer, which is why the sentence promises a prompt", () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
     const consumers: string[] = [];
     const walk = (dir: string) => {
@@ -142,8 +151,10 @@ describe("AgentAccess", () => {
           continue;
         }
         if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
-        // Comments stripped: this very absence is discussed in prose in
-        // `AgentAccess.tsx`, and a scan that read prose would find itself.
+        // Comments stripped: this very wiring is discussed in prose in
+        // `AgentAccess.tsx` and in `shell/AgentConsent.tsx`'s own doc, and a
+        // scan that read prose would count both of those as consumers — one of
+        // them a settings pane that listens to nothing.
         //
         // `(?<!:)` on the line-comment half, unlike the sibling scan in
         // `Settings.test.tsx`. The mutation pass caught the naive form letting
@@ -152,6 +163,17 @@ describe("AgentAccess", () => {
         // scheme separator onwards and stripped down to `"mcp:` — the event
         // names could never match. Deep links needed no such care; none of its
         // tokens carry a slash.
+        //
+        // Where it still matters, stated from what the mutation pass actually
+        // showed rather than from what would be tidy: replacing it with the
+        // naive form does NOT fail this test today, because the consumer's
+        // import line carries `respondToConfirm` and `ConfirmRequest` with no
+        // slash in front of them and matches either way. What the lookbehind
+        // buys is the case the four tokens exist for — HALF a wiring, a file
+        // that subscribes to the event and answers nothing. Its only token is
+        // the event name, the naive form eats it from its own scheme separator
+        // onwards, and the scan would report a package with a dangling listener
+        // as having none.
         const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/.*/g, "");
         // Both halves of a wiring, so half of one is caught too: the event a
         // listener subscribes to, and the call and type any answer needs.
@@ -165,6 +187,6 @@ describe("AgentAccess", () => {
       }
     };
     walk(root);
-    expect(consumers).toEqual([]);
+    expect(consumers).toEqual([join("shell", "AgentConsent.tsx")]);
   });
 });

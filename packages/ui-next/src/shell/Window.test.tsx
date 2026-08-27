@@ -26,6 +26,8 @@ const {
   zoomSpy,
   createWorkspaceSpy,
   switchWorkspaceSpy,
+  respondToConfirm,
+  bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
   loadTabsState: vi.fn(),
@@ -46,6 +48,10 @@ const {
   zoomSpy: vi.fn(),
   createWorkspaceSpy: vi.fn(),
   switchWorkspaceSpy: vi.fn(),
+  respondToConfirm: vi.fn<(id: string, approved: boolean) => Promise<void>>(async () => {}),
+  // The backend event bus, captured per channel so a test can emit exactly
+  // what `mcp_confirm.rs` emits.
+  bus: new Map<string, (payload: unknown) => void>(),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => {
@@ -64,6 +70,11 @@ vi.mock("@srelens/core", async (importOriginal) => {
     vaultStatus: () => vaultStatus(),
     vaultLock: () => vaultLock(),
     vaultUnlockPassword: (...a: unknown[]) => vaultUnlockPassword(...a),
+    respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
+    on: (channel: string, handler: (payload: unknown) => void) => {
+      bus.set(channel, handler);
+      return () => bus.delete(channel);
+    },
   };
 });
 
@@ -176,6 +187,8 @@ beforeEach(() => {
   vaultStatus.mockReset().mockResolvedValue(VAULT_OPEN);
   vaultLock.mockReset().mockResolvedValue(undefined);
   vaultUnlockPassword.mockReset().mockResolvedValue(undefined);
+  respondToConfirm.mockReset().mockResolvedValue(undefined);
+  bus.clear();
   resetLock();
   zoomSpy.mockReset();
   createWorkspaceSpy.mockReset();
@@ -888,5 +901,71 @@ describe("Window — the launch check, before the vault has answered", () => {
     const before = store.currentWorkspace().tabs.length;
     fireEvent.keyDown(window, { key: "t", metaKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(before + 1);
+  });
+});
+
+// ---- An agent's confirmation, and the MCP server it comes over ---------
+
+/**
+ * #374 item 1, closed here because this branch made it reachable.
+ *
+ * The confirm gate blocks a mutating capability in Rust and waits sixty
+ * seconds; classic's `McpConfirmDialog` was the only listener, and `main.tsx`
+ * mounts that tree or this one. So in this design every agent mutation and
+ * every Secret read hung and was denied with nothing on screen. `AgentConsent`
+ * is the port, and where it is MOUNTED is the whole of the design decision —
+ * these tests pin the mount point rather than the component, which has its own
+ * suite.
+ */
+describe("Window, and an agent asking to change something", () => {
+  const ask = (id: string, tool: string, args: Record<string, unknown> = {}) => {
+    const handler = bus.get("mcp://confirm-request");
+    if (!handler) throw new Error("nothing subscribed to mcp://confirm-request");
+    act(() => handler({ id, tool, args }));
+  };
+
+  it("puts the question to the reader instead of letting the call time out", async () => {
+    await booted();
+    ask("r1", "k8s_drainNode", { name: "node-3" });
+    expect(await screen.findByText(/k8s_drainNode/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r1", true));
+  });
+
+  /**
+   * Above the tab strip, not inside a tab. Since PR #365 a dialog is mounted in
+   * the tab it was opened from — right for a tab's own question, and wrong for
+   * this one: the reader could switch tabs away from a call the backend is
+   * blocking on, and the prompt would go with the tab. So the card must be
+   * outside every `TabSurface`, which is also what makes the kit draw it as the
+   * document-wide modal an app-wide question needs.
+   */
+  it("asks the window rather than whichever tab happens to be in front", async () => {
+    await booted();
+    ask("r2", "k8s_deleteResource");
+    const card = await screen.findByRole("dialog");
+    expect(card.closest('[data-slot="tab-surface"]')).toBeNull();
+    expect(card.getAttribute("aria-modal")).toBe("true");
+    // The strip is still MOUNTED — the cover a lock raises is what replaces the
+    // band, and this is not one. It is out of the accessibility tree for as
+    // long as the card is up, which is what a window-wide modal means and the
+    // opposite of what a tab-scoped one does: `queryByRole` therefore cannot
+    // see it, and the DOM is where the claim has to be read.
+    expect(document.querySelector('[role="tablist"]')).toBeTruthy();
+  });
+
+  it("refuses rather than prompting over a sealed window", async () => {
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    ask("r3", "k8s_deletePod");
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r3", false));
+    // By name, not by role: the cover itself is a `role="dialog"`.
+    expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
+    expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
   });
 });
