@@ -253,7 +253,25 @@ impl Vault {
     /// machine-key-era vault has no passphrase to unlock with, its key is
     /// resolved once at open, and setup itself refuses a locked vault — so
     /// discarding the key there would strand this process until a restart.
+    ///
+    /// **Serialised against every other key-touching operation** by the same
+    /// process-local mutex [`update`](Self::update) and
+    /// [`rekey_from_current`](Self::rekey_from_current) take. Taking only
+    /// `key`/`key_source` was not enough: `rekey_from_current` reads the old
+    /// key, rewrites the sealed bytes, and installs `Some(new_key)` LAST, so a
+    /// discard landing in that window was overwritten the moment the re-key
+    /// finished — `vault_lock` resolved, §25's cover went up, and the vault was
+    /// unlocked again behind it while the window said the workspace was
+    /// sealed. Under the mutex the two can only run whole: a discard either
+    /// precedes the re-key (which then refuses a locked vault) or follows it
+    /// (and clears the key it just installed). Either way a lock that returned
+    /// `Ok` leaves the vault locked.
+    ///
+    /// The lock is NOT held across anything that could re-enter — nothing
+    /// inside takes it, and no caller of this holds it (`vault_password::
+    /// lock_core` is the only one).
     pub(crate) fn discard_key(&self) -> Result<(), String> {
+        let _guard = self.lock.lock().unwrap();
         // The dir, recovered from the vault file's own path (`dir/secrets.enc`,
         // so a parent always exists): the key's fate is this vault's, and no
         // caller gets to name a different vault's dir. A path without a parent
