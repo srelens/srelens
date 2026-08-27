@@ -431,6 +431,17 @@ export function Connections({ route }: { route: string }) {
    * The table's own `emptyText` covers the narrow case of a list that came back
    * short; this is the first-run one, where an empty panel with six column
    * headers over it says only that srelens has nothing and not what to do next.
+   *
+   * **The hint branches on the platform, because it is a claim about whose
+   * machine the files are on.** "srelens reads YOUR kubeconfig files in place"
+   * is true of the desktop and false of the web build: there the kubeconfig
+   * belongs to the server, the clusters are read on the server's host, and no
+   * file can be added from the browser at all — which is what `SourcesRail`
+   * says one pane over, and what `/connect`'s own empty-state hint has always
+   * branched for. The `Connect a cluster` control still leads to `/connect` on
+   * web, deliberately: that screen is where §24's own paragraph explains why
+   * neither door is drawn there, which is more use to a web reader than an
+   * absent button.
    */
   if (status === "loaded" && rows.length === 0) {
     return (
@@ -438,7 +449,11 @@ export function Connections({ route }: { route: string }) {
         <EmptyState
           className="flex-1"
           title="No clusters yet"
-          hint="srelens reads your kubeconfig files in place. Connect a cluster and it appears here, with the file it came from beside it."
+          hint={
+            desktop
+              ? "srelens reads your kubeconfig files in place. Connect a cluster and it appears here, with the file it came from beside it."
+              : "srelens reads the kubeconfig files this server was started with, in place. A cluster appears here once one of those files declares it, with the file it came from beside it."
+          }
           action={
             <Button type="button" variant="primary" size="sm" onClick={() => openTab(CONNECT)}>
               Connect a cluster

@@ -175,6 +175,7 @@ function row(stableId: string) {
 describe("Connect", () => {
   describe("what §24 puts on the page", () => {
     it("draws the eyebrow, both headline lines and the lede", async () => {
+      core.isTauri.mockReturnValue(true);
       open();
       await screen.findByText("Contexts found");
 
@@ -186,6 +187,43 @@ describe("Connect", () => {
           "srelens uses the credentials already in your kubeconfig and talks to the API server directly. Nothing about your clusters leaves this machine.",
         ),
       ).toBeTruthy();
+    });
+
+    /**
+     * **The lede is a claim about where the kubeconfig is, so it cannot be one
+     * string.**
+     *
+     * §24's own words are true of the desktop and false of the web build, on
+     * the same page as {@link WEB_ONLY}'s "This build talks to a shared
+     * server": in web mode the kubeconfig is the SERVER's, the clusters are
+     * read on the server's host, and web mode over-listing the server's
+     * contexts is a filed bug (#347). The screen already branched its
+     * empty-state hint for exactly this; the lede did not.
+     *
+     * Asserted as the absence of the specific false sentence rather than as
+     * the presence of the true one alone: a branch that added the web copy and
+     * left the local-first claim standing beside it would satisfy a
+     * presence-only test.
+     */
+    it("does not tell a web reader their clusters never leave this machine", async () => {
+      open();
+      await screen.findByText("Contexts found");
+
+      expect(screen.queryByText(/Nothing about your clusters leaves this machine/)).toBeNull();
+      expect(screen.queryByText(/already in your kubeconfig/)).toBeNull();
+      expect(
+        screen.getByText(
+          "srelens uses the credentials in the kubeconfig this server was started with, and talks to the API server directly from the server's host. The clusters listed below are the ones that server can see, not the ones on the machine you are reading this on.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("does not call a shared-server build local-first", async () => {
+      open();
+      await screen.findByText("Contexts found");
+
+      expect(screen.queryByText("srelens · local-first")).toBeNull();
+      expect(screen.getByText("srelens · shared server")).toBeTruthy();
     });
 
     it("is full-bleed: no screen toolbar over it", async () => {
@@ -545,6 +583,32 @@ describe("Connect", () => {
       await waitFor(() => expect(screen.getAllByTestId("connect-context")).toHaveLength(3));
     });
 
+    /**
+     * **Where the file actually goes.**
+     *
+     * The hint said "beside your other kubeconfigs". `savePastedKubeconfig`
+     * writes to `app_config_dir()/kubeconfigs/<stem>-<ts>.yaml` — srelens's
+     * own folder — while the reader's kubeconfig is `~/.kube/config`. A reader
+     * who wanted to find, edit or delete that context went to `~/.kube` and
+     * found nothing. The frozen classic app words the same operation
+     * correctly (`SettingsView.tsx`: "Saved securely in the srelens app
+     * configuration directory"); the migration turned a true sentence into a
+     * false one.
+     */
+    it("says where a pasted context is written, which is not beside the reader's kubeconfig", async () => {
+      core.isTauri.mockReturnValue(true);
+      open();
+      await screen.findByText("Contexts found");
+
+      await userEvent.click(screen.getByRole("button", { name: /Paste a context/i }));
+      expect(screen.queryByText(/beside your other kubeconfigs/i)).toBeNull();
+      expect(
+        screen.getByText(
+          "Written to a file of its own in the srelens app configuration folder, not into your own kubeconfig. srelens reads it in place from then on.",
+        ),
+      ).toBeTruthy();
+    });
+
     it("will not save an empty paste", async () => {
       core.isTauri.mockReturnValue(true);
       open();
@@ -620,12 +684,37 @@ describe("Connect", () => {
 
   describe("the footer strip", () => {
     it("carries the sparkle and its copy", async () => {
-      open();
-      const strip = await screen.findByTestId("connect-footer");
+      core.isTauri.mockReturnValue(true);
+      const strip = (open(), await screen.findByTestId("connect-footer"));
       expect(strip.querySelector("svg")).toBeTruthy();
       expect(
         within(strip).getByText(
-          "Once a cluster is connected, ask the console about it in plain language. srelens reads the cluster to answer and sends your kubeconfig nowhere.",
+          "srelens reads each cluster directly, with the credentials already in your kubeconfig, and sends that file nowhere. Asking the console about a cluster in plain language is not in this design yet.",
+        ),
+      ).toBeTruthy();
+    });
+
+    /**
+     * The strip used to promise "ask the console about it in plain language.
+     * srelens reads the cluster to answer" — and the console answers nothing
+     * in this design: `shell/Console.tsx` renders "The agent is not in the new
+     * design yet". Pinned as the absence of the promise, because the honest
+     * replacement is a sentence a future edit could drop while re-adding the
+     * old one.
+     */
+    it("does not promise a console that answers", async () => {
+      core.isTauri.mockReturnValue(true);
+      const strip = (open(), await screen.findByTestId("connect-footer"));
+      expect(within(strip).queryByText(/reads the cluster to answer/)).toBeNull();
+      expect(within(strip).getByText(/not in this design yet/)).toBeTruthy();
+    });
+
+    it("does not call the server's kubeconfig the reader's", async () => {
+      const strip = (open(), await screen.findByTestId("connect-footer"));
+      expect(within(strip).queryByText(/your kubeconfig/)).toBeNull();
+      expect(
+        within(strip).getByText(
+          "srelens reads each cluster directly from this server, with the credentials in the kubeconfig it was started with. Asking the console about a cluster in plain language is not in this design yet.",
         ),
       ).toBeTruthy();
     });

@@ -321,14 +321,47 @@ describe("Connections", () => {
   });
 
   it("sends a reader with no clusters to connect rather than an empty table", async () => {
+    core.isTauri.mockReturnValue(true);
     resetContexts();
     setContexts([]);
     open();
     expect(await screen.findByRole("button", { name: "Connect a cluster" })).toBeTruthy();
     expect(screen.getByText("No clusters yet")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "srelens reads your kubeconfig files in place. Connect a cluster and it appears here, with the file it came from beside it.",
+      ),
+    ).toBeTruthy();
     // Not an empty table with six column headers over it.
     expect(document.querySelector('[data-testid="cluster-table"]')).toBeNull();
     expect(sub()).toBeNull();
+  });
+
+  /**
+   * **"your kubeconfig files" is a claim about whose machine they are on.**
+   *
+   * In web mode the kubeconfig belongs to the server, the clusters are read on
+   * the server's host, and no file can be added from the browser at all —
+   * `SourcesRail` says so a pane away. The sibling `/connect` screen already
+   * branches its own empty-state hint for exactly this; this one did not, and
+   * said it beside a `Connect a cluster` button.
+   *
+   * Pinned as the absence of the false sentence as well as the presence of the
+   * true one: a branch that appended the web copy and left the possessive
+   * standing would satisfy a presence-only test.
+   */
+  it("does not call the server's kubeconfig files the reader's own", async () => {
+    resetContexts();
+    setContexts([]);
+    open();
+    await screen.findByText("No clusters yet");
+
+    expect(screen.queryByText(/your kubeconfig files/)).toBeNull();
+    expect(
+      screen.getByText(
+        "srelens reads the kubeconfig files this server was started with, in place. A cluster appears here once one of those files declares it, with the file it came from beside it.",
+      ),
+    ).toBeTruthy();
   });
 
   it("opens the connect route from the empty state", async () => {

@@ -38,13 +38,52 @@ import { openTab, setActiveCluster, setWorkspaceClusters, useTabs } from "../lib
 import { glyph } from "../lib/tree";
 import { STATUS, bySource, latencyLabel, viaOf } from "./connections/clusterText";
 
-/** §24's copy, verbatim, and in one place so the page and the suite quote one string. */
+/**
+ * §24's copy, in one place so the page and the suite quote one string.
+ *
+ * **Two deliberate departures from §24, recorded here because the file used to
+ * claim "verbatim" and a future reviewer would otherwise "restore" the thing
+ * that was wrong.**
+ *
+ * 1. **The lede and the footer branch on the platform.** §24 wrote one string
+ *    each, and both are claims about WHOSE machine the kubeconfig is on —
+ *    true of the desktop and false of the web build, where the kubeconfig is
+ *    the server's, the clusters are read on the server's host, and web mode
+ *    over-listing the server's contexts is a filed bug (#347). §24's own
+ *    words appeared on the same card as {@link WEB_ONLY}'s "This build talks
+ *    to a shared server". The empty-state hint below already branched for
+ *    exactly this reason; these now do too.
+ * 2. **§24's footer is replaced, not quoted.** Its version offered a
+ *    read-only cluster, and there is no such thing in srelens — every write
+ *    the agent can issue stops at a confirmation prompt whatever the cluster
+ *    is, which is what `SourcesRail`'s own section says one click away. The
+ *    verbatim footer would have contradicted its sibling rail.
+ *
+ * The replacement carries no promise of its own either. It used to say "ask
+ * the console about it in plain language. srelens reads the cluster to
+ * answer", and the console answers nothing in this design —
+ * `shell/Console.tsx` renders "The agent is not in the new design yet". So it
+ * says what srelens does do, and says plainly that the asking is not here yet.
+ */
 const HEADLINE_ONE = "Pick a cluster.";
 const HEADLINE_TWO = "The room is already reading it.";
-const LEDE =
+const LEDE_DESKTOP =
   "srelens uses the credentials already in your kubeconfig and talks to the API server directly. Nothing about your clusters leaves this machine.";
-const FOOTER =
-  "Once a cluster is connected, ask the console about it in plain language. srelens reads the cluster to answer and sends your kubeconfig nowhere.";
+const LEDE_WEB =
+  "srelens uses the credentials in the kubeconfig this server was started with, and talks to the API server directly from the server's host. The clusters listed below are the ones that server can see, not the ones on the machine you are reading this on.";
+/**
+ * `local-first` is the desktop's claim and only the desktop's. A build served
+ * from a shared host is not local-first in any sense the word carries, and an
+ * eyebrow is exactly where a reader takes a brand line as a fact about the
+ * software in front of them.
+ */
+const EYEBROW_DESKTOP = "srelens · local-first";
+const EYEBROW_WEB = "srelens · shared server";
+/** Said once, in both footers: the console is not wired up in this design. */
+const CONSOLE_NOT_YET =
+  "Asking the console about a cluster in plain language is not in this design yet.";
+const FOOTER_DESKTOP = `srelens reads each cluster directly, with the credentials already in your kubeconfig, and sends that file nowhere. ${CONSOLE_NOT_YET}`;
+const FOOTER_WEB = `srelens reads each cluster directly from this server, with the credentials in the kubeconfig it was started with. ${CONSOLE_NOT_YET}`;
 
 /**
  * Why neither door is drawn in the browser, said once — decision 2.
@@ -126,6 +165,15 @@ function ContextRow({
    * — for a local cluster, where the file is beside the point — the tool that
    * made it and the endpoint it listens on. `viaOf` is the connections table's
    * own answer to that question, imported rather than restated.
+   *
+   * **A deviation from §24, recorded rather than left for a reviewer to
+   * "restore".** §24's second line is the RAW CONTEXT STRING — the kubeconfig's
+   * own `contexts[].name`, on the reasoning that a reader recognises it. That
+   * needs a profiles store to be worth anything: without one, `name` above is
+   * already the raw context string, so the row would print it twice. `viaOf`
+   * answers the question the second line is actually for — where this cluster
+   * comes from — and when a profiles store arrives the two lines diverge
+   * naturally, the first becoming the reader's own name for the cluster.
    */
   const via = viaOf(context);
   const status = STATUS[probe.state];
@@ -323,9 +371,19 @@ function PasteDialog({
             style={{ background: "var(--surface-sunk)", borderColor: "var(--rule)" }}
           />
         </Field>
+        {/* **Where the file actually goes.** This said "beside your other
+            kubeconfigs" and it does not go there: `savePastedKubeconfig` ->
+            `files.rs`'s `save_pasted_kubeconfig` writes to
+            `app_config_dir()/kubeconfigs/<stem>-<ts>.yaml` — srelens's own
+            folder — while the reader's kubeconfig is `~/.kube/config`. A
+            reader who wanted to find, edit or delete that context went to
+            `~/.kube` and found nothing. The frozen classic app words the same
+            operation correctly (`SettingsView.tsx`: "Saved securely in the
+            srelens app configuration directory"); the migration turned a true
+            sentence into a false one. */}
         <p className="text-[0.75rem] leading-relaxed text-muted">
-          Written to a file of its own beside your other kubeconfigs. srelens reads it in place from
-          then on.
+          Written to a file of its own in the srelens app configuration folder, not into your own
+          kubeconfig. srelens reads it in place from then on.
         </p>
       </div>
     </Dialog>
@@ -547,12 +605,14 @@ export function Connect({ route }: { route: string }) {
               lowercase everywhere — "SRELENS" is a spelling srelens does not
               have. The tracking and the mono face are the design's; only the
               transform gives way. */}
-          <Eyebrow className="normal-case">srelens · local-first</Eyebrow>
+          <Eyebrow className="normal-case">{desktop ? EYEBROW_DESKTOP : EYEBROW_WEB}</Eyebrow>
           <h1 className="mt-2.5 flex flex-col text-[2.75rem] font-semibold leading-[1.06] tracking-[-0.02em]">
             <span>{HEADLINE_ONE}</span>
             <span className="text-muted">{HEADLINE_TWO}</span>
           </h1>
-          <p className="mt-4 max-w-[62ch] text-[0.9375rem] leading-relaxed text-muted">{LEDE}</p>
+          <p className="mt-4 max-w-[62ch] text-[0.9375rem] leading-relaxed text-muted">
+            {desktop ? LEDE_DESKTOP : LEDE_WEB}
+          </p>
         </header>
 
         <div className="card min-w-0">
@@ -638,7 +698,9 @@ export function Connect({ route }: { route: string }) {
           <span className="mt-px shrink-0 text-accent">
             <Sparkle size={14} aria-hidden="true" />
           </span>
-          <p className="text-[0.8125rem] leading-relaxed text-muted">{FOOTER}</p>
+          <p className="text-[0.8125rem] leading-relaxed text-muted">
+            {desktop ? FOOTER_DESKTOP : FOOTER_WEB}
+          </p>
         </div>
       </div>
 
