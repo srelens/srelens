@@ -43,7 +43,7 @@ vi.mock("@srelens/core/react", async (importOriginal) => {
 import { useAccess } from "@srelens/core/react";
 
 import { ResourceOverview, ObjectDetail } from "./ResourceOverview";
-import type { K8sObject } from "@srelens/core";
+import { conditionKind, type Condition, type K8sObject } from "@srelens/core";
 
 // A disabled control explains itself through a Radix tooltip, not a native
 // title (#376): hover its trigger — the wrapper around a disabled button,
@@ -381,6 +381,111 @@ describe("ObjectDetail condition pill tones (classic, frozen)", () => {
     ]);
     expect(toneOf("Ready")).toContain("bg-destructive");
     expect(toneOf("Degraded")).toContain("bg-amber-500");
+  });
+});
+
+/**
+ * Classic's OTHER condition renderer, and the reason the one above is not the
+ * whole story.
+ *
+ * `ConditionsTable` reads core's `conditionKind`; `ConditionBadges` — which a
+ * Deployment, StatefulSet and ReplicaSet render INSTEAD — kept a local
+ * `conditionBadgeVariant` on the narrow `/Pressure|Unavailable|Failed|Failure|
+ * Dangling/i` regex core has since widened. So for every type in the widened
+ * set the two renderers in this one file toned the same condition differently:
+ * a `Degraded: True` custom condition read GREEN on a Deployment and red on a
+ * DaemonSet. That is exactly the "two readings of one fact can disagree"
+ * failure `k8sStatus.ts` names as its reason for existing.
+ *
+ * The tone is read off `data-variant`, which the badge sets from the variant it
+ * was handed — the component's own mechanism, not a class name that belongs to
+ * the theme.
+ */
+describe("ObjectDetail condition BADGE tones (the workload renderer)", () => {
+  const variantOf = (label: string) =>
+    screen.getByText(label).getAttribute("data-variant") ?? "no such badge";
+
+  const deploymentWith = (conditions: Array<Record<string, string>>): K8sObject => ({
+    kind: "Deployment",
+    metadata: { name: "web", namespace: "default" },
+    spec: { replicas: 1, selector: { matchLabels: { app: "web" } } },
+    status: { replicas: 1, conditions },
+  });
+
+  const renderWith = (conditions: Array<Record<string, string>>) =>
+    render(<ObjectDetail kind="Deployment" obj={deploymentWith(conditions)} now={NOW} />);
+
+  it("reads the same widened negative set the table does", () => {
+    // None of these matched the badge's old narrow regex, so all four read
+    // GREEN on a Deployment while the table painted them red.
+    renderWith([
+      { type: "Degraded", status: "True" },
+      { type: "ControllerResizeError", status: "True" },
+      { type: "NamespaceContentRemaining", status: "True" },
+      { type: "Failing", status: "True" },
+    ]);
+    expect(variantOf("Degraded")).toBe("destructive");
+    expect(variantOf("ControllerResizeError")).toBe("destructive");
+    expect(variantOf("NamespaceContentRemaining")).toBe("destructive");
+    expect(variantOf("Failing")).toBe("destructive");
+  });
+
+  it("reads a healthy inverted condition as healthy, and an Unknown one as amber", () => {
+    renderWith([
+      { type: "ReplicaFailure", status: "False" },
+      { type: "MemoryPressure", status: "False" },
+      { type: "Available", status: "Unknown" },
+    ]);
+    expect(variantOf("ReplicaFailure")).toBe("success");
+    expect(variantOf("MemoryPressure")).toBe("success");
+    expect(variantOf("Available")).toBe("warning");
+  });
+
+  it("condemns a positive condition that is False, rather than shrugging at it", () => {
+    // `Available: False` on a Deployment is the pod-availability failure the
+    // whole frame is about. The badge used to return `neutral` for it — a grey
+    // chip — while the table beside it painted the identical condition red.
+    renderWith([{ type: "Available", status: "False" }]);
+    expect(variantOf("Available")).toBe("destructive");
+  });
+
+  it("tones a Progressing condition on its status alone, like the table", () => {
+    // The badge used to special-case `Progressing` to `info` (a blue chip)
+    // while the table painted it green — and the new design's OWN amber rule
+    // (`conditionKindWithReason`) stays out of classic entirely.
+    renderWith([{ type: "Progressing", status: "True", reason: "ReplicaSetUpdated" }]);
+    expect(variantOf("Progressing")).toBe("success");
+  });
+
+  it("gives the same answer as the table for every condition, which is the point", () => {
+    // The property, stated once: classic has ONE reading of a condition's tone.
+    // Both renderers go through core's `conditionKind`, so this is a check that
+    // neither has grown a rule of its own again.
+    const cases: Array<Record<string, string>> = [
+      { type: "Available", status: "True" },
+      { type: "Available", status: "False" },
+      { type: "Progressing", status: "True", reason: "ReplicaSetUpdated" },
+      { type: "ReplicaFailure", status: "False" },
+      { type: "ReplicaFailure", status: "True" },
+      { type: "Degraded", status: "True" },
+      { type: "ControllerResizeError", status: "True" },
+      { type: "MemoryPressure", status: "Unknown" },
+    ];
+    // The badge's own vocabulary, as `Badge` maps it — `danger` is rendered
+    // `destructive` and `neutral` is rendered `secondary`.
+    const BADGE_FOR_KIND: Record<string, string> = {
+      neutral: "secondary",
+      success: "success",
+      warning: "warning",
+      danger: "destructive",
+      info: "info",
+    };
+    for (const c of cases) {
+      const { unmount } = renderWith([c]);
+      const expected = BADGE_FOR_KIND[conditionKind(c as unknown as Condition)];
+      expect({ ...c, variant: variantOf(c.type) }).toEqual({ ...c, variant: expected });
+      unmount();
+    }
   });
 });
 

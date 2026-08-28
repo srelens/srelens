@@ -92,9 +92,21 @@ const NEGATIVE_CONDITION = /Pressure|Unavailable|Fail|Dangling|Error|Remaining|D
 
 /**
  * A condition's tone from its type and status alone. The rule both designs
- * share, and the one classic has drawn since before this module existed:
- * `Unknown` is amber, and otherwise a positive type is green when `True`
+ * share: `Unknown` is amber, and otherwise a positive type is green when `True`
  * while a `NEGATIVE_CONDITION` type is green when `False`.
+ *
+ * THE SHAPE of the rule is what classic has drawn since before this module
+ * existed; the SET it is applied to is wider, and that does re-tone some of
+ * classic's pills. Every type the substring families above added and the
+ * hand-written regexes did not have re-tones in classic:
+ * `ReplicaFailure: False` was danger and is now success (`Failed` did not match
+ * `ReplicaFailure`; `Fail` does), and a PVC's `ControllerResizeError: True`,
+ * `NodeResizeError: True` and `ModifyVolumeError: True`, a Namespace's
+ * `NamespaceContentRemaining`/`NamespaceFinalizersRemaining`, `Degraded: True`,
+ * `DisruptionTarget: True` and a CSR's `Denied: True` were success and are now
+ * danger. All of them are the polarity being read correctly for the first time,
+ * which is why they are kept for both designs — but they ARE changes, and the
+ * sentence here used to claim classic was untouched.
  *
  * Deliberately blind to `reason`. Reading one is a judgement about a
  * particular controller's vocabulary, which the new design makes and classic
@@ -139,10 +151,17 @@ const COMPLETION_REASON: Record<string, string> = {
  *
  * OPT-IN, and a separate function rather than a flag, because it is a DESIGN
  * decision read off the new design's mock and not a correctness fix. Classic
- * is frozen and never asked for it: it calls plain `conditionKind`, and its
- * pills tone exactly as they did before this module existed. Teaching the
- * shared function this rule re-toned classic's condition pills with no test to
- * catch it, which is the mistake this split exists to make impossible.
+ * is frozen and never asked for it: it calls plain `conditionKind`, so a
+ * `Progressing: True` reads green there whatever its reason, exactly as it
+ * always has. Teaching the shared function this rule re-toned classic's
+ * condition pills with no test to catch it, which is the mistake this split
+ * exists to make impossible.
+ *
+ * What the split does NOT claim is that classic's tones are unchanged overall —
+ * `conditionKind`'s own comment lists the types the widened negative set
+ * re-tones, and `ResourceOverview.test.tsx` pins them. This protects classic
+ * from the ROLLOUT rule specifically, which is the one that is a matter of taste
+ * rather than of polarity.
  *
  * A reason may only ever soften a green to amber. It may not repaint a
  * condition the status has already condemned — that is the polarity trap, and

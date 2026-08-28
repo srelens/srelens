@@ -8,7 +8,13 @@ import { podsForPvc, formatStorageSize } from "@srelens/core";
 import { bindingsForServiceAccount, podsForServiceAccount, type SaBinding } from "@srelens/core";
 import { updateConfigData } from "@srelens/core";
 import { ageFromTimestamp, durationBetween, absoluteTimestamp, timestampWithAge } from "@srelens/core";
-import { type Condition, conditionKind, containerStateText, orderPodConditions } from "@srelens/core";
+import {
+  type Condition,
+  conditionKind,
+  containerStateText,
+  orderPodConditions,
+  type HealthKind,
+} from "@srelens/core";
 import { asRecord, asArray, str, plural } from "@srelens/core";
 import { decodeBase64, dockerRegistries, type DockerRegistryRow } from "@srelens/core";
 import {
@@ -219,12 +225,52 @@ function CollapsibleText({
 /* conditions                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Core's `HealthKind` in this design's own badge vocabulary.
+ *
+ * The five names happen to match one-for-one, which is why `StatusPill` takes a
+ * `HealthKind` straight — but a `BadgeVariant` is this app's token and a
+ * `HealthKind` is a severity, so the crossing is written down here rather than
+ * assumed. `k8sHealth.ts` says as much where it declares the type: "if either
+ * renames its tokens, it maps at its own boundary, not here." This is that
+ * boundary.
+ */
+const CONDITION_BADGE: Record<HealthKind, BadgeVariant> = {
+  neutral: "neutral",
+  success: "success",
+  warning: "warning",
+  danger: "danger",
+  info: "info",
+};
+
+/**
+ * A condition's badge tone — core's `conditionKind`, so classic has ONE reading
+ * of a condition.
+ *
+ * This used to be a local copy of the rule, and it had drifted from the shared
+ * one it was copied from: its negative set was `/Pressure|Unavailable|Failed|
+ * Failure|Dangling/i` while core's had widened to families (`Fail`, `Error`,
+ * `Remaining`, plus `Degraded`, `DisruptionTarget` and `Denied`). So for every
+ * type in that widened set, the two renderers in THIS FILE toned the same
+ * condition differently — a `Degraded: True` read green on a Deployment (which
+ * draws `ConditionBadges`) and red on a DaemonSet (which draws
+ * `ConditionsTable`). That is the "two readings of one fact can disagree"
+ * failure the shared module exists to prevent, reproduced inside one component.
+ *
+ * Two local rules go with the regex, and both were disagreements of the same
+ * kind:
+ *
+ * - A positive condition that was not `True` returned `neutral` — a grey chip
+ *   for `Available: False` on a Deployment, which is the pod-availability
+ *   failure the whole frame is about, and which the table beside it already
+ *   painted red.
+ * - `Progressing` returned `info` whatever its status, where the table painted
+ *   it on status alone. (The NEW design's amber-while-rolling rule is
+ *   `conditionKindWithReason`, and it stays out of classic — this calls plain
+ *   `conditionKind`, as every other classic surface does.)
+ */
 function conditionBadgeVariant(c: Condition): BadgeVariant {
-  if (c.status === "Unknown") return "warning";
-  const negative = /Pressure|Unavailable|Failed|Failure|Dangling/i.test(c.type);
-  if (c.status !== "True") return negative ? "success" : "neutral";
-  if (/Progressing/i.test(c.type)) return "info";
-  return negative ? "danger" : "success";
+  return CONDITION_BADGE[conditionKind(c)];
 }
 
 /** Conditions as a row of coloured badges (Pod/Deployment-style). */
