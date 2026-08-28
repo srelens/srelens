@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   ageSortValue,
   asArray,
@@ -12,6 +11,7 @@ import {
 } from "@srelens/core";
 import { KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { Section } from "./Section";
+import { SectionFailure, useSectionList } from "./sectionList";
 import { StringList } from "./sections";
 
 /**
@@ -98,31 +98,27 @@ function RecentJobsSection({
   namespace: string;
   ownerName: string;
 }) {
-  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; jobs?: JobSummary[] }>({
-    status: "loading",
+  const state = useSectionList<JobSummary[]>(true, [context, namespace, ownerName], async () => {
+    const out = await listJobs(context, namespace);
+    return out.error
+      ? { error: out.error }
+      : { data: (out.jobs ?? []).filter((j) => j.owner === ownerName) };
   });
 
-  useEffect(() => {
-    let active = true;
-    setState({ status: "loading" });
-    listJobs(context, namespace).then((out) => {
-      if (!active) return;
-      if (out.error) {
-        setState({ status: "error" });
-        return;
-      }
-      setState({ status: "ready", jobs: (out.jobs ?? []).filter((j) => j.owner === ownerName) });
-    });
-    return () => {
-      active = false;
-    };
-  }, [context, namespace, ownerName]);
-
-  if (state.status === "error") return null; // a missing jobs list shouldn't break the panel
   if (state.status === "loading") {
     return (
       <Section title="Recent Jobs">
         <LoadingState label="Loading jobs" />
+      </Section>
+    );
+  }
+  // The block STAYS on a refusal, with the reason in it. It used to `return
+  // null`, so "this CronJob has never run" and "srelens was refused to list
+  // jobs" drew the identical screen — see {@link useSectionList}.
+  if (state.status === "error") {
+    return (
+      <Section title="Recent Jobs">
+        <SectionFailure error={state.error} />
       </Section>
     );
   }
@@ -131,7 +127,7 @@ function RecentJobsSection({
     <Section title="Recent Jobs">
       <Table
         columns={RECENT_JOB_COLUMNS}
-        data={state.jobs ?? []}
+        data={state.data ?? []}
         getRowKey={(j) => j.name}
         emptyText="No jobs yet"
       />

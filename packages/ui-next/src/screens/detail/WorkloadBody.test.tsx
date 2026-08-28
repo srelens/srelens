@@ -961,4 +961,84 @@ describe("WorkloadDetailsBody", () => {
       expect([...container.children].every((el) => el.matches("section.section"))).toBe(true);
     });
   });
+
+  // RBAC allowing `get deployments` but not `list replicasets` is an ordinary
+  // shape. The section used to `return null` on it, so the reader could not
+  // tell "this Deployment has never rolled out" from "srelens was refused".
+  describe("when the ReplicaSets list is refused", () => {
+    it("keeps the Deploy Revisions block and says why", async () => {
+      listReplicaSets.mockResolvedValue({
+        error: "replicasets.apps is forbidden: User cannot list resource replicasets",
+      });
+      render(
+        <WorkloadDetailsBody
+          object={workload("Deployment", { replicas: 3, selector: { matchLabels: { app: "web" } } })}
+          context="ctx"
+        />,
+      );
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Deploy Revisions" })).toBeDefined());
+      expect(document.body.textContent).toContain("cannot list resource replicasets");
+    });
+
+    // The `queryByText` half alone could not fail for the reason this name
+    // gives: a section that VANISHED also has no "No revisions" in it. The
+    // heading assertion is what makes the absence mean "the block is here and
+    // withheld the claim", and the `Revision` FACT is the second half — it is
+    // derived from the same list and must not read "1" off a list nobody got.
+    it("keeps the block on screen and withholds the claim there are no revisions", async () => {
+      listReplicaSets.mockResolvedValue({ error: "listing replicasets timed out" });
+      render(
+        <WorkloadDetailsBody
+          object={workload(
+            "Deployment",
+            { replicas: 3, selector: { matchLabels: { app: "web" } } },
+            {},
+            { name: "web", namespace: "default", annotations: { "deployment.kubernetes.io/revision": "4" } },
+          )}
+          context="ctx"
+        />,
+      );
+      // Waiting on the REASON, not on the heading: the heading is also there
+      // during `loading`, so a `waitFor` on it resolves on the first frame and
+      // the case would pass against a section that then vanished.
+      await waitFor(() => expect(document.body.textContent).toContain("listing replicasets timed out"));
+      expect(screen.getByRole("heading", { name: "Deploy Revisions" })).toBeDefined();
+      expect(screen.queryByText("No revisions")).toBeNull();
+      // The revision NUMBER is the object's own annotation, so it stays; only
+      // the "(6m ago)" age comes off the list, and that must be absent.
+      expect(screen.getByText("4")).toBeDefined();
+    });
+
+    // `idle` is NOT a failure: a StatefulSet/DaemonSet/ReplicaSet never asks
+    // for revisions, so it must go on drawing no block at all.
+    it("still draws no block for a kind that never asks for revisions", async () => {
+      listReplicaSets.mockResolvedValue({ error: "should never be reached" });
+      render(
+        <WorkloadDetailsBody
+          object={workload("StatefulSet", { replicas: 3, selector: { matchLabels: { app: "web" } } })}
+          context="ctx"
+        />,
+      );
+      await waitFor(() => expect(podsForSelector).toHaveBeenCalled());
+      expect(screen.queryByRole("heading", { name: "Deploy Revisions" })).toBeNull();
+      expect(listReplicaSets).not.toHaveBeenCalled();
+    });
+  });
+
+  // The related-pods block, `sections.tsx`'s `RelatedPodsSection`, reached the
+  // way every workload body reaches it. Same defect, same bar.
+  describe("when the Pods list is refused", () => {
+    it("keeps the Pods block and says why, rather than vanishing", async () => {
+      podsForSelector.mockResolvedValue({ error: "pods is forbidden: User cannot list resource pods" });
+      render(
+        <WorkloadDetailsBody
+          object={workload("Deployment", { replicas: 3, selector: { matchLabels: { app: "web" } } })}
+          context="ctx"
+        />,
+      );
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Pods" })).toBeDefined());
+      expect(document.body.textContent).toContain("cannot list resource pods");
+      expect(screen.queryByText("No pods")).toBeNull();
+    });
+  });
 });

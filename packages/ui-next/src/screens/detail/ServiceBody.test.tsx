@@ -305,4 +305,34 @@ describe("ServiceDetailsBody", () => {
       await waitFor(() => expect(screen.getAllByRole("heading", { name: "Pods" })).toHaveLength(1));
     });
   });
+
+  // The worst of the four sites, because `out.error` was never read at all: a
+  // refusal left `names` as `[]`, indistinguishable from a Service that
+  // genuinely has no slices, and the block returned null.
+  describe("when the EndpointSlices list is refused", () => {
+    it("says the slices could not be listed rather than drawing nothing", async () => {
+      listEndpointSlices.mockResolvedValue({
+        error: "endpointslices.discovery.k8s.io is forbidden: User cannot list resource endpointslices",
+      });
+      render(<ServiceDetailsBody object={service({ type: "ClusterIP" })} context="ctx" />);
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Endpoint Slices" })).toBeDefined());
+      expect(document.body.textContent).toContain("cannot list resource endpointslices");
+    });
+
+    // Classic draws nothing at all for a Service that simply HAS no slices, and
+    // that is kept — the block appearing only on a refusal is the whole point.
+    it("still draws nothing when the list succeeded and was empty", async () => {
+      listEndpointSlices.mockResolvedValue({ endpointslices: [] });
+      const { container } = render(
+        <ServiceDetailsBody
+          object={service({ type: "ClusterIP", ports: [{ port: 80, targetPort: 8080 }] })}
+          context="ctx"
+        />,
+      );
+      await waitFor(() => expect(listEndpointSlices).toHaveBeenCalled());
+      expect(screen.queryByRole("heading", { name: "Endpoint Slices" })).toBeNull();
+      // Connection and Ports, and nothing after them.
+      expect([...container.children]).toHaveLength(2);
+    });
+  });
 });

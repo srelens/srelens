@@ -198,4 +198,42 @@ describe("CronJobDetailsBody", () => {
       expect(screen.queryByRole("heading", { name: "Pods" })).toBeNull();
     });
   });
+
+  // RBAC that allows `get cronjobs` but not `list jobs` is an ordinary shape,
+  // and so are a timeout and a consent refusal. The block used to `return null`
+  // on all three, so the reader could not tell "this CronJob has never run"
+  // from "srelens was refused" — and there was nothing on screen to retry. The
+  // branch's own bar is the opposite: `Overview.tsx` puts the reason on the row
+  // that could not answer, and `Logs.tsx` keeps a per-target failure precisely
+  // so an absent container's lines cannot look like a quiet container's.
+  describe("when the Jobs list is refused", () => {
+    it("keeps the block and says why, rather than vanishing", async () => {
+      listJobs.mockResolvedValue({ error: "jobs is forbidden: User cannot list resource jobs" });
+      render(<CronJobDetailsBody object={cronjob({ schedule: "0 2 * * *" })} context="ctx" />);
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Recent Jobs" })).toBeDefined());
+      expect(document.body.textContent).toContain("cannot list resource jobs");
+    });
+
+    // The `queryByText` half alone could not fail for the reason this name
+    // gives: a block that VANISHED also has no "No jobs yet" in it. The heading
+    // assertion is what makes the absence mean "the block is here and withheld
+    // the claim" rather than "the block is gone".
+    it("keeps the block on screen and withholds the empty-state claim there are no jobs", async () => {
+      listJobs.mockResolvedValue({ error: "listing jobs timed out" });
+      const { container } = render(
+        <CronJobDetailsBody object={cronjob({ schedule: "0 2 * * *" })} context="ctx" />,
+      );
+      // Waiting on the REASON, not on the heading: the heading is also there
+      // during `loading`, so a `waitFor` on it resolves on the first frame and
+      // the case would pass against a section that then vanished.
+      await waitFor(() => expect(document.body.textContent).toContain("listing jobs timed out"));
+      expect(screen.getByRole("heading", { name: "Recent Jobs" })).toBeDefined();
+      expect(screen.queryByText("No jobs yet")).toBeNull();
+      // And the `.section + .section` adjacency the `return null` was
+      // protecting still holds: Schedule, then Recent Jobs.
+      const blocks = [...container.children];
+      expect(blocks).toHaveLength(2);
+      for (const block of blocks) expect(block.matches("section.section")).toBe(true);
+    });
+  });
 });

@@ -211,7 +211,7 @@ const DETAIL_FACTS: Record<string, FactsFor> = {
 /** The facts a subject shows, whichever screen is showing them. */
 export function detailFacts(input: { kind: string; object: K8sObject; revisions?: RevisionsState }): DetailFact[] {
   const build = DETAIL_FACTS[input.kind] ?? identityFacts;
-  return build({ kind: input.kind, object: input.object, revisions: input.revisions?.revisions });
+  return build({ kind: input.kind, object: input.object, revisions: input.revisions?.data });
 }
 
 /** Same seam, for the Containers pane a kind's descriptor opts into via

@@ -13,6 +13,7 @@ import {
 } from "@srelens/core";
 import { KV, LoadingState, PairList, Table, type Column } from "@srelens/ui-kit";
 import { Section } from "./Section";
+import { SectionFailure, useSectionList, type SectionListState } from "./sectionList";
 import type { DetailFact, FactsFor } from "./facts";
 import {
   ConditionsSection,
@@ -86,10 +87,9 @@ const DEPLOY_REVISION_COLUMNS: Column<ReplicaSetSummary>[] = [
   { key: "age", header: "Age", getSortValue: ageSortValue, render: (r) => r.age },
 ];
 
-export interface RevisionsState {
-  status: "idle" | "loading" | "ready" | "error";
-  revisions?: ReplicaSetSummary[];
-}
+/** A Deployment's rolled-out ReplicaSets, as {@link useSectionList} holds any
+ *  block's own list — `idle` for a kind that never asks (see below). */
+export type RevisionsState = SectionListState<ReplicaSetSummary[]>;
 
 /**
  * The ReplicaSets a Deployment has rolled out, fetched once for the whole
@@ -111,29 +111,14 @@ export interface RevisionsState {
  * on — and simply fetches nothing.
  */
 export function useDeployRevisions(context: string, namespace: string, ownerName: string, enabled: boolean): RevisionsState {
-  const [state, setState] = useState<RevisionsState>({ status: "idle" });
-
-  useEffect(() => {
-    if (!enabled || !context || !namespace || !ownerName) {
-      setState({ status: "idle" });
-      return;
-    }
-    let active = true;
-    setState({ status: "loading" });
-    listReplicaSets(context, namespace, ownerName).then((out) => {
-      if (!active) return;
-      if (out.error) {
-        setState({ status: "error" });
-        return;
-      }
-      setState({ status: "ready", revisions: out.replicasets ?? [] });
-    });
-    return () => {
-      active = false;
-    };
-  }, [context, namespace, ownerName, enabled]);
-
-  return state;
+  return useSectionList<ReplicaSetSummary[]>(
+    enabled && context !== "" && namespace !== "" && ownerName !== "",
+    [context, namespace, ownerName],
+    async () => {
+      const out = await listReplicaSets(context, namespace, ownerName);
+      return out.error ? { error: out.error } : { data: out.replicasets ?? [] };
+    },
+  );
 }
 
 /**
@@ -145,15 +130,23 @@ export function useDeployRevisions(context: string, namespace: string, ownerName
  * that account; it only ever SHOWS revisions.
  */
 function DeployRevisionsSection({ state }: { state: RevisionsState }) {
-  if (state.status === "idle" || state.status === "error") return null; // a missing list shouldn't break the pane
+  // `idle` alone draws nothing, and that is still right: a StatefulSet,
+  // DaemonSet or ReplicaSet has no revision history, so nothing was asked for
+  // and there is nothing to report. `error` used to be lumped in with it, which
+  // is what made "this Deployment has never rolled out" and "srelens was
+  // refused to list replicasets" the identical screen — see
+  // {@link useSectionList}.
+  if (state.status === "idle") return null;
   return (
     <Section title="Deploy Revisions">
       {state.status === "loading" ? (
         <LoadingState label="Loading revisions" />
+      ) : state.status === "error" ? (
+        <SectionFailure error={state.error} />
       ) : (
         <Table
           columns={DEPLOY_REVISION_COLUMNS}
-          data={state.revisions ?? []}
+          data={state.data ?? []}
           getRowKey={(r) => r.name}
           emptyText="No revisions"
         />

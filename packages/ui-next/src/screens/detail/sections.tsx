@@ -12,7 +12,7 @@
  * one definition of — so it is named for what it is: this design's shared
  * detail sections.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   conditionKindWithReason,
   plural,
@@ -33,6 +33,7 @@ import {
   type Column,
 } from "@srelens/ui-kit";
 import { Section } from "./Section";
+import { SectionFailure, useSectionList } from "./sectionList";
 import { formatCpu, formatMemory } from "../../lib/kinds/columns";
 import type { WorkloadSelector } from "../../lib/workloadSelector";
 
@@ -370,53 +371,41 @@ export function RelatedPodsSection({
    *  workload's only when it satisfies both — see {@link WorkloadSelector}. */
   selector: WorkloadSelector;
 }) {
-  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; pods?: RelatedPod[] }>({
-    status: "loading",
-  });
   // Both halves, so a workload whose requirements changed under an unchanged
   // set of equality labels is re-read rather than left showing the pods of
-  // the selector before it.
+  // the selector before it. A string, so it is the selector's IDENTITY without
+  // a new object each render.
   const selectorKey = JSON.stringify([selector.matchLabels, selector.matchExpressions]);
-
-  useEffect(() => {
-    let active = true;
-    setState({ status: "loading" });
-    Promise.all([
+  const state = useSectionList<RelatedPod[]>(true, [context, namespace, selectorKey], async () => {
+    const [podsOut, metricsOut] = await Promise.all([
       podsForSelector(context, namespace, selector.matchLabels, selector.matchExpressions),
       // Metrics are best-effort: a missing metrics-server must not hide pods.
       podMetrics(context, namespace).catch((): { metrics?: PodMetric[] } => ({ metrics: [] })),
-    ]).then(([podsOut, metricsOut]) => {
-      if (!active) return;
-      if (podsOut.error) {
-        setState({ status: "error" });
-        return;
-      }
-      const usage = new Map((metricsOut.metrics ?? []).map((m) => [m.name, m]));
-      const pods = (podsOut.pods ?? []).map((p) => {
+    ]);
+    // The PODS are what this block is about, so only their failure is the
+    // block's failure — usage columns simply stay empty.
+    if (podsOut.error) return { error: podsOut.error };
+    const usage = new Map((metricsOut.metrics ?? []).map((m) => [m.name, m]));
+    return {
+      data: (podsOut.pods ?? []).map((p) => {
         const m = usage.get(p.name);
         return { ...p, cpu: m?.cpuMillicores, memory: m?.memoryMiB };
-      });
-      setState({ status: "ready", pods });
-    });
-    return () => {
-      active = false;
+      }),
     };
-    // selectorKey captures the selector's identity without a new object each render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, namespace, selectorKey]);
-
-  if (state.status === "error") return null; // a missing pods list shouldn't break the panel
-  if (state.status === "loading") {
-    return (
-      <Section title="Pods">
-        <LoadingState label="Loading pods" />
-      </Section>
-    );
-  }
+  });
 
   return (
+    // The block STAYS on a refusal, with the reason in it. It used to `return
+    // null`, so "this Deployment has no pods" and "srelens was refused" drew
+    // the identical screen — see {@link useSectionList}.
     <Section title="Pods">
-      <Table columns={RELATED_POD_COLUMNS} data={state.pods ?? []} getRowKey={(p) => p.name} emptyText="No pods" />
+      {state.status === "loading" ? (
+        <LoadingState label="Loading pods" />
+      ) : state.status === "error" ? (
+        <SectionFailure error={state.error} />
+      ) : (
+        <Table columns={RELATED_POD_COLUMNS} data={state.data ?? []} getRowKey={(p) => p.name} emptyText="No pods" />
+      )}
     </Section>
   );
 }

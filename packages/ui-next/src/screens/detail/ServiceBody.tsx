@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import {
   asArray,
   asRecord,
@@ -10,6 +9,7 @@ import {
 import { KV, PairList, Table, type Column } from "@srelens/ui-kit";
 import { ForwardAction } from "../forwards/ForwardAction";
 import { Section } from "./Section";
+import { SectionFailure, useSectionList } from "./sectionList";
 import { StringList } from "./sections";
 
 /**
@@ -158,22 +158,33 @@ function PortsSection({ object, context }: { object: K8sObject; context: string 
 function EndpointSlicesSection({ context, object }: { context: string; object: K8sObject }) {
   const namespace = str(object.metadata?.namespace);
   const name = str(object.metadata?.name);
-  const [names, setNames] = useState<string[]>([]);
+  const state = useSectionList<string[]>(
+    context !== "" && namespace !== "" && name !== "",
+    [context, namespace, name],
+    async () => {
+      const out = await listEndpointSlices(context, namespace);
+      // Read FIRST. This was the one site of the four that never read `error`
+      // at all: a refusal left `names` as `[]`, which is the same value a
+      // Service with genuinely no slices produces, and the block then returned
+      // null — so the refusal drew the screen that says "no slices".
+      if (out.error) return { error: out.error };
+      return { data: (out.endpointslices ?? []).filter((s) => s.service === name).map((s) => s.name) };
+    },
+  );
 
-  useEffect(() => {
-    setNames([]);
-    if (!context || !namespace || !name) return;
-    let active = true;
-    listEndpointSlices(context, namespace).then((out) => {
-      if (!active) return;
-      const mine = (out.endpointslices ?? []).filter((s) => s.service === name).map((s) => s.name);
-      setNames(mine);
-    });
-    return () => {
-      active = false;
-    };
-  }, [context, namespace, name]);
-
+  // A refusal is the ONLY thing that makes this block appear when it has no
+  // slices to show. Classic draws nothing while the fetch is in flight and
+  // nothing for a Service that genuinely has none — no spinner, no empty row —
+  // and that is kept: inventing a loading state classic never had would be a
+  // design change, where saying "we were refused" is a correction.
+  if (state.status === "error") {
+    return (
+      <Section title="Endpoint Slices">
+        <SectionFailure error={state.error} />
+      </Section>
+    );
+  }
+  const names = state.data ?? [];
   if (names.length === 0) return null;
   return (
     <Section title="Endpoint Slices">
