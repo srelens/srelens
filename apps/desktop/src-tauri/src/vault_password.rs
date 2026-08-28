@@ -737,13 +737,37 @@ mod tests {
     /// code. `rekey_from_current` blocks on that file lock AFTER reading
     /// `old_key` and BEFORE writing `Some(new_key)`, which is the interleaving
     /// the finding describes.
+    ///
+    /// **The window is observed, not timed.** `rekey_from_current` holds the
+    /// process mutex ACROSS its wait for that file lock, so "the re-key is
+    /// inside its transaction" is a durable state rather than a moment — and a
+    /// non-blocking `try_lock` reads it without touching the critical section
+    /// (`Vault::key_critical_section_is_held`, `#[cfg(test)]` and read-only).
+    /// This thread polls until the mutex is held and only then spawns the
+    /// lock, so on every run the discard is issued against a re-key that has
+    /// already taken the mutex and read `old_key`.
+    ///
+    /// Both 200ms sleeps this used to open with are gone, and the first was
+    /// not merely imprecise. If the re-key had not been scheduled inside its
+    /// 200ms, the discard took the mutex outright, `rekey_from_current`
+    /// refused a locked vault, and `expect("the re-key itself completes")`
+    /// PANICKED — a flake, not the vacuous pass the old comment claimed.
+    ///
+    /// What is left to timing is only the 300ms, and only in the safe
+    /// direction: it bounds how long a BROKEN discard — one not taking the
+    /// mutex first — is given to land, and an unserialised discard needs one
+    /// `stat` and two uncontended write locks. A serialised one cannot land
+    /// inside any timeout, however loaded the machine, because the mutex it
+    /// needs is held by a thread parked on a file lock this thread has not
+    /// released yet.
     #[test]
     fn locking_during_a_password_change_leaves_the_vault_locked() {
         let (vault, dir) = a_set_up_unlocked_vault();
         let vault = Arc::new(vault);
 
         // Held before the re-key starts, released only once the discard is
-        // in flight: this is what keeps the re-key parked mid-transaction.
+        // provably queued behind it: this is what keeps the re-key parked
+        // mid-transaction.
         let held = std::fs::File::create(dir.join("secrets.enc.lock")).unwrap();
         held.lock().unwrap();
 
@@ -752,28 +776,42 @@ mod tests {
             let vault = Arc::clone(&vault);
             std::thread::spawn(move || vault.rekey_from_current(new_key, "password"))
         };
-        // Long enough for the re-key to take the process mutex, read
-        // `old_key` and block on the file lock. Without this wait the discard
-        // could win the mutex outright, the re-key would refuse a locked
-        // vault, and the test would pass without ever exercising the
-        // interleaving it is named for.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Wait for the state, not for a duration: the re-key takes the process
+        // mutex, reads `old_key`, and then blocks on the file lock still
+        // holding it. The deadline is only so a regression that never gets
+        // there fails loudly instead of hanging the suite.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !vault.key_critical_section_is_held() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the re-key never reached its critical section",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
 
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let discarding = {
             let vault = Arc::clone(&vault);
-            std::thread::spawn(move || vault.discard_key())
+            std::thread::spawn(move || {
+                let _ = locked_tx.send(vault.discard_key());
+            })
         };
-        // Long enough for an UNSERIALISED discard to complete (it only takes
-        // two write locks nobody holds). Serialised, it is still parked on the
-        // mutex when this elapses.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The lock is now racing a re-key that is already inside its
+        // transaction — which is the whole point of the test, and is why this
+        // must not land yet. Unserialised it lands in microseconds and the
+        // re-key writes the key straight back over it; that is the defect.
+        assert!(
+            locked_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "the lock discarded the key while a re-key held the vault",
+        );
 
         drop(held);
         rekeying.join().unwrap().expect("the re-key itself completes");
-        discarding
-            .join()
-            .unwrap()
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the lock lands once the re-key releases the vault")
             .expect("locking a set-up vault is never an error");
+        discarding.join().unwrap();
 
         assert!(
             !vault.is_unlocked(),

@@ -328,6 +328,25 @@ impl Vault {
         Ok(())
     }
 
+    /// Test-only: is the process-local critical section held by SOMEBODY
+    /// ELSE right now? Read-only, non-blocking, and outside every guard — it
+    /// takes no lock it keeps, mutates nothing, and adds no hook inside a
+    /// critical section, so no production path changes shape.
+    ///
+    /// It exists because [`rekey_from_current`](Self::rekey_from_current)
+    /// holds this mutex ACROSS its wait for the inter-process file lock: "the
+    /// re-key is parked mid-transaction, past its `old_key` read" is
+    /// therefore a *state*, not a moment, and `vault_password`'s
+    /// lock-vs-password-change test polls this to wait for it instead of
+    /// sleeping and hoping the scheduler obliged.
+    ///
+    /// `WouldBlock` specifically: a poisoned mutex is a genuine failure and
+    /// must never read as "held".
+    #[cfg(test)]
+    pub(crate) fn key_critical_section_is_held(&self) -> bool {
+        matches!(self.lock.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    }
+
     /// Read the current secrets. Missing, tampered, or wrong-key vaults read
     /// as empty (see the module docs for why that's deliberate).
     pub fn load(&self) -> Secrets {
