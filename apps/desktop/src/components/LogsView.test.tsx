@@ -328,7 +328,7 @@ describe("LogsView", () => {
     render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Container" })).toBeDefined());
 
-    fireEvent.click(screen.getByRole("button", { name: "Download all containers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download all container logs" }));
     await waitFor(() =>
       expect(saveTextFileMock).toHaveBeenCalledWith(
         "web-1-all.log",
@@ -337,5 +337,58 @@ describe("LogsView", () => {
     );
     expect(saveTextFileMock.mock.calls[0][1]).toContain("==> web-1/sidecar <==");
     expect(saveTextFileMock.mock.calls[0][1]).toContain("sidecar logs");
+  });
+
+  it("downloads every retained line for all containers, unbounded by the tail/since filters", async () => {
+    // #353: the full dump used to inherit the view's tail (200) and since
+    // window, so "all" was really "the last 200 lines". It must ask for
+    // everything the cluster still holds and leave both bounds out entirely.
+    getObjectMock.mockResolvedValue({
+      object: { spec: { containers: [{ name: "app" }, { name: "sidecar" }] } },
+    });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Container" })).toBeDefined());
+    // Narrow the on-screen view first so the dump's independence is visible.
+    await userEvent.click(screen.getByRole("combobox", { name: "Since" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Last 5m" }));
+    await waitFor(() =>
+      expect(podLogsMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "default",
+        "web-1",
+        undefined,
+        expect.objectContaining({ sinceSeconds: 300, tailLines: 200 }),
+      ),
+    );
+    podLogsMock.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Download all container logs" }));
+    await waitFor(() => expect(saveTextFileMock).toHaveBeenCalledWith("web-1-all.log", expect.any(String)));
+
+    const dumpCalls = podLogsMock.mock.calls as [string, string, string, unknown, Record<string, unknown>][];
+    expect(dumpCalls.map((c) => c[4].container)).toEqual(["app", "sidecar"]);
+    for (const [, , , , opts] of dumpCalls) {
+      expect(opts.allLines).toBe(true);
+      expect("tailLines" in opts).toBe(false);
+      expect("sinceSeconds" in opts).toBe(false);
+      // Which stream (previous/timestamps) is still the view's choice.
+      expect(opts.previous).toBe(false);
+      expect(opts.timestamps).toBe(false);
+    }
+  });
+
+  it("keeps the plain download bounded to what is on screen", async () => {
+    podLogsMock.mockResolvedValue({ logs: "line one\nline two" });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await waitFor(() => expect(screen.getByText("line two")).toBeDefined());
+    const loadOpts = podLogsMock.mock.calls[0][4] as Record<string, unknown>;
+    expect(loadOpts.tailLines).toBe(200);
+    expect("allLines" in loadOpts).toBe(false);
+    podLogsMock.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(saveTextFileMock).toHaveBeenCalledWith("web-1.log", "line one\nline two"));
+    // The on-screen download saves the buffer; it never refetches.
+    expect(podLogsMock).not.toHaveBeenCalled();
   });
 });

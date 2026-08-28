@@ -215,8 +215,14 @@ export interface PodLogsOptions {
   timestamps?: boolean;
   /** Only lines newer than this many seconds ago. */
   sinceSeconds?: number;
-  /** Number of trailing lines to return. */
+  /** Number of trailing lines to return. Ignored when `allLines` is set. */
   tailLines?: number;
+  /**
+   * Fetch every line the container runtime still retains instead of a tail;
+   * wins over `tailLines`. Only what log rotation has kept is available, and
+   * the response can be very large — for saving a full dump, not for display.
+   */
+  allLines?: boolean;
 }
 
 /** Fetch recent logs for a pod (optionally a specific container) via `k8s.podLogs`. */
@@ -227,7 +233,7 @@ export async function podLogs(
   invoke: Invoker = invokeCapability,
   options: PodLogsOptions = {},
 ): Promise<LogsOutcome> {
-  const { container, previous, timestamps, sinceSeconds, tailLines } = options;
+  const { container, previous, timestamps, sinceSeconds, tailLines, allLines } = options;
   try {
     // `k8s.podLogs` deserialises snake_case field names (no serde rename).
     const out = await invoke<{ logs: string }>("k8s.podLogs", {
@@ -239,6 +245,7 @@ export async function podLogs(
       ...(timestamps ? { timestamps: true } : {}),
       ...(sinceSeconds != null ? { since_seconds: sinceSeconds } : {}),
       ...(tailLines != null ? { tail_lines: tailLines } : {}),
+      ...(allLines ? { all_lines: true } : {}),
     });
     return { logs: out.logs };
   } catch (e) {
