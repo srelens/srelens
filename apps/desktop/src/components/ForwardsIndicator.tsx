@@ -9,6 +9,7 @@ import {
   forwardAddress,
   type ActiveForward,
 } from "@srelens/core";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /** Subscribe to the active port-forwards store. */
 export function useForwards(): ActiveForward[] {
@@ -72,24 +73,26 @@ export function ForwardsIndicator() {
                 </div>
                 <StatusPill status={forwardStatusLabel(f.status)} kind={forwardStatusKind(f.status)} />
               </div>
-              <button
-                type="button"
-                className="fl-forward-action rounded-sm px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                onClick={() => void navigator.clipboard?.writeText(forwardAddress(f))}
-                title="Copy address"
-              >
-                <Copy aria-hidden="true" />
-                Copy
-              </button>
-              <button
-                type="button"
-                className="fl-forward-action rounded-sm px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
-                onClick={() => void stopPortForward(f.id)}
-                title="Stop forward"
-              >
-                <CircleStop aria-hidden="true" />
-                Stop
-              </button>
+              <TitleTooltip title="Copy address">
+                <button
+                  type="button"
+                  className="fl-forward-action rounded-sm px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  onClick={() => void navigator.clipboard?.writeText(forwardAddress(f))}
+                >
+                  <Copy aria-hidden="true" />
+                  Copy
+                </button>
+              </TitleTooltip>
+              <TitleTooltip title="Stop forward">
+                <button
+                  type="button"
+                  className="fl-forward-action rounded-sm px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
+                  onClick={() => void stopPortForward(f.id)}
+                >
+                  <CircleStop aria-hidden="true" />
+                  Stop
+                </button>
+              </TitleTooltip>
             </li>
           ))}
         </ul>

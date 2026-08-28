@@ -7,6 +7,7 @@ import { saveTextFile } from "@srelens/core";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
 import { computeLogWindow } from "./logWindow";
 import { isTauri } from "@srelens/core/platform";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /**
  * Save `content` to `filename`: in the desktop app via the native save
@@ -91,22 +92,23 @@ function ToggleButton({
   title?: string;
 }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      aria-pressed={active}
-      title={title ?? label}
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors disabled:opacity-40 ${
-        active
-          ? "bg-primary/15 text-primary"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground"
-      }`}
-    >
-      <Icon className="size-3.5" aria-hidden={true} />
-      {text}
-    </button>
+    <TitleTooltip title={title ?? label} disabled={disabled}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={active}
+        onClick={onClick}
+        disabled={disabled}
+        className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors disabled:opacity-40 ${
+          active
+            ? "bg-primary/15 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+        }`}
+      >
+        <Icon className="size-3.5" aria-hidden={true} />
+        {text}
+      </button>
+    </TitleTooltip>
   );
 }
 

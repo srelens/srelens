@@ -82,7 +82,17 @@ function titleOf(el: HTMLElement): string | null {
 async function tooltipOf(el: HTMLElement): Promise<string | null> {
   const trigger = el.closest<HTMLElement>('[data-slot="tooltip-trigger"]') ?? el;
   await userEvent.hover(trigger);
-  return (await screen.findByRole("tooltip")).textContent;
+  // Resolved through THIS trigger's `aria-describedby` rather than by asking
+  // for the first thing with the tooltip role. Opening a menu focuses its
+  // first item, and Radix opens a tooltip on focus as well as on hover — so a
+  // bare `findByRole("tooltip")` returns the first item's tooltip however far
+  // down the menu the hover went, and the assertion reads a sibling's text.
+  const id = await waitFor(() => {
+    const described = trigger.getAttribute("aria-describedby");
+    if (!described) throw new Error("no tooltip is open for this trigger");
+    return described;
+  });
+  return document.getElementById(id)?.textContent ?? null;
 }
 
 beforeEach(() => {
@@ -227,7 +237,7 @@ describe("PodActions", () => {
     const items = await screen.findAllByRole("menuitem");
     expect(items.map((i) => i.textContent)).toEqual(["mongodb", "metrics", "generate-tls-certs"]);
     // The finished init container is shown but marked, not silently dropped.
-    expect(titleOf(items[2])).toBe("Shell into generate-tls-certs (not running)");
+    expect(await tooltipOf(items[2])).toBe("Shell into generate-tls-certs (not running)");
   });
 
   it("re-reads the containers when the menu opens", async () => {

@@ -6,10 +6,11 @@ import { cn } from "@/ui/utils"
 /**
  * How long a pointer rests on a trigger before its tooltip opens. Not 0: an
  * instant tooltip flashes on every pointer pass across a toolbar and reads
- * as noise; 200 ms is below what registers as a wait. Well under the
- * browser's fixed ~1 s native `title` delay this replaces (#376).
+ * as noise; 100 ms is under what registers as a wait at all — the user's
+ * word for it is "fast". A tenth of the browser's fixed ~1 s native `title`
+ * delay this replaces (#376).
  */
-export const TOOLTIP_DELAY_MS = 200
+export const TOOLTIP_DELAY_MS = 100
 
 /**
  * After one tooltip has shown, sibling tooltips under the same provider open
@@ -83,4 +84,35 @@ function TooltipContent({
   )
 }
 
-export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger }
+/**
+ * Explains a control with `title` in a tooltip, in place of the native `title`
+ * attribute whose ~1 s delay is not configurable (#376). This is the one
+ * implementation behind `Button`'s `title` prop; a control that is not a
+ * `Button` (a hotbar item, a menu row) wraps itself in it directly.
+ *
+ * `disabled` wraps the child in a span that carries the trigger: a disabled
+ * `<button>` receives no pointer events, so without the wrapper the reason
+ * for its being disabled would be unreachable.
+ */
+function TitleTooltip({
+  title,
+  disabled = false,
+  children,
+}: {
+  title: React.ReactNode
+  disabled?: boolean
+  children: React.ReactElement
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {disabled ? <span className="inline-flex">{children}</span> : children}
+      </TooltipTrigger>
+      <TooltipContent side="bottom" sideOffset={4}>
+        {title}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+export { TitleTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger }
