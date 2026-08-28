@@ -1,6 +1,26 @@
 //! Per-user execution environments: each user's capability calls run against
 //! a registry + client cache built ONLY from their own uploaded kubeconfigs,
 //! materialized as 0600 files under `<data>/runtime/users/<id>/`.
+//!
+//! # Why the paths here are not a traversal risk
+//!
+//! Every path in this module is rooted at `data_dir` and extended only by
+//! literals (`runtime`, `users`, `helm`) and by **integers**: the user's own
+//! `i64` id ([`user_runtime_dir`]) and a kubeconfig row's `i64` id
+//! (`KubeconfigMeta::id`, `stores.rs`). `i64::to_string` can render only
+//! `-?[0-9]+`, so a component built from one cannot contain a path separator,
+//! a `..`, a NUL, or anything else that would leave the directory it is joined
+//! onto. No name, label, or other caller-supplied string is ever a component.
+//!
+//! CodeQL's `rust/path-injection` flags these five joins anyway, and it is
+//! right to follow the taint: the ids do originate in an authenticated HTTP
+//! session. It simply cannot see that the type makes the value inert. **The
+//! type IS the mitigation**, so keep it that way — if a component ever needs
+//! to come from a `String` (a user-chosen kubeconfig name, say), it needs its
+//! own validation and this paragraph stops being true.
+//!
+//! The alerts are dismissed as false positives rather than suppressed in code;
+//! this note exists so the next scan is not re-litigated from scratch.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -46,6 +66,10 @@ pub struct UserEnvs {
     build_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// This user's private runtime root.
+///
+/// `user_id` is an `i64` and that is load-bearing, not incidental — see the
+/// traversal note at the top of this module before widening it to a string.
 fn user_runtime_dir(data_dir: &Path, user_id: i64) -> PathBuf {
     data_dir
         .join("runtime")
@@ -142,6 +166,9 @@ impl UserEnvs {
                 .get_kubeconfig_yaml(user_id, meta.id, key)
                 .await?
                 .ok_or_else(|| format!("kubeconfig {} disappeared", meta.id))?;
+            // Named from the row's `i64` id, never from `meta.name` — the
+            // filename has to stay inert, and the name is the user's own
+            // string. See the traversal note at the top of this module.
             let path = dir.join(format!("kc-{}.yaml", meta.id));
             write_private_file(&path, yaml.as_bytes())?;
             paths.push(path);
