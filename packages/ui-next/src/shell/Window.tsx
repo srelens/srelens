@@ -455,134 +455,161 @@ export function Window({
   }
 
   /**
-   * The window, once boot has read the contexts and restored the workspaces —
-   * or the spinner it shows until then.
+   * What the cover covers, once boot has read the contexts and restored the
+   * workspaces — or the spinner that stands in for it until then.
    *
    * A value rather than an early `return`, and this is the whole reason: the
-   * boot check gets to choose the BODY and nothing else, so the app-wide
-   * surfaces below it stay mounted throughout. It used to be
+   * boot check gets to choose what is INSIDE the band and nothing else, so
+   * every surface around it stays mounted throughout. It used to be
    * `if (!booted) return <LoadingState .../>` above the one return, which took
    * `AgentConsent` down with the band for the whole of `listContexts()` — and
    * the confirm gate emits its request exactly once, with no replay for a
    * subscriber that turns up later (`mcp_confirm.rs`), so a call raised during
    * boot waited out its sixty seconds and was denied with nothing on screen.
+   *
+   * **And `LockGate` is one of those surfaces**, which it was not for a round.
+   * The gate sat inside the booted branch, so for the whole of boot nothing had
+   * called `vaultStatus()`, nothing had raised the cover, and the lock store
+   * answered "not covered" about a vault it had never read — while
+   * `AgentConsent`, mounted outside the boot check for the reason above, was
+   * live and could put an Approve button in front of whoever was at the
+   * keyboard. That is reachable, not theoretical: the MCP HTTP server is a
+   * backend process and survives a webview reload, so a reload after `Lock now`
+   * lands exactly there. The gate is above the boot check now, its launch read
+   * starts DURING boot rather than after it, and the store's own third state
+   * (`isCovered`) covers the instant before that read has begun.
    */
-  const body = booted ? (
-    <div className="flex h-full min-h-0 flex-col">
+  const band = booted ? (
+    <>
       {active && (
-        <Chrome
-          controls={controls}
-          clusterName={activeCtx?.name}
-          onToggleTheme={onToggleTheme}
-          onNewWorkspace={openNewWorkspace}
-          // The same function `⌘⇧L` fires, handed over rather than reimplemented
-          // — see `lockNow` for the ordering it owns and `ChromeProps.onLock`
-          // for why a second copy would be a second door.
-          onLock={lockNow}
-        />
+        <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
       )}
-      {/* `relative`, because §25's cover is `absolute inset-0` inside this band
-          rather than `fixed`: the titlebar above it and the status bar below it
-          are not part of what a lock replaces. */}
-      <div className="relative flex min-h-0 flex-1">
-        {/* The lock surface goes HERE and not one level in — above the tab
-            strip, and above the cluster rail with it. Since PR #365 a dialog is
-            mounted in the tab it was opened from, so the rail, the strip and
-            every other tab stay reachable behind it. That is right for a dialog
-            and exactly wrong for a lock: a cover inside the screen column would
-            leave the rail live and every other tab running over a sealed vault,
-            which is worse than not locking at all, because the window would
-            look sealed. `Window.test.tsx` pins the rail and the strip by name
-            for that reason.
-
-            Unconditional rather than `active &&`: whether the component gallery
-            is up is a developer surface's business, not the vault's. */}
-        <LockGate brandMarkSrc={brandMarkSrc} onReady={() => setVaultReady(true)}>
-          {active && (
-            <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
-          )}
-          {active && <Nav contexts={contexts} />}
-          {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
-              and the screen, and a flex item's implicit `min-width: auto`
-              refuses to shrink below its content — so a wide screen widens the
-              column, and `TabStrip`'s `overflow-x-auto` never engages because
-              the box it would scroll inside has grown to fit. The strip then
-              pushes its own new-tab and overflow controls off the window, which
-              is where the user meets it. */}
-          <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {active && (
-              <TabStrip
-                tabs={tabs}
-                activeId={activeId}
-                onSelect={activateTab}
-                onClose={closeTab}
-                menuFor={menuFor}
-                onNew={() => run({ type: "new-tab" })}
-                newHint={hint("new-tab", apple)}
-                label="Open tabs"
+      {active && <Nav contexts={contexts} />}
+      {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
+          and the screen, and a flex item's implicit `min-width: auto`
+          refuses to shrink below its content — so a wide screen widens the
+          column, and `TabStrip`'s `overflow-x-auto` never engages because
+          the box it would scroll inside has grown to fit. The strip then
+          pushes its own new-tab and overflow controls off the window, which
+          is where the user meets it. */}
+      <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {active && (
+          <TabStrip
+            tabs={tabs}
+            activeId={activeId}
+            onSelect={activateTab}
+            onClose={closeTab}
+            menuFor={menuFor}
+            onNew={() => run({ type: "new-tab" })}
+            newHint={hint("new-tab", apple)}
+            label="Open tabs"
+          />
+        )}
+        <div className="relative min-h-0 flex-1">
+          {tabs.map((tab) => (
+            <TabSurface key={tab.id} visible={tab.id === activeId}>
+              {/* A placeholder tab without a cluster of its own still leaves
+                  via the cluster this window is looking at — that is the
+                  context classic reopens onto. */}
+              <Body
+                route={tab.route}
+                clusterName={tab.sub ?? activeCtx?.name}
+                ported={ported}
+                onOpenInClassic={onOpenInClassic}
+                onOpenGallery={onOpenGallery}
+                // The raise itself, not a wrapper around it. `Settings`'s
+                // `Lock now` calls this once `vaultLock()` has resolved,
+                // and what it has to raise is the cover over the WINDOW —
+                // the `LockGate` above this strip — rather than anything
+                // drawn inside this tab. Zero-argument, synchronous,
+                // non-throwing and idempotent: the whole of the contract.
+                onLocked={lockWorkspace}
               />
-            )}
-            <div className="relative min-h-0 flex-1">
-              {tabs.map((tab) => (
-                <TabSurface key={tab.id} visible={tab.id === activeId}>
-                  {/* A placeholder tab without a cluster of its own still leaves
-                      via the cluster this window is looking at — that is the
-                      context classic reopens onto. */}
-                  <Body
-                    route={tab.route}
-                    clusterName={tab.sub ?? activeCtx?.name}
-                    ported={ported}
-                    onOpenInClassic={onOpenInClassic}
-                    onOpenGallery={onOpenGallery}
-                    // The raise itself, not a wrapper around it. `Settings`'s
-                    // `Lock now` calls this once `vaultLock()` has resolved,
-                    // and what it has to raise is the cover over the WINDOW —
-                    // the `LockGate` above this strip — rather than anything
-                    // drawn inside this tab. Zero-argument, synchronous,
-                    // non-throwing and idempotent: the whole of the contract.
-                    onLocked={lockWorkspace}
-                  />
-                </TabSurface>
-              ))}
-            </div>
-            {active && <Console apple={apple} />}
-          </div>
-          <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
-            <div className="flex flex-col gap-3 px-3 py-3">
-              <TextInput value={name} onValueChange={setName} placeholder="Workspace name" aria-label="Workspace name" />
-              {contexts.map((c) => (
-                <Checkbox
-                  key={c.stableId}
-                  checked={picked.has(c.stableId)}
-                  onChange={(checked) =>
-                    setPicked((prev) => {
-                      const next = new Set(prev);
-                      if (checked) next.add(c.stableId);
-                      else next.delete(c.stableId);
-                      return next;
-                    })
-                  }
-                  label={c.name}
-                />
-              ))}
-              <div className="flex justify-end">
-                <Button variant="primary" size="sm" onClick={() => create()}>
-                  Create
-                </Button>
-              </div>
-            </div>
-          </Drawer>
-        </LockGate>
+            </TabSurface>
+          ))}
+        </div>
+        {active && <Console apple={apple} />}
       </div>
-      {active && <Status contexts={contexts} />}
-    </div>
+      <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
+        <div className="flex flex-col gap-3 px-3 py-3">
+          <TextInput value={name} onValueChange={setName} placeholder="Workspace name" aria-label="Workspace name" />
+          {contexts.map((c) => (
+            <Checkbox
+              key={c.stableId}
+              checked={picked.has(c.stableId)}
+              onChange={(checked) =>
+                setPicked((prev) => {
+                  const next = new Set(prev);
+                  if (checked) next.add(c.stableId);
+                  else next.delete(c.stableId);
+                  return next;
+                })
+              }
+              label={c.name}
+            />
+          ))}
+          <div className="flex justify-end">
+            <Button variant="primary" size="sm" onClick={() => create()}>
+              Create
+            </Button>
+          </div>
+        </div>
+      </Drawer>
+    </>
   ) : (
-    <LoadingState label="Loading" />
+    // `flex-1`, because this is now a flex item of the band's own row rather
+    // than the whole body: without it the spinner sits in a column the width of
+    // its own label instead of where the window the reader is waiting for will
+    // be.
+    <LoadingState label="Loading" className="flex-1" />
   );
 
   return (
     <>
-      {body}
+      <div className="flex h-full min-h-0 flex-col">
+        {booted && active && (
+          <Chrome
+            controls={controls}
+            clusterName={activeCtx?.name}
+            onToggleTheme={onToggleTheme}
+            onNewWorkspace={openNewWorkspace}
+            // The same function `⌘⇧L` fires, handed over rather than
+            // reimplemented — see `lockNow` for the ordering it owns and
+            // `ChromeProps.onLock` for why a second copy would be a second
+            // door.
+            onLock={lockNow}
+          />
+        )}
+        {/* `relative`, because §25's cover is `absolute inset-0` inside this
+            band rather than `fixed`: the titlebar above it and the status bar
+            below it are not part of what a lock replaces. */}
+        <div className="relative flex min-h-0 flex-1">
+          {/* The lock surface goes HERE and not one level in — above the tab
+              strip, and above the cluster rail with it. Since PR #365 a dialog
+              is mounted in the tab it was opened from, so the rail, the strip
+              and every other tab stay reachable behind it. That is right for a
+              dialog and exactly wrong for a lock: a cover inside the screen
+              column would leave the rail live and every other tab running over
+              a sealed vault, which is worse than not locking at all, because
+              the window would look sealed. `Window.test.tsx` pins the rail and
+              the strip by name for that reason.
+
+              And it is outside the BOOT check as well as inside the band —
+              wrapping the spinner exactly as it wraps the band — so the launch
+              read is in flight while the contexts are being listed rather than
+              after, and so there is no state of this window in which nothing
+              has asked the vault anything. See `band` above for what was
+              reachable when there was.
+
+              Unconditional rather than `active &&`: whether the component
+              gallery is up is a developer surface's business, not the
+              vault's. */}
+          <LockGate brandMarkSrc={brandMarkSrc} onReady={() => setVaultReady(true)}>
+            {band}
+          </LockGate>
+        </div>
+        {booted && active && <Status contexts={contexts} />}
+      </div>
       {/*
         An agent's confirmation, at the level `Chrome` and `Status` sit at —
         OUTSIDE the band, and so outside every `TabSurface`'s portal scope.
@@ -594,17 +621,26 @@ export function Window({
         the kit's `ConfirmDialog` is the document-wide modal it was before #365,
         which is what an app-wide question needs.
 
-        Outside `LockGate` rather than among its children, outside `body` rather
-        than inside it, and unconditional rather than `active &&` — three
-        different reasons, and every one of them is a state in which this must
-        still be listening. It must stay subscribed while the cover is up: it
-        REFUSES the call in that state, and a listener unmounted with the band
-        could not; see `AgentConsent` for why refusing is the answer. It must
-        stay subscribed while the window is still BOOTING, because the request
-        is emitted once and never replayed — a listener mounted after the fact
-        is handed nothing, and the call is denied on timeout with nothing ever
-        drawn. And whether the component gallery is up is a developer surface's
-        business: a call the backend is blocking on is not.
+        Outside `LockGate` rather than among its children, outside the band's
+        own boot check rather than inside it, and unconditional rather than
+        `active &&` — three different reasons, and every one of them is a state
+        in which this must still be listening. It must stay subscribed while the
+        cover is up: it REFUSES the call in that state, and a listener unmounted
+        with the band could not; see `AgentConsent` for why refusing is the
+        answer. It must stay subscribed while the window is still BOOTING,
+        because the request is emitted once and never replayed — a listener
+        mounted after the fact is handed nothing, and the call is denied on
+        timeout with nothing ever drawn. And whether the component gallery is up
+        is a developer surface's business: a call the backend is blocking on is
+        not.
+
+        Staying subscribed through boot is not a licence to ASK during it. This
+        listens in every one of those states and refuses in most of them: the
+        gate now wraps the boot spinner as well as the band, so a request that
+        arrives while the contexts are still being listed meets a cover, and the
+        lock store treats a vault nothing has read yet as covered too
+        (`isCovered`). Subscribed always; asking only where the window is
+        genuinely open.
 
         ONE mount, here. Not one per branch of the boot check: two listeners on
         `mcp://confirm-request` are two prompts and two answers to a request

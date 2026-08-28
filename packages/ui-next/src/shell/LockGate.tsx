@@ -131,17 +131,64 @@ let checkingLaunch = false;
  * `null` on a failed read as well as before the first one: a refusal is not a
  * mode, and the previous value is not evidence about now. Both cases resolve
  * the same way at the call site — no control is offered.
+ *
+ * It is a security fact as well as a drawing one — see {@link isCovered}, which
+ * treats a `null` here as a cover.
  */
 let knownMode: VaultStatus["mode"] | null = null;
 const listeners = new Set<() => void>();
 
 /**
- * Whether the cover is up, by either route. This — not `sealed` — is what every
- * caller outside the band asks, because "the vault is sealed" and "the vault
- * has not answered" put exactly the same controls out of reach.
+ * Whether there is a vault whose state could be read at all.
+ *
+ * Every vault command is a Tauri command (`invoke` from `@tauri-apps/api/core`,
+ * not the transport layer that has a web half), so in a browser there is
+ * nothing to seal, nothing to unlock, and no read that was ever going to be
+ * taken. {@link isCovered} needs the distinction because its safe default —
+ * "not yet known counts as covered" — is only safe where something is going to
+ * become known: applied in a browser it would hold the page under a permanent
+ * cover, or leave `AgentConsent` refusing every request for the life of the
+ * page. Read at call time rather than once at module load, for the same reason
+ * `Window` reads the lock at the keystroke: this answers for whatever process
+ * is asking, not for whatever was true when the bundle was evaluated.
+ */
+function vaultExists(): boolean {
+  return isTauri();
+}
+
+/**
+ * Whether the cover is up, by every route. This — not `sealed` — is what every
+ * caller outside the band asks, because "the vault is sealed", "the vault has
+ * not answered" and "nothing has ever asked the vault" put exactly the same
+ * controls out of reach.
+ *
+ * **The third route is the one no mounted gate can supply.** `sealed` and
+ * {@link checkingLaunch} are both written by a gate that is MOUNTED; before one
+ * is, both are false, and this function used to answer "not covered" about a
+ * vault it had never looked at. That is a guess dressed as a fact, and
+ * `AgentConsent` — mounted outside the boot check on purpose, because a confirm
+ * request is emitted once and never replayed — spent it on an Approve button:
+ * the MCP HTTP server is a backend process that survives a webview reload, so a
+ * mutating call could arrive into a fresh module after `Lock now` and be
+ * APPROVED over a vault the backend had already sealed.
+ *
+ * So {@link knownMode} being `null` counts as covered. It is the honest
+ * three-state record of what has been read — a mode, or nothing yet — and this
+ * project has collapsed a three-state onto a boolean three times now, each time
+ * as a defect. A security decision gets the safe end of the unknown: not-yet-
+ * known is treated as sealed, never as open.
+ *
+ * It fails closed without fighting the states that are known. A read that
+ * REFUSED sets `knownMode` back to `null` and raises `sealed` in the same
+ * breath, so that case is covered twice over and consistently. A read that
+ * answered `locked` or `setup-required` raises `sealed` too. Only `unlocked`
+ * leaves nothing up — which is the state the window is supposed to be usable in.
+ *
+ * And only where {@link vaultExists}, which is the whole of what keeps web mode
+ * out of it.
  */
 function isCovered(): boolean {
-  return sealed || checkingLaunch;
+  return sealed || checkingLaunch || (vaultExists() && knownMode === null);
 }
 
 function emit(): void {
@@ -233,6 +280,12 @@ function unsealWorkspace(): void {
  * `resetProbes` do for their stores. Not called by anything shipped: vitest
  * isolates files, not the tests inside one, so a raise in one test would
  * otherwise still be up in the next.
+ *
+ * **This is not "the window is open".** It is a fresh launch: no cover raised,
+ * no check running, and no vault read — which {@link isCovered} counts as
+ * covered wherever a vault exists. A test that needs an OPEN window says so
+ * with {@link __setKnownVaultMode}, because on a desktop that is a fact
+ * something had to establish.
  */
 export function resetLock(): void {
   sealed = false;
@@ -252,6 +305,12 @@ export function resetLock(): void {
  * so a test could set it, which is a shape the app does not need. Underscored
  * and documented as test support, like `resetLock` above it; nothing shipped
  * calls it.
+ *
+ * It is how a test states the launch read's OUTCOME, too, and not only what the
+ * titlebar may draw: `"unlocked"` here is what takes {@link isCovered}'s
+ * unknown-means-covered rule out of the way, so a test of a sibling that
+ * assumes an open window declares that rather than inheriting it from a
+ * default.
  */
 export function __setKnownVaultMode(mode: VaultStatus["mode"] | null): void {
   rememberMode(mode);

@@ -40,7 +40,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import { AgentConsent } from "./AgentConsent";
-import { lockWorkspace, resetLock } from "./LockGate";
+import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 
 const REQUEST = "mcp://confirm-request";
 const RESOLVED = "mcp://confirm-resolved";
@@ -63,6 +63,13 @@ beforeEach(() => {
   // Nothing here renders the gate itself; the store is what this component
   // reads, and a raise in one test must not still be up in the next.
   resetLock();
+  // And an OPEN vault, said out loud rather than left to the store's default.
+  // A fresh store has read no vault at all, and "no read has landed" counts as
+  // covered where a vault exists — so without this every test in this file
+  // would be exercising the refusal path and none of them would be about the
+  // prompt. This is the state `LockGate`'s launch read establishes on the way
+  // in; the covered cases below take it away deliberately.
+  __setKnownVaultMode("unlocked");
 });
 
 describe("AgentConsent", () => {
@@ -282,11 +289,51 @@ describe("AgentConsent", () => {
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r7", false));
       await act(async () => {
         resetLock();
+        // The unlock's own read, which is what actually lowers a cover: a
+        // store with no mode in it is still covered, so `resetLock` alone
+        // would leave this test asserting the refusal it is the control for.
+        __setKnownVaultMode("unlocked");
       });
       ask("r8", "k8s_evictPod");
       expect(await screen.findByText(/k8s_evictPod/)).toBeTruthy();
       expect(core.respondToConfirm).not.toHaveBeenCalledWith("r8", false);
     });
+
+    /**
+     * The state the branch had left open, and it is the dangerous one: a vault
+     * NOTHING has read.
+     *
+     * `sealed` and the launch check are both written by a mounted `LockGate`.
+     * Before one mounts — a fresh module, a webview reload after `Lock now` —
+     * neither is set, and the store used to answer "not covered" about a vault
+     * it had never read. This component is mounted outside the boot gate on
+     * purpose (a request is emitted once and never replayed), and the MCP
+     * server is a backend process that survives a reload: so a confirm-gated
+     * call could arrive in exactly that window and be put to whoever was at the
+     * keyboard, with an Approve button, over a vault the backend had sealed.
+     *
+     * Not-yet-known counts as covered, so the answer is a refusal.
+     */
+    it("refuses over a vault whose state nothing has read yet", async () => {
+      // No mode: the store as a fresh module has it, and as a reloaded webview
+      // has it. Nothing has been sealed here — that is the point.
+      act(() => __setKnownVaultMode(null));
+      render(<AgentConsent />);
+      ask("r10", "k8s_scale", { name: "api", replicas: 0 });
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r10", false));
+      expect(core.respondToConfirm).not.toHaveBeenCalledWith("r10", true);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.queryByText(/k8s_scale/)).toBeNull();
+    });
+
+    /**
+     * The browser is the other half of that rule, and it is not asserted here:
+     * there is no vault in web mode, so `knownMode` stays `null` for the life
+     * of the page — and this component subscribes to nothing there, so no
+     * request can be delivered to observe the decision on. The store is where
+     * that half is pinned (`LockGate.test.tsx`, "a vault whose state nothing
+     * has read yet"), which is also where the `isTauri()` condition lives.
+     */
 
     /**
      * A refusal that cannot be delivered — the call already timed out — has

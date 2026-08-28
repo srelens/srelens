@@ -25,6 +25,7 @@ import {
   lockWorkspace,
   resetLock,
   useWorkspaceSealed,
+  __setKnownVaultMode,
 } from "./LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
 
@@ -889,5 +890,59 @@ describe("LockGate, reporting that the vault is usable", () => {
     await user.click(screen.getByRole("button", { name: "Unlock workspace" }));
     await waitFor(() => expect(screen.getByTestId("body")).toBeTruthy());
     expect(onReady).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The third fail-open of this shape, and the one the gate cannot close by
+ * itself: a vault whose state NOTHING has read yet.
+ *
+ * `sealed` and `checkingLaunch` are both written by a MOUNTED gate. Before one
+ * mounts — a fresh module, a webview reload, the boot branch this window used
+ * to render with no gate in it at all — both are false and `isCovered()`
+ * answered "not covered" about a vault it had never read. That is a guess
+ * dressed as a fact, and `AgentConsent` spends it on an Approve button: the MCP
+ * server is a backend process that survives a reload, so a confirm-gated call
+ * could arrive in exactly that window and be APPROVED over a vault the backend
+ * had already sealed.
+ *
+ * `knownMode` is the honest three-state record of it — a mode, or `null` for
+ * "no read has landed" — and the rule is that not-yet-known counts as covered.
+ *
+ * **Where a vault exists.** In web mode there is no vault, this gate takes no
+ * read, and `knownMode` stays `null` for the life of the page: a bare
+ * "null means covered" would leave a browser under a permanent cover, or leave
+ * `AgentConsent` refusing every request forever. So the rule is conditioned on
+ * the same `isTauri()` the gate itself decides to read by.
+ */
+describe("LockGate — a vault whose state nothing has read yet", () => {
+  it("counts as covered where a vault exists, before any read has landed", () => {
+    // No gate mounted, and nothing has answered: the store as a fresh module
+    // has it, and as a reloaded webview has it.
+    expect(isWorkspaceSealed()).toBe(true);
+  });
+
+  it("stands a sibling down for it, not only a caller outside a render", () => {
+    render(<Outside />);
+    expect(outside()).toBe("standing down");
+  });
+
+  it("counts as open in web mode, where no read was ever going to be taken", () => {
+    core.isTauri.mockReturnValue(false);
+    expect(isWorkspaceSealed()).toBe(false);
+    render(<Outside />);
+    expect(outside()).toBe("live");
+  });
+
+  /**
+   * The positive control: this must be the ABSENCE of a read talking, not a
+   * store that is now sealed forever. A landed `unlocked` gives the window
+   * back.
+   */
+  it("gives the window back once a read has established a mode", () => {
+    act(() => __setKnownVaultMode("unlocked"));
+    expect(isWorkspaceSealed()).toBe(false);
+    render(<Outside />);
+    expect(outside()).toBe("live");
   });
 });

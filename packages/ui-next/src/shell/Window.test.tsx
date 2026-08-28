@@ -274,7 +274,7 @@ describe("Window boot", () => {
     expect(store.currentWorkspace().clusters).toEqual(["prod"]);
   });
 
-  it("shows a loading state rather than the wrong tabs before boot resolves", () => {
+  it("shows a loading state rather than the wrong tabs before boot resolves", async () => {
     let resolve!: (v: unknown) => void;
     listContexts.mockReturnValue(new Promise((r) => (resolve = r)));
     render(
@@ -283,8 +283,17 @@ describe("Window boot", () => {
       </ConsoleProvider>,
     );
     expect(screen.queryByRole("tablist")).toBeNull();
-    expect(screen.getByText(/loading/i)).toBeDefined();
-    act(() => resolve({ contexts: [] }));
+    // Awaited rather than read on the first paint, and that is the lock gate
+    // above the boot check: it wraps this spinner as well as the band, so the
+    // first thing on screen is its own launch check and the spinner follows
+    // once the vault reports itself open. The window says which of the two it
+    // is waiting on rather than showing one while doing the other.
+    expect(await screen.findByText(/loading/i)).toBeDefined();
+    // Still no tabs, which is the whole of what this test is for.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    await act(async () => {
+      resolve({ contexts: [] });
+    });
   });
 
   it("still boots when reading the saved state throws", async () => {
@@ -995,6 +1004,13 @@ describe("Window, and an agent asking to change something", () => {
    * So the surface is mounted ABOVE the boot gate, and the boot check chooses
    * only the body. Mounted once, not once per branch: two listeners on one
    * channel are two answers to one request.
+   *
+   * And the COVER is above the boot check with it, which is the half this
+   * test pinned backwards for a round — see the refusals below. The `Loading`
+   * spinner is inside the gate now, so finding it is itself the statement that
+   * the launch read ran during boot and found the vault open: the reader is
+   * asked because there is nothing covering the window, not because nothing had
+   * looked.
    */
   it("puts it even while the window is still booting", async () => {
     let finishBoot: () => void = () => {};
@@ -1008,7 +1024,9 @@ describe("Window, and an agent asking to change something", () => {
         <Window ported={[]} onOpenInClassic={() => {}} />
       </ConsoleProvider>,
     );
-    // Still a spinner: no tab strip, no rail, nothing of the band yet.
+    // Still a spinner: no tab strip, no rail, nothing of the band yet — and
+    // the launch read has answered `unlocked`, or the cover would be here
+    // instead of the spinner.
     expect(await screen.findByText("Loading")).toBeTruthy();
     expect(screen.queryByRole("tablist")).toBeNull();
     ask("r4", "k8s_scale", { name: "api" });
@@ -1023,6 +1041,85 @@ describe("Window, and an agent asking to change something", () => {
       finishBoot();
     });
     expect(await screen.findByRole("tablist")).toBeTruthy();
+  });
+
+  /**
+   * The same state over a SEALED vault, and this is the property the test above
+   * was pinning upside down: for one round it approved a `k8s_scale` while the
+   * window was booting with nothing having read the vault at all, and wrote that
+   * down as intended.
+   *
+   * `LockGate` used to live inside the booted branch, so during boot nothing had
+   * called `vaultStatus()`, nothing had raised the cover, and the lock store
+   * answered "not covered" about a vault it had never looked at. The scenario is
+   * ordinary: the webview reloads after `Lock now` — a design switch, a refresh
+   * — while the MCP HTTP server, a backend process, keeps serving. An agent's
+   * confirm-gated call arrives into a fresh module with no gate mounted, and the
+   * prompt was put to whoever was at the keyboard with an Approve button on it,
+   * over a vault the backend had sealed.
+   *
+   * The gate is above the boot check now, so its launch read starts during boot
+   * and the cover is up for the whole of it. The listener is still subscribed —
+   * that is what the refusal proves — and it answers exactly once.
+   */
+  it("refuses rather than approving while the window boots over a sealed vault", async () => {
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    let finishBoot: () => void = () => {};
+    listContexts.mockReturnValue(
+      new Promise((resolve) => {
+        finishBoot = () => resolve({ contexts: [ctx("prod")] });
+      }),
+    );
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    // Boot has not landed and the cover is already up, which is the whole fix.
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    ask("r5", "k8s_scale", { name: "api", replicas: 0 });
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r5", false));
+    // Never approved, and never asked: by name, since the cover is a dialog of
+    // its own.
+    expect(respondToConfirm).not.toHaveBeenCalledWith("r5", true);
+    expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
+    expect(screen.queryByText(/k8s_scale/)).toBeNull();
+    // Answered exactly once, as the approving case pins: the refusal must not
+    // be two listeners agreeing either.
+    expect(respondToConfirm.mock.calls.filter(([id]) => id === "r5")).toHaveLength(1);
+    await act(async () => {
+      finishBoot();
+    });
+  });
+
+  /**
+   * And the state in between, which is the one no mounted gate can rule out:
+   * booting, with the launch read still in flight. "The vault has not answered"
+   * is not "the vault is open" — the same fail-closed this branch already
+   * applies to a read that REFUSED, one step earlier.
+   */
+  it("refuses while the window boots and the launch read has not answered", async () => {
+    vaultStatus.mockReturnValue(new Promise(() => {}));
+    let finishBoot: () => void = () => {};
+    listContexts.mockReturnValue(
+      new Promise((resolve) => {
+        finishBoot = () => resolve({ contexts: [ctx("prod")] });
+      }),
+    );
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    ask("r6", "k8s_deleteResource");
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r6", false));
+    expect(respondToConfirm).not.toHaveBeenCalledWith("r6", true);
+    expect(screen.queryByText(/k8s_deleteResource/)).toBeNull();
+    await act(async () => {
+      finishBoot();
+    });
   });
 
   it("refuses rather than prompting over a sealed window", async () => {
