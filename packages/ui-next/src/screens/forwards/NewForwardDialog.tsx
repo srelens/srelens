@@ -17,6 +17,7 @@ import {
   toKubectl,
 } from "@srelens/core";
 import {
+  Alert,
   Button,
   CopyCommand,
   Dialog,
@@ -414,9 +415,17 @@ export function NewForwardDialog({
   const clash =
     localPort !== null && forwards.some((f) => f.localPort === localPort && !isForwardEnded(f));
 
-  /** The fields the equivalent command still wants, in the order they are read. */
+  /**
+   * The fields the equivalent command still wants, in the order they are read.
+   *
+   * **The namespace is one of them.** `command` is gated on `chosen`, which is
+   * itself gated on the namespace, so a dialog handed a target with no namespace
+   * had three satisfied fields, an empty join, and a line reading "Fill in  to
+   * see it." — with the one field actually missing never named.
+   */
   const missingForCommand = [
     target ? null : "a target",
+    namespace ? null : "a namespace",
     localUsable ? null : "a local port",
     remotePort === null ? "a remote port" : null,
   ]
@@ -504,9 +513,21 @@ export function NewForwardDialog({
       }
     >
       <div className="flex flex-col gap-3 p-3">
-        {/* First, above the target's own name: it changes what that name
-            refers to, and it is the only thing here the reader does not
-            already know. See `lib/clusterMoved`. */}
+        {/* Above even the divergence banner, and for a related reason: a dialog
+            with no cluster pinned cannot list anything and cannot start
+            anything, and the reader is owed that before they read four fields
+            asking them for a target. It is not a divergence — there is nothing
+            to compare — so it is not the moved banner's job. See `Forwards`. */}
+        {!context && (
+          <Alert tone="info" title="No cluster in focus">
+            A forward is made in one cluster, and srelens had none in focus when this was opened —
+            so there is nothing here to list and nothing to forward. This dialog stays on the
+            cluster it was opened against, so put one in focus and open New forward again.
+          </Alert>
+        )}
+        {/* Then the divergence, above the target's own name: it changes what
+            that name refers to, and it is the only thing here the reader does
+            not already know. See `lib/clusterMoved`. */}
         {moved}
         {blocked && <FailureLine error={blocked} className="text-sev" />}
         {failure && <FailureAlert tone="sev" title={failure.title} error={failure.error} />}
@@ -544,7 +565,11 @@ export function NewForwardDialog({
               disabled={namespaces === null || !context}
               placeholder={
                 !context
-                  ? "Pick a cluster in the rail first"
+                  ? // A statement, not an instruction: this dialog is pinned to
+                    // the cluster it was opened against, so a reader who goes
+                    // and picks one in the rail changes nothing here. The alert
+                    // above is where the way out is said.
+                    "Nothing to list without a cluster"
                   : namespaces === null
                     ? "Loading…"
                     : "Choose a namespace"
@@ -598,8 +623,18 @@ export function NewForwardDialog({
                  field. Opened from a port's `Forward` the target, namespace
                  and remote port all arrive filled, and a line reading "choose
                  a target" then asks the reader for the one thing they have
-                 already done. */
-              <span className="text-[0.75rem] text-muted">{`Fill in ${missingForCommand} to see it.`}</span>
+                 already done.
+
+                 The other way there is no command: every field is filled and
+                 `chosen` is still undefined, which is the whole duration of a
+                 namespace change's `listServices`/`listPods` round trip. That
+                 is not a field the reader can fill in, so it gets its own
+                 sentence rather than falling through to an empty join. */
+              <span className="text-[0.75rem] text-muted">
+                {missingForCommand === ""
+                  ? `srelens is still listing what ${namespace} can forward.`
+                  : `Fill in ${missingForCommand} to see it.`}
+              </span>
             )}
           </div>
         </div>

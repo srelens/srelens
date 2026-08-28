@@ -285,10 +285,16 @@ export function Terminals(_props: { route: string }) {
           // Stated, and nothing more — a session writes nothing to the cluster
           // and the terminal it opens is captioned with its own context. Same
           // rule as the row menu's container picker.
+          //
+          // Both names have to be REAL for there to be a divergence to state.
+          // An empty one is not a cluster: pinned `""` against the cluster the
+          // reader selected next read "This still runs against , not prod-eu",
+          // and a rail that lost its selection read "…against prod-eu, not ".
+          // The menu says the no-cluster case itself instead.
           moved={
-            newSession.context !== (cluster?.name ?? "") ? (
-              <ClusterMovedAlert pinned={newSession.context} live={cluster?.name ?? ""}>
-                {` Cancel and open New session again to start one on ${cluster?.name ?? "the cluster in focus"}.`}
+            newSession.context !== "" && cluster && newSession.context !== cluster.name ? (
+              <ClusterMovedAlert pinned={newSession.context} live={cluster.name}>
+                {` Cancel and open New session again to start one on ${cluster.name}.`}
               </ClusterMovedAlert>
             ) : undefined
           }

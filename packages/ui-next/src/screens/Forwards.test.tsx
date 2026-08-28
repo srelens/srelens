@@ -715,6 +715,67 @@ describe("Forwards — the screen around the table", () => {
     expect(screen.queryByRole("checkbox", { name: /Yes, still/ })).toBeNull();
   });
 
+  /**
+   * The rail is EMPTY when the dialog is asked for — every test above this
+   * describe's own cluster fixtures runs that way, and it is the state a reader
+   * is in before anything has connected.
+   *
+   * `useClusterGate` treats a pinned cluster as "nothing to compare" only when
+   * it is `null`; `""` is a pinned cluster, so the door that pinned
+   * `cluster?.name ?? ""` armed a divergence between an empty name and whatever
+   * the reader selected next — a banner reading "This still runs against ,
+   * not prod-eu" and a tick offering to "still forward on .". The dialog says
+   * there is no cluster instead, once, at the top.
+   */
+  it("names no divergence when there was no cluster to pin", async () => {
+    open();
+    const actions = document.querySelector('[data-slot="screen-actions"]') as HTMLElement;
+    await userEvent.click(within(actions).getByRole("button", { name: "New forward" }));
+    await screen.findByRole("dialog");
+
+    // The reader does the one thing the dialog asks: puts a cluster in focus.
+    act(() => withClusters());
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Yes, still/ })).toBeNull();
+    // And no half-named refusal on the way out either.
+    expect(screen.queryByText(/This runs on/)).toBeNull();
+  });
+
+  it("says there is no cluster, rather than a dialog that cannot start and does not say why", async () => {
+    open();
+    const actions = document.querySelector('[data-slot="screen-actions"]') as HTMLElement;
+    await userEvent.click(within(actions).getByRole("button", { name: "New forward" }));
+    await screen.findByRole("dialog");
+    // Said at the top, once, rather than discovered by pressing a dead button:
+    // with no cluster there is nothing to list and nothing to forward.
+    expect(screen.getByText("No cluster in focus")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start forward" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("says nothing about a divergence when the rail empties under the dialog", async () => {
+    // The other direction: opened on prod-eu, and the rail loses its selection
+    // while it is open. The forward still runs on prod-eu — which is what
+    // pinning promised — so there is nothing to compare and nothing to say.
+    withClusters();
+    open();
+    const actions = document.querySelector('[data-slot="screen-actions"]') as HTMLElement;
+    await userEvent.click(within(actions).getByRole("button", { name: "New forward" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu"));
+
+    act(() => resetContexts());
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Yes, still/ })).toBeNull();
+    // Still pinned to the cluster it was opened against — which is exactly why
+    // an empty rail is not news, and why the no-cluster state is not shown
+    // either: this dialog has a cluster.
+    expect(screen.queryByText("No cluster in focus")).toBeNull();
+    expect(core.listNamespaces).toHaveBeenCalledTimes(1);
+    expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu");
+  });
+
   it("opens the SAME dialog from the empty state's way out", async () => {
     // The two buttons share one handler, and the dialog is mounted beside the
     // body rather than inside either branch — so a reader with no tunnels gets

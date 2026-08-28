@@ -442,6 +442,43 @@ describe("Terminals", () => {
     expect(screen.queryByText(/This still runs against/)).toBeNull();
   });
 
+  /**
+   * The rail is EMPTY when the menu is asked for — the state a reader is in
+   * before anything has connected. The door pinned `cluster?.name ?? ""`, and
+   * an empty name is not a cluster: comparing it against the one the reader
+   * selects next produced "This still runs against , not prod-eu" and a
+   * closing sentence naming neither side.
+   */
+  it("names no divergence when there was no cluster to pin", async () => {
+    const user = userEvent.setup();
+    resetContexts();
+    tabs.setState(defaultState([]));
+    draw();
+
+    await user.click(within(headerActions()).getByRole("button", { name: "New session" }));
+    await screen.findByRole("button", { name: "Start session" });
+
+    // The reader puts a cluster in focus while the menu is open.
+    act(() => {
+      setContexts([CTX]);
+      tabs.setState(defaultState([CTX]));
+    });
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+  });
+
+  it("says nothing about a divergence when the rail empties under the menu", async () => {
+    const user = userEvent.setup();
+    draw();
+
+    await user.click(within(headerActions()).getByRole("button", { name: "New session" }));
+    await screen.findByRole("button", { name: "Start session" });
+
+    act(() => resetContexts());
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+  });
+
   it("hands the console a question about the session on screen", async () => {
     await openPod("checkout-api-5c8b7f2d9-mk3wl");
     const user = userEvent.setup();

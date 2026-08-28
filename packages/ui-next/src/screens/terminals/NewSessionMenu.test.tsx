@@ -174,6 +174,28 @@ describe("NewSessionMenu", () => {
     expect(onStarted).toHaveBeenCalledWith(9);
   });
 
+  /**
+   * A local shell is the one kind whose readiness needs no cluster listing to
+   * come back, so it was the one kind that could start with no cluster at all —
+   * `startLocalSession({ context: "" })`, under a hint promising a KUBECONFIG
+   * "scoped to the active cluster". Nothing scopes it, and the shell that comes
+   * up talks to whatever the reader's own kubeconfig points at.
+   */
+  it("will not start a local shell with no cluster to scope it to", async () => {
+    const user = userEvent.setup();
+    render(<NewSessionMenu context="" onStarted={onStarted} onClose={onClose} />);
+
+    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    const start = screen.getByRole("button", { name: "Start session" });
+    expect(start.hasAttribute("disabled")).toBe(true);
+
+    await user.click(start);
+    expect(sessions.startLocalSession).not.toHaveBeenCalled();
+    // And it does not claim a scoping it cannot perform.
+    expect(screen.queryByText(/scoped to the active cluster/)).toBeNull();
+    expect(screen.getByText(/no cluster in focus/i)).toBeTruthy();
+  });
+
   it("starting a local session on the desktop scopes it to the context", async () => {
     const user = userEvent.setup();
     render(

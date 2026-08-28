@@ -197,11 +197,35 @@ describe("NewForwardDialog — what it offers to forward", () => {
     render(<NewForwardDialog context="" onClose={vi.fn()} />);
     await screen.findByRole("dialog");
     expect(
-      within(field("Namespace")).getByRole("option", { name: "Pick a cluster in the rail first" }),
+      within(field("Namespace")).getByRole("option", { name: "Nothing to list without a cluster" }),
     ).toBeTruthy();
     // The point: nothing goes to the backend to be told there is no cluster.
     expect(core.listNamespaces).not.toHaveBeenCalled();
     expect(startButton().disabled).toBe(true);
+  });
+
+  it("says there is no cluster up front, and does not send the reader to the rail for one", async () => {
+    // The dialog is pinned to the cluster it was OPENED against, so a reader
+    // who follows "pick a cluster in the rail first" changes nothing about this
+    // dialog — it stays pinned to no cluster and can never start. It used to
+    // arm the divergence banner instead, which then named neither side. Said
+    // here, once, with the way out being to open it again.
+    render(<NewForwardDialog context="" onClose={vi.fn()} />);
+    await screen.findByRole("dialog");
+
+    const alert = screen.getByText("No cluster in focus").closest("[data-tone]");
+    expect(alert).toBeTruthy();
+    expect(alert?.textContent).toMatch(/open New forward again/i);
+    // No instruction anywhere that the reader could follow and be worse off.
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).not.toMatch(/in the rail first/i);
+  });
+
+  it("says nothing about a missing cluster when it has one", async () => {
+    open();
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith(CONTEXT));
+    expect(screen.queryByText("No cluster in focus")).toBeNull();
   });
 
   it("says so when the namespaces cannot be listed, in words rather than in Rust", async () => {
@@ -624,6 +648,35 @@ describe("NewForwardDialog — opened from the thing being forwarded", () => {
     await userEvent.clear(field("Remote port"));
     expect(await screen.findByText("Fill in a remote port to see it.")).toBeTruthy();
     expect(screen.queryByText(/a target/)).toBeNull();
+  });
+
+  it("names the namespace when that is the field the command still wants", async () => {
+    // A door that hands over a target but no namespace: the target, both ports
+    // and `localUsable` are all satisfied, and the one thing missing is the
+    // namespace — which was left out of the list entirely, so the join came out
+    // empty and the line read "Fill in  to see it."
+    render(<NewForwardDialog context={CONTEXT} target={POD_TARGET} onClose={vi.fn()} />);
+    await screen.findByRole("dialog");
+
+    expect(screen.getByText("Fill in a namespace to see it.")).toBeTruthy();
+    expect(screen.queryByText("Fill in  to see it.")).toBeNull();
+  });
+
+  it("says the listing is still out rather than asking for fields that are filled", async () => {
+    // The whole duration of a namespace change's round trip: the target the
+    // reader arrived with is not in the new namespace's listing yet, so
+    // `chosen` is undefined while every field the old list checked is filled.
+    // "Fill in  to see it." was what that state printed.
+    core.listServices.mockReturnValue(new Promise(() => {}));
+    core.listPods.mockReturnValue(new Promise(() => {}));
+    openOn(POD_TARGET);
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalled());
+
+    await userEvent.selectOptions(field("Namespace"), "payments");
+
+    expect(screen.queryByText("Fill in  to see it.")).toBeNull();
+    expect(screen.getByText("srelens is still listing what payments can forward.")).toBeTruthy();
   });
 
   it("prefills nothing when there is no target — the screen's own way in, unchanged", async () => {

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Button } from "@srelens/ui-kit";
+import { useClusterGate } from "../../lib/clusterMoved";
 import { NewForwardDialog } from "./NewForwardDialog";
 
 export interface ForwardActionProps {
@@ -46,7 +47,23 @@ export interface ForwardActionProps {
  *
  * The dialog is mounted only while open, per control. Radix portals it, so
  * where in the table this sits does not decide where it draws, and a control
- * that is never clicked costs a boolean.
+ * that is never clicked costs nothing but the pin below.
+ *
+ * **The cluster is pinned at the GESTURE**, which is the rule every other door
+ * into this dialog follows — `Forwards`' header action and `ResourceMenu`'s row
+ * menu both capture the rail's selection on the click, never read it live. This
+ * one is drawn inside a detail screen whose `context` is `useActiveContext`, so
+ * the prop follows the rail; passed straight through, everything the dialog had
+ * already been told belonged to one cluster while the forward went to another.
+ *
+ * That did not misfire today only because `useObject`'s render-time gate returns
+ * no object the instant the context changes: the Ports table unmounts, and this
+ * control and its dialog are destroyed with it, so the reader loses a
+ * half-filled dialog instead. Pinning cannot rescue the reader from that
+ * unmount — nothing inside a destroyed subtree can — but it is the difference
+ * between losing a dialog and starting a tunnel on the wrong cluster the day
+ * anything keeps the last object on screen while it refetches. See
+ * `lib/clusterMoved`.
  */
 export function ForwardAction({
   context,
@@ -57,7 +74,15 @@ export function ForwardAction({
   label,
   children,
 }: ForwardActionProps) {
-  const [open, setOpen] = useState(false);
+  /** The cluster the forward will be made in, captured on the click. */
+  const [pinned, setPinned] = useState<{ context: string; namespace: string } | null>(null);
+  /**
+   * What the dialog says, and asks again, when the rail moves out from under it
+   * — wired exactly as the other two doors wire it. A forward exposes a port and
+   * then reports it as up, which is why this re-arms the confirmation rather
+   * than only stating the divergence.
+   */
+  const gate = useClusterGate({ pinned: pinned?.context ?? null, live: context, verb: "forward" });
 
   return (
     <>
@@ -66,16 +91,27 @@ export function ForwardAction({
         variant="ghost"
         size="xs"
         aria-label={label}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          gate.reset();
+          setPinned({ context, namespace });
+        }}
       >
         {children}
       </Button>
-      {open && (
+      {pinned && (
         <NewForwardDialog
-          context={context}
-          namespace={namespace}
+          // The pin, not the props: the namespace goes with the cluster it was
+          // read out of, or the dialog would list one cluster's namespaces
+          // under the other's name.
+          context={pinned.context}
+          namespace={pinned.namespace}
           target={{ kind, name, remotePort }}
-          onClose={() => setOpen(false)}
+          moved={gate.alert}
+          refusal={gate.refusal}
+          onClose={() => {
+            setPinned(null);
+            gate.reset();
+          }}
         />
       )}
     </>

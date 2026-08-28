@@ -252,9 +252,23 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
     else void startLocal();
   }
 
+  /**
+   * A local shell needs a cluster too — that is the whole of what makes it
+   * srelens's local shell rather than a terminal.
+   *
+   * Pod and node are gated on a pick out of a listing, and with no cluster
+   * there is no listing to pick from, so neither could ever be ready. Local was
+   * the exception: `true` unconditionally, so `startLocalSession({ context: ""
+   * })` would run and spawn a shell with nothing scoped into its KUBECONFIG —
+   * under a hint that said the opposite.
+   */
   const ready =
     !busy &&
-    (kind === "pod" ? Boolean(namespace && pod) : kind === "node" ? Boolean(node) : true);
+    (kind === "pod"
+      ? Boolean(namespace && pod)
+      : kind === "node"
+        ? Boolean(node)
+        : Boolean(context));
 
   const namespaceOptions = (namespaces ?? []).map((n) => ({ value: n }));
   const podOptions = (pods ?? []).map((p) => ({ value: p }));
@@ -281,7 +295,19 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
       }
     >
       <div className="flex flex-col gap-3 p-3">
-        {/* First, above the kind and everything under it: see
+        {/* Above even the divergence banner, and not part of it: with no
+            cluster there is nothing to compare, and every kind below needs one.
+            Said once, at the top, rather than left for the reader to discover
+            from three empty selects and a dead button. */}
+        {!context && (
+          <Alert tone="info" title="No cluster in focus">
+            Every kind here is started in a cluster — a shell in one of its pods, one on one of its
+            nodes, or a local shell with that cluster scoped into KUBECONFIG. srelens had none in
+            focus when this menu was opened, and the menu stays on the cluster it was opened
+            against, so put one in focus and open New session again.
+          </Alert>
+        )}
+        {/* Then the divergence, above the kind and everything under it: see
             {@link NewSessionMenuProps.moved}. */}
         {moved}
         {failure && <FailureAlert tone="sev" title={failure.title} error={failure.error} />}
@@ -382,7 +408,12 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
 
         {kind === "local" && (
           <div className="text-[0.75rem] text-muted">
-            {`Opens a shell on this machine, with KUBECONFIG scoped to ${context || "the active cluster"}.`}
+            {context
+              ? `Opens a shell on this machine, with KUBECONFIG scoped to ${context}.`
+              : // Never "the active cluster": the scoping is to the cluster this
+                // menu was PINNED to, and with none there is no scoping to
+                // promise. The alert above says what to do about it.
+                "A local shell is scoped to the cluster this menu was opened against, and there was none."}
           </div>
         )}
       </div>

@@ -273,7 +273,17 @@ export function Forwards(_props: { route: string }) {
    * why this re-arms the confirmation rather than only stating the divergence.
    */
   const forwardGate = useClusterGate({
-    pinned: newForward?.context ?? null,
+    // An EMPTY name on either side is "nothing to compare", not a cluster.
+    // `useClusterGate` reads only `null` that way, so a door that pinned
+    // `cluster?.name ?? ""` armed a divergence between no cluster and whatever
+    // the reader selected next: "This still runs against , not prod-eu", a tick
+    // offering to "still forward on .", and a refusal naming neither side. Both
+    // ends are legitimate states of this screen — it lists every cluster's
+    // forwards, so it is reachable with nothing in focus — and neither is a
+    // divergence. A dialog opened with no cluster says so itself, at the top
+    // (see `NewForwardDialog`); a rail that later loses its selection changes
+    // nothing about the cluster the forward was pinned to.
+    pinned: cluster && newForward?.context ? newForward.context : null,
     live: cluster?.name ?? "",
     verb: "forward",
   });
