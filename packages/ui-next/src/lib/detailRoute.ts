@@ -27,7 +27,9 @@ export interface DetailRouteParts {
 }
 
 /**
- * The inverse of `detailRoute`. Parsed by counting segments after splitting
+ * The inverse of `detailRoute`, or `null` for anything it cannot make a
+ * subject of — a route of the wrong arity, and a route whose segments will not
+ * decode. Parsed by counting segments after splitting
  * on `/`, not by pattern-matching — a decoded name can contain anything,
  * including characters that would otherwise look like part of the route's
  * shape.
@@ -42,9 +44,19 @@ export function parseDetailRoute(route: string): DetailRouteParts | null {
   const [empty, k, rawKind, rawNamespace, rawName] = segments;
   if (empty !== "" || k !== "k") return null;
   if (!rawKind || !rawNamespace || !rawName) return null;
-  return {
-    kind: decodeURIComponent(rawKind),
-    namespace: rawNamespace === CLUSTER_SCOPED_SEGMENT ? null : decodeURIComponent(rawNamespace),
-    name: decodeURIComponent(rawName),
-  };
+  try {
+    return {
+      kind: decodeURIComponent(rawKind),
+      namespace: rawNamespace === CLUSTER_SCOPED_SEGMENT ? null : decodeURIComponent(rawNamespace),
+      name: decodeURIComponent(rawName),
+    };
+  } catch {
+    // A malformed escape (`%zz`, a truncated multi-byte sequence) makes
+    // `decodeURIComponent` THROW. `parseLogsRoute` in `screens/Logs.tsx`
+    // explains why that matters at length, and every word of it applies here:
+    // this parser also runs during render over persisted routes, so a throw
+    // is the whole window failing to boot rather than one bad tab. `null` is
+    // this function's existing answer for a route it cannot make a subject of.
+    return null;
+  }
 }

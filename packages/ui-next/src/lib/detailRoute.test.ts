@@ -24,6 +24,24 @@ describe("detailRoute", () => {
     }
   });
 
+  it("refuses a segment that cannot be decoded, rather than throwing", () => {
+    // The hazard `parseLogsRoute` documents at length, in the five-segment
+    // parser next door: this one also runs DURING RENDER over persisted
+    // routes — `describe` and `screenFor` both call it — so a `URIError` here
+    // is the whole new-design window failing to boot off one corrupted string
+    // in storage, not a bad tab. `null` is this function's existing answer
+    // for a route it cannot make a subject of.
+    expect(parseDetailRoute("/k/Pod/default/%zz")).toBeNull();
+    expect(parseDetailRoute("/k/%e0%a4%a/default/web-1")).toBeNull();
+    expect(parseDetailRoute("/k/Pod/%/web-1")).toBeNull();
+    // Every other segment decodes fine; the route is still refused rather
+    // than returning a half-decoded subject.
+    expect(parseDetailRoute("/k/Pod/%zz/web-1")).toBeNull();
+    // A cluster-scoped route never decodes its namespace segment, so the name
+    // is the only one left that can break this one.
+    expect(parseDetailRoute("/k/Node/-/%zz")).toBeNull();
+  });
+
   it("refuses a route that is not a detail route", () => {
     expect(parseDetailRoute("/k/pods")).toBeNull(); // a LIST route
     expect(parseDetailRoute("/k/Pod/default")).toBeNull(); // too few segments

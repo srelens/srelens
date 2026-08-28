@@ -346,6 +346,20 @@ describe("Window boot", () => {
     expect(screen.getByRole("tablist")).toBeDefined();
   });
 
+  it("boots with a persisted detail tab whose route cannot be decoded", async () => {
+    // `parseDetailRoute` runs DURING RENDER on every restored tab, through
+    // both `describe` (the strip's title) and `screenFor` (the body). A
+    // `URIError` there is not a bad tab: it is this window failing to mount
+    // at all, off one corrupted string in storage. The same property
+    // `Logs.test.tsx` pins for the five-segment logs parser next door.
+    const saved = defaultState([ctx("prod")]);
+    saved.workspaces[0].tabs.push(makeTab("/k/Pod/default/%zz"));
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    expect(screen.getByRole("tablist")).toBeDefined();
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/default/%zz")).toBe(true);
+  });
+
   it("saves on every store change after boot, and flushes on unload", async () => {
     await booted();
     expect(installFlushOnUnload).toHaveBeenCalled();
