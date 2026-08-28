@@ -406,7 +406,10 @@ export function LogsView({
   }
 
   // Full dump: every container of every in-scope pod, ignoring the container
-  // filter, each section headed `==> pod/container <==` (tail-style).
+  // filter, each section headed `==> pod/container <==` (tail-style). Asks
+  // for every retained line and leaves the view's tail/since bounds out:
+  // inheriting them made "all" mean "the last 200 lines" (#353). `previous`
+  // and `timestamps` still apply — they pick which stream, not how much.
   function downloadAll() {
     const base = srcType === "pod" ? srcPod : srcName;
     setSaveError("");
@@ -421,8 +424,7 @@ export function LogsView({
             container: c,
             previous,
             timestamps,
-            tailLines,
-            sinceSeconds,
+            allLines: true,
           });
           parts.push(`==> ${p}${c ? `/${c}` : ""} <==`);
           parts.push(out.error ? `(error: ${out.error})` : out.logs ?? "");
@@ -540,10 +542,10 @@ export function LogsView({
           <IconButton icon={Download} label="Download" onClick={download} disabled={entries.length === 0} />
           <IconButton
             icon={DownloadCloud}
-            label="Download all containers"
+            label="Download all container logs"
             onClick={downloadAll}
             disabled={savingAll || targetPods.length === 0}
-            title="Download every container's logs for the in-scope pods"
+            title="Save everything the cluster still holds for every container of these pods, not just the lines shown here"
           />
           <IconButton icon={RefreshCw} label="Refresh" onClick={() => load()} disabled={follow || loading} />
         </div>

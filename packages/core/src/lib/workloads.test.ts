@@ -87,6 +87,24 @@ describe("podLogs", () => {
     });
   });
 
+  it("asks for every retained line with all_lines, and omits it when false", async () => {
+    const invoke = vi.fn().mockResolvedValue({ logs: "" });
+    await podLogs("kind-dev", "default", "web-1", invoke, { allLines: true });
+    expect(invoke).toHaveBeenCalledWith("k8s.podLogs", {
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+      all_lines: true,
+    });
+    await podLogs("kind-dev", "default", "web-1", invoke, { allLines: false, tailLines: 50 });
+    expect(invoke).toHaveBeenLastCalledWith("k8s.podLogs", {
+      context: "kind-dev",
+      namespace: "default",
+      pod: "web-1",
+      tail_lines: 50,
+    });
+  });
+
   it("omits options that are falsy or unset", async () => {
     const invoke = vi.fn().mockResolvedValue({ logs: "" });
     await podLogs("kind-dev", "default", "web-1", invoke, { container: "app", previous: false });
