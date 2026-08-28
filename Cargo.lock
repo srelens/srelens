@@ -5902,7 +5902,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-agent"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5910,7 +5910,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-capability"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -5921,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-desktop"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -5962,7 +5962,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-kube"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5988,7 +5988,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-llm"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -6002,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-mcp"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -6021,7 +6021,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-registry"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "dirs",
  "reqwest 0.13.4",
@@ -6037,7 +6037,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-server"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -6069,7 +6069,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-streams"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "portable-pty",
  "serde",
