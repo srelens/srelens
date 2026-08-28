@@ -429,6 +429,128 @@ describe("a node session's debug pod", () => {
     expect(deletePod).toHaveBeenCalledTimes(1);
   });
 
+  it("deletes the debug pod when the shell exits on its own, and keeps the closed row", async () => {
+    // The leak: `close` disconnected and marked the row `closed` and stopped
+    // there, so a node shell that simply exited — or whose exec connection
+    // dropped — left the privileged debug pod, with host PID, network and IPC
+    // namespaces, sleeping on the node indefinitely. Only dismissing the row
+    // cleaned it up, so closing the app without dismissing kept it forever.
+    const backend = fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    backend.out("root@node:/# exit\r\n");
+    await vi.waitFor(() => expect(screenOf(terminalFor(id))).toEqual(["root@node:/# exit"]));
+    backend.exit(null);
+
+    await vi.waitFor(() => {
+      expect(deletePod).toHaveBeenCalledWith(
+        "kind-srelens-demo",
+        "srelens-debug",
+        "srelens-node-debug-x1",
+      );
+    });
+    // The row and its scrollback survive: it carries why the session died, and
+    // is the only record the reader has of it. Cleaning up the cluster is not
+    // a reason to clear the screen.
+    const rows = getSessions();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe("closed");
+    expect(screenOf(terminalFor(id))).toEqual(["root@node:/# exit"]);
+  });
+
+  it("deletes the debug pod when the exec connection drops, and the row keeps the reason", async () => {
+    const backend = fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    backend.exit("handler error: connection reset by peer");
+
+    await vi.waitFor(() => expect(deletePod).toHaveBeenCalledTimes(1));
+    const row = getSessions().find((s) => s.id === id);
+    expect(row?.state).toBe("closed");
+    // Still described, not raw — the cleanup must not have displaced the
+    // reason, which is what this row is for.
+    expect(row?.error).toBeDefined();
+    expect(row?.error).not.toContain("handler error:");
+  });
+
+  it("deletes the debug pod when the exec never opened at all", async () => {
+    // `startPodSession` records the pod BEFORE the connect, so a node session
+    // RBAC refused has a debug pod on the cluster and no shell that will ever
+    // reach it. `connect`'s catch goes through `close`, so this is the same
+    // path.
+    startPodExec.mockRejectedValue("handler error: pods is forbidden");
+    const id = await startPodSession(nodeDebugPod);
+
+    await vi.waitFor(() => expect(deletePod).toHaveBeenCalledTimes(1));
+    expect(getSessions().find((s) => s.id === id)?.state).toBe("closed");
+  });
+
+  it("deletes the debug pod once when the shell exits and the reader then dismisses the row", async () => {
+    // The two cleanup paths must not both act: `close` takes the entry out of
+    // the map before it deletes, exactly as `endSession` does, so whichever
+    // runs second finds nothing left to delete rather than firing a second
+    // delete at a pod that is already gone.
+    const backend = fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    backend.exit(null);
+    await vi.waitFor(() => expect(deletePod).toHaveBeenCalledTimes(1));
+
+    endSession(id);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(deletePod).toHaveBeenCalledTimes(1);
+    expect(getSessions()).toEqual([]);
+  });
+
+  it("deletes nothing when an ordinary pod shell exits on its own", async () => {
+    // `close` runs for every session kind, and only a node session has an
+    // entry in the map. Deleting a pod the reader is merely looking at would
+    // be the wrong kind of cleanup entirely.
+    const backend = fakeBackend();
+    await startPodSession(pod);
+
+    backend.exit(null);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deletePod).not.toHaveBeenCalled();
+  });
+
+  it("deletes nothing when a local shell exits on its own", async () => {
+    const backend = fakeBackend();
+    await startLocalSession({ context: "kind-srelens-demo" });
+
+    backend.exit(null);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deletePod).not.toHaveBeenCalled();
+  });
+
+  it("leaves the closed row standing when the cleanup itself fails", async () => {
+    // A failed delete has nowhere to land on the row — the row is about why the
+    // SHELL died, and overwriting that with a cleanup failure would answer a
+    // question the reader did not ask. It goes to `notify`, described, and the
+    // closed row and its reason are untouched.
+    deletePod.mockResolvedValue({ error: 'handler error: pods "srelens-node-debug-x1" is forbidden' });
+    const backend = fakeBackend();
+    const id = await startPodSession(nodeDebugPod);
+
+    backend.exit("handler error: command terminated with exit code 130");
+
+    await vi.waitFor(() => expect(notifyError).toHaveBeenCalled());
+    const row = getSessions().find((s) => s.id === id);
+    expect(row?.state).toBe("closed");
+    expect(row?.error).toContain("130");
+    const [, detail] = notifyError.mock.calls[0] as [string, string];
+    expect(detail).not.toContain("handler error:");
+    // Classified by `describeError`, so what the reader is shown is the
+    // sentence about permission and not the backend's wrapper.
+    expect(detail).toContain("permission");
+  });
+
   it("reports a failed delete through describeError, without stranding the row", async () => {
     deletePod.mockResolvedValue({ error: 'handler error: pods "srelens-node-debug-x1" not found' });
     fakeBackend();

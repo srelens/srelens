@@ -37,9 +37,10 @@ import {
  */
 
 /** What kind of shell a session is. `node` is a pod exec into the privileged
- *  debug pod srelens created for a node — the store deletes that pod when the
- *  session ends (see {@link endSession}), which is the cleanup a pod exec and
- *  a local shell have nothing to do. */
+ *  debug pod srelens created for a node — the store deletes that pod as soon
+ *  as the session is over, whether the far end went on its own or the reader
+ *  dismissed the row (see {@link takeDebugPod}), which is the cleanup a pod
+ *  exec and a local shell have nothing to do. */
 export type SessionKind = "pod" | "node" | "local";
 
 /**
@@ -135,9 +136,10 @@ const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
  * anything: deleting a pod the reader is merely looking at would be the wrong
  * kind of cleanup.
  *
- * Entries come out the moment {@link endSession} acts on them, which is also
- * what keeps the delete to once: a second `endSession` on the same id finds
- * nothing left to clean up.
+ * Entries come out through {@link takeDebugPod}, the moment either cleanup path
+ * acts on them — {@link close} when the far end goes, {@link endSession} when
+ * the reader dismisses the row — and that take is what keeps the delete to
+ * once: whichever runs second finds nothing left to clean up.
  */
 const nodeDebugPods = new Map<number, { context: string; namespace: string; pod: string }>();
 
@@ -241,24 +243,40 @@ export function endSession(id: number): void {
   disconnect(id);
   emulators.get(id)?.dispose();
   emulators.delete(id);
-  // Taken out of the map here, synchronously, rather than after the delete
-  // resolves: that is what makes a second `endSession(id)` — the row is
-  // already gone, but nothing stops the reader clicking again — find nothing
-  // left to delete, instead of racing the first delete or firing a second one.
-  const debugPod = nodeDebugPods.get(id);
-  nodeDebugPods.delete(id);
+  const debugPod = takeDebugPod(id);
   if (debugPod) void deleteDebugPod(debugPod);
   commit(sessions.filter((s) => s.id !== id));
 }
 
 /**
+ * Claim this session's debug pod, if it still has one to clean up.
+ *
+ * The whole point is the take: the entry leaves the map SYNCHRONOUSLY, before
+ * any delete is issued, so of the two paths that clean up — {@link close} when
+ * the far end goes, {@link endSession} when the reader dismisses the row — the
+ * second one to run finds nothing and does nothing. Either order, and a second
+ * call on the same id is a no-op rather than a delete aimed at a pod that is
+ * already gone.
+ *
+ * `undefined` for a pod exec or a local shell, neither of which created
+ * anything, and for a node session already cleaned up.
+ */
+function takeDebugPod(id: number): { context: string; namespace: string; pod: string } | undefined {
+  const target = nodeDebugPods.get(id);
+  nodeDebugPods.delete(id);
+  return target;
+}
+
+/**
  * Delete the debug pod a finished node session leaves behind.
  *
- * The row is already gone by the time this runs — `endSession` does not wait
- * on it — so a failure has nowhere on screen to land. It goes to `notify`
- * instead, described rather than raw: the pod may already be gone, or the
- * reader may lack permission to delete it, and either way `deletePod` itself
- * never throws, so the row is never left stranded waiting on this.
+ * Fire-and-forget from both callers: neither waits on it, so a failure has
+ * nowhere to land on the row. Nor should it land there — a row that closed
+ * says why the SHELL died, and overwriting that with a cleanup failure would
+ * answer a question the reader never asked. It goes to `notify` instead,
+ * described rather than raw: the pod may already be gone, or the reader may
+ * lack permission to delete it, and either way `deletePod` itself never throws,
+ * so a terminal that has already closed is never stranded waiting on this.
  */
 async function deleteDebugPod(target: { context: string; namespace: string; pod: string }): Promise<void> {
   const out = await deletePod(target.context, target.namespace, target.pod);
@@ -402,7 +420,8 @@ function markIdle(id: number) {
 }
 
 /**
- * The far end is gone. The row STAYS, marked `closed`, carrying why.
+ * The far end is gone. The row STAYS, marked `closed`, carrying why — and a
+ * node session's debug pod does NOT.
  *
  * `reason` is whatever the backend gave — a clean exit gives nothing, and a
  * row that already recorded a reason keeps it rather than being overwritten by
@@ -412,6 +431,14 @@ function markIdle(id: number) {
  */
 function close(id: number, reason: unknown) {
   disconnect(id);
+  // The debug pod goes NOW, not when the reader gets round to dismissing the
+  // row. A node shell that exits normally, or whose exec connection drops,
+  // used to leave a privileged pod — host PID, network and IPC namespaces —
+  // sleeping on the node indefinitely, and closing the app without dismissing
+  // the row left it there for good. `takeDebugPod` is what keeps this to one
+  // delete between here and `endSession`, either order.
+  const debugPod = takeDebugPod(id);
+  if (debugPod) void deleteDebugPod(debugPod);
   const error = describedReason(reason);
   commit(
     sessions.map((s) => {
