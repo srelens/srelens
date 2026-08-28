@@ -102,6 +102,30 @@ describe("Mark", () => {
     expect(screen.getByTestId("glyph")).toBeDefined();
   });
 
+  it("draws a later valid image after an earlier one failed", () => {
+    // The failure belongs to the source that failed, not to the component: the
+    // editor keeps three marks mounted across every edit, so a corrupt image
+    // picked once would otherwise strand the preview on the fallback until the
+    // dialog closed, however many good images followed.
+    const { container, rerender } = render(<Mark name="prod" icon={Glyph} imageSrc="/gone.png" />);
+    fireEvent.error(container.querySelector("img") as HTMLImageElement);
+    expect(container.querySelector("img")).toBeNull();
+
+    rerender(<Mark name="prod" icon={Glyph} imageSrc="/good.png" />);
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/good.png");
+  });
+
+  it("keeps falling back for the source that failed, across an unrelated edit", () => {
+    // The other half of the pair above: re-rendering must not un-fail an image
+    // that is still the one that could not load.
+    const { container, rerender } = render(<Mark name="prod" icon={Glyph} imageSrc="/gone.png" />);
+    fireEvent.error(container.querySelector("img") as HTMLImageElement);
+
+    rerender(<Mark name="prod" short="xy" icon={Glyph} imageSrc="/gone.png" />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("glyph")).toBeDefined();
+  });
+
   it("rides the short text along the bottom of a glyph mark", () => {
     const { container } = render(<Mark name="prod-eu-west" short="pew" icon={Glyph} />);
     expect(badge(container)?.textContent).toBe("PEW");

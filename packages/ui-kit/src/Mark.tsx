@@ -77,14 +77,22 @@ export function Mark({
 }: MarkProps) {
   // An image that will not load is a state, not an error to report: the mark
   // beneath it is a perfectly good answer, so fall through to it silently.
-  const [broken, setBroken] = useState(false);
+  //
+  // WHICH source failed, not a boolean: the mark outlives the source it is
+  // drawing. {@link CustomizeMark} keeps three of these mounted across every
+  // edit, so a flag would have latched on the first corrupt image the reader
+  // picked and shown the fallback for every good one after it; the rail does
+  // the same to a mark whose truncated stored data URL is later repaired. A
+  // `key` on the `<img>` would remount the element but leave a flag set, so it
+  // is no substitute.
+  const [failed, setFailed] = useState<string>();
   const px = SIZES[size];
 
   // `filled` rather than a null check: `short={custom && override.short}` is how
   // a caller makes this conditional and it hands over `false`, and an empty
   // string is the case that drew a blank square.
   const text = (filled(short) ? String(short) : initials(name)).slice(0, MAX_SHORT).toUpperCase();
-  const image = filled(imageSrc) && !broken ? String(imageSrc) : undefined;
+  const image = filled(imageSrc) && imageSrc !== failed ? String(imageSrc) : undefined;
   const label = name.trim() || text;
 
   // A glyph or an image says nothing about which one this is, so the short text
@@ -126,7 +134,7 @@ export function Mark({
             // it here would announce it twice.
             alt=""
             className="h-full w-full object-cover"
-            onError={() => setBroken(true)}
+            onError={() => setFailed(image)}
           />
         ) : Icon !== undefined ? (
           <Icon
