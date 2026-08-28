@@ -71,6 +71,26 @@ function holding(localPort: number): ActiveForward {
   };
 }
 
+/**
+ * A forward that GAVE UP: the row core keeps on screen after a tunnel
+ * exhausted its retries. `failed` is the one status `isForwardEnded` calls
+ * ended, and the backend's task — which owned the `TcpListener` — is gone with
+ * it, so the local port is free even though the row is still listed.
+ */
+function dead(localPort: number): ActiveForward {
+  return { ...holding(localPort), id: 2, status: "failed", error: "connection refused" };
+}
+
+/**
+ * A forward that is between attempts. Still alive, still holding its listener:
+ * `AttemptCtx` (and the socket in it) lives across the reconnect loop's
+ * attempts, so this port is NOT free. The half that keeps `dead` above honest —
+ * without it, "exclude what is not active" would pass the same assertion.
+ */
+function flapping(localPort: number): ActiveForward {
+  return { ...holding(localPort), id: 3, status: "reconnecting", error: "connection reset" };
+}
+
 let opened: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -234,6 +254,39 @@ describe("NewForwardDialog — the port clash", () => {
     open();
     await fillIn({ local: "9090", remote: "" });
     expect(startButton().disabled).toBe(true);
+  });
+
+  // A dead row is HISTORY, not a claim on the port. Core keeps a forward that
+  // gave up on screen deliberately (a tunnel that died underneath the reader is
+  // news), and dismissing it is a separate gesture — so counting it here made
+  // the reader clear the history of the failure before they could retry it,
+  // which is the one thing they came back to the dialog to do.
+  it("lets a port that a failed forward gave up on be forwarded again", async () => {
+    store.list = [dead(8080)];
+    open();
+    await fillIn({ local: "8080" });
+
+    expect(screen.queryByText(/already forwarded/)).toBeNull();
+    expect(startButton().disabled).toBe(false);
+    // Not merely enabled: the retry actually goes out, on the same port.
+    await userEvent.click(startButton());
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
+    expect(core.startPortForward).toHaveBeenCalledWith(
+      expect.objectContaining({ localPort: 8080 }),
+    );
+  });
+
+  // The boundary `isForwardEnded` draws, asserted from this side too: only
+  // `failed` frees the port. A tunnel that is reconnecting kept its listener,
+  // so its number is still taken and §A.4's error still stands.
+  it("still refuses a port a reconnecting forward is holding", async () => {
+    store.list = [flapping(8080)];
+    open();
+    await fillIn({ local: "8080" });
+
+    expect(screen.getByText("Port 8080 is already forwarded.")).toBeTruthy();
+    expect(startButton().disabled).toBe(true);
+    expect(core.startPortForward).not.toHaveBeenCalled();
   });
 });
 

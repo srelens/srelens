@@ -5,6 +5,7 @@ import {
   describeError,
   forwardAddress,
   getForwards,
+  isForwardEnded,
   kindToForwardTarget,
   listNamespaces,
   listPods,
@@ -393,8 +394,25 @@ export function NewForwardDialog({
   const localBlank = localText.trim() === "";
   const localUsable = localBlank || localPort !== null;
 
-  /** §A.4's one field error, decided against the live store. */
-  const clash = localPort !== null && forwards.some((f) => f.localPort === localPort);
+  /**
+   * §A.4's one field error, decided against the live store — and against the
+   * forwards in it that still HOLD a port.
+   *
+   * A tunnel that gave up keeps its row: core marks it ended rather than
+   * deleting it, because a forward that died underneath the reader is news
+   * (see `endForward`), and dismissing the row is its own gesture. But its
+   * task has returned, and the backend's `TcpListener` lived inside that task,
+   * so the number is free — counting it here made the one thing the reader
+   * came back for, retrying the tunnel that had just failed on the port it
+   * failed on, impossible until they had first cleared its history.
+   *
+   * `isForwardEnded` is the only thing allowed to decide which rows those are,
+   * and it draws the line exactly where the socket does: `reconnecting` is not
+   * ended, and it is still holding its listener between attempts, so a
+   * flapping tunnel's port still clashes.
+   */
+  const clash =
+    localPort !== null && forwards.some((f) => f.localPort === localPort && !isForwardEnded(f));
 
   /** The fields the equivalent command still wants, in the order they are read. */
   const missingForCommand = [
