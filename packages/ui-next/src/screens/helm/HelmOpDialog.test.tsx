@@ -600,6 +600,68 @@ describe("HelmOpDialog — rollback's gate", () => {
     expect(button("Roll back").disabled).toBe(true);
   });
 
+  /**
+   * The consent is stored as the REVISION it was given against — the shape
+   * `lib/clusterMoved` settled on for the same defect one prop over. A tick
+   * that outlived the number it was about is a rollback to a revision nobody
+   * agreed to, and a rollback replaces what is running.
+   */
+  it("asks again when the target moves under a ticked box", async () => {
+    open({ kind: "rollback", history: HISTORY, revision: 4 });
+    await screen.findByRole("dialog");
+    const box = () => screen.getByRole("checkbox") as HTMLInputElement;
+
+    await userEvent.click(box());
+    expect(box().checked).toBe(true);
+    expect(button("Roll back to 3").disabled).toBe(false);
+
+    const target = hintedField("Target revision");
+    await userEvent.clear(target);
+    await userEvent.type(target, "1");
+
+    // The box was ticked for revision 3, and the button now offers 1.
+    expect(box().checked).toBe(false);
+    expect(button("Roll back to 1").disabled).toBe(true);
+    // And the label asks about the revision in the field, not the one it was
+    // first drawn for.
+    expect(box().closest("label")?.textContent).toContain("revision 1");
+
+    await userEvent.click(box());
+    expect(button("Roll back to 1").disabled).toBe(false);
+  });
+
+  it("rolls back to the revision the box was ticked for, and no other", async () => {
+    open({ kind: "rollback", history: HISTORY, revision: 4 });
+    await screen.findByRole("dialog");
+    await userEvent.click(screen.getByRole("checkbox"));
+
+    const target = hintedField("Target revision");
+    await userEvent.clear(target);
+    await userEvent.type(target, "1");
+    // Pressed while the consent is stale: `Roll back to 1` is dead, so nothing
+    // reaches the store.
+    await userEvent.click(button("Roll back to 1"));
+    expect(store.startHelmOperation).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("checkbox"));
+    await userEvent.click(button("Roll back to 1"));
+    expect(store.startHelmOperation).toHaveBeenCalledTimes(1);
+    expect(store.startHelmOperation.mock.calls[0][0].args).toContain("1");
+  });
+
+  it("consents to nothing while the field names no revision", async () => {
+    open({ kind: "rollback", history: HISTORY, revision: 4 });
+    await screen.findByRole("dialog");
+    await userEvent.click(screen.getByRole("checkbox"));
+    await userEvent.clear(hintedField("Target revision"));
+
+    // There is no revision to agree to, so the box does not claim one.
+    const box = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.disabled).toBe(true);
+    expect(button("Roll back").disabled).toBe(true);
+  });
+
   it("takes another revision when the reader names one", async () => {
     open({ kind: "rollback", history: HISTORY, revision: 4 });
     await screen.findByRole("dialog");

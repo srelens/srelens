@@ -377,7 +377,20 @@ export function HelmOpDialog({
   const [atomic, setAtomic] = useState(false);
   const [wait, setWait] = useState(false);
   const [targetText, setTargetText] = useState(suggested ? String(suggested.revision) : "");
-  const [acknowledged, setAcknowledged] = useState(false);
+  /**
+   * Rollback's consent, held as the REVISION it was given against rather than
+   * as a boolean.
+   *
+   * `lib/clusterMoved` codified this shape for the cluster one prop over: an
+   * acknowledgement stored as a yes/no outlives the question it answered. Here
+   * the question is the number in the field, and it is the number `helm
+   * rollback <rel> <n>` is given: ticked for 118 and then edited to 3, a bare
+   * boolean stayed ticked and one click replaced what is running with a
+   * revision nobody agreed to. Stored this way the gate re-arms itself, and a
+   * reader who comes back to the revision they did agree to finds their own
+   * answer still standing.
+   */
+  const [acknowledgedFor, setAcknowledgedFor] = useState<number | null>(null);
   /**
    * The typed confirmation, compared to the release name EXACTLY.
    *
@@ -452,7 +465,11 @@ export function HelmOpDialog({
   const complete = incomplete === null;
   /** Has the reader passed this operation's gate? */
   const confirmed =
-    kind === "uninstall" ? typed === release && release !== "" : kind === "rollback" ? acknowledged : true;
+    kind === "uninstall"
+      ? typed === release && release !== ""
+      : kind === "rollback"
+        ? target !== null && acknowledgedFor === target
+        : true;
   const ready = complete && confirmed;
 
   function submit() {
@@ -658,10 +675,15 @@ export function HelmOpDialog({
             >
               <TextInput value={targetText} onValueChange={setTargetText} type="number" />
             </Field>
-            {/* Asked once, and never typed out. See this component's note. */}
+            {/* Asked once, and never typed out — see this component's note, and
+                {@link acknowledgedFor} for why the answer is a revision rather
+                than a tick. Dead while the field names no revision: there is
+                nothing to agree to, and a box that could be ticked there would
+                be consent to a rollback with no target. */}
             <Checkbox
-              checked={acknowledged}
-              onChange={setAcknowledged}
+              checked={target !== null && acknowledgedFor === target}
+              onChange={(next) => setAcknowledgedFor(next ? target : null)}
+              disabled={target === null}
               label={
                 target === null
                   ? `Yes, roll ${release} back.`
