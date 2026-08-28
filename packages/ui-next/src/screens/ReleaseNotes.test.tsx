@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { UpdateMeta } from "@srelens/core";
 
@@ -127,6 +127,60 @@ describe("ReleaseNotes", () => {
 
     expect(await screen.findByText(/no space left on device/)).toBeDefined();
     expect(screen.getByRole("button", { name: /install/i }).hasAttribute("disabled")).toBe(false);
+  });
+
+  /**
+   * The install's own failure went to the reader as `install.message` — the
+   * caught value's `.message`, or `String(cause)` — straight onto the screen.
+   * Every other screen in this area routes the same class of value through
+   * `lib/errorCopy`, which classifies it with `describeError` and folds the
+   * original behind a disclosure; the OBJECT has to reach it for that to be
+   * possible at all.
+   */
+  it("classifies a failed install rather than printing what the updater said", async () => {
+    checkForUpdate.mockResolvedValue(update());
+    installUpdate.mockRejectedValue(
+      new Error("error sending request: tcp connect error: connection refused"),
+    );
+    render(<ReleaseNotes route="/release-notes" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /install/i }));
+
+    // The sentence a reader can act on, not hyper's Display.
+    const alert = await screen.findByText(/could not be made/i);
+    expect(alert).toBeTruthy();
+    const raw = alert.closest("[data-tone]")?.querySelector('[data-slot="raw"]');
+    expect(raw?.textContent).toContain("tcp connect error");
+    // Still announced: this arrives while the reader is looking elsewhere.
+    expect(alert.closest('[role="alert"]')).toBeTruthy();
+  });
+
+  it("strips the wrapper the updater's own rejection arrives with", async () => {
+    // A rejected Tauri command rejects with a STRING, not an `Error`, and
+    // `CapabilityError`'s Display puts `handler error:` in front of it. Read off
+    // `.message`/`String(cause)` that prefix went to the reader verbatim; it is
+    // not news to anyone, and `describeError` is the one place that knows so.
+    checkForUpdate.mockResolvedValue(update());
+    installUpdate.mockRejectedValue("handler error: no space left on device");
+    render(<ReleaseNotes route="/release-notes" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /install/i }));
+
+    expect(await screen.findByText("no space left on device")).toBeDefined();
+    expect(screen.queryByText(/handler error/)).toBeNull();
+  });
+
+  it("classifies a failed check the same way", async () => {
+    checkForUpdate.mockRejectedValueOnce(
+      new Error("ApiError: Unauthorized (Status { metadata: Some(ListMeta { .. }) })"),
+    );
+    render(<ReleaseNotes route="/release-notes" />);
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/rejected your credentials/i)).toBeTruthy();
+    expect(alert.querySelector('[data-slot="raw"]')?.textContent).toContain("ApiError");
+    // The screen's own title survives the classification.
+    expect(within(alert).getByText("Could not check for updates")).toBeTruthy();
   });
 
   it("leaves updates to the server in web mode", async () => {

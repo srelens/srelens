@@ -400,6 +400,64 @@ describe("ExecAuthRail — where installs can run", () => {
     expect(core.diagnoseContext).toHaveBeenCalledTimes(2);
   });
 
+  /**
+   * The rule the code's own comment states — "Re-check either way: a failed
+   * install can still have moved a binary, and the resolution is the only
+   * honest report of where it ended up" — with an `else` in front of it that
+   * did the opposite. `Toolbox`'s install carries the same sentence and reloads
+   * unconditionally, so the two halves of one screen disagreed about a tool
+   * whose install had just failed: the table said where it now is, the rail
+   * kept saying `Missing`.
+   */
+  it("re-checks the context even when the install failed", async () => {
+    core.installPlugin.mockResolvedValue({ error: "handler error: krew is not installed" });
+    reports({ "edge-apac": [MISSING] });
+    rail(["edge-apac"]);
+
+    const section = await waitFor(() => sectionFor("edge-apac"));
+    expect(core.diagnoseContext).toHaveBeenCalledTimes(1);
+    await userEvent.click(within(section).getByRole("button", { name: /install/i }));
+
+    await waitFor(() => expect(core.diagnoseContext).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps a refused install's reason through the re-check it triggers", async () => {
+    // The re-check blanks the rail while it runs, and the sections it draws
+    // afterwards are new ones — so a failure held inside a requirement's own
+    // row would flash and vanish. The reason outlives the re-read.
+    core.installPlugin.mockResolvedValue({ error: "handler error: krew is not installed" });
+    reports({ "edge-apac": [MISSING] });
+    rail(["edge-apac"]);
+
+    const section = await waitFor(() => sectionFor("edge-apac"));
+    await userEvent.click(within(section).getByRole("button", { name: /install/i }));
+
+    await waitFor(() => expect(core.diagnoseContext).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(sectionFor("edge-apac").textContent).toMatch(/could not install kubectl-oidc_login/i),
+    );
+  });
+
+  it("forgets a previous refusal once the install goes through", async () => {
+    core.installPlugin
+      .mockResolvedValueOnce({ error: "handler error: krew is not installed" })
+      .mockResolvedValue({ data: { plugin: "oidc-login", output: "installed" } });
+    reports({ "edge-apac": [MISSING] });
+    rail(["edge-apac"]);
+
+    await userEvent.click(
+      within(await waitFor(() => sectionFor("edge-apac"))).getByRole("button", { name: /install/i }),
+    );
+    await waitFor(() =>
+      expect(sectionFor("edge-apac").textContent).toMatch(/could not install/i),
+    );
+
+    await userEvent.click(within(sectionFor("edge-apac")).getByRole("button", { name: /install/i }));
+    await waitFor(() =>
+      expect(sectionFor("edge-apac").textContent).not.toMatch(/could not install/i),
+    );
+  });
+
   it("says what went wrong when an install is refused", async () => {
     core.installPlugin.mockResolvedValue({ error: "handler error: krew is not installed" });
     reports({ "edge-apac": [MISSING] });

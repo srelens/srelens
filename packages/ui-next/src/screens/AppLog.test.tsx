@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { setNotifier } from "@srelens/core";
 import { AppLog } from "./AppLog";
 
 // The file, the path and the file manager are all core's, and all three need a
@@ -95,6 +96,80 @@ describe("AppLog", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
     expect(core.revealAppLog).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * `revealAppLog` is `await invokeCommand("reveal_app_log")` with no catch of
+   * its own, and the command behind it returns `Result<(), String>`: no file
+   * manager, a sandbox denial, or a log directory it cannot resolve all come
+   * back as a rejection. Fired as `void revealAppLog()` that was an unhandled
+   * rejection and nothing at all on screen.
+   *
+   * A toast rather than a banner, which is the rule `NewForwardDialog` settled
+   * for the same shape of failure: the gesture has no slot on the screen, and
+   * nothing the reader was reading has gone wrong.
+   */
+  it("says so when the reveal is refused, rather than failing silently", async () => {
+    core.revealAppLog.mockRejectedValue(new Error("no file manager on this machine"));
+    const error = vi.fn();
+    const restore = setNotifier({
+      success: () => {},
+      error,
+      info: () => {},
+      updateAvailable: () => {},
+      clusterSignIn: () => {},
+    });
+    try {
+      render(<AppLog route="/logs" />);
+      await screen.findByRole("log", { name: "Application log" });
+
+      await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+      await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+      // Through `describeError`, like every other failure this package reports.
+      expect(error.mock.calls[0][0]).toMatch(/reveal/i);
+      expect(error.mock.calls[0][1]).toContain("no file manager on this machine");
+    } finally {
+      restore();
+    }
+  });
+
+  it("says nothing when the reveal goes through", async () => {
+    const error = vi.fn();
+    const restore = setNotifier({
+      success: () => {},
+      error,
+      info: () => {},
+      updateAvailable: () => {},
+      clusterSignIn: () => {},
+    });
+    try {
+      render(<AppLog route="/logs" />);
+      await screen.findByRole("log", { name: "Application log" });
+      await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+      await waitFor(() => expect(core.revealAppLog).toHaveBeenCalledTimes(1));
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("reports a failed read in words, with the original folded away", async () => {
+    // The kit's raw `ErrorState` printed whatever Rust sent as the detail. Every
+    // other screen in this area routes the same class of value through
+    // `lib/errorCopy`, which classifies it and folds the original behind a
+    // disclosure — and this screen's failures are exactly the ones a reader
+    // reaches it to understand.
+    core.readAppLog.mockRejectedValue(
+      new Error("ApiError: Unauthorized (Status { metadata: Some(ListMeta { .. }) })"),
+    );
+    render(<AppLog route="/logs" />);
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/rejected your credentials/i)).toBeTruthy();
+    // The struct is inside the disclosure, never the sentence.
+    const raw = alert.querySelector('[data-slot="raw"]');
+    expect(raw?.textContent).toContain("ApiError");
+    expect(within(alert).getByText("Could not read the application log")).toBeTruthy();
   });
 
   it("copies the log file's path to the clipboard", async () => {

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { diagnoseContext, installPlugin, isTauri, plural, startToolInstall } from "@srelens/core";
 import type { RequirementResult, RequirementStatus } from "@srelens/core/lib/toolbox";
 import {
@@ -181,6 +181,39 @@ export function ExecAuthRail({ contexts }: ExecAuthRailProps) {
     [JSON.stringify(contexts)],
   );
 
+  /**
+   * The last install this rail was refused, and which binary it was for.
+   *
+   * Held HERE rather than in the row that ran it, because the re-check below
+   * re-reads every context — `useResource.reload` goes back to `loading`, so
+   * the whole rail is replaced by its loading state and every section under it
+   * is destroyed. A reason kept in a row would flash and vanish; this one
+   * outlives the re-read and is handed back down to the row it belongs to.
+   * `Toolbox`'s twin holds its own install failure at screen level for exactly
+   * the same reason.
+   */
+  const [refused, setRefused] = useState<{ binary: string; error: unknown } | null>(null);
+
+  const reload = checks.reload;
+  /**
+   * One install has finished, however it went.
+   *
+   * **The re-check is unconditional**, and that is the whole point of routing
+   * both outcomes through one function: a failed install can still have moved a
+   * binary — a partial extract, a krew that put the plugin somewhere and then
+   * errored — and the resolution is the only honest report of where it ended
+   * up. This used to be `if (result.error) …; else onInstalled()`, under a
+   * comment saying "either way", which left the rail saying `Missing` about a
+   * tool the Toolbox table beside it had already re-read.
+   */
+  const finished = useCallback(
+    (binary: string, error: unknown) => {
+      setRefused(error === null || error === undefined ? null : { binary, error });
+      reload();
+    },
+    [reload],
+  );
+
   if (checks.status === "loading") {
     return <LoadingState label="Checking exec auth" className="py-6" />;
   }
@@ -232,7 +265,7 @@ export function ExecAuthRail({ contexts }: ExecAuthRailProps) {
   return (
     <>
       {actionable.map((check) => (
-        <ContextSection key={check.context} check={check} onInstalled={checks.reload} />
+        <ContextSection key={check.context} check={check} refused={refused} onFinished={finished} />
       ))}
       {unchecked.length > 0 && <UncheckedSection checks={unchecked} />}
     </>
@@ -262,10 +295,13 @@ function UncheckedSection({ checks }: { checks: ContextCheck[] }) {
 /** One context that cannot authenticate, and what would fix it. */
 function ContextSection({
   check,
-  onInstalled,
+  refused,
+  onFinished,
 }: {
   check: ContextCheck;
-  onInstalled: () => void;
+  /** The last refused install on this rail, whichever binary it was for. */
+  refused: { binary: string; error: unknown } | null;
+  onFinished: (binary: string, error: unknown) => void;
 }) {
   const items = check.items.filter(unresolved);
 
@@ -293,7 +329,10 @@ function ContextSection({
             <Requirement
               key={item.binary}
               item={item}
-              onInstalled={onInstalled}
+              // Only the row it was refused for: one rail draws three of these,
+              // and a reason under the wrong binary is worse than none.
+              refusal={refused?.binary === item.binary ? refused.error : null}
+              onFinished={onFinished}
             />
           ))}
         </div>
@@ -303,9 +342,17 @@ function ContextSection({
 }
 
 /** One binary a context wants, and the remedy its resolution actually has. */
-function Requirement({ item, onInstalled }: { item: RequirementResult; onInstalled: () => void }) {
+function Requirement({
+  item,
+  refusal,
+  onFinished,
+}: {
+  item: RequirementResult;
+  /** Why this binary's last install was refused, from the rail — see there. */
+  refusal: unknown;
+  onFinished: (binary: string, error: unknown) => void;
+}) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
 
   const verdict = TOOL_VERDICT[RESOLVED[item.status]];
   const run = installAction(item);
@@ -313,13 +360,14 @@ function Requirement({ item, onInstalled }: { item: RequirementResult; onInstall
   async function install() {
     if (!run) return;
     setBusy(true);
-    setError(null);
     const result = await run();
     setBusy(false);
-    if (result.error) setError(result.error);
-    // Re-check either way: a failed install can still have moved a binary, and
-    // the resolution is the only honest report of where it ended up.
-    else onInstalled();
+    // ONE call for both outcomes, so the re-check cannot be conditional on the
+    // install having succeeded: a failed install can still have moved a binary,
+    // and the resolution is the only honest report of where it ended up. The
+    // reason travels with it, and lives above this row — see the rail's own
+    // note on why it cannot be held here.
+    onFinished(item.binary, result.error ?? null);
   }
 
   let remedy: ReactNode = null;
@@ -368,8 +416,8 @@ function Requirement({ item, onInstalled }: { item: RequirementResult; onInstall
         <div className="break-all font-mono text-[0.6875rem] text-faint">{item.path}</div>
       ) : null}
       {remedy}
-      {error !== null && (
-        <FailureAlert tone="sev" title={`Could not install ${item.binary}`} error={error} />
+      {refusal !== null && refusal !== undefined && (
+        <FailureAlert tone="sev" title={`Could not install ${item.binary}`} error={refusal} />
       )}
     </div>
   );

@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
-import { appLogPath, isTauri, readAppLog, revealAppLog } from "@srelens/core";
+import { appLogPath, describeError, isTauri, notify, readAppLog, revealAppLog } from "@srelens/core";
 import {
   EmptyState,
-  ErrorState,
   FilterBar,
   IconButton,
   LoadingState,
@@ -10,6 +9,7 @@ import {
   Screen,
   Select,
 } from "@srelens/ui-kit";
+import { FailureState } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
 import { Icons } from "../lib/icons";
 import { LEVELS, filterLines, parseAppLog, type Level } from "../lib/appLogLines";
@@ -57,6 +57,27 @@ export function AppLog(_props: { route: string }) {
     () => filterLines(lines, text, level),
     [lines, text, level],
   );
+
+  /**
+   * Open the log where it lives — and say so when the machine will not.
+   *
+   * `revealAppLog` is a bare `await invokeCommand("reveal_app_log")` with no
+   * catch of its own, and the command behind it returns `Result<(), String>`:
+   * no file manager, a sandbox denial, a log directory it cannot resolve. Fired
+   * as `void revealAppLog()` those were unhandled rejections with nothing on
+   * screen — the one control here that did not report its own failure.
+   *
+   * A TOAST, not the banner below: this gesture has no slot on the screen, and
+   * nothing the reader was reading has gone wrong. Same rule
+   * `NewForwardDialog` settled on for a browser that will not open.
+   */
+  async function reveal() {
+    try {
+      await revealAppLog();
+    } catch (e) {
+      notify.error("Couldn't reveal the application log", describeError(e).detail);
+    }
+  }
 
   async function copyPath() {
     try {
@@ -108,7 +129,7 @@ export function AppLog(_props: { route: string }) {
             onClick={() => void copyPath()}
             disabled={!path}
           />
-          <IconButton icon={Icons.reveal} label="Reveal" onClick={() => void revealAppLog()} />
+          <IconButton icon={Icons.reveal} label="Reveal" onClick={() => void reveal()} />
         </>
       }
     >
@@ -128,9 +149,14 @@ export function AppLog(_props: { route: string }) {
 
       {log.status === "loading" && <LoadingState label="Loading the log" />}
       {log.status === "error" && (
-        <ErrorState
+        // `FailureState`, not the kit's raw `ErrorState`: the string Rust sent
+        // goes through `describeError` and its original folds away behind a
+        // disclosure, which is what every other screen in this area does with
+        // the same class of value. This screen's own title stays — it is the
+        // half the classification cannot know.
+        <FailureState
           title="Could not read the application log"
-          detail={log.error}
+          error={log.error}
           onRetry={log.reload}
         />
       )}

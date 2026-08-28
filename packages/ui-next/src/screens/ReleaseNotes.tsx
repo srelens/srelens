@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button, EmptyState, ErrorState, LoadingState, Progress, Screen } from "@srelens/ui-kit";
+import { Button, EmptyState, LoadingState, Progress, Screen } from "@srelens/ui-kit";
 import {
   appVersion,
   checkForUpdate,
@@ -9,15 +9,24 @@ import {
   parseReleaseNotes,
   type UpdateMeta,
 } from "@srelens/core";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
 import { Notes } from "./Notes";
 
-/** Where the install has got to. `percent` is null until a total size arrives. */
+/**
+ * Where the install has got to. `percent` is null until a total size arrives.
+ *
+ * A failure carries the caught value ITSELF, not a message read off it. The
+ * screen used to keep `cause instanceof Error ? cause.message : String(cause)`
+ * and print that at the reader; `describeError` classifies an object and keeps
+ * the original for the disclosure, and neither is possible once the value has
+ * been flattened to a string on the way in.
+ */
 type Install =
   | { phase: "idle" }
   | { phase: "installing"; percent: number | null }
   | { phase: "done" }
-  | { phase: "failed"; message: string };
+  | { phase: "failed"; cause: unknown };
 
 /**
  * What is in the update that is waiting, and the button that takes it.
@@ -63,10 +72,7 @@ export function ReleaseNotes(_props: { route: string }) {
       await installUpdate(channel, (percent) => setInstall({ phase: "installing", percent }));
       setInstall({ phase: "done" });
     } catch (cause) {
-      setInstall({
-        phase: "failed",
-        message: cause instanceof Error ? cause.message : String(cause),
-      });
+      setInstall({ phase: "failed", cause });
     }
   };
 
@@ -84,9 +90,13 @@ export function ReleaseNotes(_props: { route: string }) {
       ) : found.status === "loading" ? (
         <LoadingState label="Checking for updates" />
       ) : found.status === "error" ? (
-        <ErrorState
+        // Through `lib/errorCopy` rather than the kit's raw `ErrorState`: the
+        // updater's own refusals reach the reader classified, with the original
+        // folded away behind a disclosure. The screen's title stays, because
+        // that is the half `describeError` cannot know.
+        <FailureState
           title="Could not check for updates"
-          detail={found.error}
+          error={found.error}
           onRetry={found.reload}
         />
       ) : !update ? (
@@ -132,9 +142,11 @@ export function ReleaseNotes(_props: { route: string }) {
             <p className="text-[0.8125rem]">Restart srelens to finish</p>
           )}
           {install.phase === "failed" && (
-            <p role="alert" className="text-[0.8125rem] text-sev">
-              Install failed: {install.message}
-            </p>
+            // `sev`, so the kit gives it `role="alert"` — the assertive live
+            // region the hand-written paragraph had, kept, because this arrives
+            // while the reader is looking at the notes. The notes stay on screen
+            // under it: a failed install has not taken them away.
+            <FailureAlert tone="sev" title="Could not install the update" error={install.cause} />
           )}
         </div>
       )}
