@@ -311,6 +311,10 @@ async fn gather(client: kube::Client) -> Result<PodOverviewOut, String> {
     names.sort();
     names.dedup();
 
+    // A first pass at the cap, over NAMES, so a sick cluster does not issue
+    // three thousand requests to fill a list of two hundred. It is a bound on
+    // the asking, not on the answer — a name can come back as a pod per
+    // namespace — so the append loop below caps the pods themselves.
     let budget = UNSETTLED_CAP.saturating_sub(unsettled.len());
     if names.len() > budget {
         truncated = true;
@@ -337,9 +341,20 @@ async fn gather(client: kube::Client) -> Result<PodOverviewOut, String> {
             Ok(list) => {
                 for pod in list.items {
                     let summary = summarise_pod(pod);
-                    if !fetched.contains(&(summary.namespace.clone(), summary.name.clone())) {
-                        unsettled.push(summary);
+                    if fetched.contains(&(summary.namespace.clone(), summary.name.clone())) {
+                        continue;
                     }
+                    // [`UNSETTLED_CAP`] is a cap on the pods this returns, and
+                    // the budget spent above could only bound the names asked
+                    // for. `metadata.name=<name>` answers from every namespace
+                    // at once, so two hundred reused names came back as more
+                    // than two hundred pods — the large response this module
+                    // exists to end, reported as `truncated: false`.
+                    if unsettled.len() >= UNSETTLED_CAP {
+                        truncated = true;
+                        break;
+                    }
+                    unsettled.push(summary);
                 }
             }
             // One pod we could not read is not a reason to lose the other
@@ -769,6 +784,44 @@ mod pod_overview_tests {
         let by_name = server.asked("metadata.name");
         assert_eq!(by_name.len(), 1, "one query answers the shared name: {by_name:?}");
         assert!(by_name[0].contains("api-0"));
+    }
+
+    /// The cap is over PODS, not over names. `metadata.name=<name>` asks every
+    /// namespace at once — that is the whole reason the second pass can reach a
+    /// pod whose printed row carried no namespace — so ONE name can come back
+    /// as five pods. Spending the budget per name let those five past a cap of
+    /// 200 while still reporting `truncated: false`: the large response this
+    /// capability exists to prevent, presented as the whole truth.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reused_name_cannot_push_the_list_past_the_cap() {
+        // One short of the cap from the phase filter alone, so the by-name
+        // pass has room for exactly one more pod — and the name it asks for is
+        // run by five namespaces. The table carries only the row the READY
+        // column singles out: `unsettled` takes the other 199 straight from
+        // the phase-filtered list, which needs no rows here.
+        let filler: Vec<serde_json::Value> = (1..UNSETTLED_CAP)
+            .map(|i| pod(&format!("sick-{i}"), "ops", "Failed", None))
+            .collect();
+        assert_eq!(filler.len(), UNSETTLED_CAP - 1);
+        let shared: Vec<serde_json::Value> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|ns| pod("api-0", ns, "Running", Some("CrashLoopBackOff")))
+            .collect();
+        let server = serve(
+            table(vec![row("api-0", "0/1", "CrashLoopBackOff", "n1")]),
+            pod_list(filler, None),
+            pod_list(shared, None),
+        )
+        .await;
+
+        let out = overview(server.client.clone(), Duration::from_secs(5)).await.unwrap();
+
+        assert_eq!(
+            out.unsettled.len(),
+            UNSETTLED_CAP,
+            "the cap holds over pods, not over the names that were asked for"
+        );
+        assert!(out.truncated, "a cap that bites is reported, never presented as the whole list");
     }
 
     /// A cap that bites is reported. A summary that is short and says nothing
