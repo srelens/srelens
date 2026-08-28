@@ -244,6 +244,21 @@ fn ensure_selector_safe(part: &str, what: &str) -> Result<(), CapabilityError> {
             "label selector {what} must not be empty"
         )));
     }
+    ensure_no_selector_syntax(part, what)
+}
+
+/// The same refusal for a `matchLabels` VALUE, which may legitimately be empty.
+///
+/// `app=` selects pods carrying `app` with an empty value, so the value half
+/// cannot inherit [`ensure_selector_safe`]'s non-empty rule — only its
+/// punctuation rule. Split out rather than parameterised so neither caller can
+/// pass the wrong flag.
+fn ensure_selector_value_safe(part: &str, what: &str) -> Result<(), CapabilityError> {
+    ensure_no_selector_syntax(part, what)
+}
+
+/// Refuse the selector grammar's own punctuation, wherever it appears.
+fn ensure_no_selector_syntax(part: &str, what: &str) -> Result<(), CapabilityError> {
     if part
         .chars()
         .any(|c| c.is_whitespace() || matches!(c, ',' | '(' | ')' | '!' | '=' | '<' | '>'))
@@ -277,6 +292,17 @@ pub(crate) fn selector_query(
 ) -> Result<Option<String>, CapabilityError> {
     let mut terms: Vec<String> = Vec::new();
     if !labels.is_empty() {
+        // The equality half is gated too, not only the expressions below. It
+        // used to go straight into `format!("{k}={v}")`, so `{"app":
+        // "web,tier=cache"}` rendered as two conjoined terms and the caller
+        // silently got a narrower set than it asked for. Label selectors are
+        // conjunction-only, so an injected term can only NARROW — which on a
+        // "which pods does this workload own" answer is an under-report, and
+        // the same class of wrong answer the expression gate exists to stop.
+        for (k, v) in labels {
+            ensure_selector_safe(k, "key")?;
+            ensure_selector_value_safe(v, "value")?;
+        }
         terms.push(label_selector(labels));
     }
 
@@ -523,6 +549,43 @@ mod tests {
                 "expected {r:?} to be refused, got {out:?}"
             );
         }
+    }
+
+    #[test]
+    fn refuses_match_labels_that_would_break_the_selector_grammar() {
+        // The equality half went straight into `format!("{k}={v}")` while only
+        // the expression half was gated, and the capability's own comment
+        // claimed a malformed selector was refused. Label selectors are
+        // conjunction-only, so an injected term can only NARROW the answer —
+        // which on "which pods does this workload own" is a silent under-report
+        // rather than a leak, and is exactly the wrong answer the expression
+        // gate exists to prevent.
+        let broken = [
+            labels(&[("app", "web,tier=cache")]),
+            labels(&[("app", "web,!tier")]),
+            labels(&[("app=web,tier", "x")]),
+            labels(&[("app", "web)")]),
+            labels(&[("ap p", "web")]),
+            labels(&[("", "web")]),
+        ];
+        for m in broken {
+            let out = selector_query(&m, &[]);
+            assert!(
+                matches!(out, Err(CapabilityError::InvalidInput(_))),
+                "expected {m:?} to be refused, got {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_an_empty_match_label_value_which_is_a_real_selector() {
+        // `app=` asks for pods carrying `app` with an empty value, which is a
+        // legitimate thing to select on — so the value rule must not inherit
+        // the key rule's non-empty requirement.
+        assert_eq!(
+            selector_query(&labels(&[("app", "")]), &[]).unwrap(),
+            Some("app=".to_string()),
+        );
     }
 
     #[test]
