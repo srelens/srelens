@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect } from "vitest";
-import { detailRoute, parseDetailRoute } from "./detailRoute";
+import { detailRoute, editRoute, parseDetailRoute, parseEditRoute } from "./detailRoute";
 
 describe("detailRoute", () => {
   it("carries the kind, the namespace and the name", () => {
@@ -46,5 +46,58 @@ describe("detailRoute", () => {
     expect(parseDetailRoute("/k/pods")).toBeNull(); // a LIST route
     expect(parseDetailRoute("/k/Pod/default")).toBeNull(); // too few segments
     expect(parseDetailRoute("/resources")).toBeNull();
+  });
+});
+
+// `Edit` used to mint `/edit/<name>` — the NAME alone, while every other route
+// the row menu mints carries kind, namespace and name. `openTab` dedupes by
+// route string, so `Edit` on `default/api` and on `staging/api` collapsed into
+// ONE tab, and the second click focused the first resource's editor. So did a
+// Pod `api` and a Deployment `api`.
+describe("editRoute", () => {
+  it("carries the kind, the namespace and the name, like every other resource route", () => {
+    expect(editRoute("Pod", "kube-system", "web-0")).toBe("/edit/Pod/kube-system/web-0");
+  });
+
+  it("stands the same placeholder in for a cluster-scoped kind, so the arity never varies", () => {
+    expect(editRoute("Node", null, "worker-1")).toBe("/edit/Node/-/worker-1");
+  });
+
+  it("gives two namespaces' same-named resources two different routes", () => {
+    expect(editRoute("Deployment", "default", "api")).not.toBe(editRoute("Deployment", "staging", "api"));
+  });
+
+  it("gives two kinds' same-named resources two different routes", () => {
+    expect(editRoute("Pod", "default", "api")).not.toBe(editRoute("Deployment", "default", "api"));
+  });
+
+  it("encodes every segment, so a name cannot change the route's shape", () => {
+    const route = editRoute("Widget", "default", "a/b");
+    expect(route.split("/")).toHaveLength(5);
+    expect(parseEditRoute(route)!.name).toBe("a/b");
+  });
+
+  it("round-trips", () => {
+    for (const [k, ns, n] of [["Pod", "default", "web"], ["Node", null, "n1"]] as const) {
+      expect(parseEditRoute(editRoute(k, ns, n))).toEqual({ kind: k, namespace: ns, name: n });
+    }
+  });
+
+  it("refuses a segment that cannot be decoded, rather than throwing", () => {
+    // Same hazard, same answer as `parseDetailRoute`: this runs during render
+    // over persisted routes, so a `URIError` is the window failing to boot.
+    expect(parseEditRoute("/edit/Pod/default/%zz")).toBeNull();
+    expect(parseEditRoute("/edit/%e0%a4%a/default/web-1")).toBeNull();
+    expect(parseEditRoute("/edit/Pod/%/web-1")).toBeNull();
+  });
+
+  it("refuses the wrong arity, so the legacy one-segment shape is not mistaken for a subject", () => {
+    expect(parseEditRoute("/edit/web-1")).toBeNull();
+    expect(parseEditRoute("/edit")).toBeNull();
+    expect(parseEditRoute("/edit/Pod/default")).toBeNull();
+    expect(parseEditRoute("/edit/Pod/default/web-0/extra")).toBeNull();
+    // And it does not answer for another prefix's route of the right arity.
+    expect(parseEditRoute("/k/Pod/default/web-0")).toBeNull();
+    expect(parseDetailRoute("/edit/Pod/default/web-0")).toBeNull();
   });
 });

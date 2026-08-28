@@ -162,6 +162,40 @@ describe("useRowMenu", () => {
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/kube-system/web-0")).toBe(true);
   });
 
+  /**
+   * `Edit` used to mint `/edit/<name>` — the NAME alone, while `Open in new
+   * tab` and `Follow logs` beside it both carry kind, namespace and name.
+   * `openTab` dedupes by route string, so `Edit` on `default/api` and on
+   * `staging/api` collapsed into ONE tab titled "Edit api", and the second
+   * click focused the FIRST resource's editor. A Pod `api` and a Deployment
+   * `api` collapsed the same way.
+   */
+  it("opens Edit at a route carrying the kind, the namespace and the name", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/edit/Pod/kube-system/web-0")).toBe(true);
+  });
+
+  it("gives Edit on two namespaces' same-named resources two tabs, not one", async () => {
+    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: {} };
+    const { unmount } = render(<Harness args={args} row={{ name: "api", namespace: "default" }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    unmount();
+    render(<Harness args={args} row={{ name: "api", namespace: "staging" }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const edits = store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/edit/"));
+    expect(edits.map((t) => t.route)).toEqual([
+      "/edit/Deployment/default/api",
+      "/edit/Deployment/staging/api",
+    ]);
+  });
+
+  it("gives Edit on a cluster-scoped kind the same arity, with the placeholder segment", async () => {
+    render(<Harness args={NODE_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/edit/Node/-/worker-1")).toBe(true);
+  });
+
   it("opens Follow logs at the Logs screen's route, not the placeholder one", async () => {
     // The row menu is the screen's front door — the bare `/logs` empty state
     // tells the reader to come through it. It used to mint

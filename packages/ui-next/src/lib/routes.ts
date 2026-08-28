@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
-import { parseDetailRoute } from "./detailRoute";
+import { parseDetailRoute, parseEditRoute } from "./detailRoute";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
 import { Connections } from "../screens/Connections";
@@ -132,6 +132,26 @@ export function describe(route: string, clusterName?: string): RouteInfo {
     if (suffix === "forward") return { route, title: `${name} · forward`, sub, kind: "forwards" };
     return { route, title: name, sub, kind: "resource" };
   }
+  // `/edit/<kind>/<namespace>/<name>` — five segments, parsed rather than
+  // prefix-split for the reason `parseEditRoute` gives: a decoded name can
+  // contain a `/`, so only the segment count tells the shape.
+  //
+  // The NAMESPACE is in the title, not in `sub`. `openTab` dedupes by route, so
+  // the route is what stops `default/api` and `staging/api` collapsing onto one
+  // tab — but the strip then has to say which is which, and `sub` cannot be
+  // where that goes: it is the CLUSTER on every other tab in the strip, so a
+  // namespace sitting there would read as one. This is the one place a resource
+  // tab's title carries more than the bare name, and it carries it because two
+  // of these tabs are open at once far more often than two detail tabs are.
+  const edit = parseEditRoute(route);
+  if (edit) {
+    const where = edit.namespace === null ? edit.name : `${edit.namespace}/${edit.name}`;
+    return { route, title: `Edit ${where}`, sub, kind: "edit" };
+  }
+  // The legacy one-segment `/edit/<name>`. Nothing mints it any more; the shape
+  // survives here only so a tab a previous session persisted can still name
+  // itself in the strip, exactly as `/resources/<name>/logs|shell|forward` does
+  // above.
   if (route.startsWith("/edit/")) {
     return { route, title: `Edit ${decodedSegment(route.split("/")[2] ?? "")}`, sub, kind: "edit" };
   }

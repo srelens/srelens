@@ -19,7 +19,7 @@ import {
 } from "@srelens/core";
 import { ConfirmDialog, KubectlPreview, Select, TextInput, type ContextMenuItem } from "@srelens/ui-kit";
 import { ClusterMovedAlert, useClusterGate } from "../lib/clusterMoved";
-import { detailRoute } from "../lib/detailRoute";
+import { detailRoute, editRoute } from "../lib/detailRoute";
 import { FailureLine } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { ROW_ACTION_LABEL } from "../lib/kinds/rowActions";
@@ -374,7 +374,11 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     list.push({
       label: ROW_ACTION_LABEL.edit,
       icon: Icons.edit,
-      onPick: () => openTab(`/edit/${encodeURIComponent(row.name)}`, { clusterName: context }),
+      // `editRoute`, not `/edit/<name>`: the route IS the resource's identity
+      // under `openTab`'s dedupe, so a name alone collapsed `default/api` and
+      // `staging/api` — and a Pod `api` and a Deployment `api` — onto one tab,
+      // and the second pick focused the first resource. See {@link editRoute}.
+      onPick: () => openTab(editRoute(kind, row.namespace ?? null, row.name), { clusterName: context }),
     });
     list.push({
       label: ROW_ACTION_LABEL.copy,

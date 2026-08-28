@@ -127,7 +127,28 @@ suite("describe", () => {
   });
 
   it("names an edit tab after what it edits", () => {
+    // The legacy one-segment shape, still named so a tab a previous session
+    // persisted can name itself in the strip — the same reason
+    // `/resources/<name>/logs|shell|forward` survives above. Nothing mints it.
     expect(describe("/edit/web-1", "c")).toMatchObject({ title: "Edit web-1", kind: "edit" });
+  });
+
+  it("names an edit tab by its namespace and name, so two namespaces' same-named resources are told apart", () => {
+    // `openTab` dedupes by route, so the ROUTE is what stopped `default/api`
+    // and `staging/api` collapsing onto one tab. The strip then has to say
+    // which is which, and the namespace is the only thing that does — `sub`
+    // cannot carry it, because `sub` is the CLUSTER on every other tab and a
+    // namespace sitting there would read as one.
+    expect(describe("/edit/Deployment/default/api", "c")).toMatchObject({
+      title: "Edit default/api",
+      kind: "edit",
+      sub: "c",
+    });
+    expect(describe("/edit/Deployment/staging/api", "c").title).toBe("Edit staging/api");
+    // Cluster-scoped: there is no namespace to name.
+    expect(describe("/edit/Node/-/worker-1", "c")).toMatchObject({ title: "Edit worker-1", kind: "edit" });
+    // Percent-encoded on the way in, so the title is the decoded name.
+    expect(describe("/edit/Widget/default/a%2Fb", "c").title).toBe("Edit default/a/b");
   });
 
   it("names a /resources tab whose name will not decode, instead of throwing", () => {
@@ -165,6 +186,8 @@ suite("describe", () => {
       "/resources/%zz/logs",
       "/edit/%",
       "/edit/%zz",
+      "/edit/Pod/default/%zz",
+      "/edit/%zz/default/web-1",
       "/k/Pod/default/%zz",
       "/logs/Pod/checkout/%zz",
       "/%zz",
