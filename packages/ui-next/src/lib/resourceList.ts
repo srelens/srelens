@@ -68,11 +68,50 @@ function mergeMetrics<Row extends ListRow>(rows: Row[], metrics: Map<RowKey, Par
 }
 
 /**
+ * `forKey` is the view this payload was watched or polled for, carried in the
+ * state so the render-time gate below can compare it against the view being
+ * asked about. Required rather than optional on purpose: every write has to
+ * stamp it, and the type is what makes forgetting one a compile error.
+ */
+interface ListState {
+  rows: unknown[];
+  error?: string;
+  loading: boolean;
+  watch: WatchStatus;
+  forKey: string;
+}
+
+/**
  * The data engine for a resource-list screen: watch vs poll, a view-keyed row
  * cache, and cancellation, with no knowledge of columns or layout. Follows
  * the generation-counter pattern from useResource — a result that arrives
  * after the view changed or the component unmounted is dropped by comparing
  * a captured generation against the current one.
+ *
+ * What it returns is GATED on the view the held state was fetched for
+ * matching the one passed in THIS render — `useObject`'s gate, in
+ * `useObject`'s shape, and for the same reason. The effect below resets the
+ * rows on a view change, but an effect runs after commit and after paint: on
+ * the very render the caller switches cluster or namespace, the previous
+ * view's rows are still in this hook's state, and a real browser paints one
+ * committed frame pairing the NEW view's heading with the OLD view's table —
+ * `status: "ready"`, under which every row action would run against the
+ * cluster the reader has left. A settled-state test cannot see it (RTL
+ * flushes effects synchronously), which is exactly how it survived review.
+ *
+ * The gate covers `metrics` too, which is held apart from the rows and merged
+ * at render: without it, the change render fed {@link mergeMetrics} one
+ * view's readings map, and a pod named the same in both views took the other
+ * one's CPU — displayed, and sorted on.
+ *
+ * It is reachable on a MOUNTED hook, not only at mount: `Resources` renders
+ * its inner component with no `key`, and no screen carries `key={name}` (see
+ * `lib/clusterMoved.tsx`), so switching cluster changes the view under a hook
+ * that stays put.
+ *
+ * A plain comparison computed fresh every render, not a second effect: it
+ * holds on the very first commit after the view changes, and it cannot be
+ * undone by a future refactor reordering effects.
  */
 export function useResourceList<Row extends ListRow>(
   context: string,
@@ -86,9 +125,9 @@ export function useResourceList<Row extends ListRow>(
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
-  const [state, setState] = useState<{ rows: unknown[]; error?: string; loading: boolean; watch: WatchStatus }>(() => {
+  const [state, setState] = useState<ListState>(() => {
     const cached = cacheGet(key);
-    return { rows: cached ?? [], error: undefined, loading: cached === undefined, watch: "live" };
+    return { rows: cached ?? [], error: undefined, loading: cached === undefined, watch: "live", forKey: key };
   });
 
   // Held apart from `state`: enrichment (pod/node metrics) runs on its own
@@ -99,7 +138,7 @@ export function useResourceList<Row extends ListRow>(
   useEffect(() => {
     const mine = ++gen.current;
     const cached = cacheGet(key);
-    setState({ rows: cached ?? [], error: undefined, loading: cached === undefined, watch: "live" });
+    setState({ rows: cached ?? [], error: undefined, loading: cached === undefined, watch: "live", forKey: key });
     setMetrics(undefined);
 
     if (!descriptor) {
@@ -206,6 +245,16 @@ export function useResourceList<Row extends ListRow>(
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context, namespace, kind, descriptor, tick, files.join(",")]);
+
+  // The gate itself. `reload` is handed back either way: it is stable, and a
+  // caller must be able to retry the view it is asking about right now. The
+  // remaining `setState`s in the effect are updater forms that spread the
+  // state they are given, so they carry `forKey` through under the generation
+  // guard above; the required field is what stops a future full write from
+  // dropping it.
+  if (state.forKey !== key) {
+    return { rows: [], status: "loading", error: undefined, watch: "live", reload };
+  }
 
   return {
     rows: mergeMetrics(state.rows as Row[], metrics),

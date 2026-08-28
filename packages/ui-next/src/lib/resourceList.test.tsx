@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { render, renderHook, act, waitFor } from "@testing-library/react";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file — a plain `const watchResource = vi.fn(...)` below it would be read
@@ -197,5 +197,102 @@ describe("useResourceList", () => {
     act(() => mockState.emitRows!([{ name: "a" }]));
     await waitFor(() => expect(result.current.status).toBe("ready"));
     expect(result.current.error).toBeUndefined();
+  });
+});
+
+/**
+ * The render-time key gate — `useObject`'s, for the same reason and in the
+ * same shape.
+ *
+ * Every test above settles first and then asserts, which is blind to this:
+ * RTL flushes passive effects synchronously, so by the time a `waitFor`
+ * resolves the effect has already reset the state and any bad frame has been
+ * overwritten. A real browser paints whatever was committed, and what gets
+ * committed is decided during render, before any effect runs. So these
+ * observe the hook's return value AT RENDER TIME instead.
+ *
+ * It is reachable on a MOUNTED hook, not only at mount: `Resources` renders
+ * its inner component with no `key`, and no screen carries `key={name}` (see
+ * `lib/clusterMoved.tsx`), so switching cluster or namespace changes the view
+ * on a hook that stays put.
+ */
+describe("useResourceList — the render the view changes", () => {
+  beforeEach(() => {
+    resetListCache();
+    vi.clearAllMocks();
+    mockState.emitRows = null;
+    mockState.emitStatus = null;
+  });
+
+  it("reports loading, never the previous view's rows, on that render", async () => {
+    const seen: Array<{ asked: string; status: string; rows: ListRow[] }> = [];
+    function Probe({ ns }: { ns: string }) {
+      const list = useResourceList("prod", "pods", watched, ns, []);
+      seen.push({ asked: ns, status: list.status, rows: list.rows });
+      return null;
+    }
+
+    const { rerender } = render(<Probe ns="default" />);
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a" }]));
+    await waitFor(() => expect(seen.at(-1)?.status).toBe("ready"));
+    seen.length = 0;
+
+    rerender(<Probe ns="kube-system" />);
+
+    // The FIRST render at the new view is the frame a browser would paint. It
+    // must not put `default`'s pods under a table now headed kube-system —
+    // where every row action would run against the namespace the reader left.
+    expect(seen[0]).toEqual({ asked: "kube-system", status: "loading", rows: [] });
+    // No render in between may leak them either.
+    expect(seen.filter((s) => s.asked === "kube-system" && s.rows.length > 0)).toEqual([]);
+  });
+
+  it("pairs no view's metrics with another view's rows on that render", async () => {
+    // Enrichment is held apart from the rows and merged at render, so the
+    // gate has to cover it too: a readings map from the namespace the reader
+    // left, merged into rows by identity, is how one pod's CPU lands on
+    // another's row — displayed, and sorted on.
+    const enrich = vi.fn().mockResolvedValue(new Map([[rowKey({ name: "api-0", namespace: "shop" }), { cpu: 10 }]]));
+    const d: KindDescriptor<ListRow> = { ...watched, enrich, enrichMs: 10000 };
+
+    const seen: Array<{ asked: string; rows: ListRow[] }> = [];
+    function Probe({ ns }: { ns: string }) {
+      const list = useResourceList("prod", "pods", d, ns, []);
+      seen.push({ asked: ns, rows: list.rows });
+      return null;
+    }
+
+    const { rerender } = render(<Probe ns="shop" />);
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "api-0", namespace: "shop" }]));
+    await waitFor(() => expect(seen.at(-1)?.rows[0]).toMatchObject({ cpu: 10 }));
+    seen.length = 0;
+
+    rerender(<Probe ns="billing" />);
+    expect(seen[0]).toEqual({ asked: "billing", rows: [] });
+  });
+
+  it("keeps serving the rows across a reload of the same view", async () => {
+    // The gate compares views, not fetch generations: `reload` does not change
+    // the view, so it must not empty the table on its way to a refetch.
+    const load = vi.fn().mockResolvedValue({ rows: [{ name: "a" }] });
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+
+    const seen: string[] = [];
+    let reload!: () => void;
+    function Probe() {
+      const list = useResourceList("prod", "leases", polled, "default", []);
+      reload = list.reload;
+      seen.push(list.status);
+      return null;
+    }
+
+    render(<Probe />);
+    await waitFor(() => expect(seen.at(-1)).toBe("ready"));
+    seen.length = 0;
+
+    act(() => reload());
+    expect(seen[0]).toBe("ready");
   });
 });

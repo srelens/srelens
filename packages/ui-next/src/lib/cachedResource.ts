@@ -145,13 +145,46 @@ export interface CachedResource<T> extends Resource<T> {
   updatedAt?: number;
 }
 
-type State<T> = { status: ResourceStatus; data?: T; error?: string; stale: boolean; updatedAt?: number };
+/**
+ * `forKey` is the key this payload was fetched for, carried in the state so
+ * the render-time gate below can compare it against the key being asked
+ * about. Required rather than optional on purpose: every write has to stamp
+ * it, and the type is what makes forgetting one a compile error.
+ */
+type State<T> = {
+  status: ResourceStatus;
+  data?: T;
+  error?: string;
+  stale: boolean;
+  updatedAt?: number;
+  forKey: string;
+};
 
 /**
  * A cached, stale-while-revalidate resource. The `key` is the cache identity
  * and the effect's only dependency, so **it must name everything the loader
  * closes over** — the context above all. `load` is read through a ref, so it
  * may be a fresh closure on every render without retriggering anything.
+ *
+ * What it returns is GATED on the key the held state was fetched for matching
+ * the one passed in THIS render — `useObject`'s gate, in `useObject`'s shape,
+ * and for the same reason. The effect below resets the state on a key change,
+ * but an effect runs after commit and after paint: on the very render the
+ * caller switches cluster, the previous cluster's data is still in this
+ * hook's state, and a real browser paints one committed frame pairing the NEW
+ * cluster's heading with the OLD cluster's figures — `status: "ready"`,
+ * `stale: false`, and the previous cluster's `updatedAt` printed beside them.
+ * A settled-state test cannot see it (RTL flushes effects synchronously),
+ * which is exactly how it survived review.
+ *
+ * It is reachable on a MOUNTED hook, not only at mount: `Overview` renders
+ * its inner component with no `key`, and no screen carries `key={name}` (see
+ * `lib/clusterMoved.tsx`), so switching cluster changes the key under a hook
+ * that stays put.
+ *
+ * A plain comparison computed fresh every render, not a second effect: it
+ * holds on the very first commit after the key changes, and it cannot be
+ * undone by a future refactor reordering effects.
  */
 export function useCachedResource<T>(
   key: string,
@@ -163,14 +196,14 @@ export function useCachedResource<T>(
   const emptyRef = useRef(isEmpty);
   emptyRef.current = isEmpty;
 
-  const settled = useCallback((entry: Entry<T>): State<T> => {
+  const settled = useCallback((entry: Entry<T>, forKey: string): State<T> => {
     const status: ResourceStatus = emptyRef.current(entry.data) ? "empty" : "ready";
-    return { status, data: entry.data, stale: false, updatedAt: entry.at };
+    return { status, data: entry.data, stale: false, updatedAt: entry.at, forKey };
   }, []);
 
   const [state, setState] = useState<State<T>>(() => {
     const hit = cache.get(key) as Entry<T> | undefined;
-    return hit ? settled(hit) : { status: "loading", stale: false };
+    return hit ? settled(hit, key) : { status: "loading", stale: false, forKey: key };
   });
 
   const gen = useRef(0);
@@ -195,19 +228,19 @@ export function useCachedResource<T>(
     // here: a second TTL check in this effect would be a rule with two homes
     // that no test can tell apart — disabling either one on its own left the
     // suite green, which is how the duplicate was found.
-    setState(hit ? settled(hit) : { status: "loading", stale: false });
+    setState(hit ? settled(hit, key) : { status: "loading", stale: false, forKey: key });
 
     request(key, () => loadRef.current(), force).then(
       (entry) => {
         if (gen.current !== mine) return;
-        setState(settled(entry));
+        setState(settled(entry, key));
       },
       (e: unknown) => {
         if (gen.current !== mine) return;
         const error = e instanceof Error ? e.message : String(e);
         setState((prev) =>
           prev.data === undefined
-            ? { status: "error", error, stale: false }
+            ? { status: "error", error, stale: false, forKey: key }
             : { ...prev, error, stale: true },
         );
       },
@@ -218,5 +251,8 @@ export function useCachedResource<T>(
     };
   }, [key, tick, settled]);
 
-  return { ...state, reload };
+  // The gate itself. `reload` is handed back either way: it is stable, and a
+  // caller must be able to retry the key it is asking about right now.
+  const { forKey, ...current } = state;
+  return forKey === key ? { ...current, reload } : { status: "loading", stale: false, reload };
 }
