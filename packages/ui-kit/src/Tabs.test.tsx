@@ -117,3 +117,115 @@ describe("Tabs in a narrow container", () => {
     expect(css).toContain(".tabstrip::-webkit-scrollbar");
   });
 });
+
+/**
+ * The detail pane's mock draws its five panes as a compact rounded segmented
+ * control, not as the window chrome's flat strip. A variant rather than a
+ * rewrite: `.tabstrip`/`.tab` are the chrome's own CSS, worn by `TabStrip`,
+ * and restyling them would restyle every document tab in the window. (#331)
+ */
+describe("Tabs variants", () => {
+  it("wears the chrome's strip by default", () => {
+    const { container } = render(<Tabs tabs={tabs} active="pods" onChange={() => {}} />);
+    expect(container.querySelector(".tabstrip")).not.toBeNull();
+    expect(container.querySelectorAll(".tab").length).toBe(3);
+    expect(container.querySelector(".seg")).toBeNull();
+  });
+
+  it("wears the design system's segmented control when asked", () => {
+    const { container } = render(<Tabs tabs={tabs} active="pods" onChange={() => {}} variant="segmented" />);
+    expect(container.querySelector(".seg")).not.toBeNull();
+    expect(container.querySelectorAll(".seg-btn").length).toBe(3);
+    expect(container.querySelector(".tabstrip")).toBeNull();
+  });
+
+  it("keeps the tablist contract in either variant", () => {
+    // The look changes; the roles and the roving tabindex do not.
+    render(<Tabs tabs={tabs} active="services" onChange={() => {}} variant="segmented" label="Resource views" />);
+    expect(screen.getByRole("tablist", { name: "Resource views" })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "Services" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Services" }).getAttribute("tabindex")).toBe("0");
+    expect(screen.getByRole("tab", { name: "Pods" }).getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("moves between segmented tabs with the arrow keys", async () => {
+    const onChange = vi.fn();
+    render(<Tabs tabs={tabs} active="pods" onChange={onChange} variant="segmented" />);
+    screen.getByRole("tab", { name: "Pods" }).focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(onChange).toHaveBeenLastCalledWith("services");
+  });
+
+  it("marks the active segmented tab with the same attribute as the strip", () => {
+    // One attribute for both looks; the stylesheet reads it, not the variant.
+    const { container } = render(<Tabs tabs={tabs} active="events" onChange={() => {}} variant="segmented" />);
+    const on = container.querySelectorAll('[data-active="true"]');
+    expect(on.length).toBe(1);
+    expect(on[0].textContent).toBe("Events");
+  });
+});
+
+describe("the tab strip's minimum width", () => {
+  const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const components = css.slice(css.indexOf("@layer components {"), css.indexOf("@layer utilities {"));
+
+  it("does not force a Tabs strip past the width of the pane it sits in", () => {
+    // `.tab` carries a 108px minimum for the window's document tabs, where a
+    // one-character filename should still be a target. Five panes at that
+    // minimum need 540px and the peek defaults to 352, so the strip scrolled
+    // sideways at every ordinary width. Tabs opts out; the chrome keeps it.
+    expect(components).toContain('.tabstrip[data-variant] .tab { min-width: 0; }');
+  });
+
+  it("leaves the window chrome's document tabs their minimum", () => {
+    const rule = components.slice(components.indexOf("\n  .tab {"));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain("min-width: 108px");
+  });
+
+  it("draws the active segmented tab as a raised pill", () => {
+    // The mock's look, and the same treatment `.seg-btn[data-on]` already had
+    // — one segmented control in the design system, driven by either flag.
+    expect(components).toMatch(/\.seg-btn\[data-active="true"\]/);
+  });
+
+  it("lets a five-tab segmented control scroll rather than clip", () => {
+    const rule = components.slice(components.indexOf('.seg[data-variant="segmented"] {'));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain("overflow-x: auto");
+    expect(body).toContain("scrollbar-width: none");
+  });
+});
+
+/**
+ * The third appearance, and the reason there is a third: the design's full
+ * resource tab draws its panes as words on the page surface with an accent
+ * underline beneath the active one — not the window chrome's filled strip and
+ * not the peek's rounded pill. The kit resisted a third skin on principle
+ * (see `SKIN`'s own note) right up until the design asked for one.
+ */
+describe("Tabs, underlined", () => {
+  it("wears the underline skin without changing the control", async () => {
+    const onChange = vi.fn();
+    const { container } = render(
+      <Tabs tabs={tabs} active="pods" onChange={onChange} variant="underline" label="Resource views" />,
+    );
+    expect(container.querySelector(".utabs")).toBeTruthy();
+    expect(screen.getAllByRole("tab").every((t) => t.classList.contains("utab"))).toBe(true);
+    // Same contract as the other two skins: roving tab stop, and a click emits.
+    expect(screen.getByRole("tab", { name: "Pods" }).getAttribute("tabindex")).toBe("0");
+    await userEvent.click(screen.getByRole("tab", { name: "Events" }));
+    expect(onChange).toHaveBeenCalledWith("events");
+  });
+
+  it("marks the active tab with the accent rule and nothing else", () => {
+    const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+    const components = css.slice(css.indexOf("@layer components {"), css.indexOf("@layer utilities {"));
+    const rule = components.slice(components.indexOf('  .utab[data-active="true"] {'));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain("border-bottom-color: var(--accent)");
+    // No filled background: that is the window chrome's tab, and a page's
+    // tabs sit on the page.
+    expect(body).not.toContain("background");
+  });
+});

@@ -235,17 +235,182 @@
     text-align: left;
     white-space: nowrap;
   }
+  /* Numeric columns (READY, RESTARTS, CPU, MEMORY, AGE) right-align so their
+     digits line up down the column — set per-column via `Column.align`.
+     `end` rather than `right`: the table renders in RTL locales eventually. */
+  .tbl th[data-align="end"] { text-align: end; }
   .tbl tbody tr { border-bottom: 1px solid color-mix(in srgb, var(--rule) 55%, transparent); }
   .tbl tbody tr:last-child { border-bottom: 0; }
   .tbl tbody tr:hover { background: var(--surface-sunk); }
   .tbl tbody tr:hover .row-ask { opacity: 1; }
   .tbl tbody tr[data-selected="true"] { background: var(--accent-wash); }
+  /* Tabular figures, because these cells hold live numbers. CPU, MEMORY,
+     RESTARTS and AGE refresh on a poll while the reader is looking at the list,
+     and `--font-sans` (system-ui) spaces its digits proportionally: measured at
+     13px, the advances run 5.954px for "1" to 8.290px for "4". End-aligned, a
+     single changed digit drags every digit before it along — one MEMORY cell's
+     text sat at 1194.28, 1195.75 and 1197.13 across three polls. Twenty-five
+     rows doing that at once is a table that will not hold still. */
   .tbl td {
     padding: var(--pad-y) 0.7rem;
     height: var(--row-h);
     font-size: 0.8125rem;
     vertical-align: middle;
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+  /* The 0.7rem padding above is symmetric, so an end-aligned cell keeps its
+     trailing breathing room instead of hugging the next column's rule. */
+  .tbl td[data-align="end"] { text-align: end; }
+  /* The data table's own parts. `.tbl` above already carries the surface —
+     sticky head, row rules, hover, the selected wash — so these are only what
+     a sortable, resizable, selectable table adds on top of it. (#319) */
+  .tbl-interactive tbody tr { cursor: pointer; }
+  /* Once widths are pinned the table stops fitting itself to its container and
+     takes the measured total instead, which is what stops columns shifting
+     while a long list scrolls (#298). */
+  .tbl-resized { table-layout: fixed; }
+  .tbl-check { width: 36px; text-align: center; }
+  .tbl-check input { accent-color: var(--accent); vertical-align: middle; }
+  /* A column pinned to the end of the table, from `Column.sticky` — for the
+     control a reader has to be able to reach when the table is wider than the
+     pane it scrolls in. MEASURED, before and after: the connections table's
+     seven columns sum to 1082px, its pane is 1014px wide at a 1600px window and
+     374px wide at the 960px minimum, so `Open` sat at x=1311 against a right
+     edge of 1308 on every row and the window had to reach 1668px before it
+     appeared. At 960px the overflow is 711px, which is why the columns were
+     pinned rather than capped: a cap can fit one window and cannot fit both. */
+  .tbl th[data-sticky="end"],
+  .tbl td[data-sticky="end"] {
+    position: sticky;
+    right: 0;
+    /* Painted, or the columns are visible sliding under it. `--canvas` is the
+       ground the app's tables sit on — the rows themselves are transparent, so
+       there is nothing to inherit — and `--tbl-sticky-bg` is the way out for a
+       table that sits on another one. */
+    background: var(--tbl-sticky-bg, var(--canvas));
+    /* Says the column is pinned rather than merely last, which is the whole
+       difference between a control at the end of a row and one that follows the
+       reader. */
+    border-left: 1px solid var(--rule);
+  }
+  /* Above the cells it slides over, and the head above the body: `.tbl thead th`
+     already carries `z-index: 1`, so the pinned head takes 2 to sit over its
+     own row's cells. The head keeps the head's own ground — the rule above is
+     the more specific selector, so without this line the pinned header cell
+     paints `--canvas` and sits in the header strip as a patch a shade darker
+     than the six cells beside it. MEASURED as rgb(13,12,18) against the strip's
+     rgb(22,21,29) before this line existed. */
+  .tbl thead th[data-sticky="end"] { z-index: 2; background: var(--surface); }
+  .tbl tbody td[data-sticky="end"] { z-index: 1; }
+  /* The row's own states have to be repeated on the pinned cell: it paints its
+     own background, so the hover wash and the selected wash on the `tr` stop at
+     its edge otherwise — one row in two colours. */
+  .tbl tbody tr:hover td[data-sticky="end"] {
+    background: var(--tbl-sticky-bg-hover, var(--surface-sunk));
+  }
+  .tbl tbody tr[data-selected="true"] td[data-sticky="end"],
+  .tbl tbody tr[data-state="selected"] td[data-sticky="end"] {
+    background: var(--accent-wash);
+  }
+  /* A boundary between two groups of rows, from `Table`'s `rowGroup` — the
+     label for the rows under it, in the head's own voice so the eye reads it as
+     structure rather than as data. Ordering rows alone does not group them: the
+     connections table listed its fourteen kubeconfig contexts before its three
+     local clusters with no header, no rule and no change of spacing, and the
+     only cue a reader had was the `Source` cell's text changing at row 15 of 17.
+     Not interactive, so it takes neither the hover wash nor a cursor. */
+  .tbl tbody tr.tbl-group:hover { background: transparent; }
+  .tbl-group th {
+    padding: 0.5rem 0.7rem 0.3rem;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.625rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    text-align: left;
+    white-space: nowrap;
+  }
+  /* Air above every boundary but the first, which is what makes two groups read
+     as two rather than as one list with labels dropped into it. */
+  .tbl-group:not(:first-child) th { padding-top: 0.95rem; }
+  /* The label follows the horizontal scroll. A cell spanning the whole table
+     cannot itself be pinned — its box is as wide as the table — so the inline
+     label inside it is what sticks. MEASURED: the connections table is 1082px
+     against a 374px pane at a 960px window, so without this every group label
+     sits 700px to the left of what the reader is looking at. */
+  .tbl-group th > span {
+    position: sticky;
+    left: 0.7rem;
+    display: inline-block;
+  }
+  /* Holds the space the virtualized rows would occupy, so the scrollbar
+     describes the whole list rather than the window being rendered. */
+  .tbl-spacer { border: 0 !important; }
+  .tbl-spacer:hover { background: transparent !important; }
+  .tbl-empty {
+    padding: 1.25rem 0.7rem;
+    text-align: center;
+    color: var(--ink-muted);
+    font-size: 0.75rem;
+  }
+  .th-head { display: flex; align-items: center; gap: 0.25rem; }
+  /* `text-align: end` on the `th` above does nothing to `.th-head`'s own
+     children — it's a flex container, and flex items ignore the text-align
+     of their parent. Without this the sort button (and funnel, if any) stay
+     packed against the left edge of a right-aligned column, floating off to
+     the side of the digits it's supposed to sit over. */
+  .tbl th[data-align="end"] .th-head { justify-content: flex-end; }
+  .th-filter {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 4px;
+    padding: 1px;
+    color: var(--ink-faint);
+    opacity: 0.65;
+  }
+  .th-filter:hover,
+  .th-filter:focus-visible { opacity: 1; color: var(--ink); }
+  .th-filter.is-active { opacity: 1; color: var(--accent); }
+  /* A grab strip on the column edge, positioned against the header cell —
+     which is a containing block already, being sticky. Wider than it looks,
+     because a 1px target is not one. */
+  .th-resize {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 7px;
+    height: 100%;
+    cursor: col-resize;
+    background: none;
+    border: 0;
+    padding: 0;
+  }
+  .th-resize::after {
+    content: "";
+    position: absolute;
+    top: 20%;
+    left: 3px;
+    width: 1px;
+    height: 60%;
+    background: var(--rule);
+  }
+  .th-resize:hover::after,
+  .th-resize:focus-visible::after { background: var(--accent); }
+  /* Put on <body> by Table for the duration of a column drag — `RESIZING_COLUMN`
+     there is this same name. The pointer leaves the 7px strip the moment the
+     drag starts, so without this the cursor flickers back to whatever each cell
+     it crosses asks for, and the drag sweeps a text selection along with it.
+     classic ruled this in apps/desktop/src/ui/styles.css as
+     `fl-is-resizing-column`; a `next` boot loads only this sheet, so the class
+     did nothing there at all. `!important` because it has to beat the cursor
+     every cell, link and button underneath sets for itself. */
+  .tbl-resizing-column,
+  .tbl-resizing-column * {
+    cursor: col-resize !important;
+    user-select: none !important;
   }
   .th-sort {
     display: inline-flex;
@@ -257,6 +422,13 @@
     text-transform: inherit;
   }
   .th-sort:hover { color: var(--ink); }
+  /* The inactive sort caret starts hidden (opacity: 0) and is revealed on
+     hover/focus by Tailwind utilities applied in the JSX (group-hover:opacity-100,
+     group-focus-visible:opacity-100). This works because Tailwind's utilities
+     layer is declared after this @layer components block, so the utilities win
+     the cascade regardless of specificity. If .th-caret ever moves outside the
+     component layer or gains !important, the reveal mechanism breaks silently —
+     the affordance disappears and keyboard/pointer users lose discoverability. */
   .th-caret { opacity: 0; }
   .th-sort[data-on="true"] .th-caret { opacity: 1; color: var(--accent); }
 
@@ -277,12 +449,40 @@
     white-space: nowrap;
   }
   .seg-btn:hover { color: var(--ink); }
-  .seg-btn[data-on="true"] {
+  /* Two flags, one look. `data-on` is what a radiogroup of segments emits
+     (CustomizeMark); `data-active` is what a tablist emits (Tabs' segmented
+     variant), which the ARIA contract already spells `aria-selected`. The
+     design system has one segmented control, so both drive the same pill. */
+  .seg-btn[data-on="true"],
+  .seg-btn[data-active="true"] {
     background: var(--surface);
     color: var(--ink);
     box-shadow: 0 1px 2px rgba(20, 18, 25, 0.08);
   }
-  [data-theme="dark"] .seg-btn[data-on="true"] { box-shadow: none; background: var(--surface-raised); }
+  [data-theme="dark"] .seg-btn[data-on="true"],
+  [data-theme="dark"] .seg-btn[data-active="true"] { box-shadow: none; background: var(--surface-raised); }
+  /* Five panes of a resource detail do not fit a 260px peek. The control
+     carries its own overflow rather than pushing the pane sideways, and hides
+     the bar for the same reason the window's tab strip does: inside a control
+     this short it would eat the labels. Scoped to the variant so a three-way
+     radiogroup keeps sizing to its content. */
+  .seg[data-variant="segmented"] {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .seg[data-variant="segmented"]::-webkit-scrollbar { display: none; }
+
+  /* A bare figure in a pane header. `.path` would do the size and the lining
+     up, but it is muted, and the design reads `Degraded  9/12 ready  84d` with
+     the ratio in normal ink and only the age quiet. Muting is therefore a tone
+     the caller passes, not the default this class bakes in. */
+  .fact {
+    font-size: 0.75rem;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
 
   /* status: a dot and a word. Colour is reserved for what is wrong. */
   .status {
@@ -291,9 +491,67 @@
     gap: 0.35rem;
     font-size: 0.75rem;
     color: var(--ink-muted);
+    /* A flex item's `min-width` is `auto`, which means "never smaller than my
+       content" — so a pill inside a constrained row refused to shrink and its
+       label ran out past the row, painting itself over whatever was
+       right-aligned after it. Found on the Logs rail, where three pods of one
+       Deployment differ only in their last five characters and all three
+       overprinted their line counts into an unreadable smear. Truncating is
+       the caller's business (the label opts in); being allowed to is this
+       component's. */
+    min-width: 0;
   }
   .status .dot { width: 6px; height: 6px; border-radius: 99px; flex-shrink: 0; }
+  /* Emitted by StatusPill only under `tinted`, and only for danger and warn.
+     The colour comes from the tone as an inline style — the weight is here,
+     because a bad state that is merely red is nothing to a reader who cannot
+     see it, and the extra weight is the second channel. */
   .status[data-bad="true"] { font-weight: 500; }
+
+  /* status-row: a verdict, the subject it is about, and its trailing facts —
+     one row of a list that is not a table. */
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.3rem 0.5rem;
+    border-radius: 6px;
+    text-align: left;
+    font-size: 0.75rem;
+    color: var(--ink);
+  }
+  /* Only the pressable form reacts to a pointer. A plain row that lit up on
+     hover would promise something it does not do. */
+  button.status-row:hover { background: var(--field); }
+  /* A minimum, never a fixed width: it lines the names up down the list the
+     way LogLine's gutters keep a stream's messages in line, while a word
+     longer than the column (`CrashLoopBackOff`) pushes rather than clipping. */
+  .status-row-verdict {
+    flex-shrink: 0;
+    min-width: 9rem;
+  }
+  /* Takes the slack. `min-width: 0` because a flex item will not shrink below
+     its content without it, so one long pod name would shove the trailing
+     facts off the end of the row. */
+  .status-row-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .status-row-facts {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 0.75rem;
+    color: var(--ink-muted);
+  }
+  .status-row-fact {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
 
   .row-ask {
     opacity: 0;
@@ -486,16 +744,73 @@
   }
   .pane-body { flex: 1; min-height: 0; overflow: auto; }
 
+  /* --- the fixed rail ---------------------------------------------
+     The region beside a main one on almost every screen in the design: a
+     hairline, a small-caps head and a column that scrolls on its own.
+
+     It names NO WIDTH. Four screens want four different ones — events 250,
+     custom resources 264, cluster overview 286, logs 272 — which is four
+     values, not a scale, so the number is the caller's and arrives inline. A
+     width here would be a fifth answer quietly disagreeing with all of them.
+
+     No grip, no cursor, no drag affordance of any kind: only the detail
+     inspector and the left sidebar resize (see `SideRail`'s own note), and
+     `.resize-handle` is where all of that lives. The head is `.pane-head`
+     rather than a class of its own — it is the same small-caps bar a pane
+     wears, and a second copy of it would be a second thing to keep in step. */
+  .side-rail {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    min-height: 0;
+    background: var(--surface);
+    border-left: 1px solid var(--rule);
+  }
+  .side-rail-body { flex: 1; min-height: 0; overflow: auto; }
+
+  /* A flat titled section: the run of blocks a detail body is made of, divided
+     by hairline rules rather than boxed in cards. `Panel` draws the card and
+     keeps its call sites; this is the other shape, and the two are not one
+     component with a flag because the card has a ruled head, a lifted surface
+     and a border, none of which survive here.
+
+     The rule is drawn between siblings, never around them, so the first block
+     in a run has no line above it and the last none below — the divider is the
+     thing, not a frame. */
+  .section { padding: 0.6rem 0.75rem; }
   .section + .section { border-top: 1px solid var(--rule); }
-  .section-head {
+  .section-title { margin-bottom: 0.3rem; }
+
+  /* `padded: false` — the content runs to both edges of the surface while the
+     heading keeps the inset it labels the band from. Only the sides go: the
+     vertical padding is the rhythm between one band and the next, and dropping
+     it would butt a table's header rule straight against the rule above it. */
+  .section[data-padded="false"] { padding-left: 0; padding-right: 0; }
+  .section[data-padded="false"] > .section-title { padding-left: 0.75rem; padding-right: 0.75rem; }
+
+  /* The design's section-head voice (§C.3), recipe verbatim: the same 10px /
+     600 / 0.07em / uppercase / --ink-faint `.pane-head` wears, ON
+     --surface-sunk, WITH A BOTTOM RULE — and, unlike a pane head, 25px and
+     sticky within its pane rather than fixed. A band with no tint behind it
+     reads flatter than the design; this is what makes it read as a band.
+
+     Sticky matters past the cosmetics: the cluster overview's Nodes band can
+     hold over a hundred rows, and a heading that scrolls away with the rows
+     above it stops saying what the ones still on screen are. See
+     `.subhead-caps ~ .tbl thead th` below for the one place this collides
+     with another sticky head.
+
+     A components-layer class rather than utilities on the heading: the other
+     variant IS utilities, and two utilities that set the same property are
+     resolved by the generated stylesheet's order rather than by the order the
+     JSX writes them. See `SubHead`. */
+  .subhead-caps {
     position: sticky;
     top: 0;
     z-index: 2;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
     height: 25px;
-    padding: 0 0.6rem;
     background: var(--surface-sunk);
     border-bottom: 1px solid var(--rule);
     font-size: 0.625rem;
@@ -504,6 +819,39 @@
     text-transform: uppercase;
     color: var(--ink-faint);
   }
+
+  /* `.tbl thead th` is also sticky at `top: 0` (see `.tbl thead th` above) —
+     right for a table sitting alone in a pane, but the Nodes band wraps one
+     directly inside a `.subhead-caps` head (`<Section smallCaps padded={false}>`
+     around a `<Table>`). Left alone the two would stick to the identical
+     coordinates: same top, same scrolling ancestor, and the section head's
+     higher z-index would paint over the table's own column names the moment
+     the list scrolls, rather than sitting above them. Offsetting the table
+     head by the section head's fixed 25px height stacks the two instead of
+     collapsing them onto each other. Scoped to a `.subhead-caps` sibling only
+     — a table alone in a pane, under `.pane-head` instead, is unaffected. */
+  .subhead-caps ~ .tbl thead th { top: 25px; }
+
+  /* A section that folds: the heading itself is the control, so the whole
+     line is clickable rather than a caret the size of a full stop beside it.
+     Inherits the heading's own type — this is the same line it was, wearing a
+     caret that turns with the state. */
+  .section-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .section-caret { transition: transform 120ms ease; color: var(--ink-faint); }
+  .section-caret[data-open="true"] { transform: rotate(90deg); }
+  /* A closed block is its heading and nothing else, so the gap the heading
+     kept for content it no longer has goes with it. */
+  .section[data-open="false"] .section-title { margin-bottom: 0; }
+
   .section-body { padding: 0.6rem; }
 
   /* key/value rows: fixed label column, values left-aligned beside it */
@@ -514,10 +862,25 @@
     gap: 0 0.75rem;
     padding: 0.22rem 0;
   }
+  /* The key column is a `minmax(88px, 34%)` track, so its max is fixed and the
+     track never grows to fit an outsized key. Without `min-width: 0` the grid
+     item's automatic minimum is its min-content size — for a `nowrap` key,
+     the entire string — and a long one painted straight through the value
+     column and out past the right edge of its surface. Seen on the overview
+     rail, whose Fleet rows are keyed on kube CONTEXT names: a real kubeconfig
+     carries `kdev-…-kubernetes-admin@cluster-…`, and the 286px rail rendered
+     "kind-srelens-dem30/30 running" with the tail hanging off the window.
+
+     Clipped rather than wrapped: a key that wraps to three lines drags its own
+     value off the row's baseline, and every other outsized name in this design
+     — the tab strip's titles, the sidebar's cluster name — is clipped too. */
   .kv-k {
     font-size: 0.75rem;
     color: var(--ink-muted);
     white-space: nowrap;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .kv-v {
     font-size: 0.75rem;
@@ -527,6 +890,21 @@
     font-variant-numeric: tabular-nums;
   }
   .kv-v.code { font-size: 0.6875rem; }
+
+  /* The same pair, read on a page instead of down a column: the label above
+     the value, a hairline under the pair.
+
+     Every rule is on the row itself, never on an ancestor. The surface that
+     wants this form asks the row for it (`<KV stacked />`) and lays its own
+     grid of them out; a wrapper restyling a body it did not build is what
+     `FactGrid` was, and it needed a fresh exception for every child that was
+     not a fact row. */
+  .kv[data-stacked="true"] {
+    display: block;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--rule) 55%, transparent);
+  }
+  .kv[data-stacked="true"] .kv-k { margin-bottom: 0.1rem; }
 
   /* a quiet field label — sentence case, no tracking */
   .field-label {
@@ -778,6 +1156,44 @@
     cursor: default;
     user-select: none;
   }
+  /* The 108px above is the window's document tabs: a tab named `a.yaml` is
+     still a target worth hitting, and the chrome has the width to spend. A
+     `Tabs` strip does not — five panes at that minimum need 540px and the
+     resource peek runs 260-640 with a 352 default, so the strip scrolled
+     sideways at every ordinary width. Scoped by the attribute only `Tabs`
+     emits, so `TabStrip` keeps the minimum it was written for. (#331) */
+  .tabstrip[data-variant] .tab { min-width: 0; }
+
+  /* The third tab skin. The window chrome fills its active tab and the peek
+     raises a pill; a page does neither — the words sit on the surface and the
+     accent rules under the one you are reading. Added when the design asked
+     for it and not before, which is the only reason a design system is allowed
+     a third of anything. */
+  .utabs {
+    display: flex;
+    align-items: stretch;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--rule);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .utabs::-webkit-scrollbar { display: none; }
+  .utab {
+    position: relative;
+    padding: 0.4rem 0.55rem;
+    margin-bottom: -1px;
+    border-bottom: 2px solid transparent;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--ink-muted);
+    white-space: nowrap;
+  }
+  .utab:hover { color: var(--ink-soft); }
+  .utab[data-active="true"] {
+    color: var(--ink);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
   .tab:hover { background: var(--field); }
   .tab[data-active="true"] {
     background: var(--surface);
@@ -860,7 +1276,10 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    height: 34px;
+    /* A minimum, not a fixed size: a standalone Toolbar wraps its controls at
+       narrow widths, and a second row inside a fixed box lands on the content
+       below. One line looks exactly as it did. (#325 review) */
+    min-height: 34px;
     flex-shrink: 0;
     padding: 0 0.6rem;
     background: var(--surface);
@@ -880,7 +1299,26 @@
     padding: 0 0.4rem;
     background: var(--canvas-deep);
     border-top: 1px solid var(--rule);
+    /* MEASURED at the window's own 960px minimum (`minWidth` in
+       apps/desktop/src-tauri/tauri.conf.json), with every readout the strip can
+       carry at once: a 20-character cluster name, a version, the link word, a
+       dead forward, a plural forward count, live shells, a failed helm
+       operation and a running one, and `Ask`. `clientWidth` 960, `scrollWidth`
+       1036 — 76px over. `Ask` ran from 1005px to 1036px and `elementFromPoint`
+       at its own midpoint did not find it: the way into the console was off the
+       window and unclickable, not merely cramped.
+
+       And unreachable, because the segments are `white-space: nowrap` with no
+       `min-width`, so flex's `min-width: auto` keeps them at their full size and
+       the overflow escaped to the document, where `body { overflow: hidden }`
+       clipped it. The strip carries its own overflow instead, exactly as
+       `.tabstrip` does above and for the same reason. The scrollbar is hidden:
+       inside 22px — shorter than the tab strip's 33px — a visible bar would take
+       more room than the readouts it makes room for. */
+    overflow-x: auto;
+    scrollbar-width: none;
   }
+  .statusbar::-webkit-scrollbar { display: none; }
   .status-seg {
     display: inline-flex;
     align-items: center;
@@ -908,6 +1346,19 @@
     border-right: 1px solid var(--rule);
   }
   .resize-handle:hover { border-right-color: var(--accent); }
+  /* The mirrored grip. A pane docked on the right of the screen carries its
+     handle on its LEFT edge, so the rule it draws belongs on that side too —
+     the base rule above is one-sided, and left alone it would draw the grip's
+     border down the far side of the pane. In the same @layer deliberately:
+     this codebase declares its cascade layers, and a components rule that
+     landed in `utilities` would win and lose against the wrong things. */
+  .resize-handle[data-edge="left"] {
+    right: auto;
+    left: -2px;
+    border-right: none;
+    border-left: 1px solid var(--rule);
+  }
+  .resize-handle[data-edge="left"]:hover { border-left-color: var(--accent); }
 
   /* --- context menu ----------------------------------------------- */
   .ctx-menu {
@@ -1011,6 +1462,28 @@
   .logline:hover { background: var(--field); }
   .logline:hover .row-ask { opacity: 1; }
 
+  /* --- a command the reader can take away -----------------------
+
+     It WRAPS. `overflow-wrap: anywhere` and no `text-overflow`, deliberately:
+     the mock clips the line, but a command you cannot finish reading is not
+     one you can retype, and this lands in a 264px rail. The usual repair is a
+     `title` holding the whole string, which is the unredacted second copy
+     `PairList` and `KV` both had removed. */
+  .copy-command {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .copy-command-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--ink-muted);
+  }
+  .copy-command-check { color: var(--ok); flex-shrink: 0; }
+
   .scroll { overflow: auto; scrollbar-gutter: stable; }
 }
 
@@ -1079,51 +1552,6 @@
       transition-duration: 0.001ms !important;
     }
   }
-}
-
-/* ---------------------------------------------------------------
-   The placeholder shown while the new design has no screens yet.
-   Uses the design's own tokens, so it doubles as a visible check
-   that this stylesheet — and only this one — reached the document.
-   --------------------------------------------------------------- */
-.next-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 14px;
-  height: 100%;
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 0 32px;
-}
-
-.next-placeholder h1 {
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-}
-
-.next-placeholder p {
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--ink-muted);
-}
-
-.next-placeholder button {
-  padding: 7px 14px;
-  border: 1px solid var(--rule-strong);
-  border-radius: 7px;
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.next-placeholder button:hover {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 
 /* ---------------------------------------------------------------

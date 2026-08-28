@@ -149,6 +149,11 @@ pub struct GetHelmReleaseIn {
     pub context: String,
     pub namespace: String,
     pub name: String,
+    /// The revision to read. Omitted means the current one, exactly as
+    /// before this field existed — every caller that doesn't know about
+    /// revisions keeps getting what it always got.
+    #[serde(default)]
+    pub revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -179,6 +184,25 @@ pub struct HelmReleaseDetail {
     pub notes: String,
     /// All revisions, newest first.
     pub history: Vec<HelmRevision>,
+}
+
+/// Pick one revision's decoded release object out of a release's history
+/// (`revisions` is newest first). `None` asks for the current revision —
+/// `revisions[0]`, exactly what this capability returned before it could
+/// be asked for anything else. `Some(n)` for a revision that isn't in the
+/// list is an error, not a fallback to the current one: silently returning
+/// the current revision would make a diff of two revisions compare a
+/// manifest with itself and report no changes on a release that changed.
+fn pick_revision(revisions: &[Value], requested: Option<i64>) -> Result<&Value, CapabilityError> {
+    match requested {
+        None => revisions
+            .first()
+            .ok_or_else(|| CapabilityError::Handler("no revisions available".to_string())),
+        Some(rev) => revisions
+            .iter()
+            .find(|v| v.get("version").and_then(Value::as_i64) == Some(rev))
+            .ok_or_else(|| CapabilityError::Handler(format!("revision {rev} not found"))),
+    }
 }
 
 /// `k8s.getHelmRelease` — full detail of a release: values, manifest, history.
@@ -217,7 +241,7 @@ pub fn get_helm_release_capability(cache: Arc<ClientCache>) -> Capability {
                     })
                     .collect();
 
-                let current = &revisions[0];
+                let current = pick_revision(&revisions, input.revision)?;
                 let sum = summarise_release(current);
                 let values_yaml = match current.get("config") {
                     Some(cfg) if !cfg.is_null() => serde_yaml::to_string(cfg).unwrap_or_default(),
@@ -270,6 +294,60 @@ mod tests {
         let raw = STANDARD.encode(r#"{"name":"nginx","version":1}"#).into_bytes();
         let v = decode_release(&raw).unwrap();
         assert_eq!(v["name"], "nginx");
+    }
+
+    fn revision_json(version: i64, manifest: &str) -> Value {
+        serde_json::from_str(&format!(
+            r#"{{"name":"redis","namespace":"cache","version":{version},
+                "info":{{"status":"deployed","last_deployed":"2026-07-01T00:00:00Z"}},
+                "manifest":"{manifest}"}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn get_helm_release_in_defaults_revision_to_none_when_absent() {
+        // The wire shape existing callers already send — no `revision` key at
+        // all. This must keep deserialising exactly as it did before this
+        // field existed.
+        let input: GetHelmReleaseIn = serde_json::from_str(
+            r#"{"context":"kind-dev","namespace":"cache","name":"redis"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.revision, None);
+    }
+
+    #[test]
+    fn pick_revision_returns_the_named_revision() {
+        let revisions = vec![revision_json(119, "manifest-119"), revision_json(118, "manifest-118")];
+        let picked = pick_revision(&revisions, Some(118)).unwrap();
+        assert_eq!(picked["manifest"], "manifest-118");
+        assert_eq!(picked["version"], 118);
+    }
+
+    #[test]
+    fn pick_revision_omitted_returns_the_current_one() {
+        // Newest-first, exactly as `k8s.getHelmRelease` has always returned
+        // when no revision was asked for.
+        let revisions = vec![revision_json(119, "manifest-119"), revision_json(118, "manifest-118")];
+        let picked = pick_revision(&revisions, None).unwrap();
+        assert_eq!(picked["manifest"], "manifest-119");
+        assert_eq!(picked["version"], 119);
+    }
+
+    #[test]
+    fn pick_revision_missing_reports_the_error_instead_of_falling_back() {
+        // The property that matters most: a revision that does not exist
+        // must not silently resolve to the current one. That would make the
+        // diff pane compare a manifest with itself and render "no changes"
+        // about a release that changed.
+        let revisions = vec![revision_json(119, "manifest-119"), revision_json(118, "manifest-118")];
+        let err = pick_revision(&revisions, Some(42)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("42"), "error should name the missing revision: {msg}");
+
+        // The load-bearing part: never the current revision's manifest.
+        assert!(pick_revision(&revisions, Some(42)).is_err());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Button } from "../ui";
-import { loadDesign, switchDesign, type Design } from "../design";
+import { PORTED_SCREENS, loadDesign, switchDesign, type Design } from "../design";
 
 /**
  * Settings → Appearance: the choice between the current design and the new one.
@@ -43,6 +43,12 @@ export function AppearanceSettingsSection() {
         screens are not there yet, and the ones that are may still change. Switching reloads
         the window, and you can switch back here at any time.
       </p>
+      <p className="fl-settings-hint">In the new design so far:</p>
+      <ul className="fl-settings-hint">
+        {PORTED_SCREENS.map((s) => (
+          <li key={s.route}>{s.name}</li>
+        ))}
+      </ul>
       {error && (
         <p className="fl-settings-hint" role="alert">
           Could not switch design. {error}

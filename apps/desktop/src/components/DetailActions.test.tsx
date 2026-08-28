@@ -66,6 +66,7 @@ const pod = {
   restarts: 0,
   node: "node-a",
   age: "2d",
+  image: "nginx:1.27-alpine",
 };
 
 // This repo doesn't pull in @testing-library/jest-dom, so assert directly on

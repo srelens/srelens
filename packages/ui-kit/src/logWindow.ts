@@ -1,4 +1,4 @@
-import { computeVisibleRange } from "../ui/Table";
+import { computeVisibleRange } from "./Table";
 
 /** Below this many lines, virtualising isn't worth the spacer bookkeeping. */
 const DEFAULT_THRESHOLD = 100;

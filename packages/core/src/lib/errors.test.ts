@@ -43,6 +43,30 @@ describe("cleanErrorMessage", () => {
     expect(cleanErrorMessage(new Error("boom"))).toBe("boom");
   });
 
+  it("strips the class name String() prints in front of a stringified Error", () => {
+    // `podCount`, `getManifest`, `clusters` and every other lib wrapper report
+    // a rejection as `{ error: String(e) }`, and `String(new Error(m))` is
+    // `Error: ${m}`. The handler prefix is anchored at the start, so that one
+    // word was enough to stop it matching — which is how the overview's Fleet
+    // rows came to print `Error: handler error: ApiError: …` verbatim.
+    expect(cleanErrorMessage("Error: handler error: list pods timed out")).toBe(
+      "list pods timed out",
+    );
+  });
+
+  it("keeps stripping while the prefixes stack", () => {
+    expect(cleanErrorMessage("Error: Error: handler error: nope")).toBe("nope");
+  });
+
+  it("strips a prefix, not a word that happens to start the message", () => {
+    // Only the two known prefixes, and only with their colon. A message that
+    // opens with a word ending in "error" is the message, not a wrapper.
+    expect(cleanErrorMessage("Errors were found in the manifest")).toBe(
+      "Errors were found in the manifest",
+    );
+    expect(cleanErrorMessage("ApiError: Unauthorized")).toBe("ApiError: Unauthorized");
+  });
+
   it("coerces non-string, non-Error values safely", () => {
     expect(cleanErrorMessage(null)).toBe("");
     expect(cleanErrorMessage(undefined)).toBe("");
@@ -77,6 +101,17 @@ describe("describeError", () => {
     );
   });
 
+  it("classifies hyper's own opaque connect failure, which is what a cluster being down looks like", () => {
+    // Verbatim from `k8s.listNodes` against a kind cluster whose container is
+    // stopped. `kubectl` says "connection refused"; the backend's stack has
+    // already thrown that away by the time the string reaches the UI, and
+    // "Something went wrong" for the most ordinary failure there is was the
+    // least useful answer this function gave.
+    const result = describeError("handler error: ServiceError: client error (Connect)");
+    expect(result.title).toBe("Can't reach the cluster");
+    expect(result.detail).toMatch(/Make sure the cluster is running/);
+  });
+
   it("classifies an unresolved host", () => {
     expect(describeError("failed to lookup address information: no such host").title).toBe(
       "Cluster address not found",
@@ -86,6 +121,26 @@ describe("describeError", () => {
   it("classifies auth failures distinctly", () => {
     expect(describeError("Unauthorized").title).toBe("Not authorized");
     expect(describeError("forbidden: pods is forbidden").title).toBe("Access denied");
+  });
+
+  it("classifies the apiserver's whole 401 as a 401, and keeps the struct only in raw", () => {
+    // Verbatim from a real context in the user's kubeconfig, as `podCount`
+    // hands it to the overview's Fleet rows: `String(e)` over a
+    // `CapabilityError` wrapping kube-rs's `ApiError` Display. Every earlier
+    // branch has to decline it — `unreachable`, `dns` and `self.signed` are
+    // all substring tests, and this string is 300 characters of struct.
+    const raw =
+      'Error: handler error: ApiError: Unauthorized: Unauthorized (Status { status: Some("Failure"), ' +
+      "metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, " +
+      'self_link: None }), reason: Some("Unauthorized"), code: Some(401), message: Some("Unauthorized") })';
+    const result = describeError(raw);
+    expect(result.title).toBe("Not authorized");
+    expect(result.detail).toMatch(/rejected your credentials/);
+    // The reader is never shown the struct in the copy — but it is not thrown
+    // away either, and it no longer carries either wrapper prefix.
+    expect(result.detail).not.toMatch(/ListMeta|handler error/);
+    expect(result.raw).toContain("ListMeta");
+    expect(result.raw.startsWith("ApiError:")).toBe(true);
   });
 
   it("classifies a cluster-login marker as a distinct sign-in prompt, not generic unauthorized", () => {

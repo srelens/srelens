@@ -11,6 +11,10 @@ apps/desktop/coverage
 .superpowers/
 docs/superpowers/
 
+# scripts/screenshot.mjs writes here. The PNGs are of whatever real cluster the
+# person running it is pointed at, so they must never land in a commit.
+.screenshots/
+
 # OS
 .DS_Store
 

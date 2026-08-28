@@ -12,6 +12,7 @@ mod cluster_oidc_cmd;
 mod llm_agent;
 mod llm_config;
 mod exec;
+mod external;
 mod files;
 mod forward;
 mod helm;
@@ -33,14 +34,16 @@ mod watch;
 use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppRegistry};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
+use external::open_external;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
-use forward::{start_port_forward, stop_port_forward};
+use forward::{list_forwards, start_port_forward, stop_port_forward};
 use helm::{helm_op_close, start_helm_op};
 use logs::{start_log_stream, stop_log_stream};
 use mcp::{
-    install_srelens_cli, mcp_audit_tail, mcp_confirm_respond, mcp_http_start, mcp_http_status,
-    mcp_http_stop, mcp_prompt_issues, mcp_token_get, mcp_token_revoke, mcp_token_rotate,
-    mcp_token_storage, srelens_cli_status, McpAuditPath, McpHttpManager, McpPromptsDir,
+    install_srelens_cli, mcp_audit_tail, mcp_confirm_pending, mcp_confirm_respond,
+    mcp_http_start, mcp_http_status, mcp_http_stop, mcp_prompt_issues, mcp_token_get,
+    mcp_token_revoke, mcp_token_rotate, mcp_token_storage, srelens_cli_status, McpAuditPath,
+    McpHttpManager, McpPromptsDir,
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
@@ -468,9 +471,11 @@ pub fn run() {
             exec_close,
             start_port_forward,
             stop_port_forward,
+            list_forwards,
             start_log_stream,
             stop_log_stream,
             save_text_file,
+            open_external,
             pick_kubeconfig_files,
             save_pasted_kubeconfig,
             start_tool_install,
@@ -482,6 +487,7 @@ pub fn run() {
             mcp_http_stop,
             mcp_http_status,
             mcp_confirm_respond,
+            mcp_confirm_pending,
             mcp_token_get,
             mcp_token_rotate,
             mcp_token_revoke,
@@ -493,6 +499,7 @@ pub fn run() {
             vault_password::vault_status,
             vault_password::vault_setup_password,
             vault_password::vault_unlock_password,
+            vault_password::vault_lock,
             vault_password::vault_recover_password,
             vault_password::vault_change_password,
             mcp_audit_tail,

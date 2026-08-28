@@ -157,6 +157,7 @@ vi.mock("./components/EditResourceTab", () => ({
 }));
 
 import { App } from "./App";
+import { HANDOFF_KEY } from "./design";
 
 const context = (name: string) => ({
   name,
@@ -418,5 +419,27 @@ describe("App", () => {
 
     expect(tauri.windowClose).toHaveBeenCalledTimes(1);
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  it("reopens the view the new design handed over, once the contexts are known", async () => {
+    // A design switch reloads the document, so the handoff rides in
+    // sessionStorage — and is consumed exactly once, here. Routed only after
+    // `contexts` resolves, mirroring the deep-link gate: a cold-start handoff
+    // judged against an empty list would be rejected as unknown.
+    sessionStorage.setItem(HANDOFF_KEY, JSON.stringify({ context: "prod", kind: "pods" }));
+    render(<App />);
+    // ResourceBrowser renders `{context}:{kind}` first; the rest is the
+    // mock's own buttons.
+    expect((await screen.findByTestId("browser")).textContent).toContain("prod:pods");
+  });
+
+  it("opens nothing for a handoff naming an unknown context, and still clears it", async () => {
+    // Keeping an unreadable handoff would reopen a view on every later launch;
+    // dropping it silently on an unknown name would hide that it was dropped.
+    sessionStorage.setItem(HANDOFF_KEY, JSON.stringify({ context: "ghost", kind: "pods" }));
+    render(<App />);
+    await waitFor(() => expect(sessionStorage.getItem(HANDOFF_KEY)).toBeNull());
+    expect(screen.queryByTestId("browser")).toBeNull();
+    expect(screen.queryByTestId("overview")).toBeNull();
   });
 });

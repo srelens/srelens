@@ -89,25 +89,41 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 /// or the fragment of a line the window's start lands inside, is not an error.
 ///
 /// Only the live log is read; entries rotated into `.jsonl.1` are not included.
-pub fn tail(path: &std::path::Path, limit: usize) -> Vec<Value> {
+///
+/// **An absent log is an empty trail; an unreadable one is an error.** This
+/// used to return `Vec::new()` for three distinct failures — `File::open`,
+/// `seek` and `read_to_end` — so a log that exists and cannot be read was
+/// indistinguishable from a fresh install. The pane at the other end of the
+/// call says "A fresh install has made none — this is not an error." for an
+/// empty result, on the one screen whose purpose is answering what an agent did
+/// after an incident, so that collapse turned a permissions change or a
+/// filesystem fault into a clean bill of health. `NotFound` is the single
+/// outcome still swallowed, because a fresh install genuinely has no log: it is
+/// the one absence that is a fact rather than a gap in what srelens knows.
+pub fn tail(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<Value>> {
     /// Generous next to a realistic `limit` (tens of entries at a few hundred
     /// bytes each) while staying a small fraction of the 5 MB cap.
     const WINDOW: u64 = 512 * 1024;
 
     use std::io::{Read, Seek, SeekFrom};
 
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return Vec::new();
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        // The only silent case, and the only one that is really empty.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // Propagated rather than falling back to 0: a metadata call that fails on
+    // an open handle is a real fault, and answering "the log starts here" from
+    // a length nobody could read is the same guess this function stopped
+    // making.
+    let len = f.metadata()?.len();
     let start = len.saturating_sub(WINDOW);
-    if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
+    if start > 0 {
+        f.seek(SeekFrom::Start(start))?;
     }
     let mut buf = Vec::new();
-    if f.read_to_end(&mut buf).is_err() {
-        return Vec::new();
-    }
+    f.read_to_end(&mut buf)?;
     // Lossy: a window start can land inside a multi-byte character, and a
     // mangled leading fragment is discarded below regardless.
     let text = String::from_utf8_lossy(&buf);
@@ -117,12 +133,14 @@ pub fn tail(path: &std::path::Path, limit: usize) -> Vec<Value> {
         // is not a record.
         lines.remove(0);
     }
-    lines
+    // Unparseable LINES are still skipped rather than raised: a torn final
+    // write is a known property of an append-only log, not a failed read.
+    Ok(lines
         .iter()
         .rev()
         .filter_map(|l| serde_json::from_str(l).ok())
         .take(limit)
-        .collect()
+        .collect())
 }
 
 pub struct JsonlAuditLog {
@@ -257,7 +275,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         write_entries(&path, 10, 0);
 
-        let out = tail(&path, 3);
+        let out = tail(&path, 3).expect("a readable log is not an error");
 
         assert_eq!(out.len(), 3);
         assert_eq!(out[0]["tool"], json!("tool9"), "newest first");
@@ -265,10 +283,58 @@ mod tests {
         assert_eq!(out[2]["tool"], json!("tool7"));
     }
 
+    /// A log that does not exist is an EMPTY trail, not a failure: a fresh
+    /// install has made no capability calls, and the file is written on the
+    /// first one. This is the only I/O outcome `tail` is entitled to swallow.
     #[test]
-    fn tail_of_a_missing_log_is_empty() {
-        let out = tail(std::path::Path::new("/nonexistent/srelens/audit.jsonl"), 50);
+    fn tail_of_a_missing_log_is_an_empty_trail_and_not_an_error() {
+        let out = tail(std::path::Path::new("/nonexistent/srelens/audit.jsonl"), 50)
+            .expect("an absent log is a fresh install, not a failure");
         assert!(out.is_empty(), "a log that was never written is not an error");
+    }
+
+    /// The finding: three distinct failures — `File::open`, `seek` and
+    /// `read_to_end` — all returned `Vec::new()`, so an audit file that exists
+    /// and cannot be READ was indistinguishable from a fresh install. The pane
+    /// on the other end of this call says "A fresh install has made none — this
+    /// is not an error." for an empty vector, on the one screen whose whole
+    /// purpose is answering what an agent did after an incident.
+    ///
+    /// A DIRECTORY at the log's path, rather than a `chmod 000` file: it is a
+    /// path that exists and cannot be read as a file on every platform and at
+    /// every euid, where a permission bit is simply ignored for root and the
+    /// test would then pass by reading the file it meant to be refused.
+    #[test]
+    fn tail_of_a_log_that_cannot_be_read_is_an_error_not_an_empty_trail() {
+        let dir = std::env::temp_dir().join(format!("srelens-tailunread-{}", std::process::id()));
+        let path = dir.join("as-a-directory.jsonl");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let out = tail(&path, 50);
+
+        let err = out.expect_err("a log that exists and cannot be read is not an empty trail");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "the file is right there; only a genuinely absent log may read as empty"
+        );
+    }
+
+    /// The `File::open` half of the same property, on a refusal that is not
+    /// `NotFound`: the log's parent is a regular file, so opening it fails with
+    /// ENOTDIR. A fresh install's absent log and a log srelens cannot get at
+    /// are different answers and this is the one that must not be silent.
+    #[test]
+    fn tail_of_a_log_that_cannot_be_opened_is_an_error_not_an_empty_trail() {
+        let dir = std::env::temp_dir().join(format!("srelens-tailopen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, "i am a file\n").unwrap();
+
+        let out = tail(&blocker.join("audit.jsonl"), 50);
+
+        let err = out.expect_err("a log that cannot be opened is not an empty trail");
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     /// The log is capped at 5 MB, so reading and parsing all of it to show 50
@@ -286,7 +352,7 @@ mod tests {
         write_entries(&path, 2000, 1000);
         assert!(std::fs::metadata(&path).unwrap().len() > 1024 * 1024);
 
-        let out = tail(&path, 100_000);
+        let out = tail(&path, 100_000).expect("a readable log is not an error");
 
         assert!(!out.is_empty());
         assert_eq!(out[0]["tool"], json!("tool1999"), "newest entry must be present");
@@ -306,7 +372,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         write_entries(&path, 3000, 1000);
 
-        let out = tail(&path, 100_000);
+        let out = tail(&path, 100_000).expect("a readable log is not an error");
 
         assert!(
             out.iter().all(|e| e.get("tool").is_some()),

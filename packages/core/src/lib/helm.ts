@@ -44,18 +44,23 @@ export async function listHelmReleases(
   }
 }
 
-/** Fetch a Helm release's values, manifest, and history via `k8s.getHelmRelease`. */
+/** Fetch a Helm release's values, manifest, and history via `k8s.getHelmRelease`.
+ * Omitting `revision` sends no `revision` key at all, so the wire is
+ * byte-identical for every caller that never asked for a specific revision —
+ * the backend's `#[serde(default)]` only treats an *absent* key as "current". */
 export async function getHelmRelease(
   context: string,
   namespace: string,
   name: string,
   invoke: Invoker = invokeCapability,
+  revision?: number,
 ): Promise<{ release?: HelmReleaseDetail; error?: string }> {
   try {
     const release = await invoke<HelmReleaseDetail>("k8s.getHelmRelease", {
       context,
       namespace,
       name,
+      ...(revision != null ? { revision } : {}),
     });
     return { release };
   } catch (e) {

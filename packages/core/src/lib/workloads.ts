@@ -8,6 +8,20 @@ export interface PodSummary {
   restarts: number;
   node: string;
   age: string;
+  /** Container image(s) the pod runs; multiple containers are comma-joined,
+   *  e.g. "acme/checkout-api:118a7e, envoyproxy/envoy:v1.30". Empty when the
+   *  pod has no containers. */
+  image: string;
+  /**
+   * Why a container is waiting, when one is — "CrashLoopBackOff",
+   * "ImagePullBackOff", "ContainerCreating" — and "" when none is. `phase`
+   * cannot tell a healthy pod from a crash-looping one on its own (a pod whose
+   * container is in a back-off loop still reports "Running"), so read the two
+   * together through `podStatus`, never `phase` alone.
+   *
+   * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
+   */
+  waitingReason?: string;
 }
 
 export interface NamespacesOutcome {
@@ -142,11 +156,43 @@ export async function listReplicaSets(
   }
 }
 
-/** Pods matching a label selector (a workload's pods) via `k8s.podsForSelector`. */
+/**
+ * One `matchExpressions` entry of a Kubernetes `LabelSelector` — the set-based
+ * half of a workload's selector.
+ *
+ * `operator` is `"In"`, `"NotIn"`, `"Exists"`, or `"DoesNotExist"`, spelled
+ * exactly as the Kubernetes API spells them: the backend is the one place that
+ * renders a selector, and it refuses an operator it does not recognise rather
+ * than guessing at what was meant. `values` belongs to `In`/`NotIn` only.
+ *
+ * Typed as `string` rather than a union on purpose — a requirement read off a
+ * live object is passed through as it was found, so a spec we cannot render
+ * comes back as an error instead of being quietly corrected into a selector
+ * that names different pods.
+ */
+export interface LabelSelectorRequirement {
+  key: string;
+  operator: string;
+  values?: string[];
+}
+
+/**
+ * Pods matching a label selector (a workload's pods) via `k8s.podsForSelector`.
+ *
+ * A `LabelSelector` has two halves and a pod matches only when it satisfies
+ * **both**: `selector` is `matchLabels`, `expressions` is `matchExpressions`.
+ * Sending only the first is not an approximation — it queries a strictly wider
+ * set than the workload owns, and for a selector written entirely in
+ * expressions it queries nothing at all.
+ *
+ * `expressions` is omitted from the payload when empty, so a caller with only
+ * equality labels sends exactly what it always did.
+ */
 export async function podsForSelector(
   context: string,
   namespace: string,
   selector: Record<string, string>,
+  expressions: LabelSelectorRequirement[] = [],
   invoke: Invoker = invokeCapability,
 ): Promise<PodsOutcome> {
   try {
@@ -154,6 +200,7 @@ export async function podsForSelector(
       context,
       namespace,
       selector,
+      ...(expressions.length === 0 ? {} : { matchExpressions: expressions }),
     });
     return { pods: out.pods };
   } catch (e) {

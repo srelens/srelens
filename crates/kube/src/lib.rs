@@ -123,6 +123,8 @@ pub mod networkpolicies;
 pub mod nodes;
 pub mod oidc_detect;
 pub mod persistentvolumes;
+pub mod pod_count;
+pub mod pod_overview;
 pub mod pvcs;
 pub mod resourcequotas;
 pub mod rolebindings;

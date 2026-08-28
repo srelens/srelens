@@ -34,6 +34,18 @@ pub struct LogLine {
     pub line: String,
 }
 
+/// A connection-state change emitted on the stream channel, tagged with the
+/// SAME source as that target's lines. A stream fans out over many targets,
+/// each reconnecting on its own schedule; without this tag a subscriber can
+/// only guess whether one pod dropped out or all of them did, and guessing
+/// is what it used to do. The `status` key is also what distinguishes this
+/// payload from a `LogLine` on the shared channel.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogStatusEvent {
+    pub source: String,
+    pub status: String,
+}
+
 struct Stream {
     handles: Vec<JoinHandle<()>>,
 }
@@ -89,6 +101,9 @@ impl LogStreamManager {
                 tokio::spawn(async move {
                     let (line_sink, line_channel) = (sink.clone(), channel.clone());
                     let (status_sink, status_channel) = (sink.clone(), channel.clone());
+                    // Both closures need the label: the line closure takes
+                    // `source` by move, so the status closure gets its own copy.
+                    let status_source = source.clone();
                     stream_pod_logs_resilient(
                         cache,
                         context,
@@ -105,8 +120,12 @@ impl LogStreamManager {
                             }
                         },
                         move |status| {
-                            status_sink
-                                .emit(&status_channel, serde_json::json!({ "status": status }));
+                            if let Ok(v) = serde_json::to_value(LogStatusEvent {
+                                source: status_source.clone(),
+                                status: status.to_string(),
+                            }) {
+                                status_sink.emit(&status_channel, v);
+                            }
                         },
                     )
                     .await;
@@ -165,6 +184,61 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("without a pod target"));
+    }
+
+    /// The status event has to name its target, the way each line already
+    /// does. Neither target can connect here (the cache holds no kubeconfig),
+    /// so each one's first attempt fails and emits its own "reconnecting"
+    /// before backing off — two events, one per target, each tagged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_events_name_the_target_they_came_from() {
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "ns".into(),
+                vec![
+                    LogTarget {
+                        pod: "web-1".into(),
+                        container: Some("app".into()),
+                        label: "web-1".into(),
+                    },
+                    LogTarget {
+                        pod: "web-2".into(),
+                        container: Some("app".into()),
+                        label: "web-2".into(),
+                    },
+                ],
+                "logs:1".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut payloads = Vec::new();
+        for _ in 0..200 {
+            payloads = sink.payloads_for("logs:1");
+            if payloads.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        manager.stop("logs:1");
+
+        assert_eq!(payloads.len(), 2, "expected one status per target");
+        let mut sources: Vec<String> = payloads
+            .iter()
+            .map(|p| p["source"].as_str().unwrap_or("<missing>").to_string())
+            .collect();
+        sources.sort();
+        assert_eq!(sources, vec!["web-1".to_string(), "web-2".to_string()]);
+        for p in &payloads {
+            assert_eq!(p["status"], "reconnecting");
+        }
     }
 
     #[test]

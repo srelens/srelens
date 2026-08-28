@@ -9,6 +9,9 @@
     "core:default",
     "core:webview:allow-set-webview-zoom",
     "core:window:allow-set-decorations",
+    "core:window:allow-set-title-bar-style",
+    "core:window:allow-set-title",
+    "core:window:allow-start-dragging",
     "process:default",
     "deep-link:default",
     "window-state:default"

@@ -11,6 +11,12 @@ export interface SelectProps {
   options: SelectOption[];
   className?: string;
   placeholder?: string;
+  /**
+   * Greys the control and stops it emitting. For a control whose value has no
+   * meaning in the current state — rather than one the reader merely lacks
+   * permission to use, which wants an explanation instead of a dead control.
+   */
+  disabled?: boolean;
   "aria-label"?: string;
 }
 
@@ -34,6 +40,7 @@ export function Select({
   options,
   className,
   placeholder,
+  disabled,
   "aria-label": ariaLabel,
 }: SelectProps) {
   const unmatched = !options.some((o) => o.value === value);
@@ -47,6 +54,7 @@ export function Select({
     <div className="relative inline-flex items-center">
       <select
         value={rendered}
+        disabled={disabled}
         onChange={(e) => onValueChange(e.target.value)}
         aria-label={ariaLabel}
         className={cx(

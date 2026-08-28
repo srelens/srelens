@@ -5,16 +5,17 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (84)
+## Tools (87)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (46)
+### Kubernetes — read-only (49)
 
 | Tool | Summary |
 | --- | --- |
 | `k8s.bindingsForServiceAccount` | list the RoleBindings and ClusterRoleBindings that reference a ServiceAccount |
 | `k8s.canI` | check whether the current user can perform actions (SelfSubjectAccessReview, batched) |
+| `k8s.clusterFacts` | report a cluster's provider, region and metrics-server availability |
 | `k8s.clusterInfo` | connect to a kube context and report server version and reachability |
 | `k8s.diffManifest` | diff a manifest against the cluster via server dry-run apply (per document) |
 | `k8s.getManifest` | fetch a resource's manifest as YAML (any supported kind) |
@@ -51,8 +52,10 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.listStorageClasses` | list StorageClasses of a connected kube context (cluster-scoped) |
 | `k8s.nodeMetrics` | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
+| `k8s.podCount` | running vs total pod counts for a cluster, counted without listing pod bodies |
 | `k8s.podLogs` | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large) |
 | `k8s.podMetrics` | pod CPU/memory usage (requires metrics-server) |
+| `k8s.podOverview` | pod totals, per-node counts and the pods that are not running, without listing pod bodies |
 | `k8s.podsForPvc` | list pods in a namespace that mount a given PersistentVolumeClaim |
 | `k8s.podsForSelector` | list pods matching a label selector (a workload's managed pods) |
 | `k8s.podsForServiceAccount` | list pods in a namespace running as a given ServiceAccount |

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { DESIGN_KEY, loadDesign, saveDesign } from "./design";
+import { DESIGN_KEY, PORTED_SCREENS, loadDesign, saveDesign } from "./design";
 
 beforeEach(() => localStorage.clear());
 
@@ -46,5 +46,48 @@ describe("the design preference", () => {
     } finally {
       Storage.prototype.setItem = original;
     }
+  });
+});
+
+describe("the list of ported screens", () => {
+  it("names the screens that exist in the new design, in the order they are shown", () => {
+    // One list, read by classic's Settings and by the new design's Placeholder,
+    // so the two cannot disagree about what has been ported. A screen is added
+    // here in the PR that ports it.
+    expect(PORTED_SCREENS.map((s) => s.route)).toEqual([
+      "/applog",
+      "/notes",
+      "/resources",
+      "/k",
+      "/events",
+      "/overview",
+      "/logs",
+      "/forwards",
+      "/terminals",
+      "/helm",
+      "/toolbox",
+      "/connections",
+      "/connect",
+      "/settings",
+    ]);
+  });
+
+  it("gives every screen a name to show, since the route is not user-facing", () => {
+    expect(PORTED_SCREENS.map((s) => s.name)).toEqual([
+      "Application log",
+      "Release notes",
+      "Workloads",
+      "Resource lists and details",
+      "Events",
+      "Cluster overview",
+      "Logs",
+      "Port forwards",
+      "Terminals",
+      "Helm",
+      "Toolbox",
+      "Connections",
+      "Connect a cluster",
+      "Settings",
+    ]);
   });
 });

@@ -1,17 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const { isTauriMock, setDecorationsMock, notifyErrorMock } = vi.hoisted(() => ({
+const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, notifyErrorMock } = vi.hoisted(() => ({
   isTauriMock: vi.fn(),
-  setDecorationsMock: vi.fn(),
+  isApplePlatformMock: vi.fn(),
+  setTitleBarStyleMock: vi.fn(),
+  setTitleMock: vi.fn(),
   notifyErrorMock: vi.fn(),
 }));
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
-  isTauri: isTauriMock,
+  isTauri: () => isTauriMock(),
+  isApplePlatform: (platform?: string) => isApplePlatformMock(platform),
   notify: { error: notifyErrorMock, success: vi.fn(), info: vi.fn() },
 }));
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ setDecorations: setDecorationsMock }),
+  getCurrentWindow: () => ({ setDecorations: vi.fn(), setTitleBarStyle: setTitleBarStyleMock, setTitle: setTitleMock }),
 }));
 
 import { DESIGN_KEY, switchDesign } from "./design";
@@ -22,7 +25,9 @@ let originalLocation: Location;
 beforeEach(() => {
   localStorage.clear();
   reload.mockClear();
-  setDecorationsMock.mockReset().mockResolvedValue(undefined);
+  setTitleBarStyleMock.mockReset().mockResolvedValue(undefined);
+  setTitleMock.mockReset().mockResolvedValue(undefined);
+  isApplePlatformMock.mockReset().mockReturnValue(true);
   notifyErrorMock.mockClear();
   isTauriMock.mockReturnValue(true);
   originalLocation = window.location;
@@ -42,13 +47,39 @@ describe("switchDesign", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves the system chrome alone while the new design has none of its own", async () => {
-    // NextApp is a heading, a paragraph and a button. Dropping the decorations
-    // now would leave a frameless window with no drag region and no window
-    // controls — unmovable, unminimisable, closable only by quitting. This
-    // flips when the design's own titlebar lands. (#314 review)
+  it("leaves the titlebar alone switching to next — its boot dresses the window", async () => {
+    // The overlay lands in applyNextDesignChrome after the reload, not here:
+    // one writer per direction, and boot is where "which design am I" has
+    // already been read.
     await switchDesign("next");
-    expect(setDecorationsMock).not.toHaveBeenCalled();
+    expect(setTitleBarStyleMock).not.toHaveBeenCalled();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the system titlebar back when leaving the new design on Apple", async () => {
+    // Classic renders under system decorations; an overlay left behind there
+    // would double the chrome — and the native title cleared for the overlay
+    // has to come back, since classic draws no name of its own. Same failure
+    // policy as any cosmetic step: attempted, never allowed to block.
+    await switchDesign("classic");
+    expect(setTitleBarStyleMock).toHaveBeenCalledWith("visible");
+    expect(setTitleMock).toHaveBeenCalledWith("srelens");
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not touch the titlebar off Apple, whose chrome classic never drew over", async () => {
+    isApplePlatformMock.mockReturnValue(false);
+    await switchDesign("classic");
+    expect(setTitleBarStyleMock).not.toHaveBeenCalled();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("still reloads when resetting the titlebar rejects", async () => {
+    // A build without the capability granted throws here; wrong chrome is a
+    // blemish, a switch that silently undoes itself is a broken setting.
+    setTitleBarStyleMock.mockRejectedValue(new Error("permission not granted"));
+    const result = await switchDesign("classic");
+    expect(result.ok).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
@@ -71,10 +102,10 @@ describe("switchDesign", () => {
     }
   });
 
-  it("reloads on web, where there are no decorations to set", async () => {
+  it("reloads on web, where there is no window chrome to set", async () => {
     isTauriMock.mockReturnValue(false);
-    await switchDesign("next");
-    expect(setDecorationsMock).not.toHaveBeenCalled();
+    await switchDesign("classic");
+    expect(setTitleBarStyleMock).not.toHaveBeenCalled();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 });

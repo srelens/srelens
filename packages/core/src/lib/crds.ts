@@ -23,6 +23,10 @@ export interface CrdRef {
   namespaced: boolean;
   /** Optional: older backends and hand-built refs in tests may omit it. */
   printerColumns?: PrinterColumn[];
+  /** Served versions, in declaration order. Optional for the same reason `printerColumns` is. */
+  versions?: string[];
+  /** The version objects are stored as. Optional for the same reason `printerColumns` is. */
+  storageVersion?: string;
 }
 
 export interface CustomRow {

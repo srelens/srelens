@@ -5,7 +5,7 @@ import { getObject } from "@srelens/core";
 import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "@srelens/core";
 import { saveTextFile } from "@srelens/core";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
-import { computeLogWindow } from "./logWindow";
+import { computeLogWindow } from "@srelens/ui-kit";
 import { isTauri } from "@srelens/core/platform";
 import { TitleTooltip } from "@/components/ui/tooltip";
 

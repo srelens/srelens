@@ -4,13 +4,16 @@
 
 use std::fmt;
 use std::io::ErrorKind;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use k8s_openapi::api::core::v1::{Pod, Service, ServicePort};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ListParams;
 use kube::Api;
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 
 use crate::client_cache::ClientCache;
@@ -73,6 +76,93 @@ pub async fn connect_pod_api(
     Ok(Api::namespaced(client, namespace))
 }
 
+/// Bytes that have crossed one forward, counted as they pass rather than
+/// when a connection closes. `copy_bidirectional` reports its totals too, but
+/// only once the connection is over: a tunnel holding one long-lived
+/// connection — a database session, a websocket — would report nothing for as
+/// long as it stays open, so a busy tunnel would read as idle for hours.
+///
+/// The count belongs to the *forward*, not to a connection: `accept_loop`
+/// spawns a task per accepted connection, so the caller owns the `Arc` and a
+/// tunnel's total survives any one connection closing.
+///
+/// `Relaxed` is deliberate. A reporter task in another crate reads this while
+/// the pipes write to it, but it is a monotonic statistic rather than a
+/// synchronisation point — nothing is published through it, so no ordering
+/// beyond the atomicity of the add itself is needed.
+#[derive(Debug, Default)]
+pub struct TrafficCounter(AtomicU64);
+
+impl TrafficCounter {
+    pub fn add(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn total(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// A stream that adds whatever each poll actually moved to a `TrafficCounter`.
+///
+/// Only the *local* side is wrapped, and that counts both directions: every
+/// byte the client sends arrives as a read on it, and every byte the client
+/// receives leaves as a write to it. Wrapping the upstream too would double
+/// the number.
+struct Counted<S> {
+    inner: S,
+    counter: Arc<TrafficCounter>,
+}
+
+impl<S> Counted<S> {
+    fn new(inner: S, counter: Arc<TrafficCounter>) -> Self {
+        Self { inner, counter }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let res = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if matches!(res, Poll::Ready(Ok(()))) {
+            this.counter
+                .add(buf.filled().len().saturating_sub(before) as u64);
+        }
+        res
+    }
+}
+
+// `is_write_vectored` is left at its `false` default on purpose: reporting
+// true would route writes through `poll_write_vectored`, and a default
+// implementation of that would move bytes this wrapper never sees.
+impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let res = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = res {
+            this.counter.add(n as u64);
+        }
+        res
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 /// Accept loop for a bound listener: every inbound local connection opens its
 /// own port-forward stream to `pod:remote_port` and is piped bidirectionally.
 /// Runs until the listener errors, the target pod monitor detects the pod is
@@ -94,9 +184,10 @@ pub async fn serve_pod_forward(
     api: Api<Pod>,
     pod: String,
     remote_port: u16,
+    traffic: Arc<TrafficCounter>,
 ) -> Result<(), String> {
     tokio::select! {
-        res = accept_loop(listener, api.clone(), pod.clone(), remote_port) => res,
+        res = accept_loop(listener, api.clone(), pod.clone(), remote_port, traffic) => res,
         res = monitor_target_pod(api, pod) => res,
     }
 }
@@ -106,17 +197,22 @@ async fn accept_loop(
     api: Api<Pod>,
     pod: String,
     remote_port: u16,
+    traffic: Arc<TrafficCounter>,
 ) -> Result<(), String> {
     loop {
-        let (mut local, _peer) = listener.accept().await.map_err(|e| e.to_string())?;
+        let (local, _peer) = listener.accept().await.map_err(|e| e.to_string())?;
         let api = api.clone();
         let pod = pod.clone();
+        // Cloned per connection so every connection of this forward adds to
+        // the one total the caller holds.
+        let traffic = traffic.clone();
         tokio::spawn(async move {
             let mut pf = match api.portforward(&pod, &[remote_port]).await {
                 Ok(pf) => pf,
                 Err(_) => return,
             };
             if let Some(mut upstream) = pf.take_stream(remote_port) {
+                let mut local = Counted::new(local, traffic);
                 let _ = copy_bidirectional(&mut local, &mut upstream).await;
             }
         });
@@ -264,6 +360,109 @@ pub fn pick_ready_pod(pods: &[Pod]) -> Option<&Pod> {
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{Container, ContainerPort, PodSpec, PodStatus};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::task::JoinHandle;
+
+    /// A loopback echo server, standing in for whatever listens on the far
+    /// side of the tunnel: it sends back every byte it is given, so a client
+    /// that writes N and reads N back has moved 2N across the local stream.
+    async fn echo_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (mut r, mut w) = sock.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// The per-connection body of `accept_loop`, with a real echo upstream in
+    /// place of a port-forward stream: an accepted local connection wrapped in
+    /// `Counted` and piped bidirectionally. Returns the client end and the
+    /// pipe's handle so a test can decide whether to close the connection.
+    async fn counted_pipe(counter: Arc<TrafficCounter>) -> (TcpStream, JoinHandle<()>) {
+        let upstream_addr = echo_server().await;
+        let listener = bind_local(0).await.expect("bind");
+        let local_addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(local_addr).await.expect("connect");
+        let (local, _peer) = listener.accept().await.expect("accept");
+        let mut upstream = TcpStream::connect(upstream_addr).await.expect("upstream");
+        let handle = tokio::spawn(async move {
+            let mut local = Counted::new(local, counter);
+            let _ = copy_bidirectional(&mut local, &mut upstream).await;
+        });
+        (client, handle)
+    }
+
+    /// Write `payload`, read the echo back, then close: the whole exchange,
+    /// start to finish. Returns the number of bytes that came back.
+    async fn echo_through_counted_stream(counter: Arc<TrafficCounter>, payload: &[u8]) -> usize {
+        let (mut client, handle) = counted_pipe(counter).await;
+        client.write_all(payload).await.expect("write");
+        let mut back = vec![0u8; payload.len()];
+        client.read_exact(&mut back).await.expect("read back");
+        assert_eq!(back, payload, "the echo came back intact");
+        drop(client);
+        let _ = handle.await;
+        back.len()
+    }
+
+    /// Write `payload` and read the echo back, but leave everything open —
+    /// the client and the pipe are handed back alive.
+    async fn write_through_counted_stream(
+        counter: Arc<TrafficCounter>,
+        payload: &[u8],
+    ) -> (TcpStream, JoinHandle<()>) {
+        let (mut client, handle) = counted_pipe(counter).await;
+        client.write_all(payload).await.expect("write");
+        let mut back = vec![0u8; payload.len()];
+        client.read_exact(&mut back).await.expect("read back");
+        (client, handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn counts_bytes_in_both_directions() {
+        // An echo upstream, so a client that writes N and reads N back moves
+        // 2N: counting only the local side sees both directions.
+        let counter = Arc::new(TrafficCounter::default());
+        let moved = echo_through_counted_stream(counter.clone(), b"hello world").await;
+        assert_eq!(moved, 11, "wrote 11 bytes");
+        assert_eq!(counter.total(), 22, "11 up and 11 back down");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_still_open_has_already_counted_what_it_moved() {
+        // The property the whole task exists for: a long-lived connection must
+        // report before it closes, or a database tunnel reads 0 for hours.
+        // `copy_bidirectional`'s return value cannot satisfy this — it only
+        // arrives once the connection is over.
+        let counter = Arc::new(TrafficCounter::default());
+        let (_client, held) = write_through_counted_stream(counter.clone(), b"first").await;
+        assert!(!held.is_finished(), "the connection is still open");
+        assert!(
+            counter.total() >= 5,
+            "counted while the connection is still open, saw {}",
+            counter.total()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_counter_spans_every_connection_of_a_forward() {
+        // Counters belong to a forward, not to a connection: `accept_loop`
+        // spawns per connection, so a tunnel's total must not reset when one
+        // of its connections closes.
+        let counter = Arc::new(TrafficCounter::default());
+        echo_through_counted_stream(counter.clone(), b"one").await;
+        let after_first = counter.total();
+        echo_through_counted_stream(counter.clone(), b"two").await;
+        assert_eq!(after_first, 6, "3 up and 3 back down");
+        assert_eq!(counter.total(), 12, "the second connection added to the first");
+    }
 
     fn svc_port(port: i32, target: Option<IntOrString>) -> ServicePort {
         ServicePort {

@@ -29,6 +29,32 @@ describe("McpAuditList", () => {
     expect(await screen.findByText(/no agent activity/i)).toBeTruthy();
   });
 
+  /**
+   * `auditTail` used to swallow every refusal and resolve to `[]`, so this
+   * panel could only ever say "no agent activity yet" — including when the
+   * trail could not be read at all. It rejects now, and a refusal must not
+   * come out looking like a quiet cluster.
+   */
+  it("says the trail could not be read, instead of reporting no activity", async () => {
+    auditTail.mockRejectedValue(new Error("mcp_audit_tail failed: request timeout"));
+    render(<McpAuditList />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent ?? "").toMatch(/could not be read/i);
+    expect(screen.queryByText(/no agent activity/i)).toBeNull();
+  });
+
+  it("retries the read after a refusal, rather than staying failed", async () => {
+    auditTail.mockRejectedValueOnce(new Error("nope"));
+    render(<McpAuditList />);
+    await screen.findByRole("alert");
+    auditTail.mockResolvedValue([
+      { ts: 1780000002, transport: "http", tool: "k8s_scale", args: {}, decision: "approved", outcome: "ok", err: null },
+    ]);
+    fireEvent.click(screen.getByLabelText(/refresh agent activity/i));
+    expect(await screen.findByText(/k8s_scale/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   /// Settings stays open while agents keep calling, so a list fetched once on
   /// mount silently goes stale — an operator watching for an agent's action
   /// sees nothing and concludes it never happened.

@@ -26,6 +26,20 @@ const WASH: Record<Tone, string> = {
   muted: "transparent",
 };
 
+/**
+ * The tone a load reads at — the thresholds a percentage is coloured by.
+ *
+ * Here rather than inside {@link Meter} because two things draw the same
+ * reading: the meter on a node's row, and the figure a screen puts above it
+ * (the cluster overview's CPU and Memory tiles are toned by the cluster's own
+ * share). A second copy of `> 80` / `> 65` would let a tile call a cluster
+ * amber while the meters under it called it red — the same drift the status
+ * vocabulary in `@srelens/core` is kept in one place to avoid.
+ */
+export function loadTone(percent: number): Tone {
+  return percent > 80 ? "sev" : percent > 65 ? "warn" : "ok";
+}
+
 export function toneColor(tone: Tone): string {
   return COLOR[tone];
 }

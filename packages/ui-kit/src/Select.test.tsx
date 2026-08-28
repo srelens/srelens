@@ -90,6 +90,29 @@ describe("Select", () => {
     expect(select.options[select.selectedIndex]?.text).toBe("");
   });
 
+  it("can be disabled, and says so to a screen reader as well as a mouse", () => {
+    // A control that looks live and does nothing is the thing this design has
+    // been removing, not adding: the Logs screen's `since` window has no meaning
+    // while a terminated instance's snapshot is on screen.
+    render(
+      <Select value="kube-system" onValueChange={() => {}} options={options} aria-label="Namespace" disabled />,
+    );
+    const select = screen.getByRole("combobox", { name: "Namespace" }) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+  });
+
+  it("does not emit a change while disabled", async () => {
+    const onValueChange = vi.fn();
+    render(
+      <Select value="default" onValueChange={onValueChange} options={options} aria-label="Namespace" disabled />,
+    );
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: "Namespace" }),
+      "kube-system",
+    ).catch(() => {});
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+
   it("does not let the placeholder be chosen", () => {
     render(
       <Select value="" onValueChange={() => {}} options={options} placeholder="Pick one" aria-label="Namespace" />,

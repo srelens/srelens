@@ -42,16 +42,8 @@ vi.mock("@srelens/core/react", async (importOriginal) => {
 });
 import { useAccess } from "@srelens/core/react";
 
-import {
-  ResourceOverview,
-  ObjectDetail,
-  ageFromTimestamp,
-  containerLastRestartTime,
-  parseQuantity,
-  orderPodConditions,
-  summarizeAffinity,
-} from "./ResourceOverview";
-import type { K8sObject } from "@srelens/core";
+import { ResourceOverview, ObjectDetail } from "./ResourceOverview";
+import { conditionKind, type Condition, type K8sObject } from "@srelens/core";
 
 // A disabled control explains itself through a Radix tooltip, not a native
 // title (#376): hover its trigger — the wrapper around a disabled button,
@@ -79,97 +71,6 @@ beforeEach(() => {
   });
 });
 const TLS_CERTIFICATE = "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURPakNDQWlLZ0F3SUJBZ0lVSjVQdnk1NXRIbUhESkd3elhNVld2YnV4ck5nd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0Z6RVZNQk1HQTFVRUF3d01aWGhoYlhCc1pTNTBaWE4wTUI0WERUSTJNRGN3TmpFeE1qazFOVm9YRFRNMgpNRGN3TXpFeE1qazFOVm93RnpFVk1CTUdBMVVFQXd3TVpYaGhiWEJzWlM1MFpYTjBNSUlCSWpBTkJna3Foa2lHCjl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFzeFc2aHU0MVVwYittNXpHZm5aZ2tpT0xuaVhYTmhPYzhvTWgKaFZCcDVXL0Y5aXluelBGQjRGM0NOK2VlaEp1aVhYWHVFUWdQUVFqOVIrV3ErYlBUK1JPOHd6cEJqQ1BYaHo1TAp2Z0dzNDR1cXBQQ2JvUXVpV0RYcmZDWWtUT2xyd0tIZWJDcVRRM2FQUk1hUGk0YkhzRHdNdmlUcDRhMERGVTFWCkhGc2RXcHM0Uis3TG1MSXBhU3RUTTV1bU1qSC9FTzJGZ2psQmhYUUVGT1M0UnZ2WGpoV0E1ZGZiMEtwNUVSNFIKZjFGdktCRTNaTzVmbG5ldlFlTGdyMnZZT2Jhalg5OTQ1NVE0L1UwMTJJZG1ldWV4L2Q1ZU5VV0VNelprZzlrUQp1U00vMFpwbkhEVFU4UXZQTHh0Qy9jSlU1ekdKMzM0ZnppTGVmQUlpbDR2NFRvVzBQd0lEQVFBQm8zNHdmREFkCkJnTlZIUTRFRmdRVWxadEVndTl1L3ZTTVptSmNNa2RUcWhWVmJDSXdId1lEVlIwakJCZ3dGb0FVbFp0RWd1OXUKL3ZTTVptSmNNa2RUcWhWVmJDSXdEd1lEVlIwVEFRSC9CQVV3QXdFQi96QXBCZ05WSFJFRUlqQWdnZ3hsZUdGdApjR3hsTG5SbGMzU0NFSGQzZHk1bGVHRnRjR3hsTG5SbGMzUXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnRUJBR2svCnp6cGhUNnRuNCtxUXg5Ly9meWNkSzFtNjg1eW1TRFZqT3ZXeWRQaWg4RzI4OUJkQ1BmYlc4ZVVrOXJqakJVZWcKR1k5OUJMcEhvcW9zZDNVWEhOUDJzWUdnZ0dZOG40QXdSbFFWZi9qajBPenVWUzZpS0FDM1ZXWFBtdGk5Q1JQZwpHVkdaR0VZMWI1SXYwVStaSzBjYlJ6c1NSN0FBN05VWGhTUUg0NjJDQlpJa1JSTXNFcVhSV2huUG5Kd3phLzJJCmJ1REdiTG1WMmhRUTdJeWJtb0FpL1FQVUM5WldrMExOV2pGYlpDa0kvem4wd2QxWVhham1iTHBSV0dsTjR1LzcKL2NDSER6NDNyWTZXeHJNRjVwYkJ5aWcvWk5obUVZK25rSFhwK2ZoRFdZOGV1QVVxT1p4bUQrNFIzL2lPQ2dhYgpsVWMzUnNCdmExVjNSbFB6K0pvPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==";
-
-describe("ageFromTimestamp", () => {
-  it("formats seconds, minutes, hours, and days", () => {
-    expect(ageFromTimestamp("2026-01-01T00:00:00Z", NOW + 30_000)).toBe("30s");
-    expect(ageFromTimestamp("2026-01-01T00:00:00Z", NOW + 5 * 60_000)).toBe("5m");
-    expect(ageFromTimestamp("2026-01-01T00:00:00Z", NOW + 3 * 3_600_000)).toBe("3h");
-    expect(ageFromTimestamp("2026-01-01T00:00:00Z", NOW + 2 * 86_400_000)).toBe("2d");
-  });
-
-  it("returns a dash for missing or invalid input", () => {
-    expect(ageFromTimestamp(undefined, NOW)).toBe("—");
-    expect(ageFromTimestamp("not-a-date", NOW)).toBe("—");
-  });
-});
-
-describe("parseQuantity", () => {
-  it("parses plain, milli, binary, and decimal suffixes", () => {
-    expect(parseQuantity("4")).toBe(4);
-    expect(parseQuantity("500m")).toBe(0.5);
-    expect(parseQuantity("2Gi")).toBe(2 * 2 ** 30);
-    expect(parseQuantity("1G")).toBe(1e9);
-  });
-  it("returns null for unparseable input", () => {
-    expect(parseQuantity("")).toBeNull();
-    expect(parseQuantity("abc")).toBeNull();
-  });
-});
-
-describe("orderPodConditions", () => {
-  it("orders lifecycle conditions PodScheduled → Initialized → ContainersReady → Ready", () => {
-    const shuffled = [
-      { type: "Ready", status: "True" },
-      { type: "PodScheduled", status: "True" },
-      { type: "ContainersReady", status: "False" },
-      { type: "Initialized", status: "True" },
-    ];
-    expect(orderPodConditions(shuffled).map((c) => c.type)).toEqual([
-      "PodScheduled",
-      "Initialized",
-      "ContainersReady",
-      "Ready",
-    ]);
-  });
-
-  it("appends unknown condition types after the known lifecycle ones", () => {
-    const conds = [
-      { type: "DisruptionTarget", status: "True" },
-      { type: "Ready", status: "True" },
-      { type: "PodScheduled", status: "True" },
-    ];
-    expect(orderPodConditions(conds).map((c) => c.type)).toEqual([
-      "PodScheduled",
-      "Ready",
-      "DisruptionTarget",
-    ]);
-  });
-});
-
-describe("summarizeAffinity", () => {
-  it("summarizes required and preferred rules per affinity type", () => {
-    const affinity = {
-      nodeAffinity: {
-        requiredDuringSchedulingIgnoredDuringExecution: { nodeSelectorTerms: [{}, {}] },
-        preferredDuringSchedulingIgnoredDuringExecution: [{}],
-      },
-      podAntiAffinity: {
-        requiredDuringSchedulingIgnoredDuringExecution: [{}],
-      },
-    };
-    expect(summarizeAffinity(affinity)).toEqual([
-      "Node affinity: 2 required, 1 preferred",
-      "Pod anti-affinity: 1 required",
-    ]);
-  });
-
-  it("returns an empty list when there is no affinity", () => {
-    expect(summarizeAffinity({})).toEqual([]);
-  });
-});
-
-describe("containerLastRestartTime", () => {
-  it("uses the previous termination time only for restarted containers", () => {
-    expect(
-      containerLastRestartTime({
-        restartCount: 2,
-        lastState: { terminated: { finishedAt: "2025-12-31T23:55:00Z" } },
-      }),
-    ).toBe("2025-12-31T23:55:00Z");
-    expect(containerLastRestartTime({ restartCount: 0, lastState: {} })).toBe("");
-  });
-});
 
 const podObject: K8sObject = {
   kind: "Pod",
@@ -422,6 +323,169 @@ describe("ObjectDetail (Deployment)", () => {
     expect(screen.getByText("Progressing")).toBeDefined();
     expect(screen.getByText("Available")).toBeDefined();
     expect(screen.getByText("Running")).toBeDefined();
+  });
+});
+
+// Classic is a frozen design, and its condition pills are part of it. The
+// branch moved `conditionKind` into core and then taught the shared copy a
+// rollout rule read off the NEW design's mock — which silently re-toned these
+// pills, with no classic test to catch it. This pins the tone classic has
+// always drawn, so the next change to the shared helper cannot leak in here.
+//
+// The surface is `ConditionsTable`, which every kind without a body of its own
+// renders (a Deployment shows `ConditionBadges` instead — a different, local
+// rule this does not touch). `Certificate` is such a kind.
+describe("ObjectDetail condition pill tones (classic, frozen)", () => {
+  /** The tone class on the pill's dot, e.g. `bg-emerald-500`. */
+  const toneOf = (label: string) => {
+    const pill = screen.getByText(label);
+    return pill.querySelector("span")?.className ?? "";
+  };
+
+  const objectWith = (conditions: Array<Record<string, string>>): K8sObject => ({
+    kind: "Certificate",
+    metadata: { name: "web-tls", namespace: "default" },
+    status: { conditions },
+  });
+
+  const renderWith = (conditions: Array<Record<string, string>>) =>
+    render(<ObjectDetail kind="Certificate" obj={objectWith(conditions)} now={NOW} />);
+
+  it("keeps a Progressing condition green on its status alone, whatever its reason", () => {
+    // The new design tones this amber — a rollout still in flight — off its
+    // mock. Classic never asked for that and must not be given it.
+    renderWith([{ type: "Progressing", status: "True", reason: "ReplicaSetUpdated" }]);
+    expect(toneOf("Progressing")).toContain("bg-emerald-500");
+  });
+
+  it("keeps a completed rollout green too, so the reason changes nothing either way", () => {
+    renderWith([{ type: "Progressing", status: "True", reason: "NewReplicaSetAvailable" }]);
+    expect(toneOf("Progressing")).toContain("bg-emerald-500");
+  });
+
+  it("reads a ReplicaFailure: False as healthy — the one deliberate change to classic here", () => {
+    // Classic's own `conditionBadgeVariant` already matched `Failed|Failure`
+    // while its `conditionKind` matched only `Failed`, so classic disagreed
+    // with itself about this row: the badge called it healthy and the pill
+    // painted it red. Core's `/Fail/` settles it in the badge's favour. A
+    // reviewed behaviour change, kept for both designs because it is a bug
+    // fix rather than a design decision.
+    renderWith([{ type: "ReplicaFailure", status: "False" }]);
+    expect(toneOf("ReplicaFailure")).toContain("bg-emerald-500");
+  });
+
+  it("still paints a genuinely bad condition red, and an Unknown one amber", () => {
+    renderWith([
+      { type: "Ready", status: "False" },
+      { type: "Degraded", status: "Unknown" },
+    ]);
+    expect(toneOf("Ready")).toContain("bg-destructive");
+    expect(toneOf("Degraded")).toContain("bg-amber-500");
+  });
+});
+
+/**
+ * Classic's OTHER condition renderer, and the reason the one above is not the
+ * whole story.
+ *
+ * `ConditionsTable` reads core's `conditionKind`; `ConditionBadges` — which a
+ * Deployment, StatefulSet and ReplicaSet render INSTEAD — kept a local
+ * `conditionBadgeVariant` on the narrow `/Pressure|Unavailable|Failed|Failure|
+ * Dangling/i` regex core has since widened. So for every type in the widened
+ * set the two renderers in this one file toned the same condition differently:
+ * a `Degraded: True` custom condition read GREEN on a Deployment and red on a
+ * DaemonSet. That is exactly the "two readings of one fact can disagree"
+ * failure `k8sStatus.ts` names as its reason for existing.
+ *
+ * The tone is read off `data-variant`, which the badge sets from the variant it
+ * was handed — the component's own mechanism, not a class name that belongs to
+ * the theme.
+ */
+describe("ObjectDetail condition BADGE tones (the workload renderer)", () => {
+  const variantOf = (label: string) =>
+    screen.getByText(label).getAttribute("data-variant") ?? "no such badge";
+
+  const deploymentWith = (conditions: Array<Record<string, string>>): K8sObject => ({
+    kind: "Deployment",
+    metadata: { name: "web", namespace: "default" },
+    spec: { replicas: 1, selector: { matchLabels: { app: "web" } } },
+    status: { replicas: 1, conditions },
+  });
+
+  const renderWith = (conditions: Array<Record<string, string>>) =>
+    render(<ObjectDetail kind="Deployment" obj={deploymentWith(conditions)} now={NOW} />);
+
+  it("reads the same widened negative set the table does", () => {
+    // None of these matched the badge's old narrow regex, so all four read
+    // GREEN on a Deployment while the table painted them red.
+    renderWith([
+      { type: "Degraded", status: "True" },
+      { type: "ControllerResizeError", status: "True" },
+      { type: "NamespaceContentRemaining", status: "True" },
+      { type: "Failing", status: "True" },
+    ]);
+    expect(variantOf("Degraded")).toBe("destructive");
+    expect(variantOf("ControllerResizeError")).toBe("destructive");
+    expect(variantOf("NamespaceContentRemaining")).toBe("destructive");
+    expect(variantOf("Failing")).toBe("destructive");
+  });
+
+  it("reads a healthy inverted condition as healthy, and an Unknown one as amber", () => {
+    renderWith([
+      { type: "ReplicaFailure", status: "False" },
+      { type: "MemoryPressure", status: "False" },
+      { type: "Available", status: "Unknown" },
+    ]);
+    expect(variantOf("ReplicaFailure")).toBe("success");
+    expect(variantOf("MemoryPressure")).toBe("success");
+    expect(variantOf("Available")).toBe("warning");
+  });
+
+  it("condemns a positive condition that is False, rather than shrugging at it", () => {
+    // `Available: False` on a Deployment is the pod-availability failure the
+    // whole frame is about. The badge used to return `neutral` for it — a grey
+    // chip — while the table beside it painted the identical condition red.
+    renderWith([{ type: "Available", status: "False" }]);
+    expect(variantOf("Available")).toBe("destructive");
+  });
+
+  it("tones a Progressing condition on its status alone, like the table", () => {
+    // The badge used to special-case `Progressing` to `info` (a blue chip)
+    // while the table painted it green — and the new design's OWN amber rule
+    // (`conditionKindWithReason`) stays out of classic entirely.
+    renderWith([{ type: "Progressing", status: "True", reason: "ReplicaSetUpdated" }]);
+    expect(variantOf("Progressing")).toBe("success");
+  });
+
+  it("gives the same answer as the table for every condition, which is the point", () => {
+    // The property, stated once: classic has ONE reading of a condition's tone.
+    // Both renderers go through core's `conditionKind`, so this is a check that
+    // neither has grown a rule of its own again.
+    const cases: Array<Record<string, string>> = [
+      { type: "Available", status: "True" },
+      { type: "Available", status: "False" },
+      { type: "Progressing", status: "True", reason: "ReplicaSetUpdated" },
+      { type: "ReplicaFailure", status: "False" },
+      { type: "ReplicaFailure", status: "True" },
+      { type: "Degraded", status: "True" },
+      { type: "ControllerResizeError", status: "True" },
+      { type: "MemoryPressure", status: "Unknown" },
+    ];
+    // The badge's own vocabulary, as `Badge` maps it — `danger` is rendered
+    // `destructive` and `neutral` is rendered `secondary`.
+    const BADGE_FOR_KIND: Record<string, string> = {
+      neutral: "secondary",
+      success: "success",
+      warning: "warning",
+      danger: "destructive",
+      info: "info",
+    };
+    for (const c of cases) {
+      const { unmount } = renderWith([c]);
+      const expected = BADGE_FOR_KIND[conditionKind(c as unknown as Condition)];
+      expect({ ...c, variant: variantOf(c.type) }).toEqual({ ...c, variant: expected });
+      unmount();
+    }
   });
 });
 

@@ -50,4 +50,36 @@ describe("IconButton", () => {
     render(<IconButton icon={Dot} label="Delete" danger />);
     expect(screen.getByRole("button").style.color).toContain("--sev");
   });
+  it("forwards the props and the ref a wrapper needs to drive it", () => {
+    // Radix's `asChild` — which Tooltip, Popover and ContextMenu all use —
+    // clones its child and hands it event handlers, aria attributes and a ref.
+    // A component that drops them renders perfectly and then never opens: the
+    // gallery found a Tooltip around an IconButton doing exactly that. (#320)
+    const ref = { current: null as HTMLButtonElement | null };
+    const onFocus = vi.fn();
+    render(
+      <IconButton
+        icon={Dot}
+        label="Delete"
+        ref={ref}
+        onFocus={onFocus}
+        aria-describedby="hint-1"
+        data-state="closed"
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Delete" });
+    expect(ref.current).toBe(button);
+    expect(button.getAttribute("aria-describedby")).toBe("hint-1");
+    expect(button.dataset.state).toBe("closed");
+    fireEvent.focus(button);
+    expect(onFocus).toHaveBeenCalled();
+  });
+
+  it("still refuses to have its type changed out from under it", () => {
+    // Spreading the rest must not reopen the submit-button hole: the type is
+    // this component's promise, not a default a caller can overwrite by
+    // accident. (#320)
+    render(<IconButton icon={Dot} label="Delete" {...({ type: "submit" } as object)} />);
+    expect(screen.getByRole("button", { name: "Delete" }).getAttribute("type")).toBe("button");
+  });
 });

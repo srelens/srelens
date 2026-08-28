@@ -49,6 +49,31 @@
 
   --field: rgba(20, 18, 25, 0.05);
   --shadow-lift: 0 1px 0 rgba(20, 18, 25, 0.02);
+
+  /* --- mark palette: identity, not meaning ---------------------------
+     The colours a cluster mark may be given. An axis of their own rather
+     than a reuse of --sev/--warn/--ok/--info/--accent, which the five-swatch
+     palette this replaces did reuse: those four say something (this is bad,
+     this needs attention) and --accent moves with the accent axis, so a
+     cluster marked "violet" turned blue for anyone who preferred a blue
+     accent, and a cluster marked red claimed a severity it has nothing to do
+     with. These say nothing but "this one, not that one".
+
+     Each is a solid behind Mark's `var(--surface)` ink, so the light set is
+     dark enough for white text and the dark set light enough for near-black.
+     --mark-ink is the pair that inverts outright: the near-black the design
+     draws is the ink colour, and ink is what it stays. */
+  --mark-red: #b4342a;
+  --mark-orange: #b0530f;
+  --mark-amber: #a2670f;
+  --mark-green: #1f7a52;
+  --mark-teal: #0f6f6a;
+  --mark-blue: #2a5fa8;
+  --mark-indigo: #4b3bd6;
+  --mark-purple: #6d2fb0;
+  --mark-pink: #ad2456;
+  --mark-slate: #5c586a;
+  --mark-ink: #141219;
 }
 
 [data-theme="dark"] {
@@ -142,7 +167,12 @@
   --ink: #000000;
   --ink-soft: #1a1a1a;
   --ink-muted: #3d3d3d;
-  --ink-faint: #565656;
+  /* #565656 reached only 6.56:1 against `--surface-sunk`, which is the one
+     text pair in this theme that did NOT clear 7:1 — while the Accessibility
+     pane told its reader "High contrast raises every text pair above 7:1".
+     Darkened so the sentence is true rather than deleted; the floor is
+     computed and asserted in `tokens-only.test.ts`. */
+  --ink-faint: #505050;
   --rule: #767676;
   --rule-strong: #000000;
   --accent: #2b1ba8;
@@ -159,6 +189,27 @@
   --info-wash: #e7eefc;
   --field: rgba(0, 0, 0, 0.09);
   --shadow-lift: none;
+}
+
+/* --- mark palette on the dark themes --------------------------------
+   One block for both, rather than a copy inside each: `midnight` does not
+   inherit `dark`'s block, and a mark palette written into only one of them
+   would leave the other drawing near-black squares on a near-black rail.
+   `paper` and `contrast` are light grounds, so the light set above is theirs
+   and they need no override here. */
+[data-theme="dark"],
+[data-theme="midnight"] {
+  --mark-red: #f2776c;
+  --mark-orange: #f0955e;
+  --mark-amber: #dda446;
+  --mark-green: #55cd97;
+  --mark-teal: #55c9bd;
+  --mark-blue: #7aa9ea;
+  --mark-indigo: #8f80ff;
+  --mark-purple: #c08ae8;
+  --mark-pink: #ef7fa4;
+  --mark-slate: #a5a0b3;
+  --mark-ink: #e7e5ed;
 }
 
 /* --- accent axis: independent of the theme -------------------------- */

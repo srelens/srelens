@@ -1,12 +1,34 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, ScrollText, SquareTerminal } from "lucide-react";
-import type { X509Certificate } from "@peculiar/x509";
 import { getObject, getSecret, type K8sObject } from "@srelens/core";
+import { certificateRows, type CertificateRow } from "@srelens/core";
 import { listEndpointSlices } from "@srelens/core";
 import { serviceExternalAddress } from "@srelens/core";
 import { podsForPvc, formatStorageSize } from "@srelens/core";
 import { bindingsForServiceAccount, podsForServiceAccount, type SaBinding } from "@srelens/core";
 import { updateConfigData } from "@srelens/core";
+import { ageFromTimestamp, durationBetween, absoluteTimestamp, timestampWithAge } from "@srelens/core";
+import {
+  type Condition,
+  conditionKind,
+  containerStateText,
+  orderPodConditions,
+  type HealthKind,
+} from "@srelens/core";
+import { asRecord, asArray, str, plural } from "@srelens/core";
+import { decodeBase64, dockerRegistries, type DockerRegistryRow } from "@srelens/core";
+import {
+  containerLastRestartTime,
+  latestRestartTime,
+  portText,
+  probeChips,
+  resourceText,
+  envText,
+  mountText,
+  tolerationText,
+} from "@srelens/core";
+import { summarizeAffinity, updateStrategy, relatedPodSelector } from "@srelens/core";
+import { parseQuantity, usagePercent, formatBytes, decodedByteLength } from "@srelens/core";
 import { useAccess, denyReason, reportActionError, type AccessCheck } from "@srelens/core/react";
 import { describeError } from "@srelens/core";
 import {
@@ -30,69 +52,6 @@ import {
   type ResourceTarget,
 } from "@srelens/core";
 import { TitleTooltip } from "@/components/ui/tooltip";
-
-/* ------------------------------------------------------------------ */
-/* small value helpers                                                 */
-/* ------------------------------------------------------------------ */
-
-/** Relative age from an ISO timestamp, e.g. "5d", "3h", "10m". */
-export function ageFromTimestamp(iso?: string, now: number = Date.now()): string {
-  if (!iso) return "—";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "—";
-  const secs = Math.max(0, Math.floor((now - then) / 1000));
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
-}
-
-/** Human-readable duration between two ISO timestamps, e.g. "2m 30s". */
-export function durationBetween(startIso?: string, endIso?: string): string {
-  if (!startIso || !endIso) return "—";
-  const secs = Math.max(0, Math.floor((new Date(endIso).getTime() - new Date(startIso).getTime()) / 1000));
-  if (Number.isNaN(secs)) return "—";
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const remSecs = secs % 60;
-  if (mins < 60) return remSecs ? `${mins}m ${remSecs}s` : `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  const remMins = mins % 60;
-  return remMins ? `${hours}h ${remMins}m` : `${hours}h`;
-}
-
-/** Absolute, human-readable timestamp, e.g. "Jun 10, 2026, 12:52:33 PM". */
-export function absoluteTimestamp(iso?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function asRecord(v: unknown): Record<string, unknown> {
-  return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
-}
-function asArray(v: unknown): unknown[] {
-  return Array.isArray(v) ? v : [];
-}
-function str(v: unknown): string {
-  if (v == null) return "";
-  if (typeof v === "string") return v;
-  return String(v);
-}
-function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
 
 type Pair = [label: string, value: React.ReactNode];
 
@@ -266,70 +225,52 @@ function CollapsibleText({
 /* conditions                                                          */
 /* ------------------------------------------------------------------ */
 
-interface Condition {
-  type: string;
-  status: string;
-  reason?: string;
-  message?: string;
-  lastTransitionTime?: string;
-}
+/**
+ * Core's `HealthKind` in this design's own badge vocabulary.
+ *
+ * The five names happen to match one-for-one, which is why `StatusPill` takes a
+ * `HealthKind` straight — but a `BadgeVariant` is this app's token and a
+ * `HealthKind` is a severity, so the crossing is written down here rather than
+ * assumed. `k8sHealth.ts` says as much where it declares the type: "if either
+ * renames its tokens, it maps at its own boundary, not here." This is that
+ * boundary.
+ */
+const CONDITION_BADGE: Record<HealthKind, BadgeVariant> = {
+  neutral: "neutral",
+  success: "success",
+  warning: "warning",
+  danger: "danger",
+  info: "info",
+};
 
-function conditionKind(c: Condition): StatusKind {
-  const negative = /Pressure|Unavailable|Failed|Dangling|NetworkUnavailable/i.test(c.type);
-  if (c.status === "Unknown") return "warning";
-  const good = c.status === "True" ? !negative : negative;
-  return good ? "success" : "danger";
-}
-
+/**
+ * A condition's badge tone — core's `conditionKind`, so classic has ONE reading
+ * of a condition.
+ *
+ * This used to be a local copy of the rule, and it had drifted from the shared
+ * one it was copied from: its negative set was `/Pressure|Unavailable|Failed|
+ * Failure|Dangling/i` while core's had widened to families (`Fail`, `Error`,
+ * `Remaining`, plus `Degraded`, `DisruptionTarget` and `Denied`). So for every
+ * type in that widened set, the two renderers in THIS FILE toned the same
+ * condition differently — a `Degraded: True` read green on a Deployment (which
+ * draws `ConditionBadges`) and red on a DaemonSet (which draws
+ * `ConditionsTable`). That is the "two readings of one fact can disagree"
+ * failure the shared module exists to prevent, reproduced inside one component.
+ *
+ * Two local rules go with the regex, and both were disagreements of the same
+ * kind:
+ *
+ * - A positive condition that was not `True` returned `neutral` — a grey chip
+ *   for `Available: False` on a Deployment, which is the pod-availability
+ *   failure the whole frame is about, and which the table beside it already
+ *   painted red.
+ * - `Progressing` returned `info` whatever its status, where the table painted
+ *   it on status alone. (The NEW design's amber-while-rolling rule is
+ *   `conditionKindWithReason`, and it stays out of classic — this calls plain
+ *   `conditionKind`, as every other classic surface does.)
+ */
 function conditionBadgeVariant(c: Condition): BadgeVariant {
-  if (c.status === "Unknown") return "warning";
-  const negative = /Pressure|Unavailable|Failed|Failure|Dangling/i.test(c.type);
-  if (c.status !== "True") return negative ? "success" : "neutral";
-  if (/Progressing/i.test(c.type)) return "info";
-  return negative ? "danger" : "success";
-}
-
-// The pod lifecycle, in the order kubelet reports it.
-const POD_CONDITION_ORDER = ["PodScheduled", "Initialized", "ContainersReady", "Ready"];
-
-/**
- * Sort pod conditions into lifecycle order (PodScheduled → Initialized →
- * ContainersReady → Ready); any other condition types keep their relative order
- * after the known lifecycle ones.
- */
-export function orderPodConditions(conditions: Condition[]): Condition[] {
-  const rank = (type: string) => {
-    const index = POD_CONDITION_ORDER.indexOf(type);
-    return index === -1 ? POD_CONDITION_ORDER.length : index;
-  };
-  return conditions
-    .map((condition, index) => ({ condition, index }))
-    .sort((a, b) => rank(a.condition.type) - rank(b.condition.type) || a.index - b.index)
-    .map(({ condition }) => condition);
-}
-
-/**
- * One line per affinity type in use, e.g. "Node affinity: 2 required, 1
- * preferred". `nodeAffinity` counts `nodeSelectorTerms`; pod (anti-)affinity
- * count their rule arrays directly. Types with no rules are omitted.
- */
-export function summarizeAffinity(affinity: Record<string, unknown>): string[] {
-  const lines: string[] = [];
-  const describe = (label: string, rule: Record<string, unknown>, requiredIsTerms: boolean) => {
-    const required = requiredIsTerms
-      ? asArray(asRecord(rule.requiredDuringSchedulingIgnoredDuringExecution).nodeSelectorTerms).length
-      : asArray(rule.requiredDuringSchedulingIgnoredDuringExecution).length;
-    const preferred = asArray(rule.preferredDuringSchedulingIgnoredDuringExecution).length;
-    if (required === 0 && preferred === 0) return;
-    const parts: string[] = [];
-    if (required) parts.push(`${required} required`);
-    if (preferred) parts.push(`${preferred} preferred`);
-    lines.push(`${label}: ${parts.join(", ")}`);
-  };
-  describe("Node affinity", asRecord(affinity.nodeAffinity), true);
-  describe("Pod affinity", asRecord(affinity.podAffinity), false);
-  describe("Pod anti-affinity", asRecord(affinity.podAntiAffinity), false);
-  return lines;
+  return CONDITION_BADGE[conditionKind(c)];
 }
 
 /** Conditions as a row of coloured badges (Pod/Deployment-style). */
@@ -421,111 +362,6 @@ const PERSISTENT_VOLUME_SOURCE_TYPES = new Set([
   "storageos",
   "vsphereVolume",
 ]);
-
-/** Describe a container's runtime state, e.g. "running, ready". */
-function containerStateText(st: Record<string, unknown>): { text: string; kind: StatusKind } {
-  const state = asRecord(st.state);
-  const ready = st.ready === true ? ", ready" : "";
-  if ("running" in state) return { text: `running${ready}`, kind: "success" };
-  if ("waiting" in state) {
-    const reason = str(asRecord(state.waiting).reason) || "waiting";
-    return { text: `waiting - ${reason}`, kind: reason.includes("BackOff") ? "danger" : "warning" };
-  }
-  if ("terminated" in state) {
-    const t = asRecord(state.terminated);
-    const reason = str(t.reason) || "terminated";
-    const code = t.exitCode != null ? ` (exit code: ${str(t.exitCode)})` : "";
-    return {
-      text: `terminated${ready} - ${reason}${code}`,
-      kind: reason === "Completed" ? "neutral" : "danger",
-    };
-  }
-  return { text: "—", kind: "neutral" };
-}
-
-/** The previous termination marks when Kubernetes last restarted a container. */
-export function containerLastRestartTime(status: unknown): string {
-  const st = asRecord(status);
-  if (Number(st.restartCount ?? 0) < 1) return "";
-  return str(asRecord(asRecord(st.lastState).terminated).finishedAt);
-}
-
-function timestampWithAge(iso: string, now: number): string {
-  return iso ? `${ageFromTimestamp(iso, now)} ago (${absoluteTimestamp(iso)})` : "";
-}
-
-function latestRestartTime(statuses: Record<string, unknown>[]): string {
-  return statuses
-    .map(containerLastRestartTime)
-    .filter(Boolean)
-    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? "";
-}
-
-/** Format a port as "name: port/protocol". */
-function portText(p: Record<string, unknown>): string {
-  const name = str(p.name);
-  const proto = str(p.protocol) || "TCP";
-  return `${name ? `${name}: ` : ""}${str(p.containerPort)}/${proto}`;
-}
-
-/** Probe → chips: "tcp-socket :cluster delay=30s timeout=1s period=10s …". */
-function probeChips(probe: Record<string, unknown>): string[] {
-  const chips: string[] = [];
-  if (probe.httpGet) {
-    const h = asRecord(probe.httpGet);
-    chips.push(`http-get ${str(h.scheme || "HTTP").toLowerCase()}://:${str(h.port)}${str(h.path)}`);
-  } else if (probe.tcpSocket) {
-    chips.push(`tcp-socket :${str(asRecord(probe.tcpSocket).port)}`);
-  } else if (probe.exec) {
-    chips.push(`exec [${asArray(asRecord(probe.exec).command).map(str).join(" ")}]`);
-  }
-  if (probe.initialDelaySeconds != null) chips.push(`delay=${str(probe.initialDelaySeconds)}s`);
-  if (probe.timeoutSeconds != null) chips.push(`timeout=${str(probe.timeoutSeconds)}s`);
-  if (probe.periodSeconds != null) chips.push(`period=${str(probe.periodSeconds)}s`);
-  if (probe.successThreshold != null) chips.push(`#success=${str(probe.successThreshold)}`);
-  if (probe.failureThreshold != null) chips.push(`#failure=${str(probe.failureThreshold)}`);
-  return chips;
-}
-
-function resourceText(r: Record<string, unknown>): string {
-  return `CPU: ${str(r.cpu) || "—"}, Memory: ${str(r.memory) || "—"}`;
-}
-
-/** "NAME=value" or "NAME=<secret/configMap/field>" for an env entry. */
-function envText(e: unknown): string {
-  const r = asRecord(e);
-  const name = str(r.name);
-  if (r.value != null) return `${name}=${str(r.value)}`;
-  const vf = asRecord(r.valueFrom);
-  const src = vf.secretKeyRef
-    ? "secret"
-    : vf.configMapKeyRef
-      ? "configMap"
-      : vf.fieldRef
-        ? "field"
-        : vf.resourceFieldRef
-          ? "resource"
-          : "ref";
-  return `${name}=<${src}>`;
-}
-
-/** "mountPath (ro) ← volume" for a volumeMount entry. */
-function mountText(m: unknown): string {
-  const r = asRecord(m);
-  const ro = r.readOnly === true ? " (ro)" : "";
-  return `${str(r.mountPath)}${ro} ← ${str(r.name)}`;
-}
-
-/** A toleration as "key=value → effect" (or "key Exists → effect"). */
-function tolerationText(t: unknown): string {
-  const r = asRecord(t);
-  const key = str(r.key) || "(any taint)";
-  const operator = str(r.operator) || "Equal";
-  const effect = str(r.effect) || "all effects";
-  const secs = r.tolerationSeconds != null ? ` for ${str(r.tolerationSeconds)}s` : "";
-  const left = operator === "Exists" ? `${key} exists` : `${key}=${str(r.value)}`;
-  return `${left} → ${effect}${secs}`;
-}
 
 function PlainChips({ items }: { items: string[] }) {
   return (
@@ -1184,14 +1020,24 @@ function WorkloadDetailView({
   );
 }
 
-/** "RollingUpdate (partition 2)" / "RollingUpdate (max unavailable 1)" / "OnDelete". */
+/**
+ * "RollingUpdate (partition 2)" / "RollingUpdate (max unavailable 1)" / "OnDelete".
+ *
+ * Classic's own form, and it stays here rather than in core. The NUMBERS come
+ * from core's `updateStrategy` — one reader of `spec.strategy` /
+ * `spec.updateStrategy` for every design — but the words around them are this
+ * design's. The new design draws the same facts as "RollingUpdate ·
+ * unavailable 1" off its mock; that is its decision to make, and classic is
+ * frozen. A shared function returning either sentence would put one design's
+ * typography in the other's screens, which is exactly what happened when this
+ * helper was moved to core wholesale.
+ */
 function updateStrategyText(strategy: Record<string, unknown>): string {
-  const type = str(strategy.type) || "RollingUpdate";
-  const ru = asRecord(strategy.rollingUpdate);
+  const { type, partition, maxUnavailable, maxSurge } = updateStrategy(strategy);
   const parts: string[] = [];
-  if (ru.partition != null) parts.push(`partition ${str(ru.partition)}`);
-  if (ru.maxUnavailable != null) parts.push(`max unavailable ${str(ru.maxUnavailable)}`);
-  if (ru.maxSurge != null) parts.push(`max surge ${str(ru.maxSurge)}`);
+  if (partition != null) parts.push(`partition ${partition}`);
+  if (maxUnavailable != null) parts.push(`max unavailable ${maxUnavailable}`);
+  if (maxSurge != null) parts.push(`max surge ${maxSurge}`);
   return parts.length ? `${type} (${parts.join(", ")})` : type;
 }
 
@@ -1448,30 +1294,6 @@ function CronJobBody({
   );
 }
 
-function decodeBase64(v: string): string {
-  try {
-    const binary = atob(v);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-  } catch {
-    return v;
-  }
-}
-
-function decodedByteLength(v: string): number {
-  try {
-    return atob(v).length;
-  } catch {
-    return new TextEncoder().encode(v).length;
-  }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
 /** One ConfigMap/Secret entry: key + value. Secret values are base64-decoded
  *  and masked behind a reveal toggle. */
 function ConfigDataEntry({ name, value, secret }: { name: string; value: string; secret: boolean }) {
@@ -1511,78 +1333,6 @@ function SecretData({ data }: { data: Record<string, string> }) {
       )}
     </Section>
   );
-}
-
-interface CertificateRow {
-  key: string;
-  role: string;
-  subject: string;
-  issuer: string;
-  serial: string;
-  validFrom: string;
-  validUntil: string;
-  status: string;
-  keyAlgorithm: string;
-  sans: string[];
-  size: string;
-}
-
-function publicKeyAlgorithm(certificate: X509Certificate): string {
-  const algorithm = certificate.publicKey.algorithm as Algorithm & {
-    modulusLength?: number;
-    namedCurve?: string;
-  };
-  if (algorithm.namedCurve) return `${algorithm.name} ${algorithm.namedCurve}`;
-  if (algorithm.modulusLength) return `${algorithm.name} ${algorithm.modulusLength}-bit`;
-  return algorithm.name;
-}
-
-async function certificateRows(pem: string): Promise<CertificateRow[]> {
-  await import("reflect-metadata");
-  const { SubjectAlternativeNameExtension, X509Certificate } = await import("@peculiar/x509");
-  const matches = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-  return matches.map((pemCertificate, index) => {
-    const fallback: CertificateRow = {
-      key: String(index),
-      role: index === 0 ? "Leaf" : `Chain ${index}`,
-      subject: "Unable to parse certificate",
-      issuer: "",
-      serial: "",
-      validFrom: "",
-      validUntil: "",
-      status: "Invalid",
-      keyAlgorithm: "",
-      sans: [],
-      size: formatBytes(new TextEncoder().encode(pemCertificate).length),
-    };
-    try {
-      const certificate = new X509Certificate(pemCertificate);
-      const now = Date.now();
-      const expires = certificate.notAfter.getTime();
-      const starts = certificate.notBefore.getTime();
-      const status = now < starts
-        ? "Not yet valid"
-        : now > expires
-          ? "Expired"
-          : expires - now < 30 * 86_400_000
-            ? "Expires soon"
-            : "Valid";
-      const san = certificate.getExtension(SubjectAlternativeNameExtension);
-      return {
-        ...fallback,
-        subject: certificate.subject,
-        issuer: certificate.issuer,
-        serial: certificate.serialNumber,
-        validFrom: certificate.notBefore.toISOString(),
-        validUntil: certificate.notAfter.toISOString(),
-        status,
-        keyAlgorithm: publicKeyAlgorithm(certificate),
-        sans: san?.names.items.map((name) => name.value) ?? [],
-      };
-    } catch {
-      return fallback;
-    }
-  });
 }
 
 function privateKeyType(pem: string): string {
@@ -1669,32 +1419,6 @@ function TlsSecretBody({ data }: { data: Record<string, string> }) {
       <SecretData data={data} />
     </>
   );
-}
-
-interface DockerRegistryRow {
-  registry: string;
-  username: string;
-  credential: string;
-}
-
-function dockerRegistries(data: Record<string, string>, type: string): DockerRegistryRow[] {
-  const key = type === "kubernetes.io/dockercfg" ? ".dockercfg" : ".dockerconfigjson";
-  try {
-    const parsed = JSON.parse(decodeBase64(str(data[key]))) as Record<string, unknown>;
-    const auths = type === "kubernetes.io/dockercfg" ? parsed : asRecord(parsed.auths);
-    return Object.entries(auths).map(([registry, raw]) => {
-      const auth = asRecord(raw);
-      const decodedAuth = auth.auth ? decodeBase64(str(auth.auth)) : "";
-      const username = str(auth.username) || decodedAuth.split(":", 1)[0];
-      return {
-        registry,
-        username: username || "—",
-        credential: auth.identitytoken ? "Identity token" : auth.auth || auth.password ? "Stored" : "Missing",
-      };
-    });
-  } catch {
-    return [];
-  }
 }
 
 function DockerSecretBody({ data, type }: { data: Record<string, string>; type: string }) {
@@ -2246,29 +1970,6 @@ interface QuotaRow {
   hard: string;
 }
 
-/** Parse a Kubernetes quantity (e.g. "500m", "2Gi", "4") to a base-unit number. */
-export function parseQuantity(q: string): number | null {
-  const m = /^([0-9.]+)\s*([a-zA-Z]*)$/.exec((q ?? "").trim());
-  if (!m) return null;
-  const n = parseFloat(m[1]);
-  if (Number.isNaN(n)) return null;
-  const unit = m[2];
-  const binary: Record<string, number> = { Ki: 2 ** 10, Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40, Pi: 2 ** 50, Ei: 2 ** 60 };
-  const decimal: Record<string, number> = { k: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
-  if (unit === "") return n;
-  if (unit === "m") return n / 1000;
-  if (binary[unit]) return n * binary[unit];
-  if (decimal[unit]) return n * decimal[unit];
-  return n; // unknown unit — same on both sides, so the ratio still holds
-}
-
-function usagePercent(used: string, hard: string): number | null {
-  const u = parseQuantity(used);
-  const h = parseQuantity(hard);
-  if (u == null || h == null || h === 0) return null;
-  return Math.round((u / h) * 100);
-}
-
 function ResourceQuotaBody({ obj }: { obj: K8sObject }) {
   const status = asRecord(obj.status);
   const hard = asRecord(status.hard);
@@ -2804,23 +2505,6 @@ function KindBody({
       return <WebhookBody obj={obj} />;
     default:
       return null;
-  }
-}
-
-function relatedPodSelector(kind: string, obj: K8sObject): Record<string, string> {
-  const spec = asRecord(obj.spec);
-  switch (kind) {
-    case "Service":
-      return asRecord(spec.selector) as Record<string, string>;
-    case "DaemonSet":
-    case "Job":
-      return asRecord(asRecord(spec.selector).matchLabels) as Record<string, string>;
-    case "PodDisruptionBudget":
-      return asRecord(asRecord(spec.selector).matchLabels) as Record<string, string>;
-    case "NetworkPolicy":
-      return asRecord(asRecord(spec.podSelector).matchLabels) as Record<string, string>;
-    default:
-      return {};
   }
 }
 

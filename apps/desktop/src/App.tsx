@@ -18,6 +18,7 @@ import { AssistantTab } from "./components/AssistantTab";
 import { CommandPalette } from "./components/CommandPalette";
 import { ShortcutCheatSheet } from "./components/ShortcutCheatSheet";
 import { isTypingTarget, matchesShortcut } from "@srelens/core";
+import { takeHandoff } from "./design";
 import { McpConfirmDialog } from "./components/McpConfirmDialog";
 import { VaultGate } from "./components/VaultGate";
 import { Toaster } from "./components/ui/sonner";
@@ -263,6 +264,19 @@ export function App() {
       unlisten?.();
     };
   }, []);
+
+  // A design switch reloads the document, and the new design leaves a note
+  // about where it was. Consumed once the contexts are known — same gate as
+  // the deep links below, for the same reason — and consumed exactly once:
+  // takeHandoff clears as it reads, so a later launch starts at home.
+  useEffect(() => {
+    if (!contexts) return;
+    const handoff = takeHandoff();
+    if (!handoff) return;
+    if (contexts.some((c) => c.name === handoff.context)) {
+      openView(handoff.context, handoff.kind);
+    }
+  }, [contexts]);
 
   // Routed only once the contexts are known: a link that arrives during a cold
   // start would otherwise be judged against an empty context list and

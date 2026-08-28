@@ -1,11 +1,16 @@
 name: CI
 
-# Run the test suites on every push/PR to dev or main so nothing lands red.
+# Run the test suites on every push/PR to a shared branch so nothing lands red.
+#
+# `feat/ui-next` is one of those: the new-design migration merges there rather
+# than into dev until it lands, and a branch missing from this list gets no CI
+# at all — not a red check, no checks, which GitHub reports as mergeable. PR
+# #326 was opened against it and sat green with zero checks having run. (#318)
 on:
   push:
-    branches: [dev, main]
+    branches: [dev, main, feat/ui-next]
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, feat/ui-next]
 
 # Pull requests share a per-ref group and cancel each other: a superseded run
 # tests a commit nobody will merge, so killing it saves minutes and loses

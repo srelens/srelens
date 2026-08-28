@@ -5,13 +5,42 @@ export interface TabItem {
   label: string;
 }
 
+/**
+ * `strip` is the window chrome's flat run of tabs; `segmented` is the compact
+ * rounded control the design draws inside a pane; `underline` is the row of
+ * words a full page reads across, ruled beneath the active one.
+ */
+export type TabsVariant = "strip" | "segmented" | "underline";
+
 export interface TabsProps {
   tabs: TabItem[];
   active: string;
   onChange: (id: string) => void;
   /** Names the strip for assistive technology (e.g. "Resource views"). */
   label?: string;
+  variant?: TabsVariant;
 }
+
+/**
+ * Three looks, one control. Two of them wear CSS the design system already
+ * had: the strip is `.tabstrip`/`.tab`, which `TabStrip` wears for the window's
+ * document tabs, and the segmented control is `.seg`/`.seg-btn`, which
+ * `CustomizeMark` wears for its radiogroup. Neither is restyled — a new
+ * appearance for a control that already had one is how a design system stops
+ * being one. (#331)
+ *
+ * `underline` is the third, and it is new CSS rather than a borrowed skin
+ * because nothing in the design drew it before: the resource full tab shows
+ * its panes as plain words on the page with an accent rule under the active
+ * one. It was added when the design asked for it and not a moment earlier,
+ * which is the only defence a third appearance has. The control underneath is
+ * unchanged — same roles, same roving tabindex, same arrow keys.
+ */
+const SKIN: Record<TabsVariant, { list: string; tab: string }> = {
+  strip: { list: "tabstrip", tab: "tab" },
+  segmented: { list: "seg", tab: "seg-btn" },
+  underline: { list: "utabs", tab: "utab" },
+};
 
 /**
  * Horizontal tab strip for switching views. Panels are rendered by callers, so
@@ -31,8 +60,9 @@ export interface TabsProps {
  * Selection follows focus, which is the expected pattern for tabs whose panels
  * are already rendered and cheap to switch. (#318)
  */
-export function Tabs({ tabs, active, onChange, label }: TabsProps) {
+export function Tabs({ tabs, active, onChange, label, variant = "strip" }: TabsProps) {
   const refs = useRef(new Map<string, HTMLButtonElement>());
+  const skin = SKIN[variant];
 
   function focus(id: string) {
     onChange(id);
@@ -62,13 +92,22 @@ export function Tabs({ tabs, active, onChange, label }: TabsProps) {
   }
 
   return (
-    <div className="tabstrip" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+    // `data-variant` is not only for the segmented styling: it is also what
+    // tells the stylesheet these are panes rather than the window's documents,
+    // and so lets `.tab` drop the 108px minimum a five-pane peek cannot afford.
+    <div
+      className={skin.list}
+      data-variant={variant}
+      role="tablist"
+      aria-label={label}
+      onKeyDown={onKeyDown}
+    >
       {tabs.map((t) => (
         <button
           key={t.id}
           type="button"
           role="tab"
-          className="tab"
+          className={skin.tab}
           data-active={t.id === active}
           aria-selected={t.id === active}
           tabIndex={t.id === active ? 0 : -1}

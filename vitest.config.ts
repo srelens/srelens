@@ -16,6 +16,10 @@ export default defineConfig({
   test: {
     // Every workspace member with tests. A package missing here is silently
     // untested: the root run reports green while never loading its suites.
+    // `test` options set HERE do not reach these — a project config is
+    // resolved on its own, and only the root-only options (coverage,
+    // reporters) are read from this block. So the shared ones live in
+    // `vitest.shared.ts` and each of the four imports them.
     projects: ["apps/desktop", "packages/core", "packages/ui-kit", "packages/ui-next"],
     coverage: {
       provider: "v8",

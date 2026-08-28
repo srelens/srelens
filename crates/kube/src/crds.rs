@@ -44,6 +44,10 @@ pub struct CrdDescriptor {
     pub kind: String,
     pub plural: String,
     pub namespaced: bool,
+    /// Every version this CRD serves, in declaration order.
+    pub versions: Vec<String>,
+    /// The version objects are stored as. Empty when the CRD names none.
+    pub storage_version: String,
     /// Columns this CRD asks to have displayed, in declaration order.
     pub printer_columns: Vec<PrinterColumn>,
 }
@@ -70,6 +74,29 @@ fn chosen_version(spec: &serde_json::Value) -> Option<&serde_json::Value> {
 /// Choose the storage version, else the first served version, else the first.
 fn pick_version(spec: &serde_json::Value) -> String {
     chosen_version(spec)
+        .and_then(|v| v["name"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Every version this CRD serves, in the order it declares them.
+fn served_versions(spec: &serde_json::Value) -> Vec<String> {
+    spec["versions"]
+        .as_array()
+        .map(|vs| {
+            vs.iter()
+                .filter(|v| v["served"].as_bool().unwrap_or(false))
+                .filter_map(|v| v["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The one version objects are persisted as. Empty when the CRD names none.
+fn storage_version(spec: &serde_json::Value) -> String {
+    spec["versions"]
+        .as_array()
+        .and_then(|vs| vs.iter().find(|v| v["storage"].as_bool().unwrap_or(false)))
         .and_then(|v| v["name"].as_str())
         .unwrap_or_default()
         .to_string()
@@ -289,6 +316,8 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
                             kind,
                             plural,
                             namespaced,
+                            versions: served_versions(spec),
+                            storage_version: storage_version(spec),
                             printer_columns: printer_columns(spec),
                         })
                     })
@@ -412,6 +441,22 @@ mod tests {
         let cache = ClientCache::new(PathBuf::from("/x"));
         assert_eq!(list_crds_capability(cache.clone()).id, "k8s.listCRDs");
         assert_eq!(list_custom_resource_capability(cache).id, "k8s.listCustomResource");
+    }
+
+    #[test]
+    fn reads_served_versions_in_order_and_the_storage_one() {
+        let spec = serde_json::json!({
+            "group": "example.com",
+            "names": { "kind": "Widget", "plural": "widgets" },
+            "scope": "Namespaced",
+            "versions": [
+                { "name": "v1beta1", "served": true,  "storage": false },
+                { "name": "v1",      "served": true,  "storage": true  },
+                { "name": "v1alpha1","served": false, "storage": false }
+            ]
+        });
+        assert_eq!(served_versions(&spec), vec!["v1beta1", "v1"]);
+        assert_eq!(storage_version(&spec), "v1");
     }
 
     #[test]

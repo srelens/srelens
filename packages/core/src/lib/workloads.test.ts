@@ -189,7 +189,7 @@ describe("listReplicaSets", () => {
 describe("podsForSelector", () => {
   it("passes context+namespace+selector and returns pods", async () => {
     const invoke = vi.fn().mockResolvedValue({ pods: [{ name: "web-1" }] });
-    const outcome = await podsForSelector("kind-dev", "default", { app: "web" }, invoke);
+    const outcome = await podsForSelector("kind-dev", "default", { app: "web" }, [], invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.podsForSelector", {
       context: "kind-dev",
       namespace: "default",
@@ -198,8 +198,34 @@ describe("podsForSelector", () => {
     expect(outcome.pods).toEqual([{ name: "web-1" }]);
   });
 
+  it("sends the set-based half of the selector when there is one", async () => {
+    const invoke = vi.fn().mockResolvedValue({ pods: [{ name: "web-1" }] });
+    // `app=web` alone would select the canary pods too — the expression is
+    // what narrows the query, so it has to reach the backend.
+    await podsForSelector(
+      "kind-dev",
+      "default",
+      { app: "web" },
+      [{ key: "track", operator: "NotIn", values: ["canary"] }],
+      invoke,
+    );
+    expect(invoke).toHaveBeenCalledWith("k8s.podsForSelector", {
+      context: "kind-dev",
+      namespace: "default",
+      selector: { app: "web" },
+      matchExpressions: [{ key: "track", operator: "NotIn", values: ["canary"] }],
+    });
+  });
+
+  it("leaves the wire untouched when there are no expressions", async () => {
+    const invoke = vi.fn().mockResolvedValue({ pods: [] });
+    await podsForSelector("kind-dev", "default", { app: "web" }, [], invoke);
+    const [, payload] = invoke.mock.calls[0] as [string, Record<string, unknown>];
+    expect(Object.keys(payload).sort()).toEqual(["context", "namespace", "selector"]);
+  });
+
   it("normalises errors", async () => {
-    const outcome = await podsForSelector("x", "default", {}, () =>
+    const outcome = await podsForSelector("x", "default", {}, [], () =>
       Promise.reject(new Error("forbidden")),
     );
     expect(outcome.pods).toBeUndefined();

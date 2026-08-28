@@ -26,7 +26,7 @@
 //! on panic, so the cluster is left usable and the suite is re-runnable
 //! back-to-back with no manual cleanup.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -741,6 +741,115 @@ async fn run_suite() {
         "expected our fixture pods: {out}"
     );
 
+    // === k8s.podCount / k8s.podOverview (#339) ===============================
+    // Both count/group pods cluster-wide WITHOUT listing pod bodies (see
+    // crates/kube/src/pod_count.rs and pod_overview.rs). Cross-checked here
+    // against a real cluster-wide k8s.listPods (namespace "") rather than
+    // trusting the counts on their own.
+    println!("=== pod count / overview ===");
+    let all_pods_out = h
+        .reg
+        .invoke("k8s.listPods", json!({ "context": ctx, "namespace": "" }))
+        .await
+        .unwrap();
+    h.mark("k8s.listPods");
+    let all_pods = all_pods_out["pods"].as_array().unwrap();
+
+    // podCount's own definition of its denominator (every phase except
+    // Succeeded) and numerator (Running only) — matched here, not
+    // re-derived, so the test fails if either capability's counting ever
+    // drifts from what a plain list of the same pods shows.
+    let plain_still_running = all_pods.iter().filter(|p| p["phase"] != "Succeeded").count() as i64;
+    let plain_running = all_pods.iter().filter(|p| p["phase"] == "Running").count() as i64;
+
+    let pod_count_out = h.ok("k8s.podCount", json!({ "context": ctx })).await;
+    assert_eq!(
+        pod_count_out["total"].as_i64().unwrap(),
+        plain_still_running,
+        "podCount total must match a plain cluster-wide pod list, minus Succeeded pods: {pod_count_out}"
+    );
+    assert_eq!(
+        pod_count_out["running"].as_i64().unwrap(),
+        plain_running,
+        "podCount running must match the Running pods in a plain cluster-wide list: {pod_count_out}"
+    );
+    assert!(
+        pod_count_out["total"].as_i64().unwrap() >= 5,
+        "expected at least our fixture pods counted: {pod_count_out}"
+    );
+
+    // podOverview's own "short of ready" rule (mirrors the READY-column check
+    // in crates/kube/src/pod_overview.rs), applied to the same ready count
+    // k8s.listPods reports, so "unsettled" can be checked against the plain
+    // list rather than trusted blind.
+    fn ready_cell_is_short(ready: &str) -> bool {
+        let Some((r, t)) = ready.split_once('/') else {
+            return true;
+        };
+        match (r.trim().parse::<i64>(), t.trim().parse::<i64>()) {
+            (Ok(r), Ok(t)) => r < t,
+            _ => true,
+        }
+    }
+
+    let pod_overview_out = h.ok("k8s.podOverview", json!({ "context": ctx })).await;
+    assert_eq!(
+        pod_overview_out["total"].as_i64().unwrap(),
+        all_pods.len() as i64,
+        "podOverview total must match a plain cluster-wide pod list: {pod_overview_out}"
+    );
+    assert!(
+        !pod_overview_out["truncated"].as_bool().unwrap(),
+        "the e2e namespace is far below the 200-pod unsettled cap: {pod_overview_out}"
+    );
+
+    // Every pod podOverview counted must be accounted for in exactly one
+    // node's group (or none, if unscheduled) — the property the module
+    // exists to answer without ever listing a pod body to do it.
+    let mut expected_by_node: BTreeMap<String, i64> = BTreeMap::new();
+    for p in all_pods {
+        let node = p["node"].as_str().unwrap_or_default();
+        if !node.is_empty() {
+            *expected_by_node.entry(node.to_string()).or_insert(0) += 1;
+        }
+    }
+    let actual_by_node: BTreeMap<String, i64> = pod_overview_out["byNode"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| (n["node"].as_str().unwrap().to_string(), n["pods"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        actual_by_node, expected_by_node,
+        "podOverview's per-node groups must account for every scheduled pod in a plain list: {pod_overview_out}"
+    );
+
+    let expected_unsettled: HashSet<(String, String)> = all_pods
+        .iter()
+        .filter(|p| p["phase"] != "Running" || ready_cell_is_short(p["ready"].as_str().unwrap_or_default()))
+        .map(|p| {
+            (
+                p["namespace"].as_str().unwrap_or_default().to_string(),
+                p["name"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let actual_unsettled: HashSet<(String, String)> = pod_overview_out["unsettled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["namespace"].as_str().unwrap_or_default().to_string(),
+                p["name"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual_unsettled, expected_unsettled,
+        "podOverview's unsettled set must match pods that are not simply Running in a plain list: {pod_overview_out}"
+    );
+
     // #17: attach an ephemeral debug container to a fixture pod. It can't be
     // removed once added, but the whole namespace is torn down after the suite.
     let debug_pod = out["pods"].as_array().unwrap()[0]["name"].as_str().unwrap().to_string();
@@ -1327,6 +1436,38 @@ async fn run_suite() {
         h.any("k8s.podMetrics", json!({ "context": ctx, "namespace": NS }))
             .await;
         println!("  metrics API absent — asserted clean degradation only");
+    }
+
+    // === k8s.clusterFacts (#339) ===============================================
+    // The overview rail's control-plane facts: provider, region and
+    // metrics-server availability. metrics_server's own probe is API-group
+    // discovery, a different path than k8s.nodeMetrics above, but the two
+    // must agree on whether metrics-server is there — checked against
+    // `metrics_available` rather than asserting only that a key exists.
+    println!("=== cluster facts ===");
+    let out = h.ok("k8s.clusterFacts", json!({ "context": ctx })).await;
+    assert_eq!(out["context"], ctx);
+    assert!(out["provider"].is_string(), "provider must be reported, possibly empty: {out}");
+    assert!(out["region"].is_string(), "region must be reported, possibly empty: {out}");
+    let state = out["metricsServer"]["state"].as_str().unwrap();
+    assert!(
+        ["present", "absent", "unknown"].contains(&state),
+        "unexpected metrics-server state: {out}"
+    );
+    if metrics_available {
+        assert_eq!(
+            state, "present",
+            "k8s.nodeMetrics served readings above, so clusterFacts must see metrics-server too: {out}"
+        );
+        assert!(
+            !out["metricsServer"]["version"].as_str().unwrap_or_default().is_empty(),
+            "a present metrics-server must report a version: {out}"
+        );
+    } else {
+        assert_ne!(
+            state, "present",
+            "k8s.nodeMetrics found nothing above, so clusterFacts should not claim metrics-server is present: {out}"
+        );
     }
 
     // === 7. Writes ==============================================================
