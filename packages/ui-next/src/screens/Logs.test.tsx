@@ -332,6 +332,15 @@ function push(...lines: { source: string; text: string }[]) {
  *
  * Flushing pending promises first, then re-querying, hands back the node the
  * screen actually settled on.
+ *
+ * **The ONLY barrier in this file, and the only `findByRole("log")` in it.**
+ * The helper existed for thirty-five tests and was used by twenty-eight of
+ * them; the other thirty-five sites still awaited `findByRole` raw, which is
+ * the same unsettled node under a different name. #375 is one of those:
+ * "draws a Sources row per pod" took the unsettled node, pushed lines into the
+ * buffer, and the rail tallied an empty one — a failure that reached CI twice,
+ * on #373 and again on #380. A raw `findByRole("log")` added back here is that
+ * flake returning, so there is exactly one left and it is the line below.
  */
 const body = async () => {
   await screen.findByRole("log", { name: /logs/i });
@@ -599,7 +608,7 @@ describe("Logs", () => {
 
   it("wires the since select to what the stream is asked to tail", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     // Opens on the whole log; the narrowing is the reader's to ask for.
     expect(lastOptions().sinceSeconds).toBeUndefined();
 
@@ -615,7 +624,7 @@ describe("Logs", () => {
 
   it("asks for timestamps, because the design gives the time its own column", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     expect(lastOptions().timestamps).toBe(true);
   });
 
@@ -637,7 +646,7 @@ describe("Logs", () => {
     // true, useless, and reads as a broken screen. The tail cap already bounds
     // how much arrives, so the age window buys nothing and costs the logs.
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     expect(lastOptions().sinceSeconds).toBeUndefined();
     expect((screen.getByRole("combobox", { name: /since/i }) as HTMLSelectElement).value).toBe("all");
   });
@@ -824,14 +833,14 @@ describe("Logs", () => {
   describe("the pause toggle", () => {
     it("reads Pause while following and Follow while paused", async () => {
       draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       await userEvent.click(screen.getByRole("button", { name: "Pause" }));
       expect(screen.getByRole("button", { name: "Follow" })).toBeTruthy();
     });
 
     it("says how many lines arrived while the view was held", async () => {
       draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       await userEvent.click(screen.getByRole("button", { name: "Pause" }));
       act(() => {
         h.state.pending = 12;
@@ -844,13 +853,13 @@ describe("Logs", () => {
   describe("what the stream is doing", () => {
     it("says Following while it is live", async () => {
       draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       expect(signal()).toContain("Following");
     });
 
     it("says so when the connection is being retried", async () => {
       draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       act(() => {
         h.state.status = "reconnecting";
         notify();
@@ -871,7 +880,7 @@ describe("Logs", () => {
 
   it("hands the stream to the console when asked about", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await userEvent.click(screen.getByRole("button", { name: /Summarise this stream/i }));
     await waitFor(() =>
       expect(asked).toEqual(["Summarise the last 500 log lines and group errors by cause"]),
@@ -890,7 +899,7 @@ describe("Logs", () => {
 
   it("remembers the subject it streamed", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await waitFor(() =>
       expect(recentLogSubjects("prod")).toEqual([
         { cluster: "prod", kind: "Deployment", namespace: "checkout", name: "checkout-api" },
@@ -1038,7 +1047,7 @@ describe("what the stream is doing, in a word AND a denominator", () => {
       { status: "connecting" as const, live: 0, reconnecting: 0 },
     ]) {
       const view = draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       act(() => {
         Object.assign(h.state, state);
         notify();
@@ -1050,7 +1059,7 @@ describe("what the stream is doing, in a word AND a denominator", () => {
 
   it("reads one flapping pod of ten as one of ten, not as a total outage", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     act(() => {
       h.state.status = "reconnecting";
       h.state.live = 9;
@@ -1067,7 +1076,7 @@ describe("what the stream is doing, in a word AND a denominator", () => {
     // a wide workload lines can be scrolling while the word still says
     // connecting. The counts are what make that honest.
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     act(() => {
       h.state.status = "connecting";
       h.state.live = 46;
@@ -1081,7 +1090,7 @@ describe("what the stream is doing, in a word AND a denominator", () => {
 
   it("takes its words and its colours from core, never from a table of its own", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     act(() => {
       h.state.status = "error";
       h.state.live = 0;
@@ -1095,7 +1104,7 @@ describe("what the stream is doing, in a word AND a denominator", () => {
 
   it("says Paused for the held VIEW, and still says what the connection is doing", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await userEvent.click(screen.getByRole("button", { name: "Pause" }));
     expect(signal()).toContain("Paused");
     // Pausing freezes the pane, not the stream — a reader who paused and then
@@ -1107,7 +1116,7 @@ describe("what the stream is doing, in a word AND a denominator", () => {
 describe("the Stream rail", () => {
   it("draws a Sources row per pod, with core's verdict and the revision", async () => {
     const { container } = draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     expect(railPods(container)).toEqual([
       ["api-7", "rev 7d764666f9"],
@@ -1128,7 +1137,7 @@ describe("the Stream rail", () => {
    */
   it("hands the rail the STRIPPED message, so the tally is not silently empty", async () => {
     const { container } = draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(
       ...LINES,
       line("api-8/api", "14:07:45.100000000", "error pool timeout waited=30.1s in_use=6"),
@@ -1145,7 +1154,7 @@ describe("the Stream rail", () => {
 
   it("counts what the BODY is drawing, so the badge and the terms cannot describe a different set", async () => {
     const { container } = draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES, line("api-8/api", "14:07:45.100000000", "error pool timeout waited=30.1s in_use=6"));
     expect(screen.getByText("2 errors")).toBeTruthy();
 
@@ -1187,7 +1196,7 @@ describe("exporting what is on screen", () => {
 
   it("writes the buffer through the desktop's save dialog, flattened as classic does", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
@@ -1202,7 +1211,7 @@ describe("exporting what is on screen", () => {
 
   it("exports WHAT IS ON SCREEN — every filter applied, not the whole buffer", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     await userEvent.type(filterField(), "pool");
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
@@ -1253,7 +1262,7 @@ describe("exporting what is on screen", () => {
 
   it("exports the held view while paused, which is what the reader is looking at", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     await userEvent.click(screen.getByRole("button", { name: "Pause" }));
     // The hook freezes `lines` while paused and keeps counting what arrives.
@@ -1286,7 +1295,7 @@ describe("exporting what is on screen", () => {
       });
     try {
       draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       push(...LINES);
       await userEvent.click(screen.getByRole("button", { name: /export/i }));
       await waitFor(() => expect(clicked).toEqual(["checkout-api.log"]));
@@ -1299,7 +1308,7 @@ describe("exporting what is on screen", () => {
 
   it("offers nothing to export when there is nothing on screen", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", true);
     push(...LINES);
     expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", false);
@@ -1308,7 +1317,7 @@ describe("exporting what is on screen", () => {
   it("heads a failed save with the screen's own sentence, not the backend's", async () => {
     h.saved.mockRejectedValue("save_text_file failed: Permission denied (os error 13)");
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
     const notice = await screen.findByText(/could not save this stream/i);
@@ -1321,7 +1330,7 @@ describe("exporting what is on screen", () => {
   it("classifies what it can, rather than printing String(e) the way classic did", async () => {
     h.saved.mockRejectedValue("save_text_file failed: deadline exceeded");
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
     const notice = await screen.findByText(/could not save this stream/i);
@@ -1337,7 +1346,7 @@ describe("exporting what is on screen", () => {
   it("puts the failure away again on the next export", async () => {
     h.saved.mockRejectedValueOnce("save_text_file failed: Permission denied (os error 13)");
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
     await screen.findByText(/could not save this stream/i);
@@ -1351,13 +1360,13 @@ describe("exporting what is on screen", () => {
 describe("what a restart costs the reader", () => {
   it("says nothing before the first restart", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     expect(screen.queryByText(/scrollback/i)).toBeNull();
   });
 
   it("says the scrollback went when a since change reopened the stream", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     push(...LINES);
     act(() => {
       // What the hook does on a since/container/tail change: a fresh buffer
@@ -1371,7 +1380,7 @@ describe("what a restart costs the reader", () => {
 
   it("lets the reader put the notice away, and says it again on the NEXT restart", async () => {
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     act(() => {
       h.state.restarts = 1;
       notify();
@@ -1458,7 +1467,7 @@ describe("the previous instance", () => {
   it("fetches the terminated container's buffer once, and asks no window of it", async () => {
     withCorpse();
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     // A window the reader chose for the LIVE tail. The instance that died
     // twenty minutes ago wrote nothing in the last five, so passing it on
     // would hand back an empty file and call it the corpse's logs.
@@ -1481,7 +1490,7 @@ describe("the previous instance", () => {
   it("asks only for the containers that have actually died", async () => {
     withCorpse();
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await press();
     await waitFor(() => expect(h.fetched).toHaveBeenCalledTimes(1));
     // api-7's otel-sidecar, api-8 and api-9 are all in scope and none of them
@@ -1492,7 +1501,7 @@ describe("the previous instance", () => {
   it("names the pod, when it terminated and its exit code", async () => {
     withCorpse();
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await press();
 
     const banner = await screen.findByText(/reading the previous instance/i);
@@ -1524,7 +1533,7 @@ describe("the previous instance", () => {
     for (const [instance, says, silent] of cases) {
       withCorpse([instance]);
       const view = draw();
-      await screen.findByRole("log", { name: /logs/i });
+      await body();
       await press();
       const headline = await screen.findByText(/reading the previous instance/i);
       expect(headline.textContent).toMatch(says);
@@ -1536,7 +1545,7 @@ describe("the previous instance", () => {
   it("clears follow, and the disabled control SAYS WHY rather than going inert", async () => {
     withCorpse();
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     expect(signal()).toContain("Following");
 
     await press();
@@ -1609,7 +1618,7 @@ describe("the previous instance", () => {
     withCorpse();
     h.fetched.mockResolvedValue({ error: "k8s.podLogs failed: request timeout" });
     draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await press();
 
     const notice = await screen.findByText(/could not read the previous instance/i);
@@ -1685,7 +1694,7 @@ describe("the previous instance", () => {
       ].join("\n"),
     });
     const { container } = draw();
-    await screen.findByRole("log", { name: /logs/i });
+    await body();
     await press();
 
     await waitFor(() => expect(railTerms(container).length).toBeGreaterThan(0));
