@@ -3,7 +3,7 @@ import { act, render, screen, fireEvent, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
 import { Rail } from "./Rail";
-import { activeCluster, currentWorkspace, setState } from "../lib/tabsStore";
+import { activeCluster, currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 import { defaultMark, getMark, loadMarks, setMark } from "../lib/marks";
@@ -115,6 +115,52 @@ describe("Rail", () => {
     setup();
     await pick("staging", "Open staging");
     expect(activeCluster()).toBe("staging");
+  });
+
+  /**
+   * **Switching cluster in the rail relabels the strip.**
+   *
+   * Nothing pins a tab to a cluster: every cluster-scoped screen reads
+   * `useActiveContext()`, so the moment the rail switches, the mounted screen
+   * is showing the new cluster. `makeTab` spent `clusterName` on the tab's
+   * `sub` when the tab was created, so the strip went on naming the old one —
+   * an action run from that tab ran against one cluster under a tab labelled
+   * another, which is the same hole `openTab`'s relabel closed for the tab it
+   * activates.
+   *
+   * STAGING's stableId is deliberately not its name: the workspace holds
+   * stableIds (#265) and the strip shows names, so the last assertion is what
+   * tells a relabel from an id written onto the tab.
+   */
+  it("leaves no tab labelled with the cluster it switched away from", async () => {
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const contexts = [ctx("prod-eu"), STAGING];
+    setState(defaultState(contexts));
+    openTab("/overview", { clusterName: "prod-eu" });
+    openTab("/k/pods", { clusterName: "prod-eu" });
+    setup({ contexts });
+
+    await userEvent.click(screen.getByRole("button", { name: "staging-eu" }));
+
+    expect(activeCluster()).toBe("id-stage");
+    const subs = currentWorkspace().tabs.map((t) => t.sub);
+    expect(subs).toEqual(["staging-eu", "staging-eu", "staging-eu"]);
+    expect(subs).not.toContain("id-stage");
+  });
+
+  /** The menu's `Open` is the same gesture by another route, and had the same
+   *  hole — fixing one and leaving the other is how the two disagree. */
+  it("leaves no tab labelled with the previous cluster from the menu either", async () => {
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const contexts = [ctx("prod-eu"), STAGING];
+    setState(defaultState(contexts));
+    openTab("/overview", { clusterName: "prod-eu" });
+    setup({ contexts });
+
+    await pick("staging-eu", "Open staging-eu");
+
+    expect(activeCluster()).toBe("id-stage");
+    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual(["staging-eu", "staging-eu"]);
   });
 
   it("opens the Connections tab", async () => {

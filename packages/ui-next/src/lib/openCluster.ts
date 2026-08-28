@@ -28,11 +28,13 @@ export function openCluster(context: ClusterContext): void {
   if (!workspace.clusters.includes(id)) {
     setWorkspaceClusters(workspace.id, [...workspace.clusters, id]);
   }
-  setActiveCluster(id);
-  // By NAME, not by stableId: core's `list*` and `watchResource` all take a
-  // context name, and the tab is what carries it to them (#265). `openTab`
-  // relabels an `/overview` tab that is already open for a different cluster,
-  // so nothing extra is needed here — see its own note for why that lives
-  // there and not in this function.
+  // By NAME as well as by stableId, and the name is not spare: the workspace
+  // stores the id (#265), while the strip's labels — and core's `list*` and
+  // `watchResource` — are all in terms of the context name. `setActiveCluster`
+  // relabels every cluster-scoped tab with it, because the screens behind those
+  // tabs have all just started rendering this cluster; `openTab` relabels the
+  // `/overview` tab it may be reusing. Both live in the store, at the point
+  // each decision is made, rather than here — see their own notes.
+  setActiveCluster(id, context.name);
   openTab("/overview", { clusterName: context.name });
 }

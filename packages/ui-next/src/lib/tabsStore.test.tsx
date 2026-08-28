@@ -15,7 +15,15 @@ function seed(over: Partial<TabsState> = {}) {
   return store.getState();
 }
 
+/**
+ * A context whose stableId is NOT its name. Workspaces hold stableIds (#265)
+ * and tabs carry names, so a fixture where the two are the same string cannot
+ * tell a relabel from a stableId written straight onto the strip.
+ */
+const named = (stableId: string, name: string): ClusterContext => ({ ...ctx(stableId), name });
+
 const routes = () => store.currentWorkspace().tabs.map((t) => t.route);
+const subFor = (route: string) => store.currentWorkspace().tabs.find((t) => t.route === route)?.sub;
 const active = () => store.currentWorkspace().tabs.find((t) => t.id === store.currentWorkspace().activeId)!;
 
 beforeEach(() => {
@@ -318,6 +326,62 @@ describe("activeCluster", () => {
     expect(store.activeCluster()).toBeNull();
   });
 
+  /**
+   * **The rail switches cluster; the strip has to follow.** Every cluster-scoped
+   * tab is about whichever cluster is active — nothing pins a tab to one, and
+   * `useActiveContext()` is the single answer every screen reads — so a tab
+   * whose `sub` still names the cluster before the switch labels the screen
+   * with a cluster it is not showing, and an action run from that tab runs
+   * against one cluster under a tab reading another.
+   *
+   * Through `relabel`, so the route table stays the one place that decides
+   * whether a route carries a cluster at all: `/settings` is app-scoped and
+   * keeps no `sub`.
+   *
+   * The fixtures' stableIds are deliberately not their names, so these
+   * assertions can tell a relabel from a stableId written onto the strip.
+   */
+  it("relabels every cluster-scoped tab for the cluster it switches to", () => {
+    store.setState(defaultState([named("id-prod", "prod-eu"), named("id-stage", "staging-eu")]));
+    store.openTab("/overview", { clusterName: "prod-eu" });
+    store.openTab("/k/pods", { clusterName: "prod-eu" });
+    store.openTab("/settings");
+
+    store.setActiveCluster("id-stage", "staging-eu");
+
+    const tabs = store.currentWorkspace().tabs;
+    expect(tabs.filter((t) => t.sub === "prod-eu")).toEqual([]);
+    expect(subFor("/overview")).toBe("staging-eu");
+    expect(subFor("/k/pods")).toBe("staging-eu");
+    expect(subFor("/")).toBe("staging-eu");
+    // A stableId on the strip would satisfy "no longer prod-eu" and be the
+    // same bug wearing the other name.
+    expect(tabs.filter((t) => t.sub === "id-stage")).toEqual([]);
+    // App-scoped: `/settings` is not about a cluster and gains no sub.
+    expect(subFor("/settings")).toBeUndefined();
+  });
+
+  it("relabels a stale tab even when the cluster is already the active one", () => {
+    // How a persisted session comes back: the active cluster is restored from
+    // the file, the tabs come back with whatever `sub` was written last.
+    store.setState(defaultState([named("id-prod", "prod-eu")]));
+    store.openTab("/overview", { clusterName: "staging-eu" });
+
+    store.setActiveCluster("id-prod", "prod-eu");
+
+    expect(subFor("/overview")).toBe("prod-eu");
+  });
+
+  it("relabels nothing when it refuses the cluster", () => {
+    store.setState(defaultState([named("id-prod", "prod-eu")]));
+    store.openTab("/overview", { clusterName: "prod-eu" });
+
+    store.setActiveCluster("not-in-this-workspace", "somewhere-else");
+
+    expect(store.activeCluster()).toBe("id-prod");
+    expect(subFor("/overview")).toBe("prod-eu");
+  });
+
   it("setActiveCluster does not notify for a no-op", () => {
     store.setState(defaultState([ctx("a")]));
     const spy = vi.fn();
@@ -466,6 +530,18 @@ describe("no-op actions do not notify", () => {
   silent("closeAll when every tab is pinned and the first is active", twoPinnedFirstActive, () => store.closeAll());
 
   silent("togglePin on an id that is not there", () => {}, () => store.togglePin("nope"));
+
+  // The cluster switch relabels the strip, so it has to be as quiet as
+  // `openTab` is when there is nothing to relabel: picking the cluster you are
+  // already on must not schedule a save.
+  silent(
+    "setActiveCluster naming the cluster every tab already carries",
+    () => {
+      store.setState(defaultState([named("id-prod", "prod-eu")]));
+      store.setActiveCluster("id-prod", "prod-eu");
+    },
+    () => store.setActiveCluster("id-prod", "prod-eu"),
+  );
 
   silent(
     "setWorkspaceClusters with a list equal to the one it has",

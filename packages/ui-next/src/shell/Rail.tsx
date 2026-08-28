@@ -207,6 +207,23 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     });
   }
 
+  /**
+   * Switch the rail's cluster, and hand the store the name the strip needs.
+   *
+   * `setActiveCluster` takes a stableId — that is what a workspace holds (#265)
+   * — but a tab's label is the context's NAME, and the store cannot translate
+   * between the two (`lib/clusters` imports it, not the other way round). The
+   * rail already has both, in `byId`, so the name is passed from here. Without
+   * it every cluster-scoped tab kept the label of the cluster switched away
+   * from while the mounted screen rendered the new one.
+   *
+   * Both ways in go through this: the click on a mark and the menu's `Open`.
+   * They are one gesture, and fixing one is how the two start disagreeing.
+   */
+  function select(id: string) {
+    setActiveCluster(id, byId.get(id)?.name);
+  }
+
   function remove(id: string) {
     setWorkspaceClusters(
       workspace.id,
@@ -217,7 +234,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
 
   function menuFor(item: ClusterRailItem): ContextMenuItem[] {
     return [
-      { label: `Open ${item.name}`, onPick: () => setActiveCluster(item.id) },
+      { label: `Open ${item.name}`, onPick: () => select(item.id) },
       // The ellipsis is the promise that this one asks something more before
       // anything happens — it opens the dialog below.
       { label: "Customise…", icon: Icons.edit, onPick: () => setEditing(item.id) },
@@ -235,7 +252,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
       <ClusterRail
         items={items}
         activeId={active ?? undefined}
-        onSelect={setActiveCluster}
+        onSelect={select}
         menuFor={menuFor}
         onAdd={onConnect}
         error={error}

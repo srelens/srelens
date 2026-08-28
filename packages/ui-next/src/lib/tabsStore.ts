@@ -365,12 +365,46 @@ export function useTabView(tabId: string): NonNullable<Tab["view"]> {
 /**
  * `null` for "no cluster in focus"; anything the workspace does not have is
  * refused rather than stored, so the field is always an id in `clusters`.
+ *
+ * **Every cluster-scoped tab is relabelled for the cluster named here**, and
+ * that is not a flourish either. No tab is about a cluster of its own: every
+ * cluster-scoped screen reads `useActiveContext()`, so the instant this field
+ * moves, the mounted screen is rendering the new cluster. A tab whose `sub`
+ * still names the old one labels that screen with a cluster it is not showing,
+ * and an action started from it runs against one cluster under a tab reading
+ * another. The rail's own `onSelect` was exactly that: `setActiveCluster` bare.
+ *
+ * **The whole workspace, not only the active tab.** Every one of its tabs is
+ * about the cluster in focus, so leaving the background ones stale only defers
+ * the mislabelling until the reader switches tab — and `relabel` is a no-op for
+ * a tab already carrying the name, so the pass costs an identity check per tab.
+ * App-scoped routes come back from `describe` with no `sub` at all, so
+ * `/settings` and `/connections` keep none: the route table stays the one place
+ * that decides whether a route is about a cluster.
+ *
+ * **`clusterName` rather than a lookup here.** Workspaces hold `stableId`s
+ * (#265) and tabs carry context *names*; the store that translates between them
+ * is `lib/clusters`, which imports THIS module, so reaching back for the name
+ * would be a cycle. The caller who knows the cluster passes its name, exactly
+ * as {@link openTab} takes it. No name means the caller said nothing about a
+ * cluster and the labels stand — see {@link relabel}.
+ *
+ * The refusal above covers the labels too: a cluster this workspace does not
+ * have does not become the label of tabs it did not switch.
  */
-export function setActiveCluster(id: string | null): void {
+export function setActiveCluster(id: string | null, clusterName?: string): void {
   patchCurrent((w) => {
     if (id !== null && !w.clusters.includes(id)) return w;
-    if ((w.activeCluster ?? null) === id) return w;
-    const next: Workspace = { ...w };
+    let tabs = w.tabs;
+    if (clusterName) {
+      const relabelled = w.tabs.map((t) => relabel(t, clusterName));
+      // Identity, as everywhere else here: a strip that needed no relabelling
+      // keeps its array, so an unchanged switch still emits nothing and the
+      // subscriber that writes the settings file stays asleep.
+      if (relabelled.some((t, i) => t !== w.tabs[i])) tabs = relabelled;
+    }
+    if (tabs === w.tabs && (w.activeCluster ?? null) === id) return w;
+    const next: Workspace = { ...w, tabs };
     if (id === null) delete next.activeCluster;
     else next.activeCluster = id;
     return next;
