@@ -37,7 +37,8 @@
 //    server refuses to start at all. `SRELENS_MASTER_KEY` (64 hex chars) is
 //    also mandatory; it seals stored kubeconfigs at rest, and it must stay
 //    STABLE across runs or the kubeconfig uploaded by an earlier run becomes
-//    undecryptable. Hence the fixed throwaway key below.
+//    undecryptable. Hence the per-data-dir key file below — generated on first
+//    run, NOT a constant in this file (see note 7).
 //
 // 3. `POST /auth/dev-login` needs no CSRF header and no body. It replies 302
 //    with `Set-Cookie: srelens_session=…; HttpOnly`. HttpOnly means the page
@@ -78,9 +79,32 @@
 // The server data dir lives in the OS temp dir, deliberately NOT in the repo:
 // it holds an encrypted copy of your kubeconfig, and neither `.screenshots/`
 // nor a repo-local data dir is gitignored.
+//
+// 7. THE MASTER KEY IS GENERATED, NOT COMMITTED, AND THE DATA DIR IS 0700.
+//    The key used to be a constant in this tracked file, on the grounds that it
+//    is throwaway. The key is throwaway; the kubeconfig it seals is not. On
+//    Linux `os.tmpdir()` is the shared `/tmp` and `mkdirSync`'s default mode is
+//    0755, so any other local account could read the sealed SQLite DB and
+//    decrypt it with the key published in this repository — recovering live
+//    cluster credentials that `~/.kube/config` (0600) does not expose. On macOS
+//    `$TMPDIR` is per-user, so the exposure was Linux-shaped, which is exactly
+//    the kind of "not on my machine" that ships. The key now lives beside the DB
+//    it protects, at 0600 in a 0700 directory, which keeps the stability note 2
+//    needs without publishing it.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,15 +137,53 @@ const HEIGHT = Number(flags.height ?? 1000);
 const DESIGN = String(flags.design ?? "next");
 const SETTLE_MS = Number(flags.wait ?? 3000);
 
-// Local, throwaway, and deliberately constant: a fresh key each run would make
-// the kubeconfig stored by the previous run unreadable (see note 2).
-const MASTER_KEY = "5c3e1b7a9d0f4628a1b3c5d7e9f0123456789abcdef0123456789abcdef01234";
 const DEV_EMAIL = "screenshot@localhost";
 const DATA_DIR = path.join(tmpdir(), "srelens-screenshot-data");
+const MASTER_KEY_FILE = path.join(DATA_DIR, "master.key");
 const SERVER_BIN = path.join(ROOT, "target", "debug", "srelens-server");
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The data dir, created (or corrected) at 0700.
+ *
+ * `chmodSync` as well as the `mode` option: `mkdirSync`'s mode only applies to
+ * directories it actually CREATES, so a dir left at 0755 by an earlier run of
+ * this script would keep it — and that dir is the one holding the sealed
+ * kubeconfig. Correcting it is the whole point.
+ */
+function ensureDataDir() {
+  mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  chmodSync(DATA_DIR, 0o700);
+}
+
+/**
+ * This data dir's master key: read back if it exists, minted and stored at 0600
+ * if it does not.
+ *
+ * STABLE per data dir, which is the property note 2 needs — a fresh key each
+ * run would make the kubeconfig stored by the previous run undecryptable. Not a
+ * constant in this tracked file, which is the property note 7 needs: a key
+ * committed to a public repository is not a secret, and it was sealing a real
+ * developer's real cluster credentials inside a world-readable `/tmp`
+ * directory. Call `ensureDataDir()` first — 0600 on the file only means
+ * anything inside a 0700 directory.
+ */
+function masterKey() {
+  try {
+    const existing = readFileSync(MASTER_KEY_FILE, "utf8").trim();
+    // The server requires exactly 64 hex chars; a truncated or hand-edited file
+    // would make it refuse to start with a message about the key rather than
+    // about the file, so it is replaced rather than passed on.
+    if (/^[0-9a-f]{64}$/.test(existing)) return existing;
+  } catch {
+    // No key yet for this data dir. First run — mint one.
+  }
+  const key = randomBytes(32).toString("hex");
+  writeFileSync(MASTER_KEY_FILE, `${key}\n`, { mode: 0o600 });
+  return key;
+}
 
 function run(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, { cwd: ROOT, stdio: "inherit", ...opts });
@@ -182,7 +244,7 @@ async function serverUp() {
 let server = null;
 const startedServer = !(await serverUp());
 if (startedServer) {
-  mkdirSync(DATA_DIR, { recursive: true });
+  ensureDataDir();
   console.error(`· starting srelens-server on ${ORIGIN} (data: ${DATA_DIR})`);
   // Its output goes to a file, not to our stdio: inheriting keeps the parent's
   // pipe open, so a `node scripts/screenshot.mjs … | tail` never terminates
@@ -194,7 +256,7 @@ if (startedServer) {
     env: {
       ...process.env,
       SRELENS_DEV_LOGIN: DEV_EMAIL,
-      SRELENS_MASTER_KEY: MASTER_KEY,
+      SRELENS_MASTER_KEY: masterKey(),
       SRELENS_PUBLIC_URL: ORIGIN,
     },
   });
