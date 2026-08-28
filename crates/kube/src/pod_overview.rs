@@ -42,7 +42,9 @@
 //! 2. A pod with a waiting container is never fully ready, so the Table's
 //!    READY column narrows the rest: only rows short of ready can be the
 //!    crash-loopers, and only the ones the first request did not already
-//!    bring back are fetched, by name. On that cluster that is **four**.
+//!    bring back are fetched, by name — "did not bring back" decided per POD
+//!    and not per name, because two namespaces may run the same one. On that
+//!    cluster that is **four**.
 //!
 //! Both halves are capped ([`UNSETTLED_CAP`]) and the cap is reported, because
 //! an unbounded list is the failure this module exists to end.
@@ -53,7 +55,7 @@
 //! has always read. A pod this module fetched needlessly costs one small
 //! request; a pod it judged would be a second opinion contradicting core's.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -92,8 +94,9 @@ const CANDIDATE_CONCURRENCY: usize = 8;
 ///
 /// `Succeeded` is deliberately still in: core leaves a finished pod alone
 /// (`TERMINAL_POD_PHASES`), so it costs a row nobody flags — and excluding it
-/// here would leave its name out of the "already fetched" set, which is what
-/// stops the second pass from fetching all 53 of them one at a time.
+/// here would leave it out of the "already fetched" set, which is what stops
+/// the second pass from fetching all 53 of them one at a time. That exclusion
+/// holds per pod, not per name; see the note on it in [`gather`].
 const NOT_RUNNING: &str = "status.phase!=Running";
 
 /// The server-side printer's own media type — what `kubectl get` asks for.
@@ -244,13 +247,18 @@ async fn gather(client: kube::Client) -> Result<PodOverviewOut, String> {
     let total = table.rows.len() as i64;
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
     let mut short: Vec<String> = Vec::new();
+    // How many pods in the whole cluster carry each name — every row, not just
+    // the short ones. This is what makes the exclusion below sound; see there.
+    let mut rows_by_name: HashMap<String, usize> = HashMap::new();
     for row in &table.rows {
         let node = table.cell(row, node_at);
         if !node.is_empty() && node != NO_NODE {
             *counts.entry(node).or_insert(0) += 1;
         }
+        let name = table.cell(row, name_at);
+        *rows_by_name.entry(name.clone()).or_insert(0) += 1;
         if short_of_ready(&table.cell(row, ready_at)) {
-            short.push(table.cell(row, name_at));
+            short.push(name);
         }
     }
     let by_node = counts
@@ -273,8 +281,33 @@ async fn gather(client: kube::Client) -> Result<PodOverviewOut, String> {
         .iter()
         .map(|p| (p.namespace.clone(), p.name.clone()))
         .collect();
-    let by_name: HashSet<String> = fetched.iter().map(|(_, name)| name.clone()).collect();
-    let mut names: Vec<String> = short.into_iter().filter(|n| !by_name.contains(n)).collect();
+    let fetched_names: HashSet<&str> = fetched.iter().map(|(_, name)| name.as_str()).collect();
+
+    // **A name is only "already fetched" when the cluster has one pod by that
+    // name**, and the table is what proves it: `rows_by_name` counted every
+    // row, so a count of one means this row IS the pod the phase filter
+    // returned. Two rows by that name and the exclusion says nothing — the pod
+    // that came back may be either of them.
+    //
+    // The unguarded name check dropped an unhealthy pod in silence.
+    // `payments/api-0` Pending is in the phase-filtered list, so the name
+    // `api-0` looked accounted for and `checkout/api-0` in `CrashLoopBackOff`
+    // — phase `Running`, invisible to that filter — was never fetched, never
+    // in `unsettled`, with `truncated` left false. `fetched` is keyed by
+    // `(namespace, name)` for exactly this reason; throwing the namespace away
+    // to build the exclusion threw away the reason it is keyed that way.
+    //
+    // The guard is worth the two lines rather than dropping the exclusion
+    // outright: a cluster with fifty finished Job pods has fifty short-of-ready
+    // rows whose names are its own, and each would otherwise cost a request
+    // for a body the one filtered list already brought back.
+    let mut names: Vec<String> = short
+        .into_iter()
+        .filter(|n| {
+            rows_by_name.get(n.as_str()).copied().unwrap_or(0) > 1
+                || !fetched_names.contains(n.as_str())
+        })
+        .collect();
     names.sort();
     names.dedup();
 
@@ -687,6 +720,55 @@ mod pod_overview_tests {
             "every short-of-ready row was already fetched: {:?}",
             server.asked("metadata.name")
         );
+    }
+
+    /// A name is not a pod. `payments/api-0` is Pending, so the phase filter
+    /// already has it; `checkout/api-0` is in `CrashLoopBackOff` with phase
+    /// `Running`, so the phase filter cannot see it and only a by-name fetch
+    /// can. Treating the NAME `api-0` as already fetched dropped the
+    /// crash-looper out of the overview with `truncated` left false — an
+    /// unhealthy pod silently absent, which is the one thing the `Not ready`
+    /// band exists to prevent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_fetched_in_one_namespace_does_not_hide_the_same_name_in_another() {
+        let server = serve(
+            table(vec![
+                row("api-0", "0/1", "Pending", "n1"),
+                row("api-0", "0/1", "CrashLoopBackOff", "n2"),
+            ]),
+            pod_list(vec![pod("api-0", "payments", "Pending", None)], None),
+            // What `metadata.name=api-0` answers: every namespace's api-0.
+            pod_list(
+                vec![
+                    pod("api-0", "payments", "Pending", None),
+                    pod("api-0", "checkout", "Running", Some("CrashLoopBackOff")),
+                ],
+                None,
+            ),
+        )
+        .await;
+
+        let out = overview(server.client.clone(), Duration::from_secs(5)).await.unwrap();
+
+        let mut seen: Vec<(&str, &str)> = out
+            .unsettled
+            .iter()
+            .map(|p| (p.namespace.as_str(), p.waiting_reason.as_str()))
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![("checkout", "CrashLoopBackOff"), ("payments", "")],
+            "both namespaces' api-0 belong in the list"
+        );
+        // And the one the phase filter already had is in it once, not twice:
+        // the namespace-qualified `fetched` check is what drops the duplicate.
+        assert_eq!(out.unsettled.len(), 2);
+        assert!(!out.truncated);
+
+        let by_name = server.asked("metadata.name");
+        assert_eq!(by_name.len(), 1, "one query answers the shared name: {by_name:?}");
+        assert!(by_name[0].contains("api-0"));
     }
 
     /// A cap that bites is reported. A summary that is short and says nothing
