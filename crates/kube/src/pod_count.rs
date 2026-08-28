@@ -61,6 +61,39 @@ const STILL_RUNNING: &str = "status.phase!=Succeeded";
 /// other to everything [`STILL_RUNNING`] — run concurrently under a single
 /// timeout budget. A timeout is surfaced as an error, never as a count of
 /// zero: a cluster that didn't answer has not told us it has no pods.
+///
+/// **The two counts still observe two moments, and that is not fixable here.**
+/// Moving the `Succeeded` exclusion into the selector removed the *negative*
+/// subtraction [`STILL_RUNNING`] describes, but not the disagreement behind
+/// it: a pod that goes Running → Succeeded (or Running → gone) between the two
+/// requests is counted by the running query and left out of the total, and the
+/// row reads `31/30`.
+///
+/// A real snapshot was investigated and rejected. `kube`'s `ListParams` does
+/// offer one (`.at(rv).matching(VersionMatch::Exact)`, which sends
+/// `resourceVersion=<rv>&resourceVersionMatch=Exact`), but it cannot be used
+/// honestly here:
+///
+/// * There is no way to ask for "the current resourceVersion" and both counts
+///   in one round trip. The rv has to come off the FIRST list's `ListMeta`,
+///   which serialises the two requests — doubling the latency of a path
+///   budgeted at [`POD_COUNT_TIMEOUT`] with up to ten clusters answering in
+///   parallel, for a decorative figure in a rail.
+/// * The guarantee is conditional on the server. `kube`'s own doc states it
+///   holds "for list requests to servers that honor the resourceVersionMatch
+///   parameter"; one that does not honor it ignores the parameter and serves
+///   the latest state, which is the same disagreement with a snapshot's name
+///   on it.
+/// * `Exact` is served from etcd rather than the watch cache, and answers
+///   `410 Gone` for an rv that has been compacted — trading an occasional
+///   impossible figure for an occasional hard error the reader cannot act on.
+///
+/// So the promise made instead is the weaker one that can actually be kept:
+/// **an impossible figure is never presented.** `running` is clamped to
+/// `total`, and the direction is not arbitrary — `running > total` can only
+/// arise from a pod the running query saw as Running and the total query saw
+/// as finished or gone, so the total is the later and truer of the two
+/// readings. The clamp is a no-op on every consistent pair.
 async fn count_pods(client: kube::Client, timeout: Duration) -> Result<PodCountOut, String> {
     let api: Api<Pod> = Api::all(client);
     let all = ListParams::default().fields(STILL_RUNNING);
@@ -71,9 +104,11 @@ async fn count_pods(client: kube::Client, timeout: Duration) -> Result<PodCountO
         .await
         .map_err(|_| "pod count timed out".to_string())?
         .map_err(|e| e.to_string())?;
+    let total = total.items.len() as i64;
+    let running = running.items.len() as i64;
     Ok(PodCountOut {
-        total: total.items.len() as i64,
-        running: running.items.len() as i64,
+        total,
+        running: running.min(total),
     })
 }
 
@@ -243,6 +278,47 @@ mod pod_count_tests {
             total_request.contains("%21%3D") || total_request.contains("!="),
             "expected a not-equals selector, asked: {total_request}"
         );
+        handle.abort();
+    }
+
+    /// The two counts are two separate requests, timed independently, and a
+    /// pod that finishes (or is deleted) between them is counted by the
+    /// `status.phase=Running` query and left out of the `!=Succeeded` one. The
+    /// arithmetic then reads `31/30` — more of the cluster up than the cluster
+    /// has — which Fleet caches for thirty seconds.
+    ///
+    /// The fixture is the race's OBSERVABLE outcome: a server that hands back
+    /// three running pods and a total of two. Nothing else in this file can
+    /// produce that pair, which is what makes this test able to fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pod_that_finished_between_the_two_counts_is_never_more_running_than_total() {
+        let (client, handle, _) =
+            fake_pod_server(pod_list_json(&["a", "b"]), pod_list_json(&["a", "b", "c"])).await;
+        let out = count_pods(client, Duration::from_secs(5)).await.unwrap();
+        // `running > total` is not a number the fleet row can draw honestly.
+        assert!(
+            out.running <= out.total,
+            "reported {}/{} — more running than the cluster has",
+            out.running,
+            out.total
+        );
+        // Which way it clamps is not arbitrary: `running > total` can only
+        // arise from a pod the running query saw as Running and the total
+        // query saw as gone, so the later, truer reading is the total.
+        assert_eq!(out.total, 2);
+        assert_eq!(out.running, 2);
+        handle.abort();
+    }
+
+    /// The ordinary case is untouched: a count that is already consistent is
+    /// reported exactly as the cluster gave it, and the clamp is not a `min`
+    /// that quietly flattens every row to "all up".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_consistent_pair_is_reported_exactly_as_it_came_back() {
+        let (client, handle, _) =
+            fake_pod_server(pod_list_json(&["a", "b", "c", "d"]), pod_list_json(&["a", "b"])).await;
+        let out = count_pods(client, Duration::from_secs(5)).await.unwrap();
+        assert_eq!((out.running, out.total), (2, 4));
         handle.abort();
     }
 
