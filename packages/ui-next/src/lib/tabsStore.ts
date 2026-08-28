@@ -55,9 +55,38 @@ export function getState(): TabsState {
   return cur();
 }
 
-/** Replace the whole state — for boot and for tests. */
+/**
+ * Replace the whole state — for boot and for tests.
+ *
+ * **A `currentId` naming no workspace is repaired here rather than refused.**
+ * The store had two answers to "which workspace is current" and they disagreed
+ * on exactly that document: the readers fall back — {@link currentWorkspace}
+ * and {@link useTabs} both end `?? s.workspaces[0]` — while the writers do
+ * not, since {@link patchCurrent} hands the dangling id to `patchWorkspace`,
+ * which bails on `at < 0`. So the window drew a full strip and was inert:
+ * `openTab`, `newTab`, every close, `activateTab`, `togglePin`, `cycleTab`,
+ * `setTabView` and `setActiveCluster` all did nothing, and because no `emit`
+ * fired nothing was persisted either. No error appeared anywhere.
+ *
+ * It is a real document, not a hypothetical: `parseStoredState` drops a
+ * malformed workspace on its own and never checks `currentId` against the
+ * survivors, and `Window`'s boot has a branch that deliberately skips
+ * `reconcile` — the only other thing that repairs this — to keep the saved
+ * clusters when the context listing failed. Fixing that branch would have
+ * left the next caller of this function to find the same hole, so the repair
+ * lives at the invariant instead.
+ *
+ * An empty document is left alone: there is no workspace to point at, and
+ * `Window` guards that case by installing a default. And a sound document is
+ * handed through by identity, which is what the rest of this store depends on
+ * — `emit` skips an unchanged state so the subscriber that writes the settings
+ * file stays asleep.
+ */
 export function setState(next: TabsState): void {
-  emit(next);
+  const currentId = next.workspaces.some((w) => w.id === next.currentId)
+    ? next.currentId
+    : (next.workspaces[0]?.id ?? next.currentId);
+  emit(currentId === next.currentId ? next : { ...next, currentId });
 }
 
 /**

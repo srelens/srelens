@@ -315,6 +315,56 @@ describe("workspaces", () => {
   });
 });
 
+describe("setState", () => {
+  /**
+   * The store had two answers to "which workspace is current" and they
+   * disagreed whenever `currentId` named none of them. The readers fell back
+   * to `workspaces[0]` — `currentWorkspace()` and `useTabs()` both end
+   * `?? s.workspaces[0]` — so the window drew a full strip. The writers did
+   * not: `patchCurrent` hands `cur().currentId` to `patchWorkspace`, which
+   * bails on `at < 0`. So the window was drawn and inert, and because no
+   * `emit` fired nothing was persisted either. No error appeared anywhere.
+   *
+   * The repair lives in `setState` rather than in the one boot branch that
+   * could install it, so no future caller can install it either.
+   */
+  it("repairs a currentId that names no workspace, so the strip the reader sees is the one the actions write to", () => {
+    const base = defaultState([ctx("a"), ctx("b")]);
+    store.setState({ ...base, currentId: "a-workspace-that-did-not-parse" });
+
+    expect(store.getState().currentId).toBe(base.workspaces[0].id);
+    // The rail could not switch cluster.
+    store.setActiveCluster("b");
+    expect(store.activeCluster()).toBe("b");
+    // Cmd+T did nothing.
+    store.openTab("/k/pods");
+    expect(routes()).toEqual(["/", "/k/pods"]);
+  });
+
+  it("hands a sound document straight through, so an identical write wakes no subscriber", () => {
+    // The identity discipline the rest of this store keeps: nothing needed
+    // repairing, so nothing is copied, and `emit` can still recognise a write
+    // of the state already held — one of the subscribers writes a file.
+    const state = defaultState([ctx("a")]);
+    store.setState(state);
+    expect(store.getState()).toBe(state);
+
+    let n = 0;
+    const off = store.subscribe(() => n++);
+    store.setState(state);
+    off();
+    expect(n).toBe(0);
+  });
+
+  it("leaves a dangling currentId alone when there is no workspace to point it at", () => {
+    // An empty document is the boot branch's other case and `Window` guards it
+    // by installing a default instead; the repair must not invent an id, since
+    // `currentWorkspace()` has nothing to return either way.
+    store.setState({ workspaces: [], currentId: "gone" });
+    expect(store.getState().currentId).toBe("gone");
+  });
+});
+
 describe("activeCluster", () => {
   it("setActiveCluster accepts a cluster of the workspace and nothing else", () => {
     store.setState(defaultState([ctx("a"), ctx("b")]));

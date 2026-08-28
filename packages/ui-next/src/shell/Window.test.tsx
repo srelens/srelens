@@ -346,6 +346,34 @@ describe("Window boot", () => {
     expect(screen.getByRole("tablist")).toBeDefined();
   });
 
+  it("boots to a live window when the saved currentId names a workspace that did not parse and the cluster list also errors", async () => {
+    // The sibling of the case above, and the one that branch is a condition
+    // short of: `parseStoredState` drops a malformed workspace on its own and
+    // never checks `currentId` against the survivors, so a document can
+    // arrive with workspaces AND a `currentId` naming none of them.
+    // `currentWorkspace()` falls back to `workspaces[0]`, so the strip drew
+    // in full — while every action routed through `patchCurrent` looked up
+    // the dangling id, found nothing, and returned. The rail could not switch
+    // cluster, Cmd+T did nothing, and no `emit` meant nothing was persisted.
+    const saved = {
+      workspaces: [
+        { id: "w1", name: "Team", clusters: ["prod", "stage"], tabs: [makeTab("/")], activeId: "", closed: [] },
+      ],
+      currentId: "w2-did-not-parse",
+    };
+    saved.workspaces[0].activeId = saved.workspaces[0].tabs[0].id;
+    loadTabsState.mockReturnValue(saved);
+    listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
+    await booted();
+
+    act(() => store.setActiveCluster("stage"));
+    expect(store.activeCluster()).toBe("stage");
+    act(() => store.openTab("/k/pods"));
+    expect(screen.getByRole("tab", { name: /Pods/ })).toBeDefined();
+    // The saved clusters are still trusted: this repair is not `reconcile`.
+    expect(store.currentWorkspace().clusters).toEqual(["prod", "stage"]);
+  });
+
   it("boots with a persisted detail tab whose route cannot be decoded", async () => {
     // `parseDetailRoute` runs DURING RENDER on every restored tab, through
     // both `describe` (the strip's title) and `screenFor` (the body). A
