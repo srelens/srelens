@@ -23,6 +23,7 @@ import {
   Layers,
   LayoutDashboard,
   LayoutGrid,
+  Lock,
   ListOrdered,
   LogOut,
   Maximize,
@@ -98,6 +99,12 @@ export const Icons = {
   zoomReset: Maximize,
   settings: Settings2,
   workspace: LayoutGrid,
+  // §25's lock surface. Nothing in `@srelens/ui-kit` carries a padlock — the
+  // kit takes no dependency on an icon set at all, which is why every glyph in
+  // this design comes from here — and the shell had none either: the lock
+  // screen was drawing its own inline SVG. One entry, so the mark and any
+  // later lock affordance draw the same padlock.
+  lock: Lock,
   add: Plus,
   close: X,
   search: Search,

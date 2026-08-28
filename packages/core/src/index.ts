@@ -17,6 +17,7 @@ export * from "./lib/age";
 export * from "./lib/appLog";
 export * from "./lib/assistantMarkdown";
 export * from "./lib/bulk";
+export * from "./lib/capabilities";
 export * from "./lib/chat";
 export * from "./lib/chatHistory";
 export * from "./lib/clusterLogin";

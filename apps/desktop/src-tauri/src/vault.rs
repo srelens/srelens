@@ -105,11 +105,7 @@ impl Vault {
         // marker is present, password otherwise). Legacy machine-key
         // resolution runs only while no password has been set up.
         let (key, key_source) = if meta_path(dir).exists() {
-            if biometric_marker_path(dir).exists() {
-                (None, "biometric-locked")
-            } else {
-                (None, "password-locked")
-            }
+            (None, locked_source(dir))
         } else if biometric_marker_path(dir).exists() {
             // Pre-password biometric gate (transitional state from the
             // machine-key era of this branch): key lives in the biometric
@@ -211,6 +207,12 @@ impl Vault {
         *self.key.read().unwrap()
     }
 
+    /// Whether the derived key is held in memory: `false` means every read is
+    /// empty and every write is refused until the gate is passed again.
+    pub(crate) fn is_unlocked(&self) -> bool {
+        self.key.read().unwrap().is_some()
+    }
+
     /// Install `key` after a passed biometric prompt — but only if it can
     /// actually read the existing vault (a stale biometric item must not be
     /// accepted; the caller purges it on this error).
@@ -238,6 +240,53 @@ impl Vault {
     /// toggled — the key itself stays cached in memory.
     pub(crate) fn set_key_source(&self, source: &'static str) {
         *self.key_source.write().unwrap() = source;
+    }
+
+    /// Forget the derived key — the exact inverse of [`unlock_with`], and the
+    /// whole of what "lock the workspace" means: NOTHING on disk is touched,
+    /// so the same passphrase re-opens the same sealed bytes (contrast
+    /// [`rekey_from_current`](Self::rekey_from_current), which rewrites them).
+    /// The source is relabelled to what a fresh open of this dir would report,
+    /// so Settings and the gate read a lock exactly as they read a restart.
+    ///
+    /// Refused, changing nothing, while NO master password is set: a
+    /// machine-key-era vault has no passphrase to unlock with, its key is
+    /// resolved once at open, and setup itself refuses a locked vault — so
+    /// discarding the key there would strand this process until a restart.
+    ///
+    /// **Serialised against every other key-touching operation** by the same
+    /// process-local mutex [`update`](Self::update) and
+    /// [`rekey_from_current`](Self::rekey_from_current) take. Taking only
+    /// `key`/`key_source` was not enough: `rekey_from_current` reads the old
+    /// key, rewrites the sealed bytes, and installs `Some(new_key)` LAST, so a
+    /// discard landing in that window was overwritten the moment the re-key
+    /// finished — `vault_lock` resolved, §25's cover went up, and the vault was
+    /// unlocked again behind it while the window said the workspace was
+    /// sealed. Under the mutex the two can only run whole: a discard either
+    /// precedes the re-key (which then refuses a locked vault) or follows it
+    /// (and clears the key it just installed). Either way a lock that returned
+    /// `Ok` leaves the vault locked.
+    ///
+    /// The lock is NOT held across anything that could re-enter — nothing
+    /// inside takes it, and no caller of this holds it (`vault_password::
+    /// lock_core` is the only one).
+    pub(crate) fn discard_key(&self) -> Result<(), String> {
+        let _guard = self.lock.lock().unwrap();
+        // The dir, recovered from the vault file's own path (`dir/secrets.enc`,
+        // so a parent always exists): the key's fate is this vault's, and no
+        // caller gets to name a different vault's dir. A path without a parent
+        // finds no meta below and so fails closed.
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        if !meta_path(dir).exists() {
+            return Err(
+                "no master password is set, so there would be nothing to unlock with — finish setup first"
+                    .into(),
+            );
+        }
+        // Same order as `unlock_with`: the key first, then its label.
+        *self.key.write().unwrap() = None;
+        *self.key_source.write().unwrap() = locked_source(dir);
+        Ok(())
     }
 
     /// Swap the vault onto a NEW key — the heart of password setup and
@@ -277,6 +326,25 @@ impl Vault {
         *self.key.write().unwrap() = Some(new_key);
         *self.key_source.write().unwrap() = source;
         Ok(())
+    }
+
+    /// Test-only: is the process-local critical section held by SOMEBODY
+    /// ELSE right now? Read-only, non-blocking, and outside every guard — it
+    /// takes no lock it keeps, mutates nothing, and adds no hook inside a
+    /// critical section, so no production path changes shape.
+    ///
+    /// It exists because [`rekey_from_current`](Self::rekey_from_current)
+    /// holds this mutex ACROSS its wait for the inter-process file lock: "the
+    /// re-key is parked mid-transaction, past its `old_key` read" is
+    /// therefore a *state*, not a moment, and `vault_password`'s
+    /// lock-vs-password-change test polls this to wait for it instead of
+    /// sleeping and hoping the scheduler obliged.
+    ///
+    /// `WouldBlock` specifically: a poisoned mutex is a genuine failure and
+    /// must never read as "held".
+    #[cfg(test)]
+    pub(crate) fn key_critical_section_is_held(&self) -> bool {
+        matches!(self.lock.try_lock(), Err(std::sync::TryLockError::WouldBlock))
     }
 
     /// Read the current secrets. Missing, tampered, or wrong-key vaults read
@@ -353,6 +421,18 @@ pub(crate) fn biometric_marker_path(dir: &Path) -> PathBuf {
 }
 
 // --- Master-password mode (issue #208 follow-up, mqlens's model) ---
+
+/// How a locked password-mode vault labels its key home: the biometric skip
+/// is the gate when enrolled, the password otherwise. One policy, because a
+/// lock (`vault_password::lock_core`) and a fresh open must agree — a vault
+/// the reader locked and one they just launched are the same vault.
+fn locked_source(dir: &Path) -> &'static str {
+    if biometric_marker_path(dir).exists() {
+        "biometric-locked"
+    } else {
+        "password-locked"
+    }
+}
 
 /// Known plaintext sealed under a derived key inside `vault.json`, so a wrong
 /// password is detected without ever touching the real secrets.

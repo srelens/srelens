@@ -264,6 +264,20 @@ pub fn mcp_confirm_respond(
     }
 }
 
+/// Every confirmation still waiting on an answer, with enough to draw each
+/// prompt. For a listener that subscribed AFTER `mcp://confirm-request` was
+/// emitted — the frontend's consent component mounts once the new design's
+/// chunks have downloaded, and the emit is not repeated — so it can be handed
+/// what it missed rather than letting those calls time out with nothing on
+/// screen. The frontend subscribes first and reads this second, and merges by
+/// id: see `AgentConsent` (`packages/ui-next/src/shell/AgentConsent.tsx`).
+#[tauri::command]
+pub fn mcp_confirm_pending(
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+) -> Vec<crate::mcp_confirm::PendingRequest> {
+    pending.snapshot()
+}
+
 /// The current MCP bearer token, if one has been generated.
 #[tauri::command]
 pub fn mcp_token_get(store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>) -> Option<String> {
@@ -343,9 +357,28 @@ pub async fn mcp_token_revoke(
 /// The most recent `limit` MCP audit records, newest first. Reading is owned by
 /// `srelens_mcp::audit`, which also writes the format and so knows how to tail
 /// it without parsing the whole 5 MB file.
+///
+/// **Refuses rather than answering with an empty trail.** `audit::tail` returns
+/// `Ok(vec![])` only for a log that does not exist — a fresh install has made
+/// no calls — and an `Err` for a log that exists and cannot be read. Both used
+/// to arrive here as an empty vector, and the Settings pane reads an empty
+/// vector as "no capability calls yet, this is not an error": exactly the wrong
+/// answer for a trail made unreadable by a permissions change or a filesystem
+/// fault, on the screen an incident is investigated from.
 #[tauri::command]
-pub fn mcp_audit_tail(limit: usize, path: State<'_, McpAuditPath>) -> Vec<serde_json::Value> {
-    srelens_mcp::audit::tail(&path.0, limit)
+pub fn mcp_audit_tail(
+    limit: usize,
+    path: State<'_, McpAuditPath>,
+) -> Result<Vec<serde_json::Value>, String> {
+    audit_tail_at(&path.0, limit)
+}
+
+/// The command's whole body, off the `State` extractor so it can be tested.
+/// Names the file in the refusal: the reader's next step is looking at it, and
+/// the path is theirs.
+fn audit_tail_at(path: &std::path::Path, limit: usize) -> Result<Vec<serde_json::Value>, String> {
+    srelens_mcp::audit::tail(path, limit)
+        .map_err(|e| format!("the MCP audit log at {} could not be read: {e}", path.display()))
 }
 
 /// Path to the audit log, managed so the command can read it without
@@ -450,6 +483,39 @@ pub fn install_srelens_cli() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command boundary, where the distinction has to survive: the pane
+    /// only ever sees what `mcp_audit_tail` returns. An absent log resolves to
+    /// an empty trail — a fresh install has made no calls — and a log that
+    /// exists and cannot be read REJECTS, naming the file, so the pane draws
+    /// its failure state instead of "A fresh install has made none".
+    #[test]
+    fn an_absent_audit_log_reads_as_an_empty_trail_at_the_command_boundary() {
+        let dir = std::env::temp_dir().join(format!("srelens-cmd-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("never-written.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        let out = audit_tail_at(&path, 50).expect("a fresh install is not a failure");
+
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_audit_log_is_refused_at_the_command_boundary() {
+        // A directory at the log's path: a file that is there and cannot be
+        // read, at any euid. See `audit::tail`'s own tests for why not a
+        // permission bit.
+        let dir = std::env::temp_dir().join(format!("srelens-cmd-audit2-{}", std::process::id()));
+        let path = dir.join("as-a-directory.jsonl");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let err = audit_tail_at(&path, 50)
+            .expect_err("a trail that could not be read is not an empty trail");
+
+        assert!(err.contains("could not be read"), "got: {err}");
+        assert!(err.contains("as-a-directory.jsonl"), "the reader's next step is the file: {err}");
+    }
 
     #[test]
     fn a_library_pointed_at_a_user_dir_reports_that_dirs_issues() {

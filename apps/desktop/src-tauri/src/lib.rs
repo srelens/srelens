@@ -40,9 +40,10 @@ use forward::{list_forwards, start_port_forward, stop_port_forward};
 use helm::{helm_op_close, start_helm_op};
 use logs::{start_log_stream, stop_log_stream};
 use mcp::{
-    install_srelens_cli, mcp_audit_tail, mcp_confirm_respond, mcp_http_start, mcp_http_status,
-    mcp_http_stop, mcp_prompt_issues, mcp_token_get, mcp_token_revoke, mcp_token_rotate,
-    mcp_token_storage, srelens_cli_status, McpAuditPath, McpHttpManager, McpPromptsDir,
+    install_srelens_cli, mcp_audit_tail, mcp_confirm_pending, mcp_confirm_respond,
+    mcp_http_start, mcp_http_status, mcp_http_stop, mcp_prompt_issues, mcp_token_get,
+    mcp_token_revoke, mcp_token_rotate, mcp_token_storage, srelens_cli_status, McpAuditPath,
+    McpHttpManager, McpPromptsDir,
 };
 use settings::{get_request_timeout, set_request_timeout};
 use srelens_kube::client_cache::ClientCache;
@@ -486,6 +487,7 @@ pub fn run() {
             mcp_http_stop,
             mcp_http_status,
             mcp_confirm_respond,
+            mcp_confirm_pending,
             mcp_token_get,
             mcp_token_rotate,
             mcp_token_revoke,
@@ -497,6 +499,7 @@ pub fn run() {
             vault_password::vault_status,
             vault_password::vault_setup_password,
             vault_password::vault_unlock_password,
+            vault_password::vault_lock,
             vault_password::vault_recover_password,
             vault_password::vault_change_password,
             mcp_audit_tail,

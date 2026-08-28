@@ -20,9 +20,17 @@ const {
   isApplePlatform,
   isTauri,
   loadKubeconfigFiles,
+  vaultStatus,
+  vaultLock,
+  vaultUnlockPassword,
   zoomSpy,
   createWorkspaceSpy,
   switchWorkspaceSpy,
+  loadMcpSettings,
+  startMcpHttp,
+  respondToConfirm,
+  pendingConfirms,
+  bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
   loadTabsState: vi.fn(),
@@ -37,9 +45,32 @@ const {
   isApplePlatform: vi.fn(() => true),
   isTauri: vi.fn(() => true),
   loadKubeconfigFiles: vi.fn((): string[] => []),
+  vaultStatus: vi.fn(),
+  vaultLock: vi.fn(),
+  vaultUnlockPassword: vi.fn(),
   zoomSpy: vi.fn(),
   createWorkspaceSpy: vi.fn(),
   switchWorkspaceSpy: vi.fn(),
+  loadMcpSettings: vi.fn<() => { enabled: boolean; port: number }>(() => ({
+    enabled: false,
+    port: 8765,
+  })),
+  startMcpHttp: vi.fn<(port: number) => Promise<string>>(async () => "http://127.0.0.1:8765/mcp"),
+  respondToConfirm: vi.fn<(id: string, approved: boolean) => Promise<void>>(async () => {}),
+  // What `AgentConsent` is handed at mount: nothing was waiting, unless a test
+  // says otherwise. Unmocked, the real one's `invoke` rejects in jsdom and the
+  // component says so on screen — over every window test.
+  pendingConfirms: vi.fn<() => Promise<never[]>>(async () => []),
+  // The backend event bus, captured per channel so a test can emit exactly
+  // what `mcp_confirm.rs` emits.
+  //
+  // A SET of handlers per channel, not one. Tauri's `listen` — which core's
+  // `on` and `subscribe` both wrap — delivers to every subscriber, and a mock
+  // that kept only the last one would quietly absorb a second mount of a
+  // listener: two `AgentConsent`s would look exactly like one. The mount point
+  // is the whole of that component's design, so the mock has to be able to
+  // show it wrong.
+  bus: new Map<string, Set<(payload: unknown) => void>>(),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => {
@@ -55,6 +86,36 @@ vi.mock("@srelens/core", async (importOriginal) => {
     isApplePlatform: () => isApplePlatform(),
     isTauri: () => isTauri(),
     loadKubeconfigFiles: () => loadKubeconfigFiles(),
+    vaultStatus: () => vaultStatus(),
+    vaultLock: () => vaultLock(),
+    vaultUnlockPassword: (...a: unknown[]) => vaultUnlockPassword(...a),
+    loadMcpSettings: () => loadMcpSettings(),
+    startMcpHttp: (port: number) => startMcpHttp(port),
+    respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
+    pendingConfirms: () => pendingConfirms(),
+    on: (channel: string, handler: (payload: unknown) => void) => {
+      const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
+      handlers.add(handler);
+      bus.set(channel, handlers);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    // The same bus, behind the real one's contract: resolves once registered.
+    // `AgentConsent` AWAITS its registrations (it uses `subscribe`, not `on`,
+    // and the reason is in its file comment), so a mock without this would
+    // leave the window's consent listener never installed and every test
+    // below that asks it something with nothing to deliver to. The deferred
+    // shape itself is pinned in `AgentConsent.test.tsx`; here one microtask
+    // is enough, since these tests wait for boot before they ask.
+    subscribe: async (channel: string, handler: (payload: unknown) => void) => {
+      const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
+      handlers.add(handler);
+      bus.set(channel, handlers);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
   };
 });
 
@@ -84,6 +145,31 @@ vi.mock("../lib/tabsStore", async (importOriginal) => {
   };
 });
 
+/**
+ * One extra route, and nothing else changed.
+ *
+ * `/settings` has no entry in the real `SCREENS` table yet (Task 10 adds it),
+ * so the only screen a reader can reach through this window is the
+ * Placeholder — and the Placeholder is handed no `onLocked`. Diverting a route
+ * that does not otherwise exist is what lets this file prove the whole
+ * injection path Task 8 specified (`Window` -> `Body` -> the screen's
+ * `onLocked`) without replacing `Body`, `screenFor` or the routes table for
+ * the other forty tests here, every one of which still resolves its routes for
+ * real.
+ */
+vi.mock("../lib/routes", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../lib/routes")>();
+  const LockProbe = ({ onLocked }: import("../lib/routes").RoutedScreenProps) => (
+    <button type="button" onClick={onLocked}>
+      seal the workspace
+    </button>
+  );
+  return {
+    ...real,
+    screenFor: (route: string) => (route === "/lock-probe" ? LockProbe : real.screenFor(route)),
+  };
+});
+
 // jsdom has no ResizeObserver; TabStrip's overflow Popover wants one.
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
@@ -101,6 +187,24 @@ import { resetView } from "../lib/workspace";
 import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
+import { resetLock } from "./LockGate";
+import { mcpAutoStartPhase, resetMcpAutoStart } from "../lib/mcpAutoStart";
+
+/** An open vault: the state every test in this file but the lock ones needs. */
+const VAULT_OPEN = {
+  mode: "unlocked" as const,
+  keySource: "password" as const,
+  biometricAvailable: false,
+  biometricEnrolled: false,
+};
+
+/** A sealed one. `biometricEnrolled` is false so no Touch ID sheet is raised. */
+const VAULT_SEALED = {
+  mode: "locked" as const,
+  keySource: "password-locked" as const,
+  biometricAvailable: false,
+  biometricEnrolled: false,
+};
 
 const ctx = (stableId: string, name = stableId) => ({
   name, stableId, cluster: name, server: "", isCurrent: false,
@@ -118,6 +222,20 @@ beforeEach(() => {
   isApplePlatform.mockReset().mockReturnValue(true);
   isTauri.mockReset().mockReturnValue(true);
   loadKubeconfigFiles.mockReset().mockReturnValue(["/home/u/.kube/config", "/home/u/.kube/other"]);
+  // Every test in this file but the lock ones runs with an OPEN vault: the
+  // gate mounted above the tab strip covers the whole middle band while the
+  // vault is sealed, so a file-wide default of `locked` would leave no strip
+  // for any of them to find.
+  vaultStatus.mockReset().mockResolvedValue(VAULT_OPEN);
+  vaultLock.mockReset().mockResolvedValue(undefined);
+  vaultUnlockPassword.mockReset().mockResolvedValue(undefined);
+  loadMcpSettings.mockReset().mockReturnValue({ enabled: false, port: 8765 });
+  startMcpHttp.mockReset().mockResolvedValue("http://127.0.0.1:8765/mcp");
+  pendingConfirms.mockReset().mockResolvedValue([]);
+  respondToConfirm.mockReset().mockResolvedValue(undefined);
+  bus.clear();
+  resetLock();
+  resetMcpAutoStart();
   zoomSpy.mockReset();
   createWorkspaceSpy.mockReset();
   switchWorkspaceSpy.mockReset();
@@ -181,7 +299,7 @@ describe("Window boot", () => {
     expect(store.currentWorkspace().clusters).toEqual(["prod"]);
   });
 
-  it("shows a loading state rather than the wrong tabs before boot resolves", () => {
+  it("shows a loading state rather than the wrong tabs before boot resolves", async () => {
     let resolve!: (v: unknown) => void;
     listContexts.mockReturnValue(new Promise((r) => (resolve = r)));
     render(
@@ -190,8 +308,17 @@ describe("Window boot", () => {
       </ConsoleProvider>,
     );
     expect(screen.queryByRole("tablist")).toBeNull();
-    expect(screen.getByText(/loading/i)).toBeDefined();
-    act(() => resolve({ contexts: [] }));
+    // Awaited rather than read on the first paint, and that is the lock gate
+    // above the boot check: it wraps this spinner as well as the band, so the
+    // first thing on screen is its own launch check and the spinner follows
+    // once the vault reports itself open. The window says which of the two it
+    // is waiting on rather than showing one while doing the other.
+    expect(await screen.findByText(/loading/i)).toBeDefined();
+    // Still no tabs, which is the whole of what this test is for.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    await act(async () => {
+      resolve({ contexts: [] });
+    });
   });
 
   it("still boots when reading the saved state throws", async () => {
@@ -470,9 +597,12 @@ describe("Window new workspace", () => {
     await userEvent.click(screen.getByRole("button", { name: /Default/ }));
     await userEvent.click(await screen.findByRole("button", { name: "New workspace" }));
     const drawer = await screen.findByRole("complementary", { name: "Details" });
-    // The row is the middle `flex min-h-0 flex-1` that holds Rail/Nav/the tab
-    // column — an exact class match, since that string is unique to it.
-    const row = document.querySelector('div[class="flex min-h-0 flex-1"]');
+    // The row is the middle band that holds Rail/Nav/the tab column — an exact
+    // class match, since that string is unique to it. `relative` joined it when
+    // §25's cover was mounted here: the cover is `absolute inset-0` inside this
+    // band rather than `fixed`, because the titlebar and the status bar are not
+    // part of what a lock replaces.
+    const row = document.querySelector('div[class="relative flex min-h-0 flex-1"]');
     expect(row).not.toBeNull();
     expect(drawer.parentElement).toBe(row);
   });
@@ -530,5 +660,700 @@ describe("Window — what boot has to ask for", () => {
     // proxies still answer. Boot is the only place that runs regardless.
     await booted();
     await waitFor(() => expect(rehydrateForwards).toHaveBeenCalled());
+  });
+});
+
+/**
+ * §25's cover, proved against the real chrome rather than against a tile.
+ *
+ * The tab strip and the cluster rail are what PR #365 deliberately made
+ * reachable while a dialog is open, which is right for a dialog and exactly
+ * wrong for a lock: a cover that left them live would be worse than no lock,
+ * because the window would look sealed and every other tab would still be
+ * running over a sealed vault. So these tests name both by the role and the
+ * accessible name the shell actually gives them — `TabStrip`'s `tablist` and
+ * `ClusterRail`'s `nav aria-label="Clusters"` — and the first test in the file
+ * is its own positive control: the same two queries have to FIND them with the
+ * vault open, or their absence below would prove nothing.
+ */
+describe("Window lock cover", () => {
+  it("leaves the whole window alone while the vault is open", async () => {
+    await booted();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Clusters" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Control room");
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+  });
+
+  it("covers the tab strip and the cluster rail when the vault is sealed", async () => {
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
+    // The screen under the strip is gone too — including from the hidden tab
+    // surfaces, which stay mounted for every other reason.
+    expect(screen.queryByRole("heading", { level: 1, hidden: true, name: "Control room" })).toBeNull();
+  });
+
+  it("seals and covers on the lock chord", async () => {
+    await booted();
+    act(() => store.openTab("/k/pods", { clusterName: "prod" }));
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    expect(vaultLock).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
+    // The tabs themselves survive: this covers the window, it does not close
+    // the session the reader comes back to.
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+  });
+
+  it("covers nothing when the chord's lock is refused", async () => {
+    vaultLock.mockRejectedValue(new Error("there is no vault to lock"));
+    await booted();
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    await waitFor(() => expect(vaultLock).toHaveBeenCalled());
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+  });
+
+  it("leaves the lock chord to the browser in web mode, where there is no vault", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    expect(vaultLock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+  });
+
+  it("hands a screen the raise function, and it covers the window rather than the tab", async () => {
+    await booted();
+    act(() => store.openTab("/lock-probe", { clusterName: "prod" }));
+    await userEvent.click(screen.getByRole("button", { name: "seal the workspace" }));
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    // The point of the whole seam: not this tab, the window.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "seal the workspace" })).toBeNull();
+  });
+});
+
+/**
+ * The half of decision 5 the cover alone does not deliver.
+ *
+ * `LockGate` unmounts the rail, the nav, the strip, every tab body, the drawer
+ * and the console — but `Chrome` and `Status` are its SIBLINGS, outside the
+ * band, and the window's keydown listener had no sealed guard at all. Behind a
+ * raised cover, ⌘T twice took the tabs from 2 to 4 and ⌘W three times took
+ * them to 1; the titlebar gear opened `/settings`; seven status-bar segments
+ * opened tabs; and the workspace switcher's `onRemove` deleted a workspace
+ * outright, with no dialog, whenever it held one tab.
+ *
+ * Decision 5's whole argument is that a cover leaving these live is worse than
+ * no lock, because the window LOOKS sealed. Excluding the titlebar and the
+ * status bar visually is defensible per §25; leaving them interactive is not.
+ */
+describe("Window — what the cover has to take with it", () => {
+  /** Booted with the vault open, then sealed the way `Lock now` seals it. */
+  async function sealed() {
+    await booted();
+    act(() => store.openTab("/k/pods", { clusterName: "prod" }));
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    await screen.findByText("Workspace locked");
+  }
+
+  it("acts on no tab chord while the cover is up", async () => {
+    await sealed();
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+    // Nor the ones that reorder or reopen what is behind it.
+    const activeBefore = store.currentWorkspace().activeId;
+    fireEvent.keyDown(window, { key: "]", metaKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    expect(store.currentWorkspace().activeId).toBe(activeBefore);
+  });
+
+  /**
+   * Zoom is the exception, and the reason is not convenience. Its whole effect
+   * is on the surface the reader is looking at — the lock screen — and a
+   * reader who cannot read the passphrase field cannot unlock. Taking away the
+   * ability to make this screen legible would be a lock-out, not a lock.
+   */
+  it("still zooms while the cover is up, because that is what makes the cover readable", async () => {
+    await sealed();
+    fireEvent.keyDown(window, { key: "=", metaKey: true });
+    expect(zoomSpy).toHaveBeenCalledWith("in");
+  });
+
+  it("offers no way into Settings from the titlebar while the cover is up", async () => {
+    await sealed();
+    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
+    expect(gear.disabled).toBe(true);
+    await userEvent.click(gear);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
+  });
+
+  /**
+   * The worst of them: `askRemove` deletes a workspace with no dialog when it
+   * holds one tab or fewer, and a workspace is BORN with exactly one. Behind
+   * the cover that was a destructive, undoable action with no credential.
+   */
+  it("puts the workspace switcher out of reach while the cover is up", async () => {
+    await sealed();
+    const before = store.getState().workspaces.length;
+    expect(screen.queryByRole("button", { name: /Default/ })).toBeNull();
+    // The name is still shown — it is not a secret, and blanking it would
+    // imply the vault had sealed it — but there is nothing to press.
+    expect(screen.getByText("Default")).toBeTruthy();
+    expect(store.getState().workspaces).toHaveLength(before);
+  });
+
+  it("leaves the status bar as readouts while the cover is up", async () => {
+    await sealed();
+    const strip = screen.getByRole("group", { name: "Status" });
+    expect(strip.querySelectorAll("button")).toHaveLength(0);
+    // The readouts themselves stay: the cluster name and the counts come from
+    // files and stores the vault never sealed.
+    expect(strip.textContent ?? "").toContain("prod");
+  });
+
+  /**
+   * The titlebar's `Lock workspace` control, through the real window: it must
+   * reach `lockNow` — the same function `⌘⇧L` fires — and not a second lock path
+   * of its own.
+   */
+  it("locks from the titlebar through the same path as the chord", async () => {
+    await booted();
+    await userEvent.click(screen.getByRole("button", { name: "Lock workspace" }));
+    expect(vaultLock).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Workspace locked")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    // And it is gone once the cover is up, like the rest of the bar.
+    expect(screen.queryByRole("button", { name: "Lock workspace" })).toBeNull();
+  });
+
+  it("covers nothing from the titlebar when the lock is refused", async () => {
+    vaultLock.mockRejectedValue(new Error("there is no vault to lock"));
+    await booted();
+    await userEvent.click(screen.getByRole("button", { name: "Lock workspace" }));
+    await waitFor(() => expect(vaultLock).toHaveBeenCalled());
+    expect(screen.queryByText("Workspace locked")).toBeNull();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+  });
+
+  it("gives every one of those back when the vault opens again", async () => {
+    await sealed();
+    vaultStatus.mockResolvedValue(VAULT_OPEN);
+    // Only an unlock lowers the cover, so this goes through the form.
+    await userEvent.type(screen.getByLabelText("Master passphrase"), "aaaa1111aaaa");
+    await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await screen.findByRole("tablist");
+    expect(
+      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Status" }).querySelectorAll("button").length,
+    ).toBeGreaterThan(0);
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(3);
+  });
+});
+
+/**
+ * The same gap as the block above, at LAUNCH — the second fail-open of this
+ * shape on this branch. The first was a refused launch read leaving the window
+ * live; this one is the read that has not answered yet.
+ *
+ * `checking` starts true on every desktop launch and the band is already
+ * covered, but the lock store's `sealed` stayed false until `vaultStatus()`
+ * came back, and `Chrome` and `Status` disable their handlers from that store.
+ * So for the whole of a slow or hung status check the workspace switcher, the
+ * Settings gear, the status links and every tab chord were live over a window
+ * that already showed a blocking cover — and the switcher's `onRemove` deletes
+ * a workspace outright, with no dialog, whenever it holds one tab or fewer.
+ */
+describe("Window — the launch check, before the vault has answered", () => {
+  /** Booted with a `vaultStatus()` that never answers: the cover is up and
+   *  nothing about the vault has been established. */
+  async function stillChecking() {
+    vaultStatus.mockReturnValue(new Promise(() => {}));
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    // The band is covered for the whole of it, which is the half that already
+    // worked and the reason the rest is a lie if it stays live.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    // Boot has run, so the switcher has a workspace to have offered.
+    await screen.findByText("Default");
+  }
+
+  it("puts the workspace switcher out of reach for the whole check", async () => {
+    await stillChecking();
+    const before = store.getState().workspaces.length;
+    expect(screen.queryByRole("button", { name: /Default/ })).toBeNull();
+    // The name is still shown — nothing sealed it — but there is nothing to
+    // press, and so nothing that can remove a workspace.
+    expect(screen.getByText("Default")).toBeTruthy();
+    expect(store.getState().workspaces).toHaveLength(before);
+  });
+
+  it("offers no way into Settings for the whole check", async () => {
+    await stillChecking();
+    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
+    expect(gear.disabled).toBe(true);
+    await userEvent.click(gear);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
+  });
+
+  it("leaves the status bar as readouts for the whole check", async () => {
+    await stillChecking();
+    expect(screen.getByRole("group", { name: "Status" }).querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("acts on no tab chord for the whole check", async () => {
+    await stillChecking();
+    const before = store.currentWorkspace().tabs.length;
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(before);
+  });
+
+  it("does not offer the lock control over a vault it has not read", async () => {
+    await stillChecking();
+    expect(screen.queryByRole("button", { name: "Lock workspace" })).toBeNull();
+  });
+
+  /**
+   * The positive control for all five: with the vault open the same window is
+   * live again, so their absences above are the cover's doing and not a chrome
+   * that never worked.
+   */
+  it("gives every one of those back once the launch read says the vault is open", async () => {
+    await booted();
+    expect(
+      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Status" }).querySelectorAll("button").length,
+    ).toBeGreaterThan(0);
+    const before = store.currentWorkspace().tabs.length;
+    fireEvent.keyDown(window, { key: "t", metaKey: true });
+    expect(store.currentWorkspace().tabs).toHaveLength(before + 1);
+  });
+});
+
+// ---- An agent's confirmation, and the MCP server it comes over ---------
+
+/**
+ * #374 item 1, closed here because this branch made it reachable.
+ *
+ * The confirm gate blocks a mutating capability in Rust and waits sixty
+ * seconds; classic's `McpConfirmDialog` was the only listener, and `main.tsx`
+ * mounts that tree or this one. So in this design every agent mutation and
+ * every Secret read hung and was denied with nothing on screen. `AgentConsent`
+ * is the port, and where it is MOUNTED is the whole of the design decision —
+ * these tests pin the mount point rather than the component, which has its own
+ * suite.
+ */
+describe("Window, and an agent asking to change something", () => {
+  const ask = (id: string, tool: string, args: Record<string, unknown> = {}) => {
+    const handlers = bus.get("mcp://confirm-request");
+    if (!handlers || handlers.size === 0) throw new Error("nothing subscribed to mcp://confirm-request");
+    // Every subscriber, as `listen` does — a copy, since answering unsubscribes.
+    act(() => {
+      for (const handler of [...handlers]) handler({ id, tool, args });
+    });
+  };
+
+  it("puts the question to the reader instead of letting the call time out", async () => {
+    await booted();
+    ask("r1", "k8s_drainNode", { name: "node-3" });
+    expect(await screen.findByText(/k8s_drainNode/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r1", true));
+  });
+
+  /**
+   * Above the tab strip, not inside a tab. Since PR #365 a dialog is mounted in
+   * the tab it was opened from — right for a tab's own question, and wrong for
+   * this one: the reader could switch tabs away from a call the backend is
+   * blocking on, and the prompt would go with the tab. So the card must be
+   * outside every `TabSurface`, which is also what makes the kit draw it as the
+   * document-wide modal an app-wide question needs.
+   */
+  it("asks the window rather than whichever tab happens to be in front", async () => {
+    await booted();
+    ask("r2", "k8s_deleteResource");
+    const card = await screen.findByRole("dialog");
+    expect(card.closest('[data-slot="tab-surface"]')).toBeNull();
+    expect(card.getAttribute("aria-modal")).toBe("true");
+    // The strip is still MOUNTED — the cover a lock raises is what replaces the
+    // band, and this is not one. It is out of the accessibility tree for as
+    // long as the card is up, which is what a window-wide modal means and the
+    // opposite of what a tab-scoped one does: `queryByRole` therefore cannot
+    // see it, and the DOM is where the claim has to be read.
+    expect(document.querySelector('[role="tablist"]')).toBeTruthy();
+  });
+
+  /**
+   * And while the window is still BOOTING, which is the one state the mount
+   * point had left uncovered.
+   *
+   * Boot is an `await listContexts(files)` — a kubeconfig with many contexts,
+   * or a cluster list over a slow API server, and it is seconds. The request
+   * is emitted exactly ONCE when the gate raises it (`mcp_confirm.rs:106`,
+   * a `Mutex<HashMap<String, oneshot::Sender<bool>>>` with no replay), so a
+   * listener that appears afterwards is handed nothing: the call waited out
+   * its full sixty seconds and was denied with nothing ever on screen. This
+   * branch is what made that reachable — auto-start now brings an enabled
+   * server up, and a design switch or a reload leaves it serving while the
+   * new window boots.
+   *
+   * So the surface is mounted ABOVE the boot gate, and the boot check chooses
+   * only the body. Mounted once, not once per branch: two listeners on one
+   * channel are two answers to one request.
+   *
+   * And the COVER is above the boot check with it, which is the half this
+   * test pinned backwards for a round — see the refusals below. The `Loading`
+   * spinner is inside the gate now, so finding it is itself the statement that
+   * the launch read ran during boot and found the vault open: the reader is
+   * asked because there is nothing covering the window, not because nothing had
+   * looked.
+   */
+  it("puts it even while the window is still booting", async () => {
+    let finishBoot: () => void = () => {};
+    listContexts.mockReturnValue(
+      new Promise((resolve) => {
+        finishBoot = () => resolve({ contexts: [ctx("prod")] });
+      }),
+    );
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    // Still a spinner: no tab strip, no rail, nothing of the band yet — and
+    // the launch read has answered `unlocked`, or the cover would be here
+    // instead of the spinner.
+    expect(await screen.findByText("Loading")).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    ask("r4", "k8s_scale", { name: "api" });
+    expect(await screen.findByText(/k8s_scale/)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r4", true));
+    // Answered ONCE. A second mount of the listener inside the booted branch
+    // would answer this request twice over.
+    expect(respondToConfirm.mock.calls.filter(([id]) => id === "r4")).toHaveLength(1);
+    // Let boot land, so the test does not end over a promise nothing settles.
+    await act(async () => {
+      finishBoot();
+    });
+    expect(await screen.findByRole("tablist")).toBeTruthy();
+  });
+
+  /**
+   * The same state over a SEALED vault, and this is the property the test above
+   * was pinning upside down: for one round it approved a `k8s_scale` while the
+   * window was booting with nothing having read the vault at all, and wrote that
+   * down as intended.
+   *
+   * `LockGate` used to live inside the booted branch, so during boot nothing had
+   * called `vaultStatus()`, nothing had raised the cover, and the lock store
+   * answered "not covered" about a vault it had never looked at. The scenario is
+   * ordinary: the webview reloads after `Lock now` — a design switch, a refresh
+   * — while the MCP HTTP server, a backend process, keeps serving. An agent's
+   * confirm-gated call arrives into a fresh module with no gate mounted, and the
+   * prompt was put to whoever was at the keyboard with an Approve button on it,
+   * over a vault the backend had sealed.
+   *
+   * The gate is above the boot check now, so its launch read starts during boot
+   * and the cover is up for the whole of it. The listener is still subscribed —
+   * that is what the refusal proves — and it answers exactly once.
+   */
+  it("refuses rather than approving while the window boots over a sealed vault", async () => {
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    let finishBoot: () => void = () => {};
+    listContexts.mockReturnValue(
+      new Promise((resolve) => {
+        finishBoot = () => resolve({ contexts: [ctx("prod")] });
+      }),
+    );
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    // Boot has not landed and the cover is already up, which is the whole fix.
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    ask("r5", "k8s_scale", { name: "api", replicas: 0 });
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r5", false));
+    // Never approved, and never asked: by name, since the cover is a dialog of
+    // its own.
+    expect(respondToConfirm).not.toHaveBeenCalledWith("r5", true);
+    expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
+    expect(screen.queryByText(/k8s_scale/)).toBeNull();
+    // Answered exactly once, as the approving case pins: the refusal must not
+    // be two listeners agreeing either.
+    expect(respondToConfirm.mock.calls.filter(([id]) => id === "r5")).toHaveLength(1);
+    await act(async () => {
+      finishBoot();
+    });
+  });
+
+  /**
+   * And the state in between, which is the one no mounted gate can rule out:
+   * booting, with the launch read still in flight. "The vault has not answered"
+   * is not "the vault is open" — the same fail-closed this branch already
+   * applies to a read that REFUSED, one step earlier.
+   */
+  it("refuses while the window boots and the launch read has not answered", async () => {
+    vaultStatus.mockReturnValue(new Promise(() => {}));
+    let finishBoot: () => void = () => {};
+    listContexts.mockReturnValue(
+      new Promise((resolve) => {
+        finishBoot = () => resolve({ contexts: [ctx("prod")] });
+      }),
+    );
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    ask("r6", "k8s_deleteResource");
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r6", false));
+    expect(respondToConfirm).not.toHaveBeenCalledWith("r6", true);
+    expect(screen.queryByText(/k8s_deleteResource/)).toBeNull();
+    await act(async () => {
+      finishBoot();
+    });
+  });
+
+  it("refuses rather than prompting over a sealed window", async () => {
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    ask("r3", "k8s_deletePod");
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("r3", false));
+    // By name, not by role: the cover itself is a `role="dialog"`.
+    expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
+    expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
+  });
+});
+
+/**
+ * #374 item 2: `start()` persists `enabled: true` and the next launch ignored it, so
+ * the endpoint stayed offline until Settings was opened by hand. Classic waits
+ * for its `VaultGate` to report the vault usable and then starts the enabled
+ * server (`App.tsx:763-775`); the MCP bearer is one of the two secrets the
+ * vault seals, so starting before it is open would fail to persist a token and
+ * silently never retry.
+ */
+describe("Window, and the MCP server the reader left enabled", () => {
+  it("starts it once the vault is open, on the port that was persisted", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+    expect(startMcpHttp).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves it alone when the reader did not leave it enabled", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: false, port: 8765 });
+    await booted();
+    // A beat for any effect that was going to fire.
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The ordering classic's `onReady` exists for. The bearer is sealed in the
+   * vault (`VaultTokenStore`, `main.rs:184`), so a start over a locked vault
+   * cannot mint or read one — and nothing would retry.
+   */
+  it("does not start it over a sealed vault", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  it("does not start it while the launch check has not answered", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus.mockReturnValue(new Promise(() => {}));
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(await screen.findByText("Checking whether the workspace is sealed")).toBeTruthy();
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  it("starts it when the reader unlocks, not only when the launch read finds it open", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus.mockResolvedValue(VAULT_SEALED);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    const field = await screen.findByLabelText("Master passphrase");
+    vaultStatus.mockResolvedValue(VAULT_OPEN);
+    await userEvent.type(field, "correct horse battery");
+    await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+  });
+
+  it("starts nothing in web mode, where there is no vault and no server", async () => {
+    isTauri.mockReturnValue(false);
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    await booted();
+    await act(async () => {});
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The `mayOpen` half of it. A launch read that REFUSED leaves the cover up and
+   * the vault's state unread (it fails closed), and the reconcile read that
+   * follows can then land an `unlocked` the cover is deliberately not allowed to
+   * act on. Reporting readiness from it would start the server behind a window
+   * that is still showing the lock screen — the one place this ordering can go
+   * wrong that is not simply "too early".
+   */
+  it("does not report readiness from a read the cover was not allowed to open on", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    vaultStatus
+      .mockRejectedValueOnce(new Error("the vault state was never managed"))
+      .mockResolvedValue(VAULT_OPEN);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    // The cover is up and stays up: only a read that followed a real unlock
+    // attempt may lower it.
+    expect(await screen.findByTestId("lock-cover")).toBeTruthy();
+    await act(async () => {});
+    expect(vaultStatus.mock.calls.length).toBeGreaterThan(1);
+    expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * #374 item 2's other half, and the pane's whole view of this effect.
+   *
+   * The URL a start returns was thrown away here, and `McpServer` reads
+   * `mcpHttpStatus()` in its own effect at mount. Restoring a saved Settings tab
+   * with the server enabled runs both at once — and `mcp_http_start` binds the
+   * listener before `McpHttpManager` records anything as running, so that read
+   * can legitimately answer `null` while the bind is in flight. Nothing told the
+   * pane afterwards: it sat permanently on `not running`, offering a Start button
+   * that restarts a live server and drops every agent request in flight.
+   *
+   * A settlement, not a status: the pane takes its own live read again. See
+   * `lib/mcpAutoStart.ts` for why the URL is deliberately not published.
+   */
+  it("tells the Settings pane the start has settled, so a status read taken too early is retaken", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+    await waitFor(() => expect(mcpAutoStartPhase()).toBe("settled"));
+    // And it stays settled. A store re-marked per render is a pane re-reading
+    // the backend on every keystroke elsewhere in the window.
+    await act(async () => {});
+    expect(mcpAutoStartPhase()).toBe("settled");
+  });
+
+  /**
+   * The settlement alone left half the race open: between this call and its
+   * settling — up to two seconds, since `stop_running` (`mcp.rs`) waits that
+   * long on a listener a reload left behind — the pane's own read answers
+   * `null`, it offers Start, and a click queues a second start that tears down
+   * the server this one is bringing up. So the store carries the STATE: this
+   * marks `starting` before the call, and the pane disables Start on it.
+   */
+  it("marks the start as in flight before it calls, so the pane can refuse a second one", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    let finish: (url: string) => void = () => {};
+    startMcpHttp.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+    expect(mcpAutoStartPhase()).toBe("starting");
+    await act(async () => {
+      finish("http://127.0.0.1:9111/mcp");
+    });
+    await waitFor(() => expect(mcpAutoStartPhase()).toBe("settled"));
+  });
+
+  /**
+   * A refused start settles too. The failure is swallowed here — the pane's own
+   * Start button is where a reader finds out — but the status is worth
+   * re-reading either way, and a signal that only fired on success would be one
+   * the pane could not tell from a start that never happened.
+   */
+  it("says the start settled even when it was refused", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    startMcpHttp.mockRejectedValue(new Error("address already in use"));
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalled());
+    await waitFor(() => expect(mcpAutoStartPhase()).toBe("settled"));
+  });
+
+  /**
+   * And nothing settles where nothing was started: the positive control for
+   * both above, and what keeps the pane from re-reading the backend because
+   * some other window came up.
+   */
+  it("announces nothing when there was no start to make", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: false, port: 8765 });
+    await booted();
+    await act(async () => {});
+    expect(mcpAutoStartPhase()).toBe("idle");
+  });
+
+  /**
+   * A refused start is reported nowhere and retried nowhere, exactly as
+   * classic's `.catch(() => {})` leaves it: the window must not come up on a
+   * failed auto-start, and the pane's own Start button is where a reader finds
+   * out and tries again. Without the catch this is an unhandled rejection.
+   */
+  it("comes up anyway when the start is refused", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    startMcpHttp.mockRejectedValue(new Error("address already in use"));
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalled());
+    expect(screen.getByRole("tablist")).toBeTruthy();
   });
 });

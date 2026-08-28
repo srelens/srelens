@@ -4,6 +4,23 @@ import { Window } from "./shell/Window";
 import { ConsoleProvider } from "./console";
 
 export { ConsoleProvider, useConsole, type ConsoleValue } from "./console";
+/**
+ * The boot half of the Appearance pane, re-exported for the host, and the one
+ * question about the stored record that the host has to be able to ask.
+ *
+ * `apps/desktop/src/main.tsx` calls `applyStoredAppearance` beside its own
+ * `applyNextDesignTheme()`, and passes `hasChosenTheme` INTO that function so
+ * the OS-appearance listener it arms stands down once the reader has named a
+ * theme — see `lib/appearance.ts` for why only the stored record can tell a
+ * named theme from a derived one.
+ *
+ * Both have to come from the module the host already imports dynamically: a
+ * static `@srelens/ui-next` import from the entry would drag this whole tree
+ * into the entry chunk that a classic-design boot also downloads, and a second
+ * dynamic `import()` before the `Promise.all` would serialise the two downloads
+ * the comment there keeps parallel.
+ */
+export { applyStoredAppearance, hasChosenTheme } from "./screens/settings/AppearancePane";
 
 function subscribeToHash(onChange: () => void): () => void {
   window.addEventListener("hashchange", onChange);
@@ -39,22 +56,42 @@ function useHash(): string {
  * than a screen, so it is a hash and not a route. The way *in* is on the
  * Placeholder, because that is the screen every un-ported route renders.
  *
- * `onExit` is the way back to the classic design. Settings does not exist in
- * this tree yet, so without it someone who opts in would have no route out of
- * the app except editing localStorage — which is why the Placeholder's "Open in
- * classic" is wired to it rather than to a per-route handoff, which is PR 3.
+ * `onExit` is the way back to the classic design, and it is now reached from
+ * two places rather than one. It shipped when `Settings` did not exist in this
+ * tree, so without it someone who opted in had no route out of the app except
+ * editing localStorage — which is why the Placeholder's "Open in classic" is
+ * wired to it. `screens/Settings.tsx` exists now, and its Appearance pane's
+ * `Design` panel is the way out a reader will actually look for; both go
+ * through this one callback, so there is one exit and not two.
  */
 export function NextApp({
   onExit,
   ported = [],
   onToggleTheme = () => {},
   controls = "none",
+  brandMarkSrc,
 }: {
   onExit: (route: string, context?: string) => Promise<string | null> | string | null;
   /** Display names of the screens that exist in the new design. */
   ported?: string[];
   onToggleTheme?: () => void;
   controls?: "macos" | "none";
+  /**
+   * A URL for srelens's own brand mark, drawn on the lock surface.
+   *
+   * Injected rather than imported, for the reason `ported` and
+   * `onSwitchToClassic` are: the asset lives in `apps/desktop/src/assets`, this
+   * package depends on `@srelens/core` and `@srelens/ui-kit` and nothing else,
+   * and `apps/desktop` depends on THIS package — so an import the other way is
+   * a cycle across a package boundary. A literal `/srelens-mark.svg` would
+   * have been a host path hardcoded into a package that must not know the host,
+   * and wrong for the kit's gallery or any other consumer.
+   *
+   * Optional, and its absence is drawn rather than crashed: `Mark` falls
+   * through to initials when it has no image or the image will not load, which
+   * is what its own comment calls "a state, not an error to report".
+   */
+  brandMarkSrc?: string;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -94,6 +131,7 @@ export function NextApp({
             ported={ported}
             active={!gallery}
             controls={controls}
+            brandMarkSrc={brandMarkSrc}
             onToggleTheme={onToggleTheme}
             onOpenInClassic={leave}
             onOpenGallery={() => {

@@ -122,6 +122,16 @@ describe("AppearanceSettingsSection", () => {
     expect(items).toContain("Connect a cluster");
   });
 
+  it("lists the settings screen, which is where the way back lives on the other side", () => {
+    // `/settings` is the new design's own six-pane screen, and its Appearance
+    // pane is where this very toggle lives over there. A reader weighing the
+    // switch is weighing whether they can find their way back at all, so
+    // leaving it unnamed reads as "there is no settings screen once you go".
+    render(<AppearanceSettingsSection />);
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items).toContain("Settings");
+  });
+
   it("introduces the list, so the names are not a bare list under the hint", () => {
     render(<AppearanceSettingsSection />);
     expect(screen.getByText(/in the new design so far/i)).toBeDefined();

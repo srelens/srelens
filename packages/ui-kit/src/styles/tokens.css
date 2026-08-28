@@ -167,7 +167,12 @@
   --ink: #000000;
   --ink-soft: #1a1a1a;
   --ink-muted: #3d3d3d;
-  --ink-faint: #565656;
+  /* #565656 reached only 6.56:1 against `--surface-sunk`, which is the one
+     text pair in this theme that did NOT clear 7:1 — while the Accessibility
+     pane told its reader "High contrast raises every text pair above 7:1".
+     Darkened so the sentence is true rather than deleted; the floor is
+     computed and asserted in `tokens-only.test.ts`. */
+  --ink-faint: #505050;
   --rule: #767676;
   --rule-strong: #000000;
   --accent: #2b1ba8;

@@ -68,6 +68,7 @@ describe("the list of ported screens", () => {
       "/toolbox",
       "/connections",
       "/connect",
+      "/settings",
     ]);
   });
 
@@ -86,6 +87,7 @@ describe("the list of ported screens", () => {
       "Toolbox",
       "Connections",
       "Connect a cluster",
+      "Settings",
     ]);
   });
 });

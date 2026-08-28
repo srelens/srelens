@@ -408,6 +408,7 @@ const TITLES = {
   // "Connect a cluster", not "Connect": the tab strip carries the whole title
   // from `APP_SCOPED` in routes.ts, and the screen's own headline is neither.
   "/connect": ["Connect a cluster", "connect"],
+  "/settings": ["Settings", "settings"],
   "/topology": ["Topology", "topology"],
   "/incidents": ["Incidents", "incidents"],
 };
@@ -431,7 +432,7 @@ function tabFor(r, id) {
   // the toolbox: both are about every cluster srelens can see (or none at all),
   // so a tab naming one of them would be the strip claiming a scope the screen
   // does not have.
-  if (name && !["/applog", "/notes", "/toolbox", "/connections", "/connect"].includes(r))
+  if (name && !["/applog", "/notes", "/toolbox", "/connections", "/connect", "/settings"].includes(r))
     tab.sub = name;
   return tab;
 }

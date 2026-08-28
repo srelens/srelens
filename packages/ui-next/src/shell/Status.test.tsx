@@ -8,6 +8,7 @@ import { activeRoute, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { probeCluster, resetProbes } from "../lib/probe";
 import { resetView } from "../lib/workspace";
+import { lockWorkspace, resetLock } from "./LockGate";
 
 // The forwards store is core's, module-level and driven by the backend, so the
 // count is faked at the boundary rather than by starting a real forward. The
@@ -61,6 +62,7 @@ beforeEach(() => {
   helmOps.list = [];
   resetView();
   resetProbes();
+  resetLock();
 });
 
 /** Reads the console's open flag from outside the bar, the way the dock does. */
@@ -314,5 +316,35 @@ describe("Status", () => {
     expect(screen.getByTestId("console-open").textContent).toBe("false");
     await userEvent.click(screen.getByRole("button", { name: "Ask" }));
     expect(screen.getByTestId("console-open").textContent).toBe("true");
+  });
+
+  /**
+   * Spec decision 5, at this component's own boundary. Eight `onSelect`s here
+   * called `openTab`, and behind a raised cover every one of them was a way
+   * into the workspace from a window that looked sealed. The handlers are
+   * dropped in one place, so a segment added later is covered too — which is
+   * what this asserts rather than naming the eight.
+   */
+  it("is readouts only while the vault is sealed", () => {
+    setState(defaultState([ctx]));
+    forwards.list = [{ id: 1, status: "active", context: ctx.name }];
+    sessions.list = [{ id: 1, state: "attached", context: ctx.name }];
+    lockWorkspace();
+    mount(<Status contexts={[ctx]} />);
+    const strip = screen.getByRole("group", { name: "Status" });
+    expect(strip.querySelectorAll("button")).toHaveLength(0);
+    // The readouts stay: a kubeconfig context name and counts of work this
+    // window started are not things the vault ever sealed.
+    expect(strip.textContent ?? "").toContain(ctx.name);
+    expect(strip.textContent ?? "").toContain("1 port-forward");
+  });
+
+  it("gives the segments their handlers back when the vault opens", () => {
+    setState(defaultState([ctx]));
+    lockWorkspace();
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByRole("group", { name: "Status" }).querySelectorAll("button")).toHaveLength(0);
+    act(() => resetLock());
+    expect(screen.getByRole("button", { name: "Ask" })).toBeDefined();
   });
 });

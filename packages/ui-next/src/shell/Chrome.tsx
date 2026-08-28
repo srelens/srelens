@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { ConfirmDialog, IconButton, Titlebar, WorkspaceSwitcher } from "@srelens/ui-kit";
 import { applyUiScale, getUiScale, isApplePlatform, isTauri, setUiScale, stepUiScale } from "@srelens/core";
+import { rememberTheme } from "../lib/appearance";
 import { Icons } from "../lib/icons";
+import { hint } from "../lib/shortcuts";
 import { openTab, removeWorkspace, switchWorkspace, useTabs } from "../lib/tabsStore";
+import { useCanLockWorkspace, useWorkspaceSealed } from "./LockGate";
 
 export interface ChromeProps {
   controls: "macos" | "none";
@@ -11,6 +14,20 @@ export interface ChromeProps {
   onToggleTheme: () => void;
   /** The window owns the create dialog; the chip only asks for it. */
   onNewWorkspace: () => void;
+  /**
+   * Seal the vault and cover the window.
+   *
+   * This is `Window`'s own `lockNow` — the same function `⌘⇧L` fires, not a
+   * second path to the same place. It orders `vaultLock()` before
+   * `lockWorkspace()`, returns early when the cover is already up, and skips
+   * web mode entirely; a copy of that here would be a second door, and two
+   * doors are how they start disagreeing.
+   *
+   * Optional because the component gallery renders this bar with no window
+   * behind it. Where it is absent the control is not drawn — the same rule as
+   * every other absent affordance in this bar.
+   */
+  onLock?: () => void;
 }
 
 /**
@@ -54,9 +71,44 @@ export function zoom(action: "in" | "out" | "reset") {
  * in web mode there is no webview to ask, the browser's own zoom already does
  * this, and three buttons that quietly do nothing are worse than three buttons
  * that are not there.
+ *
+ * **This bar stands down while the vault is sealed** (spec decision 5). §25
+ * leaves the titlebar outside what a lock replaces, and that is defensible
+ * VISUALLY — the window keeps its shape. Leaving it interactive is not: behind
+ * a raised cover the gear opened `/settings` and the workspace switcher's
+ * `onRemove` deleted a workspace outright, with no dialog and no credential,
+ * whenever it held one tab — which is how every workspace starts. A cover that
+ * leaves those live is worse than no lock, because the window LOOKS sealed.
+ *
+ * So the switcher becomes a readout, the gear is disabled with a reason, and
+ * `Lock workspace` is not drawn at all — it would be absurd for the lock to be
+ * the one live control on a locked window. Theme and zoom stay: both change only
+ * how this screen LOOKS, and a reader who cannot read the passphrase field
+ * cannot unlock. The names stay too — they come from a kubeconfig and a tab
+ * store the vault never sealed, and blanking them would imply it had.
  */
-export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace }: ChromeProps) {
+export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, onLock }: ChromeProps) {
   const { workspace, workspaces } = useTabs();
+  const sealed = useWorkspaceSealed();
+  /**
+   * Whether to draw `Lock workspace` at all.
+   *
+   * `⌘⇧L` has been bound since Task 9 and NOTHING on screen offered it: the
+   * only ways to lock were a chord and a button inside Settings → Security.
+   * This is the discoverable door.
+   *
+   * Three absences rather than a disabled state, and each is this project's
+   * existing rule rather than a new one. No handler, no control. Web mode —
+   * every vault command is a raw `invoke` and rejects there, which is why the
+   * `Security` nav entry and the toolbox's install column are not drawn
+   * either. And no open vault: {@link useCanLockWorkspace} is false before the
+   * launch read answers, when it refused, when the vault has never been set up
+   * (locking one is refused by design) and when it is already sealed — which is
+   * also what makes this control inert behind the cover, alongside the switcher
+   * and the gear.
+   */
+  const lockable = useCanLockWorkspace();
+  const chord = hint("lock", isApplePlatform());
   const [removing, setRemoving] = useState<string | null>(null);
   // Found rather than held, so the dialog reads the live workspace: the count
   // in its message would otherwise be whatever it was when the dialog opened.
@@ -95,19 +147,30 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace }:
               // moves the window.
               <span aria-hidden data-native-lights data-tauri-drag-region className="w-16 shrink-0 self-stretch" />
             )}
-            <WorkspaceSwitcher
-              icon={Icons.workspace}
-              workspaces={workspaces.map((w) => ({
-                id: w.id,
-                name: w.name,
-                clusters: w.clusters.length,
-                tabs: w.tabs.length,
-              }))}
-              activeId={workspace.id}
-              onSelect={switchWorkspace}
-              onRemove={askRemove}
-              onCreate={onNewWorkspace}
-            />
+            {sealed ? (
+              /* The chip's own class, with nothing to press. Unmounted rather
+                 than disabled because the switcher is a Popover trigger with
+                 no disabled state, and a panel that opened over a lock screen
+                 to offer Remove is the last thing this should grow. */
+              <span className="ws-chip" data-sealed="true">
+                {Icons.workspace && <Icons.workspace size={12} aria-hidden="true" />}
+                <span className="max-w-[110px] truncate">{workspace.name}</span>
+              </span>
+            ) : (
+              <WorkspaceSwitcher
+                icon={Icons.workspace}
+                workspaces={workspaces.map((w) => ({
+                  id: w.id,
+                  name: w.name,
+                  clusters: w.clusters.length,
+                  tabs: w.tabs.length,
+                }))}
+                activeId={workspace.id}
+                onSelect={switchWorkspace}
+                onRemove={askRemove}
+                onCreate={onNewWorkspace}
+              />
+            )}
           </>
         }
         title={clusterName ?? "srelens"}
@@ -116,8 +179,73 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace }:
             {desktop && <IconButton icon={Icons.zoomOut} label="Zoom out" onClick={() => zoom("out")} />}
             {desktop && <IconButton icon={Icons.zoomReset} label="Reset zoom" onClick={() => zoom("reset")} />}
             {desktop && <IconButton icon={Icons.zoomIn} label="Zoom in" onClick={() => zoom("in")} />}
-            <IconButton icon={Icons.sun} label="Theme" onClick={onToggleTheme} />
-            <IconButton icon={Icons.settings} label="Appearance settings" onClick={() => openTab("/settings")} />
+            {onLock !== undefined && desktop && lockable && (
+              <IconButton
+                icon={Icons.lock}
+                // A real name, not a glyph: this is the one control in the bar
+                // whose mistaken press replaces the window. The chord rides in
+                // the tooltip rather than the name, so what is announced is the
+                // action and not a run of modifier glyphs.
+                label="Lock workspace"
+                // From the table that binds it (`lib/shortcuts.ts`), never
+                // typed here — a glyph written by hand is wrong the moment the
+                // binding moves and stays wrong until somebody notices. `hint`
+                // returns "" for an unbound action, so an unbound chord leaves
+                // the tooltip as the label rather than trailing a bare
+                // separator.
+                title={chord === "" ? "Lock workspace" : `Lock workspace · ${chord}`}
+                onClick={onLock}
+              />
+            )}
+            <IconButton
+              icon={Icons.sun}
+              label="Theme"
+              // Recorded, not just applied. The handler is the host's
+              // (`toggleNextDesignTheme` writes classic's preference and
+              // re-asserts ui-next's `data-theme`), and the Appearance pane's
+              // store used to be the only thing that wrote the appearance
+              // record — so this button's choice was remembered nowhere and
+              // boot put the pane's older theme back over it at the next
+              // launch. `rememberTheme` reads whatever the host just put on
+              // the root, so it stores the value that actually landed rather
+              // than a mode this package guessed at. After the toggle, not
+              // before.
+              onClick={() => {
+                onToggleTheme();
+                rememberTheme();
+              }}
+            />
+            <IconButton
+              icon={Icons.settings}
+              // `Settings`, and not `Appearance settings`, which is what this
+              // said while it opened `/settings` — a route whose screen opens
+              // on `Agent & MCP`. A control's accessible name is a promise
+              // about where it goes, and it is the ONLY thing a keyboard or
+              // screen-reader user has to go on, so it was the one reader the
+              // wrong name misled.
+              //
+              // Renamed rather than re-pointed, deliberately. Opening the
+              // Appearance section directly would be the better fix if the
+              // destination could be named in the route, and it cannot be
+              // honestly yet: `/settings` carries no section, the rail's
+              // selection is state local to the screen, and a `/settings/
+              // appearance` route would keep the promise on the first press and
+              // break it on the second — `openTab` focuses the tab that route
+              // already opened, wherever the reader has since arrowed to. Making
+              // it hold needs the rail to write its section back into the tab's
+              // route and `openTab` to dedupe Settings by prefix, which is
+              // three coupled changes across the screen, the router and the tab
+              // store. Until then the honest name is the whole of what it
+              // opens.
+              label="Settings"
+              // Disabled rather than removed: the reader can see the way in is
+              // still there and be told why it will not open, which a control
+              // that vanished could not do. `title` is what `IconButton`
+              // documents for exactly this.
+              disabled={sealed}
+              title={sealed ? "Unlock the workspace to open Settings" : undefined}
+              onClick={() => openTab("/settings")}
+            />
           </>
         }
       />
