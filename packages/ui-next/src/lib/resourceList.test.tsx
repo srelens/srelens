@@ -32,7 +32,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import { useResourceList, resetListCache } from "./resourceList";
-import type { KindDescriptor, ListRow } from "./kinds/types";
+import { rowKey, type KindDescriptor, type ListRow } from "./kinds/types";
 
 // Typed via an explicit annotation, not `as const`: an `as const` object
 // literal narrows its array properties to `readonly`, which then can't
@@ -153,15 +153,40 @@ describe("useResourceList", () => {
     expect(evicted.result.current.rows).toHaveLength(0);
   }, 20000);
 
-  it("merges metrics into the rows by name, without waiting for them", async () => {
-    const enrich = vi.fn().mockResolvedValue(new Map([["a", { cpu: 12 }]]));
+  it("merges metrics into the rows by their identity, without waiting for them", async () => {
+    const enrich = vi.fn().mockResolvedValue(new Map([[rowKey({ name: "a", namespace: "shop" }), { cpu: 12 }]]));
     const d = { ...watched, enrich, enrichMs: 10000 } as const;
-    const { result } = renderHook(() => useResourceList("prod", "pods", d, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "pods", d, "shop", []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
-    act(() => mockState.emitRows!([{ name: "a" }, { name: "b" }]));
+    act(() => mockState.emitRows!([{ name: "a", namespace: "shop" }, { name: "b", namespace: "shop" }]));
     expect(result.current.rows[0]).toMatchObject({ name: "a" }); // rows are on screen at once
     await waitFor(() => expect(result.current.rows[0]).toMatchObject({ name: "a", cpu: 12 }));
     expect(result.current.rows[1]).not.toHaveProperty("cpu");
+  });
+
+  /**
+   * All-namespaces mode: `podMetrics` answers for every namespace, so two
+   * namespaces each running `api-0` are two readings. Keyed by name alone,
+   * one pod's CPU landed on the other's row — displayed, and sorted on.
+   */
+  it("gives each of two namespaces' api-0 its own reading, never the other's", async () => {
+    const enrich = vi.fn().mockResolvedValue(
+      new Map([
+        [rowKey({ name: "api-0", namespace: "shop" }), { cpu: 10 }],
+        [rowKey({ name: "api-0", namespace: "billing" }), { cpu: 20 }],
+      ]),
+    );
+    const d = { ...watched, enrich, enrichMs: 10000 } as const;
+    const { result } = renderHook(() => useResourceList("prod", "pods", d, "", []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() =>
+      mockState.emitRows!([
+        { name: "api-0", namespace: "shop" },
+        { name: "api-0", namespace: "billing" },
+      ]),
+    );
+    await waitFor(() => expect(result.current.rows[0]).toMatchObject({ namespace: "shop", cpu: 10 }));
+    expect(result.current.rows[1]).toMatchObject({ namespace: "billing", cpu: 20 });
   });
 
   it("lists the pods anyway when there is no metrics-server", async () => {

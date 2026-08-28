@@ -1,7 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { WATCHABLE_KINDS, type ResourceKind } from "@srelens/core";
+
+// Hoisted for the same reason resourceList.test.tsx hoists its doubles:
+// `vi.mock` is lifted above every declaration in the file.
+const { podMetrics } = vi.hoisted(() => ({ podMetrics: vi.fn() }));
+vi.mock("@srelens/core", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core")>()),
+  podMetrics,
+}));
+
 import { NAV_GROUPS } from "../tree";
 import { descriptorFor, CLUSTER_SCOPED } from "./descriptors";
+import { rowKey } from "./types";
 
 /** Every kind the sidebar offers, minus Events, which routes to its own screen. */
 const SIDEBAR_KINDS = NAV_GROUPS.flatMap((g) => g.kinds).filter((k) => k !== "events");
@@ -119,6 +129,37 @@ describe("descriptors", () => {
       expect(descriptorFor("jobs")!.flagged!(job)).toBe(false);
       expect(descriptorFor("jobs")!.flagged!(failed)).toBe(true);
       expect(descriptorFor("cronjobs")!.flagged).toBeUndefined();
+    });
+  });
+
+  describe("pod metrics enrichment", () => {
+    beforeEach(() => {
+      podMetrics.mockReset();
+    });
+
+    /**
+     * The collision: in all-namespaces mode `podMetrics` returns every
+     * namespace's pods, so a map keyed by name alone gives both `api-0`s the
+     * reading of whichever arrived last — and the table sorts on it.
+     */
+    it("keys each pod's usage by namespace and name, so two namespaces' api-0 do not collide", async () => {
+      podMetrics.mockResolvedValue({
+        metrics: [
+          { name: "api-0", namespace: "shop", cpuMillicores: 10, memoryMiB: 100 },
+          { name: "api-0", namespace: "billing", cpuMillicores: 20, memoryMiB: 200 },
+        ],
+      });
+
+      const out = await descriptorFor("pods")!.enrich!("prod", "");
+
+      expect(out.size).toBe(2);
+      expect(out.get(rowKey({ name: "api-0", namespace: "shop" }))).toEqual({ cpu: 10, memory: 100 });
+      expect(out.get(rowKey({ name: "api-0", namespace: "billing" }))).toEqual({ cpu: 20, memory: 200 });
+    });
+
+    it("lists no reading at all when the metrics call answers with nothing", async () => {
+      podMetrics.mockResolvedValue({});
+      expect((await descriptorFor("pods")!.enrich!("prod", "shop")).size).toBe(0);
     });
   });
 });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { watchResource, type WatchHandle, type WatchStatus } from "@srelens/core";
-import type { KindDescriptor, ListRow } from "./kinds/types";
+import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./kinds/types";
 
 export type ResourceListStatus = "loading" | "ready" | "empty" | "error";
 
@@ -51,14 +51,18 @@ function deriveStatus(rows: unknown[], error: string | undefined, loading: boole
 }
 
 /**
- * Merges `metrics` into `rows` by name, at render — never in state. A row
- * with no entry in `metrics` is returned untouched (same reference), so a
+ * Merges `metrics` into `rows` by row identity, at render — never in state. A
+ * row with no entry in `metrics` is returned untouched (same reference), so a
  * kind with no `enrich` (the vast majority) pays nothing for this.
+ *
+ * `rowKey`, not `row.name`: on "all namespaces" two namespaces each running an
+ * `api-0` are two rows, and matching on the name alone put one pod's CPU and
+ * memory on the other's row — which the table displays and sorts on.
  */
-function mergeMetrics<Row extends ListRow>(rows: Row[], metrics: Map<string, Partial<Row>> | undefined): Row[] {
+function mergeMetrics<Row extends ListRow>(rows: Row[], metrics: Map<RowKey, Partial<Row>> | undefined): Row[] {
   if (!metrics || metrics.size === 0) return rows;
   return rows.map((row) => {
-    const extra = metrics.get(row.name);
+    const extra = metrics.get(rowKey(row));
     return extra ? { ...row, ...extra } : row;
   });
 }
@@ -90,7 +94,7 @@ export function useResourceList<Row extends ListRow>(
   // Held apart from `state`: enrichment (pod/node metrics) runs on its own
   // cadence and must never gate or fail the list itself. Merged into the
   // returned rows at render time, in `mergeMetrics` below.
-  const [metrics, setMetrics] = useState<Map<string, Partial<Row>> | undefined>(undefined);
+  const [metrics, setMetrics] = useState<Map<RowKey, Partial<Row>> | undefined>(undefined);
 
   useEffect(() => {
     const mine = ++gen.current;

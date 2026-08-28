@@ -10,7 +10,7 @@ import {
 import { ActionBar, ConfirmDialog, type ActionBarAction } from "@srelens/ui-kit";
 import { useClusterGate } from "../lib/clusterMoved";
 import { FailureLine, FailureWord } from "../lib/errorCopy";
-import type { KindDescriptor, ListRow } from "../lib/kinds/types";
+import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 
 export interface ResourceBulkProps {
   /** Row keys the table's own checkbox column reports — `Table`'s
@@ -29,13 +29,6 @@ export interface ResourceBulkProps {
 }
 
 type ActionType = "delete" | "evict" | "restart";
-
-/** The same key `Resources.tsx` hands `Table` as `getRowKey`. Kept as one
- *  literal formula rather than two, so a namespace can never go missing on
- *  the way from a checkbox to a write. */
-function keyOf(row: ListRow): string {
-  return `${row.namespace ?? ""}/${row.name}`;
-}
 
 /** `namespace/name` — every target this screen writes to is qualified, so an
  *  all-namespaces view showing two `web-0`s never confuses which one a bulk
@@ -135,7 +128,7 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
   // can still be in `selected`. Counting `selected.size` instead would show
   // a number this bar cannot actually act on: the "3 selected" bar for a
   // Delete that resolves to 0 rows, confirms, and silently does nothing.
-  const selectedRows = rows.filter((row) => selected.has(keyOf(row)));
+  const selectedRows = rows.filter((row) => selected.has(rowKey(row)));
 
   if (selectedRows.length === 0 && !pending && !report) return null;
 
@@ -223,7 +216,7 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
               </p>
               <ul>
                 {pending.rows.map((row) => (
-                  <li key={keyOf(row)}>
+                  <li key={rowKey(row)}>
                     <code>{rowLabel(row)}</code>
                   </li>
                 ))}
@@ -253,7 +246,7 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
           message={
             <ul>
               {report.outcomes.map((outcome) => (
-                <li key={keyOf(outcome.item)}>
+                <li key={rowKey(outcome.item)}>
                   {outcome.status === "ok" ? (
                     <>
                       <code>{rowLabel(outcome.item)}</code>

@@ -6,6 +6,28 @@ export interface ListRow {
   namespace?: string;
 }
 
+/**
+ * A row's identity, encoded once — `namespace/name`.
+ *
+ * Branded rather than a bare `string` on purpose: every map keyed on a row
+ * (the table's selection, an `enrich` result) must be keyed by the WHOLE
+ * identity, and a name alone typechecks perfectly while being wrong. In an
+ * all-namespaces view two namespaces each running `api-0` are two rows, and a
+ * name-keyed map silently gives both the reading of whichever arrived last.
+ * The brand makes the only way to produce one of these {@link rowKey}, so a
+ * second site cannot format the composite key its own way.
+ */
+export type RowKey = string & { readonly __rowKey: unique symbol };
+
+/**
+ * The one encoding of a row's identity: `namespace/name`, with the empty
+ * namespace for a cluster-scoped row. Neither a namespace nor a name may
+ * contain `/`, so the pair is unambiguous.
+ */
+export function rowKey(row: ListRow): RowKey {
+  return `${row.namespace ?? ""}/${row.name}` as RowKey;
+}
+
 /** Which row actions a kind offers. Absent, not disabled — see the spec. */
 export interface KindActions {
   logs?: boolean;
@@ -48,8 +70,10 @@ export interface KindDescriptor<Row extends ListRow = ListRow> {
   scope: "namespaced" | "cluster";
   /** Required for `poll`; unused for `watch`. */
   load?: (context: string, namespace: string) => Promise<{ rows?: Row[]; error?: string }>;
-  /** Extra per-row data merged by name — pod metrics, node metrics. */
-  enrich?: (context: string, namespace: string) => Promise<Map<string, Partial<Row>>>;
+  /** Extra per-row data merged onto the row of the same identity — pod
+   *  metrics, node metrics. Keyed by {@link rowKey}, never by name: see
+   *  {@link RowKey}. */
+  enrich?: (context: string, namespace: string) => Promise<Map<RowKey, Partial<Row>>>;
   enrichMs?: number;
   actions: KindActions;
   /**

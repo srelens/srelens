@@ -27,7 +27,7 @@ import { detailRoute, parseDetailRoute } from "../lib/detailRoute";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
-import type { KindDescriptor, ListRow } from "../lib/kinds/types";
+import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
@@ -393,7 +393,7 @@ function KindList({
           <Table
             columns={renderedColumns}
             data={filtered}
-            getRowKey={(row) => `${row.namespace ?? ""}/${row.name}`}
+            getRowKey={rowKey}
             selection={{ selected, onChange: setSelected }}
             sort={sort}
             onSortChange={setSort}

@@ -34,7 +34,7 @@ import {
   type PodRow,
 } from "./columns";
 import { genericClusterColumns, genericColumns } from "./generic";
-import type { KindDescriptor, ListRow } from "./types";
+import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./types";
 
 /** Classic's list, unchanged: the kinds that have no namespace. */
 export const CLUSTER_SCOPED: readonly ResourceKind[] = [
@@ -82,9 +82,19 @@ const loadNodes = async (context: string) => {
  * `useResourceList` swallows that so the pods still list, just without a
  * reading. Only rows the metrics mention are touched.
  */
-const podEnrich = async (context: string, namespace: string): Promise<Map<string, Partial<PodRow>>> => {
+const podEnrich = async (context: string, namespace: string): Promise<Map<RowKey, Partial<PodRow>>> => {
   const out = await podMetrics(context, namespace);
-  return new Map((out.metrics ?? []).map((m) => [m.name, { cpu: m.cpuMillicores, memory: m.memoryMiB }]));
+  // Keyed by the pod's WHOLE identity, through the one encoding: on "all
+  // namespaces" this list spans every namespace, and two of them each running
+  // an `api-0` are two readings. Keyed by name, the second overwrote the
+  // first and the table then showed — and sorted on — one pod's CPU and
+  // memory against the other's row.
+  return new Map(
+    (out.metrics ?? []).map((m) => [
+      rowKey({ name: m.name, namespace: m.namespace }),
+      { cpu: m.cpuMillicores, memory: m.memoryMiB },
+    ]),
+  );
 };
 
 /**
@@ -106,7 +116,7 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     scope: "namespaced",
     // Same variance cast the columns above already need (see the comment
     // above this table): `Partial<PodRow>` only widens `Partial<ListRow>`.
-    enrich: podEnrich as (context: string, namespace: string) => Promise<Map<string, Partial<ListRow>>>,
+    enrich: podEnrich as (context: string, namespace: string) => Promise<Map<RowKey, Partial<ListRow>>>,
     enrichMs: 10000,
     actions: { logs: true, shell: true, forward: true, evict: true },
     // Same variance cast every function on this table already needs: `flagged`
