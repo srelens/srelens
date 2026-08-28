@@ -3,23 +3,52 @@ import { Tooltip as TooltipPrimitive } from "radix-ui"
 
 import { cn } from "@/ui/utils"
 
+/**
+ * How long a pointer rests on a trigger before its tooltip opens. Not 0: an
+ * instant tooltip flashes on every pointer pass across a toolbar and reads
+ * as noise; 200 ms is below what registers as a wait. Well under the
+ * browser's fixed ~1 s native `title` delay this replaces (#376).
+ */
+export const TOOLTIP_DELAY_MS = 200
+
+/**
+ * After one tooltip has shown, sibling tooltips under the same provider open
+ * with no delay for this long — the "sweep across the toolbar" behaviour.
+ */
+export const TOOLTIP_SKIP_DELAY_MS = 300
+
+// Radix throws for a `Tooltip` rendered outside a `TooltipProvider`. The app
+// mounts one provider at its root so every tooltip shares the skip-delay
+// state; a `Tooltip` mounted anywhere else (a component test, an isolated
+// render) gets a provider of its own instead of a crash.
+const HasTooltipProvider = React.createContext(false)
+
 function TooltipProvider({
-  delayDuration = 0,
+  delayDuration = TOOLTIP_DELAY_MS,
+  skipDelayDuration = TOOLTIP_SKIP_DELAY_MS,
+  children,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Provider>) {
   return (
-    <TooltipPrimitive.Provider
-      data-slot="tooltip-provider"
-      delayDuration={delayDuration}
-      {...props}
-    />
+    <HasTooltipProvider.Provider value={true}>
+      <TooltipPrimitive.Provider
+        data-slot="tooltip-provider"
+        delayDuration={delayDuration}
+        skipDelayDuration={skipDelayDuration}
+        {...props}
+      >
+        {children}
+      </TooltipPrimitive.Provider>
+    </HasTooltipProvider.Provider>
   )
 }
 
 function Tooltip({
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Root>) {
-  return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+  const hasProvider = React.useContext(HasTooltipProvider)
+  const root = <TooltipPrimitive.Root data-slot="tooltip" {...props} />
+  return hasProvider ? root : <TooltipProvider>{root}</TooltipProvider>
 }
 
 function TooltipTrigger({
@@ -28,9 +57,12 @@ function TooltipTrigger({
   return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
 }
 
+// Styled like the native `title` bubble it replaces (light popover surface,
+// hairline border, small dark text, no arrow) so only the delay changes for
+// the reader; shadcn's dark pill with an arrow would read as a new control.
 function TooltipContent({
   className,
-  sideOffset = 0,
+  sideOffset = 4,
   children,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Content>) {
@@ -40,13 +72,12 @@ function TooltipContent({
         data-slot="tooltip-content"
         sideOffset={sideOffset}
         className={cn(
-          "z-50 inline-flex w-fit max-w-xs origin-(--radix-tooltip-content-transform-origin) items-center gap-1.5 rounded-md bg-foreground px-3 py-1.5 text-xs text-background has-data-[slot=kbd]:pr-1.5 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-sm data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "z-50 w-fit max-w-xs rounded-md border border-border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-sm duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
           className
         )}
         {...props}
       >
         {children}
-        <TooltipPrimitive.Arrow className="z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px] bg-foreground fill-foreground" />
       </TooltipPrimitive.Content>
     </TooltipPrimitive.Portal>
   )
