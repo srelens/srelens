@@ -17,6 +17,7 @@ import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
 import { loadMarks } from "../lib/marks";
+import { mcpAutoStartSettled } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadNamespaces } from "../lib/workspace";
@@ -418,11 +419,33 @@ export function Window({
    * component away. The mutation pass says so plainly: removing it fails
    * nothing, and the web-mode test that passes either way is passing on the
    * gate's behaviour, which is where it belongs.
+   *
+   * **The settlement is announced, because `McpServer` raced this and lost.**
+   * A saved Settings tab is restored at the same moment this fires, and that
+   * pane reads `mcpHttpStatus()` in an effect of its own — while
+   * `mcp_http_start` binds the listener before `McpHttpManager` records anything
+   * as running, so the read can legitimately answer `null` with the bind still
+   * in flight. Nothing told the pane afterwards, so it sat permanently on
+   * `not running` offering a Start button that restarts a live server and drops
+   * every agent request in flight. It is told now, for both outcomes; see
+   * `lib/mcpAutoStart.ts` for why what crosses is a settlement rather than the
+   * URL this start returns.
    */
   useEffect(() => {
     if (!vaultReady) return;
     const mcp = loadMcpSettings();
-    if (mcp.enabled) void startMcpHttp(mcp.port).catch(() => {});
+    if (!mcp.enabled) return;
+    void (async () => {
+      try {
+        await startMcpHttp(mcp.port);
+      } catch {
+        // Swallowed, as classic swallows it — see above. The announcement is
+        // outside this catch on purpose: a refused start has still settled, and
+        // a pane that only heard about successes could not tell one from a
+        // start that never happened.
+      }
+      mcpAutoStartSettled();
+    })();
   }, [vaultReady]);
 
   function menuFor(tab: StripTab): ContextMenuItem[] {

@@ -12,6 +12,7 @@ import {
 } from "@srelens/core";
 import { Badge, Button, ConfirmDialog, Panel, SubHead } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
+import { useMcpAutoStart } from "../../lib/mcpAutoStart";
 
 /**
  * §23's `MCP server` pane: the loopback HTTP transport itself — start it, stop
@@ -261,6 +262,24 @@ export function McpServer() {
    * state. */
   const statusSeq = useRef(0);
 
+  /**
+   * The shell's auto-start, as a value that CHANGES when it settles — nothing
+   * more. `Window` brings an enabled server up the moment `LockGate` reports the
+   * vault usable, and a saved Settings tab is restored at that same moment: the
+   * status effect below can therefore answer `null` while the bind is still in
+   * flight (`mcp_http_start` binds the listener before `McpHttpManager` records
+   * anything as running), and until this existed nothing told this pane
+   * afterwards. It sat permanently on `not running`, offering a Start that
+   * restarts a live server and drops every agent request in flight.
+   *
+   * A signal and not a status, deliberately. What the effect does with it is
+   * take its OWN `mcpHttpStatus()` read again — see the file comment on why
+   * `running` here is a live read of the process rather than a stored flag, and
+   * `lib/mcpAutoStart.ts` for why a URL published from the shell would be a
+   * second source of truth for it that could lie in the other direction.
+   */
+  const shellStart = useMcpAutoStart();
+
   // Two independent effects, not one `Promise.all` — a status failure must
   // not cost an already-resolved token, and a token failure must not cost an
   // already-resolved status. See the file-level comment.
@@ -278,6 +297,13 @@ export function McpServer() {
     };
   }, []);
 
+  // Re-taken when the shell says its auto-start has settled, and that is the
+  // only thing `shellStart` is for — the value itself means nothing. See the
+  // note above `useMcpAutoStart` for the race: this pane's read can answer
+  // `null` with the bind still in flight, and until the shell said so nothing
+  // told it afterwards. Still THIS pane's own live read of the process; the
+  // signal carries no claim about what is listening, because `running` here is
+  // not a stored flag and must not become a proxy that can lie the other way.
   useEffect(() => {
     let cancelled = false;
     const seq = ++statusSeq.current;
@@ -293,7 +319,7 @@ export function McpServer() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [shellStart]);
 
   const token = tokenRead.kind === "ready" ? tokenRead.value : null;
   const hasToken = tokenRead.kind === "ready" && tokenRead.value !== null;

@@ -166,6 +166,7 @@ import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
 import { resetLock } from "./LockGate";
+import { mcpAutoStartSettlements, resetMcpAutoStart } from "../lib/mcpAutoStart";
 
 /** An open vault: the state every test in this file but the lock ones needs. */
 const VAULT_OPEN = {
@@ -211,6 +212,7 @@ beforeEach(() => {
   respondToConfirm.mockReset().mockResolvedValue(undefined);
   bus.clear();
   resetLock();
+  resetMcpAutoStart();
   zoomSpy.mockReset();
   createWorkspaceSpy.mockReset();
   switchWorkspaceSpy.mockReset();
@@ -1240,6 +1242,57 @@ describe("Window, and the MCP server the reader left enabled", () => {
     await act(async () => {});
     expect(vaultStatus.mock.calls.length).toBeGreaterThan(1);
     expect(startMcpHttp).not.toHaveBeenCalled();
+  });
+
+  /**
+   * #374 item 2's other half, and the pane's whole view of this effect.
+   *
+   * The URL a start returns was thrown away here, and `McpServer` reads
+   * `mcpHttpStatus()` in its own effect at mount. Restoring a saved Settings tab
+   * with the server enabled runs both at once — and `mcp_http_start` binds the
+   * listener before `McpHttpManager` records anything as running, so that read
+   * can legitimately answer `null` while the bind is in flight. Nothing told the
+   * pane afterwards: it sat permanently on `not running`, offering a Start button
+   * that restarts a live server and drops every agent request in flight.
+   *
+   * A settlement, not a status: the pane takes its own live read again. See
+   * `lib/mcpAutoStart.ts` for why the URL is deliberately not published.
+   */
+  it("tells the Settings pane the start has settled, so a status read taken too early is retaken", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+    await waitFor(() => expect(mcpAutoStartSettlements()).toBe(1));
+    // Once. A signal announced per render is a pane re-reading the backend on
+    // every keystroke elsewhere in the window.
+    await act(async () => {});
+    expect(mcpAutoStartSettlements()).toBe(1);
+  });
+
+  /**
+   * A refused start settles too. The failure is swallowed here — the pane's own
+   * Start button is where a reader finds out — but the status is worth
+   * re-reading either way, and a signal that only fired on success would be one
+   * the pane could not tell from a start that never happened.
+   */
+  it("says the start settled even when it was refused", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    startMcpHttp.mockRejectedValue(new Error("address already in use"));
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalled());
+    await waitFor(() => expect(mcpAutoStartSettlements()).toBe(1));
+  });
+
+  /**
+   * And nothing settles where nothing was started: the positive control for
+   * both above, and what keeps the pane from re-reading the backend because
+   * some other window came up.
+   */
+  it("announces nothing when there was no start to make", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: false, port: 8765 });
+    await booted();
+    await act(async () => {});
+    expect(mcpAutoStartSettlements()).toBe(0);
   });
 
   /**

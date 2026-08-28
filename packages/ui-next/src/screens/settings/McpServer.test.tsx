@@ -18,6 +18,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import { McpServer } from "./McpServer";
+import { mcpAutoStartSettled, resetMcpAutoStart } from "../../lib/mcpAutoStart";
 
 /**
  * A realistic bearer value. The real backend mints a 64-character hex string
@@ -63,6 +64,9 @@ describe("McpServer", () => {
     core.stopMcpHttp.mockResolvedValue(undefined);
     core.loadMcpSettings.mockReturnValue({ enabled: false, port: PORT });
     core.saveMcpSettings.mockReturnValue(undefined);
+    // The shell's auto-start signal is a module store: a settlement announced
+    // in one test would otherwise still be counted in the next.
+    resetMcpAutoStart();
   });
 
   /** The one element that carries the pane's claim about the address. */
@@ -415,6 +419,65 @@ describe("McpServer", () => {
       expect(note.textContent).toMatch(/start/i);
       // And the action it names is really here, in this tree, one click away.
       expect(screen.getByRole("button", { name: "Start server" })).toBeTruthy();
+    });
+
+    /**
+     * The shell's auto-start, which this pane raced and lost.
+     *
+     * `Window` brings an enabled server up once the vault reports itself usable,
+     * and a saved Settings tab is restored at the same moment — so this pane's
+     * mount read can answer `null` while the bind is still in flight
+     * (`mcp_http_start` binds the listener before `McpHttpManager` records
+     * anything as running). Nothing told it afterwards: the pane sat permanently
+     * on `not running`, offering a Start button that restarts a live server and
+     * drops every agent request in flight.
+     *
+     * It takes its OWN read again when the shell says the start has settled. Not
+     * a URL published from the shell: `running` here is a live read of the
+     * process rather than a stored flag, and a proxy for it could lie in the
+     * other direction.
+     */
+    it("re-reads the status when the shell's auto-start settles under it", async () => {
+      // The bind was still in flight when this pane looked.
+      core.mcpHttpStatus.mockResolvedValueOnce(null).mockResolvedValue(STATUS_URL);
+      render(<McpServer />);
+      expect(await screen.findByText("not running")).toBeTruthy();
+      await act(async () => {
+        mcpAutoStartSettled();
+      });
+      expect(await screen.findByText("running")).toBeTruthy();
+      expect(address()).toContain(STATUS_URL);
+      expect(core.mcpHttpStatus).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * The positive control: it is the SIGNAL that re-reads, not a pane that
+     * polls. Without this the fix could be a status read on every render and
+     * every test above would still pass.
+     */
+    it("reads the status once when nothing has settled under it", async () => {
+      render(<McpServer />);
+      await screen.findByRole("button", { name: "Stop server" });
+      await act(async () => {});
+      expect(core.mcpHttpStatus).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * And a refused auto-start settles too. The shell swallows that failure —
+     * this pane's Start button is where a reader finds out — but the status is
+     * worth re-reading either way, and the pane must not claim a listener from
+     * a signal that carries no such fact.
+     */
+    it("keeps saying not running when the shell's start settled without binding", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      expect(await screen.findByText("not running")).toBeTruthy();
+      await act(async () => {
+        mcpAutoStartSettled();
+      });
+      expect(screen.getByText("not running")).toBeTruthy();
+      expect(screen.queryByText("running")).toBeNull();
+      expect(core.mcpHttpStatus).toHaveBeenCalledTimes(2);
     });
   });
 
