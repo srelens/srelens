@@ -399,6 +399,19 @@
   }
   .th-resize:hover::after,
   .th-resize:focus-visible::after { background: var(--accent); }
+  /* Put on <body> by Table for the duration of a column drag — `RESIZING_COLUMN`
+     there is this same name. The pointer leaves the 7px strip the moment the
+     drag starts, so without this the cursor flickers back to whatever each cell
+     it crosses asks for, and the drag sweeps a text selection along with it.
+     classic ruled this in apps/desktop/src/ui/styles.css as
+     `fl-is-resizing-column`; a `next` boot loads only this sheet, so the class
+     did nothing there at all. `!important` because it has to beat the cursor
+     every cell, link and button underneath sets for itself. */
+  .tbl-resizing-column,
+  .tbl-resizing-column * {
+    cursor: col-resize !important;
+    user-select: none !important;
+  }
   .th-sort {
     display: inline-flex;
     align-items: center;

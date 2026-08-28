@@ -212,6 +212,35 @@ export interface TableProps<T> {
 /** Width of the leading bulk-selection column; mirrored in styles.css. */
 const CHECKBOX_COLUMN_WIDTH = 36;
 
+/**
+ * Put on `<body>` for the duration of a column drag, to hold the cursor at
+ * `col-resize` and stop the drag sweeping a text selection along with it.
+ *
+ * Ruled in `kit.css`. classic ruled it in `apps/desktop/src/ui/styles.css` as
+ * `fl-is-resizing-column`, a sheet a `next` boot never loads, so the class had
+ * no effect at all there; the name came into the kit's own vocabulary with the
+ * rule. (#380 review)
+ */
+const RESIZING_COLUMN = "tbl-resizing-column";
+
+/**
+ * The nearest ancestor that scrolls, or `<body>` when nothing between here and
+ * it does.
+ *
+ * Starts at the parent rather than at `root`: the table's root is a
+ * `display: contents` wrapper, so it generates no box of its own — there is
+ * nothing there to scroll, to measure, or to hand a `ResizeObserver`.
+ */
+function scrollParentOf(root: HTMLElement): HTMLElement | null {
+  let parent: HTMLElement | null = root.parentElement;
+  while (parent && parent !== document.body) {
+    const overflowY = getComputedStyle(parent).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") break;
+    parent = parent.parentElement;
+  }
+  return parent;
+}
+
 function getColumnValue<T>(row: T, column: Column<T>): unknown {
   return column.getValue ? column.getValue(row) : (row as Record<string, unknown>)[column.key];
 }
@@ -329,6 +358,10 @@ export function Table<T>({
   // user dragged are theirs to keep.
   const autoSized = useRef(false);
   const containerWidth = useRef(0);
+  // Whatever a column drag in flight needs undone, undone from an unmount as
+  // well as from the button coming up — see `startColumnResize`.
+  const release = useRef<() => void>(() => {});
+  useEffect(() => () => release.current(), []);
   const columnSignature = columns.map((column) => column.key).join("|");
   const rootRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ scrollTop: 0, viewportHeight: 0, rowHeight: 0 });
@@ -433,14 +466,27 @@ export function Table<T>({
         [column.key]: Math.max(minWidth, startWidth + moveEvent.clientX - startX),
       }));
     };
-    const onUp = () => {
+    // Everything this drag has to put back, in one function, so releasing on an
+    // unmount and releasing on the button coming up are the same code path. The
+    // shape {@link ResizeHandle} uses, for the reason it gives: `onUp` never
+    // runs if the table is torn down with the button still down — a shortcut
+    // that switches tab, a session restore, a cluster disconnect swapping the
+    // screen — and then the window listeners went on calling `setColumnWidths`
+    // on a dead component for the life of the document, and `<body>` kept the
+    // dragging class for good. (#380 review)
+    const detach = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      document.body.classList.remove("fl-is-resizing-column");
+      document.body.classList.remove(RESIZING_COLUMN);
+      release.current = () => {};
     };
-    document.body.classList.add("fl-is-resizing-column");
+    function onUp() {
+      detach();
+    }
+    document.body.classList.add(RESIZING_COLUMN);
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    release.current = detach;
   };
 
   const resizeColumnWithKeyboard = (
@@ -479,12 +525,7 @@ export function Table<T>({
   useEffect(() => {
     const root = rootRef.current;
     if (!root || visibleData.length <= VIRTUALIZE_THRESHOLD) return;
-    let scrollParent: HTMLElement | null = root.parentElement;
-    while (scrollParent && scrollParent !== document.body) {
-      const overflowY = getComputedStyle(scrollParent).overflowY;
-      if (overflowY === "auto" || overflowY === "scroll") break;
-      scrollParent = scrollParent.parentElement;
-    }
+    const scrollParent = scrollParentOf(root);
     if (!scrollParent) return;
     const parent = scrollParent;
     const measure = () => {
@@ -598,18 +639,28 @@ export function Table<T>({
 
   // Pinned widths would otherwise survive a window resize, so an auto-sized
   // table would stop tracking the space available to it. Drop the measurement
-  // when the container's width changes and the effect above re-takes it at the
-  // new size. Widths the user dragged are left alone.
+  // when the surrounding box's width changes and the effect above re-takes it
+  // at the new size. Widths the user dragged are left alone.
+  //
+  // The box is the scroll parent, the same one the virtualization effect above
+  // computes. It used to look for `[data-slot="table-container"]` inside the
+  // root, which is classic's shadcn wrapper: nothing in ui-next wraps the kit's
+  // table in one, so the lookup returned null, the observer was never attached
+  // and the promise above went unkept — a narrowed window left the table on its
+  // old pixel widths under `table-layout: fixed`, with a scrollbar. The root
+  // itself cannot stand in for it either: `display: contents` generates no box,
+  // and a ResizeObserver on one reports nothing. (#380 review)
   useEffect(() => {
     if (isEmpty) return;
-    const container = rootRef.current?.querySelector<HTMLElement>('[data-slot="table-container"]');
-    if (!container || typeof ResizeObserver === "undefined") return;
+    const root = rootRef.current;
+    const box = root ? scrollParentOf(root) : null;
+    if (!box || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (container.clientWidth === containerWidth.current) return;
-      containerWidth.current = container.clientWidth;
+      if (box.clientWidth === containerWidth.current) return;
+      containerWidth.current = box.clientWidth;
       if (autoSized.current) setColumnWidths({});
     });
-    observer.observe(container);
+    observer.observe(box);
     return () => observer.disconnect();
   }, [isEmpty]);
 

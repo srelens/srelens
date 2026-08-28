@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Table, filterTableData, computeVisibleRange, rowPitch, type Column } from "./Table";
 
@@ -931,5 +933,161 @@ describe("row gestures", () => {
     fireEvent.contextMenu(screen.getByText("beta").closest("tr")!);
     await userEvent.click(await screen.findByText("Delete beta"));
     expect(onPick).toHaveBeenCalled();
+  });
+});
+
+/**
+ * The column divider, and what a drag on it has to put back.
+ *
+ * Three things the classic table got away with because it lived beside
+ * classic's own wrapper and classic's own stylesheet, neither of which exists
+ * in a `next` boot: the width observer looked for a container element this tree
+ * never renders, a drag interrupted by an unmount left its window listeners and
+ * its body class behind for good, and the class it toggles had no rule in the
+ * only stylesheet ui-next loads. (#380 review)
+ */
+describe("Table column resizing", () => {
+  const columns: Column<{ name: string; phase: string }>[] = [
+    { key: "name", header: "Name" },
+    { key: "phase", header: "Phase" },
+  ];
+  const data = [{ name: "web-1", phase: "Running" }];
+
+  afterEach(() => {
+    document.body.className = "";
+    vi.unstubAllGlobals();
+  });
+
+  /** The pinned width of each column, off the `colgroup` that carries them. */
+  const colWidths = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("colgroup col")).map((col) => (col as HTMLElement).style.width);
+
+  /** jsdom ships no ResizeObserver; this one hands its callback to the test. */
+  function stubResizeObserver() {
+    const observed: Element[] = [];
+    const callbacks: ResizeObserverCallback[] = [];
+    class Stub implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe(target: Element) {
+        observed.push(target);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", Stub);
+    return { observed, callbacks };
+  }
+
+  const startDrag = () => {
+    const handle = screen.getByRole("separator", { name: "Resize Name column" });
+    fireEvent.pointerDown(handle, { clientX: 100 });
+    return handle;
+  };
+
+  /** Whatever the drag put on `<body>`, over whatever was already there. */
+  const bodyClassesAddedBy = (start: () => void) => {
+    const before = new Set(document.body.classList);
+    start();
+    return Array.from(document.body.classList).filter((name) => !before.has(name));
+  };
+
+  it("watches a box that exists, so an auto-sized table keeps tracking its space", () => {
+    // The root this renders is `display: contents` — it generates no box, and a
+    // ResizeObserver on it would report nothing. The element the effect used to
+    // look for, `[data-slot="table-container"]`, is classic's shadcn wrapper;
+    // nothing in ui-next wraps the kit's table in one, so the lookup returned
+    // null and the observer was never attached at all.
+    //
+    // jsdom measures every rect as zero, so the widths below come from a stub:
+    // 200px per header, then 100px once the space has narrowed.
+    let headerWidth = 200;
+    vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ width: headerWidth }) as DOMRect,
+    );
+    const { observed, callbacks } = stubResizeObserver();
+
+    const { container } = render(
+      <div data-testid="scroll" style={{ overflowY: "auto" }}>
+        <Table columns={columns} data={data} getRowKey={(r) => r.name} />
+      </div>,
+    );
+    const box = screen.getByTestId("scroll");
+    expect(observed).toContain(box);
+    expect(colWidths(container)).toEqual(["200px", "200px"]);
+
+    // Narrower space: the auto-sized widths are dropped and re-taken.
+    headerWidth = 100;
+    Object.defineProperty(box, "clientWidth", { value: 640, configurable: true });
+    act(() => callbacks.forEach((notify) => notify([], {} as ResizeObserver)));
+    expect(colWidths(container)).toEqual(["100px", "100px"]);
+  });
+
+  it("leaves widths the reader dragged alone when the space around them changes", () => {
+    let headerWidth = 200;
+    vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ width: headerWidth }) as DOMRect,
+    );
+    const { callbacks } = stubResizeObserver();
+    const { container } = render(
+      <div data-testid="scroll" style={{ overflowY: "auto" }}>
+        <Table columns={columns} data={data} getRowKey={(r) => r.name} />
+      </div>,
+    );
+    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize Name column" }), {
+      key: "ArrowRight",
+    });
+    expect(colWidths(container)).toEqual(["216px", "200px"]);
+
+    headerWidth = 100;
+    const box = screen.getByTestId("scroll");
+    Object.defineProperty(box, "clientWidth", { value: 640, configurable: true });
+    act(() => callbacks.forEach((notify) => notify([], {} as ResizeObserver)));
+    expect(colWidths(container)).toEqual(["216px", "200px"]);
+  });
+
+  it("releases a column drag when the table unmounts under it", () => {
+    // A shortcut that switches tab, a session restore or a cluster disconnect
+    // can tear the table down with the button still held, and then `onUp` never
+    // runs: the window listeners went on calling setState on a dead component
+    // for the life of the document, and the body class never came off.
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    const { unmount } = render(<Table columns={columns} data={data} getRowKey={(r) => r.name} />);
+
+    const applied = bodyClassesAddedBy(startDrag);
+    expect(applied.length).toBe(1);
+
+    unmount();
+    expect(Array.from(document.body.classList)).not.toContain(applied[0]);
+    const onMove = added.mock.calls.find(([type]) => type === "pointermove")?.[1];
+    expect(onMove).toBeDefined();
+    expect(
+      removed.mock.calls.some(([type, listener]) => type === "pointermove" && listener === onMove),
+    ).toBe(true);
+  });
+
+  it("declares a rule for the body class a drag applies, in the sheet ui-next loads", () => {
+    // jsdom applies no stylesheet at all, so this is the only honest check
+    // available: read the sheet a `next` boot actually loads and look for a
+    // rule on the class the component was just seen to apply. The name is
+    // taken off `<body>` rather than written twice, so the two cannot drift.
+    //
+    // classic defined `fl-is-resizing-column` in `apps/desktop/src/ui/
+    // styles.css`, which a `next` boot never loads: main.tsx imports only
+    // `@srelens/ui-next/styles`, and that imports only the kit's.
+    render(<Table columns={columns} data={data} getRowKey={(r) => r.name} />);
+    const applied = bodyClassesAddedBy(startDrag);
+    expect(applied.length).toBe(1);
+
+    const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
+    const rule = new RegExp(`\\.${applied[0]}[^{]*\\{([^}]*)\\}`).exec(css);
+    if (!rule) throw new Error(`kit.css declares no rule for .${applied[0]}`);
+    // The two things the class exists to suppress: the text selection a drag
+    // across the header would otherwise sweep up, and the cursor flickering
+    // off col-resize as the pointer crosses the cells under it.
+    expect(rule[1]).toContain("col-resize");
+    expect(rule[1]).toContain("user-select: none");
   });
 });
