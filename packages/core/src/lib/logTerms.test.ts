@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tallyLogTerms, logLineHealth, logLineLevel } from "./logTerms";
+import { tallyLogTerms, logLineHealth, logLineLevel, tokenize } from "./logTerms";
 import type { LogLine } from "./logBuffer";
 
 const line = (text: string, source = ""): LogLine => ({ source, text });
@@ -153,6 +153,54 @@ describe("tallyLogTerms", () => {
     // Different level words, same headline: still "pool timeout", not
     // "error pool" / "warn pool" — and the tone is the worst of the two.
     expect(tallyLogTerms(lines)).toEqual([{ term: "pool timeout", count: 2, tone: "danger" }]);
+  });
+});
+
+/**
+ * The tokenizer's own contract, pinned as a table because its three quote and
+ * punctuation strips were rewritten off regexes (js/polynomial-redos, #380) and
+ * "identical output" is the whole of what the rewrite promised. Every row here
+ * was produced by the regex version first.
+ */
+describe("tokenize", () => {
+  const words = (text: string) => tokenize(text).map((t) => t.text);
+  const clauseEnds = (text: string) => tokenize(text).map((t) => t.endsClause);
+
+  it("splits on whitespace and strips the writer's quoting", () => {
+    expect(words("pool saturated")).toEqual(["pool", "saturated"]);
+    expect(words('  pool   saturated  ')).toEqual(["pool", "saturated"]);
+    expect(words('"pool" saturated')).toEqual(["pool", "saturated"]);
+    expect(words("'pool' `saturated`")).toEqual(["pool", "saturated"]);
+    expect(words('"""pool"""')).toEqual(["pool"]);
+    // A quote inside a word is part of the word — only the ends are stripped.
+    expect(words(`don't stop`)).toEqual(["don't", "stop"]);
+  });
+
+  it("strips trailing sentence punctuation, and colons with it", () => {
+    expect(words("pool saturated.")).toEqual(["pool", "saturated"]);
+    expect(words("plugin/kubernetes: failed")).toEqual(["plugin/kubernetes", "failed"]);
+    expect(words("what?! now")).toEqual(["what", "now"]);
+    expect(words('saturated,"')).toEqual(["saturated"]);
+    // Leading punctuation that is not a quote stays: it is part of the word.
+    expect(words(".hidden -flag")).toEqual([".hidden", "-flag"]);
+  });
+
+  it("drops a token that was nothing but quotes and punctuation", () => {
+    expect(words('""" ,,, `')).toEqual([]);
+    expect(words("")).toEqual([]);
+    expect(words("   ")).toEqual([]);
+    expect(words('pool """ saturated')).toEqual(["pool", "saturated"]);
+  });
+
+  it("reads the clause end off the writer's punctuation, quotes ignored", () => {
+    expect(clauseEnds("pool saturated, queueing")).toEqual([false, true, false]);
+    expect(clauseEnds('pool saturated,"')).toEqual([false, true]);
+    expect(clauseEnds("pool saturated;")).toEqual([false, true]);
+    expect(clauseEnds("pool saturated!")).toEqual([false, true]);
+    // A colon is NOT a clause end — one thought, not two.
+    expect(clauseEnds("plugin/kubernetes: failed")).toEqual([false, false]);
+    // A token of quotes alone ends no clause, and is not reported at all.
+    expect(clauseEnds('""')).toEqual([]);
   });
 });
 

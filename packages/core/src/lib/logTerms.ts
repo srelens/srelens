@@ -271,17 +271,59 @@ function messageOf(text: string, obj: LogObject | null): string {
  * colon is NOT a boundary: `plugin/kubernetes: Failed to watch` is one
  * thought, and CoreDNS would otherwise tally to its component name alone.
  */
-interface Token {
+export interface Token {
   readonly text: string;
   readonly endsClause: boolean;
 }
 
-/** Whitespace-split tokens, quotes and trailing sentence punctuation stripped. */
-function tokenize(text: string): Token[] {
+/** The characters a writer's own quoting puts around a word. */
+const QUOTE_CHARS = "\"'`";
+/** Those, plus the punctuation that ends a word rather than belonging to it. */
+const TRAILING_CHARS = "\"'`.,;:!?";
+/** The punctuation that closes a clause. No colon — see {@link Token}. */
+const CLAUSE_END_CHARS = ",;.!?";
+
+/** The index of the first character of `token` that is not in `chars`. */
+function firstKept(token: string, chars: string): number {
+  let start = 0;
+  while (start < token.length && chars.includes(token[start])) start += 1;
+  return start;
+}
+
+/** The index one past the last character of `token` that is not in `chars`. */
+function lastKept(token: string, chars: string): number {
+  let end = token.length;
+  while (end > 0 && chars.includes(token[end - 1])) end -= 1;
+  return end;
+}
+
+/**
+ * Whitespace-split tokens, quotes and trailing sentence punctuation stripped.
+ *
+ * **The three strips are index walks, not regexes.** They were repetition with
+ * a `$` anchor, which the engine re-tries from every start position in the
+ * token: a run of quotes cost 709ms at 20k characters, 2.7s at 40k and 11.1s
+ * at 80k — each, and all three ran over every token (js/polynomial-redos,
+ * #380). These lines are STREAMED from the cluster, so this is the least
+ * controlled input in the app and the only one that arrives continuously. One
+ * quote-run token in one line was seconds of frozen UI thread.
+ *
+ * {@link firstKept}/{@link lastKept} walk each end once, which is linear, and
+ * answer the same three questions the patterns did — see `tokenize`'s own
+ * table in the tests, every row of which was taken off the regex version.
+ */
+export function tokenize(text: string): Token[] {
   const tokens: Token[] = [];
   for (const raw of text.trim().split(/\s+/)) {
-    const endsClause = /[,;.!?]$/.test(raw.replace(/["'`]+$/, ""));
-    const stripped = raw.replace(/^["'`]+/, "").replace(/["'`.,;:!?]+$/, "");
+    // The clause end is read past the writer's closing quote but through
+    // nothing else: `saturated,"` ends a clause, `kubernetes:` does not.
+    const unquoted = lastKept(raw, QUOTE_CHARS);
+    const endsClause = unquoted > 0 && CLAUSE_END_CHARS.includes(raw[unquoted - 1]);
+    const start = firstKept(raw, QUOTE_CHARS);
+    const end = lastKept(raw, TRAILING_CHARS);
+    // `end <= start` is a token of nothing but quotes and punctuation, which
+    // the two chained `replace`s also reduced to the empty string.
+    const stripped = end > start ? raw.slice(start, end) : "";
     if (stripped.length > 0) tokens.push({ text: stripped, endsClause });
   }
   return tokens;

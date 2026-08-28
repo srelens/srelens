@@ -134,6 +134,39 @@ export function publicKeyAlgorithm(certificate: X509Certificate): string {
   return algorithm.name;
 }
 
+/** The PEM armour a certificate block opens and closes with. */
+const PEM_BEGIN = "-----BEGIN CERTIFICATE-----";
+const PEM_END = "-----END CERTIFICATE-----";
+
+/**
+ * Every PEM certificate block in `pem`, `-----BEGIN` through `-----END`.
+ *
+ * Deliberately not a regex. `-----BEGIN CERTIFICATE-----[\s\S]*?-----END
+ * CERTIFICATE-----/g` made every BEGIN a fresh start position for a lazy body
+ * that then rescanned to the end of the string looking for an END: input with
+ * many openers and no closer cost 1386ms at 328KB and grew quadratically
+ * (js/polynomial-redos, #380). This is a Secret's own `tls.crt` as the cluster
+ * hands it over, parsed on the UI thread, so its shape is not ours to trust.
+ *
+ * Two `indexOf` walks with a cursor that only ever moves forward is linear,
+ * and gives byte-identical blocks: the block starts at the earliest BEGIN and
+ * ends at the first END after it, exactly as the lazy pattern did — a nested
+ * BEGIN is swallowed by the block that opened first, an unclosed BEGIN yields
+ * nothing, and a stray END before any BEGIN is not a block.
+ */
+export function certificateBlocks(pem: string): string[] {
+  const blocks: string[] = [];
+  let from = 0;
+  for (;;) {
+    const begin = pem.indexOf(PEM_BEGIN, from);
+    if (begin === -1) return blocks;
+    const end = pem.indexOf(PEM_END, begin + PEM_BEGIN.length);
+    if (end === -1) return blocks;
+    blocks.push(pem.slice(begin, end + PEM_END.length));
+    from = end + PEM_END.length;
+  }
+}
+
 /** Parse every PEM certificate block in `pem` into a {@link CertificateRow}.
  *  The first block is the leaf; every block after it is a numbered chain
  *  entry. A block that fails to parse still gets a row — "Invalid" status,
@@ -142,8 +175,7 @@ export function publicKeyAlgorithm(certificate: X509Certificate): string {
 export async function certificateRows(pem: string): Promise<CertificateRow[]> {
   await import("reflect-metadata");
   const { SubjectAlternativeNameExtension, X509Certificate } = await import("@peculiar/x509");
-  const matches = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-  return matches.map((pemCertificate, index) => {
+  return certificateBlocks(pem).map((pemCertificate, index) => {
     const fallback: CertificateRow = {
       key: String(index),
       role: index === 0 ? "Leaf" : `Chain ${index}`,
