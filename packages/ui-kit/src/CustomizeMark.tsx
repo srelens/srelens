@@ -263,17 +263,47 @@ export function CustomizeMark({
               })}
             </div>
           )}
-          <input
-            type="color"
-            aria-label="Custom colour"
-            // A token is a perfectly good colour for a mark and no value at all
-            // for this control, which can hold six hex digits and nothing else.
-            // Empty, it shows its own default instead of claiming black is the
-            // colour; the text beside it says what the colour really is.
-            value={SIX_DIGIT.test(value.color) ? value.color : ""}
-            onChange={(event) => set({ color: event.target.value })}
-            className="ml-1 h-[18px] w-6 cursor-pointer rounded border bg-transparent p-0"
-          />
+          {/*
+            The well is painted by CSS from the colour itself, with the native
+            input laid over it at zero opacity.
+
+            `<input type="color">` holds six hex digits and nothing else, and
+            there is no way to put it in an "unset" state: HTML's value
+            sanitization replaces any invalid value — the empty string included
+            — with #000000. This asked for `""` and a comment said it would then
+            show "its own default", which does not exist. A token is the primary
+            case, not an edge: ui-next passes `var(--mark-*)` for all eleven
+            swatches, so a reader who picked Green saw a green mark, a green
+            swatch, the text `var(--mark-green)`, and a black well beside them.
+
+            Painting the well instead of reading it hands the resolving to CSS,
+            which already does it — a token, a named colour, a `color-mix()` —
+            and keeps it resolved: the `--mark-*` tokens differ between light
+            and dark, so a hex resolved once through `getComputedStyle` would go
+            stale the moment the theme changed. The well cannot disagree with
+            the mark this way, and the input keeps its role, its name, the OS
+            picker and (through the wrapper) its focus ring. (#380 review)
+          */}
+          <span
+            data-slot="custom-colour"
+            className="relative ml-1 block h-[18px] w-6 shrink-0 rounded border has-[:focus-visible]:[outline:2px_solid_var(--accent)] has-[:focus-visible]:[outline-offset:1px]"
+            style={{ background: value.color }}
+          >
+            <input
+              type="color"
+              aria-label="Custom colour"
+              // Handed the colour only when it is one the control can hold, so
+              // the picker opens on the current colour rather than on black.
+              // Anything else stays empty, which the DOM then sanitizes to
+              // black — that is the whole point of covering it: the value here
+              // is only ever what the picker OPENS on, never what is shown.
+              // (Written as empty rather than as the black it becomes because
+              // the kit names no colour of its own; see `tokens-only.test.ts`.)
+              value={SIX_DIGIT.test(value.color) ? value.color : ""}
+              onChange={(event) => set({ color: event.target.value })}
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none border-0 bg-transparent p-0 opacity-0"
+            />
+          </span>
           <span className="code text-[0.625rem] text-faint">{value.color}</span>
         </div>
       </div>

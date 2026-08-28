@@ -138,12 +138,34 @@ describe("CustomizeMark", () => {
     expect(onChange).toHaveBeenCalledWith({ ...BASE, color: "#123456" });
   });
 
-  it("shows the custom picker empty rather than lying about a token colour", () => {
-    // A native colour input can only hold a six-digit hex. Handed `var(--accent)`
-    // it would show black and claim that was the colour.
-    setup({ value: { ...BASE, color: "var(--accent)" } });
-    expect((screen.getByLabelText("Custom colour") as HTMLInputElement).value).not.toBe("var(--accent)");
-    expect(screen.getByText("var(--accent)")).toBeDefined();
+  it("paints the custom colour well from the colour itself, token and all", () => {
+    // The well used to be the native input's own swatch, handed `""` for
+    // anything that was not a six-digit hex. There is no empty state to put a
+    // colour input in: HTML's value sanitization replaces any invalid value,
+    // `""` included, with #000000 — the test below pins that down. ui-next
+    // passes `var(--mark-*)` for all eleven swatches, so the reader picked
+    // Green and got a green mark, a green swatch, the text `var(--mark-green)`
+    // and a black well beside them.
+    const { container } = setup({ value: { ...BASE, color: "var(--mark-green)" } });
+    const well = container.querySelector('[data-slot="custom-colour"]') as HTMLElement;
+    expect(well.style.background).toBe("var(--mark-green)");
+    expect(screen.getByText("var(--mark-green)")).toBeDefined();
+  });
+
+  it("keeps the native input's unblankable swatch out of sight", () => {
+    // Both halves of the claim above, in one place: the input really is
+    // sanitized to black, and the thing the reader sees is not it. jsdom
+    // applies no stylesheet, so the covering is asserted through the class
+    // that drives it, the same proxy Table's tests use for `.tbl-resized`.
+    setup({ value: { ...BASE, color: "var(--mark-green)" } });
+    const custom = screen.getByLabelText("Custom colour") as HTMLInputElement;
+    expect(custom.value).toBe("#000000");
+    expect(custom.className.split(/\s+/)).toContain("opacity-0");
+  });
+
+  it("opens the picker on the current colour when that colour is a hex", () => {
+    setup({ value: { ...BASE, color: "#123456" } });
+    expect((screen.getByLabelText("Custom colour") as HTMLInputElement).value).toBe("#123456");
   });
 
   it("offers the three marks and reports the one chosen", () => {
