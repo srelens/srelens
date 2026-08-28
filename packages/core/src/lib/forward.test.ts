@@ -379,6 +379,100 @@ describe("rehydrateForwards", () => {
     unsub();
   });
 
+  /**
+   * The one path that can correct a row whose events were lost, and it used to
+   * skip every id it already knew.
+   *
+   * `watchForward(info.id)` can only run AFTER `start_port_forward` resolves —
+   * the id is server-assigned and the backend spawns the task before returning
+   * — and `on()` registers asynchronously on both transports. In web mode
+   * `wsClient` reconnects with a backoff up to 10s and events emitted during
+   * the outage are never delivered, so a tunnel that exhausts its retries in
+   * that gap emits `failed` and `closed` into nothing. The row then stays
+   * `active`, `error: undefined`, GREEN — and nothing could ever correct it,
+   * because `rehydrateForwards` filtered out every id already in `known`, so
+   * `fromEntry` (the only reader of the authoritative `ended`/`error`/`bytes`
+   * off `list_forwards`) never ran for it.
+   */
+  it("corrects a known row the backend reports as ended, whose events were lost", async () => {
+    const fwd = await startPortForward(req);
+    // Green, with nothing to say against it — the state a lost `failed` leaves.
+    expect(getForwards()[0].status).toBe("active");
+    expect(getForwards()[0].error).toBeUndefined();
+    // The socket was down when the tunnel gave up: no `forward:status`, no
+    // `forward:closed` ever reached this store. `list_forwards` knows.
+    backend = [
+      entry({ id: fwd.id, kind: "Pod", name: "web-1", ended: true, error: "all retries exhausted" }),
+    ];
+
+    await rehydrateForwards();
+
+    expect(getForwards()).toHaveLength(1);
+    expect(getForwards()[0].status).toBe("failed");
+    expect(getForwards()[0].error).toBe("all retries exhausted");
+    expect(isForwardEnded(getForwards()[0])).toBe(true);
+  });
+
+  it("corrects a known row's byte total from the listing too", async () => {
+    const fwd = await startPortForward(req);
+    expect(getForwards()[0].bytesMoved).toBe(0);
+    backend = [entry({ id: fwd.id, kind: "Pod", name: "web-1", bytes: 131072 })];
+
+    await rehydrateForwards();
+
+    expect(getForwards()[0].bytesMoved).toBe(131072);
+  });
+
+  it("wakes subscribers exactly once for a reconcile, and leaves an unchanged row's identity alone", async () => {
+    const stale = await startPortForward(req);
+    const fine = await startPortForward(otherReq);
+    const fineBefore = getForwards().find((f) => f.id === fine.id);
+    backend = [
+      entry({ id: stale.id, kind: "Pod", name: "web-1", ended: true, error: "all retries exhausted" }),
+      entry({ id: fine.id, kind: "Pod", name: "api-2", remotePort: 8080, localPort: fine.localPort }),
+    ];
+    const changed = vi.fn();
+    const unsub = subscribeForwards(changed);
+
+    await rehydrateForwards();
+
+    // The row-identity property `rehydrateForwards`' doc comment protects: the
+    // row that had nothing to correct is the SAME object, so a rehydrate on
+    // mount still does not re-render every row.
+    expect(getForwards().find((f) => f.id === fine.id)).toBe(fineBefore);
+    expect(getForwards().find((f) => f.id === stale.id)?.status).toBe("failed");
+    expect(changed).toHaveBeenCalledTimes(1);
+    unsub();
+  });
+
+  it("leaves a reconnecting row reconnecting, which the listing cannot see", async () => {
+    // `list_forwards` reports `ended` and nothing else about liveness, so
+    // `ended: false` covers BOTH `active` and `reconnecting`. Reconciling a
+    // live entry's status would push this row back to `active` — trading a
+    // tunnel's real flap state for a listing that has no field for it, and
+    // painting a struggling forward green.
+    const fwd = await startPortForward(req);
+    statusEvent(fwd.id, "reconnecting", "connection reset by peer");
+    expect(getForwards()[0].status).toBe("reconnecting");
+    backend = [entry({ id: fwd.id, kind: "Pod", name: "web-1", ended: false, error: null })];
+
+    await rehydrateForwards();
+
+    expect(getForwards()[0].status).toBe("reconnecting");
+    expect(getForwards()[0].error).toBe("connection reset by peer");
+  });
+
+  it("does not resurrect a row the reader dismissed, however the listing still describes it", async () => {
+    const fwd = await startPortForward(req);
+    await stopPortForward(fwd.id);
+    // A concurrent `list_forwards` snapshot, taken before the stop landed.
+    backend = [entry({ id: fwd.id, kind: "Pod", name: "web-1", bytes: 4096 })];
+
+    await rehydrateForwards();
+
+    expect(getForwards()).toHaveLength(0);
+  });
+
   it("watches a rehydrated forward's traffic and closure", async () => {
     backend = [entry({ id: 9 })];
     await rehydrateForwards();

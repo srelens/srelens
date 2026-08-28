@@ -174,14 +174,47 @@ export async function stopPortForward(id: number): Promise<void> {
 }
 
 /**
- * Adopt every forward the backend is still running. This store is module-level
- * and dies with a browser reload; `ForwardManager` does not, so without this a
- * web user reloads into an empty table while their tunnels keep running.
+ * RECONCILE the store against the backend's own listing — adopt what it does
+ * not know, and correct what it holds. This store is module-level and dies with
+ * a browser reload; `ForwardManager` does not, so without this a web user
+ * reloads into an empty table while their tunnels keep running.
  *
- * A forward the store already knows keeps its existing row — identity included,
- * so a rehydrate on mount doesn't re-render every row — and one it dropped on
- * purpose stays dropped. Resolves even when the listing fails: that failure is
- * reported to the reader, not thrown at a mount effect.
+ * **Why correcting matters, and why this is the only place that can.** A row's
+ * live state comes from `forward:status:<id>` and `forward:closed:<id>`, and
+ * `watchForward(info.id)` can only be called AFTER `start_port_forward`
+ * resolves — the id is server-assigned and the backend spawns the task before
+ * returning — with `on()` registering asynchronously on top of that. In web
+ * mode `wsClient` reconnects with a backoff up to 10s and events emitted during
+ * the outage are never delivered at all. So a tunnel that exhausts its retries
+ * inside that window emits `failed` and then `closed` into nothing, and its row
+ * stays `status: "active"`, `error: undefined`, green, over a tunnel that
+ * cannot carry a byte.
+ *
+ * This used to skip every id already in `known`, so {@link fromEntry} — the
+ * only reader of the authoritative `ended`/`error`/`bytes` off `list_forwards`
+ * — never ran for such a row, and NOTHING could ever correct it.
+ *
+ * **What is corrected, and what deliberately is not.** The listing says whether
+ * the manager's task has GIVEN UP (`ended`) and how many bytes have moved. It
+ * says nothing about the flap state: `ended: false` covers both `active` and
+ * `reconnecting`. So only the ended direction is reconciled — pushing a live
+ * entry back to `active` would wipe a genuine `reconnecting` off a row, trading
+ * live information for a listing that cannot see it.
+ *
+ * The corrections go through {@link endForward} and {@link setForwardBytes},
+ * which already no-op when nothing changed, so the row-identity property this
+ * function has always protected survives: a rehydrate on mount that finds
+ * everything as it left it leaves every row the same object and wakes no
+ * subscriber. A forward the reader dropped on purpose stays dropped, corrections
+ * included. Resolves even when the listing fails: that failure is reported to
+ * the reader, not thrown at a mount effect.
+ *
+ * NOT called after `watchForward` in `startPortForward`, though the gap is
+ * widest right there. That would put a `list_forwards` back on the start path,
+ * which was removed on purpose so a tunnel that started fine can no longer fail
+ * on a read that has nothing to do with whether it is running — a property with
+ * its own test. The forwards screen rehydrates on mount, which is when a reader
+ * is looking at these rows.
  */
 export async function rehydrateForwards(): Promise<void> {
   let entries: ForwardEntry[];
@@ -192,7 +225,18 @@ export async function rehydrateForwards(): Promise<void> {
     return;
   }
   const known = new Set(forwards.map((f) => f.id));
-  const added = entries.filter((e) => !known.has(e.id) && !dropped.has(e.id)).map(fromEntry);
+  const added: ActiveForward[] = [];
+  for (const e of entries) {
+    // A row the reader stopped or dismissed stays gone, and is not corrected
+    // back onto the screen either.
+    if (dropped.has(e.id)) continue;
+    if (!known.has(e.id)) {
+      added.push(fromEntry(e));
+      continue;
+    }
+    setForwardBytes(e.id, e.bytes);
+    if (e.ended === true) endForward(e.id, reasonOf(e.error));
+  }
   if (added.length === 0) return;
   forwards = [...forwards, ...added];
   // Only the live ones: a tunnel the backend already reports as ended has no
