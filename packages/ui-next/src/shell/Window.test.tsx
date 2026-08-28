@@ -29,6 +29,7 @@ const {
   loadMcpSettings,
   startMcpHttp,
   respondToConfirm,
+  pendingConfirms,
   bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
@@ -56,6 +57,10 @@ const {
   })),
   startMcpHttp: vi.fn<(port: number) => Promise<string>>(async () => "http://127.0.0.1:8765/mcp"),
   respondToConfirm: vi.fn<(id: string, approved: boolean) => Promise<void>>(async () => {}),
+  // What `AgentConsent` is handed at mount: nothing was waiting, unless a test
+  // says otherwise. Unmocked, the real one's `invoke` rejects in jsdom and the
+  // component says so on screen — over every window test.
+  pendingConfirms: vi.fn<() => Promise<never[]>>(async () => []),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
   //
@@ -86,6 +91,7 @@ vi.mock("@srelens/core", async (importOriginal) => {
     loadMcpSettings: () => loadMcpSettings(),
     startMcpHttp: (port: number) => startMcpHttp(port),
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
+    pendingConfirms: () => pendingConfirms(),
     on: (channel: string, handler: (payload: unknown) => void) => {
       const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
       handlers.add(handler);
@@ -209,6 +215,7 @@ beforeEach(() => {
   vaultUnlockPassword.mockReset().mockResolvedValue(undefined);
   loadMcpSettings.mockReset().mockReturnValue({ enabled: false, port: 8765 });
   startMcpHttp.mockReset().mockResolvedValue("http://127.0.0.1:8765/mcp");
+  pendingConfirms.mockReset().mockResolvedValue([]);
   respondToConfirm.mockReset().mockResolvedValue(undefined);
   bus.clear();
   resetLock();

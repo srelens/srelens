@@ -486,9 +486,11 @@ export function Window({
    * every surface around it stays mounted throughout. It used to be
    * `if (!booted) return <LoadingState .../>` above the one return, which took
    * `AgentConsent` down with the band for the whole of `listContexts()` — and
-   * the confirm gate emits its request exactly once, with no replay for a
-   * subscriber that turns up later (`mcp_confirm.rs`), so a call raised during
-   * boot waited out its sixty seconds and was denied with nothing on screen.
+   * the confirm gate emits its request exactly once (`mcp_confirm.rs`), so a
+   * call raised during boot waited out its sixty seconds and was denied with
+   * nothing on screen. (A subscriber is now handed what is already waiting —
+   * see `AgentConsent` — but a listener that is not mounted is still not a
+   * subscriber, and one mount for the life of the window is still the shape.)
    *
    * **And `LockGate` is one of those surfaces**, which it was not for a round.
    * The gate sat inside the booted branch, so for the whole of boot nothing had
@@ -650,12 +652,14 @@ export function Window({
         in which this must still be listening. It must stay subscribed while the
         cover is up: it REFUSES the call in that state, and a listener unmounted
         with the band could not; see `AgentConsent` for why refusing is the
-        answer. It must stay subscribed while the window is still BOOTING,
-        because the request is emitted once and never replayed — a listener
-        mounted after the fact is handed nothing, and the call is denied on
-        timeout with nothing ever drawn. And whether the component gallery is up
-        is a developer surface's business: a call the backend is blocking on is
-        not.
+        answer. It must stay subscribed while the window is still BOOTING: the
+        request is emitted once, and although a subscriber is now handed what
+        is already waiting when it subscribes (`mcp_confirm_pending`, read by
+        `AgentConsent` after it installs its listeners), that replay is for the
+        window before the tree existed — not a licence to unmount and remount
+        the listener, which is two subscriptions and two prompts for one
+        `oneshot::Sender`. And whether the component gallery is up is a
+        developer surface's business: a call the backend is blocking on is not.
 
         Staying subscribed through boot is not a licence to ASK during it. This
         listens in every one of those states and refuses in most of them: the

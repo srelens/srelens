@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...
 import {
   auditTail,
   getMcpTokenStorage,
+  pendingConfirms,
   promptIssues,
   respondToConfirm,
   rotateMcpToken,
@@ -25,6 +26,20 @@ describe("mcpSecurity", () => {
     invoke.mockResolvedValue(undefined);
     await respondToConfirm("abc", true);
     expect(invoke).toHaveBeenCalledWith("mcp_confirm_respond", { id: "abc", approved: true });
+  });
+
+  /**
+   * What a listener that subscribed late is handed: the requests still waiting,
+   * as the backend holds them. Passed through untouched — a rejection here is
+   * the caller's to report, the same line `auditTail` draws.
+   */
+  it("returns the confirmations still waiting, and rejects when they cannot be read", async () => {
+    const waiting = [{ id: "a", tool: "k8s_scale", args: { name: "api" } }];
+    invoke.mockResolvedValue(waiting);
+    await expect(pendingConfirms()).resolves.toEqual(waiting);
+    expect(invoke).toHaveBeenCalledWith("mcp_confirm_pending");
+    invoke.mockRejectedValue(new Error("no such command"));
+    await expect(pendingConfirms()).rejects.toThrow("no such command");
   });
 
   it("returns the rotated token", async () => {

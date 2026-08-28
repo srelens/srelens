@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { isTauri, on, respondToConfirm, type ConfirmRequest } from "@srelens/core";
-import { ConfirmDialog } from "@srelens/ui-kit";
+import { isTauri, on, pendingConfirms, respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
 
@@ -120,6 +120,44 @@ import { useWorkspaceSealed } from "./LockGate";
  * than "the window was locked", and worth naming rather than hiding: the
  * decision is a refusal on the reader's behalf, and it is reported to the agent
  * as one.
+ *
+ * **A subscriber is handed what is already waiting.** The backend emits
+ * `mcp://confirm-request` exactly once and waits sixty seconds; nothing
+ * replays it. This component's listener is an effect, and an effect runs only
+ * once `main.tsx` has downloaded the new design's two chunks, called
+ * `createRoot`, and this tree has committed — so a request raised while any of
+ * that was still happening met no listener and was denied on timeout with
+ * nothing ever drawn. That gap surfaced three times (the boot spinner, the
+ * unmounted gate, the pre-`createRoot` bootstrap), and each fix moved this
+ * listener earlier and left an earlier window in front of it. There is no
+ * earliest listener; the class is fixed instead. `Pending` (`mcp_confirm.rs`)
+ * now holds each request beside its answer channel, `mcp_confirm_pending`
+ * returns that set, and the subscribe effect below reads it — AFTER
+ * subscribing, and the order is the whole point. The backend registers a
+ * request before it emits it, so with the listener installed first a request
+ * is seen in the snapshot, or as an event, or as both, whatever the
+ * interleaving; fetch-then-subscribe would reopen the exact gap for a request
+ * raised between the two.
+ *
+ * "Or as both" is why the snapshot is MERGED BY ID and not appended: one
+ * request has one `oneshot::Sender`, and two queue entries for it would be two
+ * prompts and a second answer that rejects. And a resolution heard while the
+ * fetch was in flight wins over the snapshot — the set is read on the backend
+ * when the command runs and here when the response lands, a call can settle in
+ * between, and replaying it would draw a prompt whose answer can no longer land
+ * with nothing left to take it down. A replayed request then takes exactly the
+ * live path: into the queue, where the cover effect refuses it if the window is
+ * sealed and the prompt asks it if not. The sixty seconds are the backend's
+ * and untouched; a request replayed after boot has whatever remains of them.
+ *
+ * **A snapshot that could not be read is said on screen.** Web mode never runs
+ * the effect. On desktop a rejection means every request raised before this
+ * mounted is lost to its timeout unseen — the very failure the replay is for —
+ * and the reader is the only one who could go and look (the agent's
+ * transcript, the Audit pane). Swallowing it would be this component's own
+ * gap again, one layer down; throwing would take the live listener down with
+ * it. So it is an `Alert` the reader can put away, through `describeError`
+ * like every failure in this package, and the subscriptions stand.
  */
 
 /**
@@ -158,10 +196,29 @@ interface FailedAnswer {
   error: unknown;
 }
 
+/**
+ * The queue with `incoming` merged in BY ID — an entry already present, by
+ * event or by an earlier replay, is kept once. See the file comment on why the
+ * snapshot and the event stream can carry the same request.
+ */
+function mergeById(queue: ConfirmRequest[], incoming: ConfirmRequest[]): ConfirmRequest[] {
+  const seen = new Set(queue.map((r) => r.id));
+  const fresh: ConfirmRequest[] = [];
+  for (const r of incoming) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    fresh.push(r);
+  }
+  return fresh.length === 0 ? queue : [...queue, ...fresh];
+}
+
 export function AgentConsent() {
   const [queue, setQueue] = useState<ConfirmRequest[]>([]);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState<FailedAnswer | null>(null);
+  /** Why what was waiting at mount could not be read, until the reader puts
+   *  it away. See the file comment on why this is said rather than swallowed. */
+  const [replayFailed, setReplayFailed] = useState<unknown>(null);
   // The cover, by either route — a raised lock or a launch check that has not
   // answered. See the file comment for what this component does about it.
   const covered = useWorkspaceSealed();
@@ -176,12 +233,37 @@ export function AgentConsent() {
       const request = asRequest(payload);
       if (request) setQueue((q) => [...q, request]);
     });
+    // Resolutions heard while the snapshot below is in flight. It is read on
+    // the backend when the command runs and applied here when the response
+    // lands; a call that settled in between is in the snapshot and must not be
+    // replayed. Cleared once the snapshot has been applied — after that the
+    // queue filter alone is the whole story, as it always was.
+    let resolvedMeanwhile: Set<string> | null = new Set();
     // The backend announces every resolution, however it settled.
     const offResolved = on("mcp://confirm-resolved", (payload) => {
       const id = resolvedId(payload);
-      if (id !== null) setQueue((q) => q.filter((r) => r.id !== id));
+      if (id === null) return;
+      resolvedMeanwhile?.add(id);
+      setQueue((q) => q.filter((r) => r.id !== id));
     });
+    // AFTER both subscriptions, and the order is the whole point — see the
+    // file comment. What was raised before this mounted is handed over here.
+    let cancelled = false;
+    pendingConfirms()
+      .then((waiting) => {
+        if (cancelled) return;
+        const settled = resolvedMeanwhile ?? new Set<string>();
+        resolvedMeanwhile = null;
+        const requests = waiting
+          .map(asRequest)
+          .filter((r): r is ConfirmRequest => r !== null && !settled.has(r.id));
+        if (requests.length > 0) setQueue((q) => mergeById(q, requests));
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setReplayFailed(e);
+      });
     return () => {
+      cancelled = true;
       offRequest();
       offResolved();
     };
@@ -246,49 +328,74 @@ export function AgentConsent() {
     }
   }
 
-  if (covered || !current) return null;
+  if (covered) return null;
+
+  // Not a live control on a covered window — it renders after the cover check
+  // above, like the prompt — and not a modal: nothing here is blocking on it.
+  // Fixed above the status bar so it sits in no tab and moves no layout, the
+  // same reason the prompt is mounted where it is.
+  const replayNotice = replayFailed !== null && (
+    <Alert
+      tone="sev"
+      title="Agent requests raised before this window was ready could not be checked"
+      onDismiss={() => setReplayFailed(null)}
+      className="fixed bottom-10 right-3 z-40 max-w-md shadow-md"
+    >
+      <p className="m-0">
+        Any agent call waiting on your approval from before srelens finished loading is not shown here,
+        and is refused once its minute is up. The agent's transcript and the Audit pane say what was
+        asked.
+      </p>
+      <FailureLine error={replayFailed} className="mt-1" />
+    </Alert>
+  );
+
+  if (!current) return replayNotice || null;
 
   return (
-    <ConfirmDialog
-      title="An agent wants to run a cluster action"
-      message={
-        <div className="flex flex-col gap-2">
-          <p className="m-0">
-            Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
-          </p>
-          <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
-            <code>{JSON.stringify(current.args, null, 2)}</code>
-          </pre>
-          {queue.length > 1 && (
-            <p className="m-0 text-[0.6875rem] text-muted">
-              {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
+    <>
+      {replayNotice}
+      <ConfirmDialog
+        title="An agent wants to run a cluster action"
+        message={
+          <div className="flex flex-col gap-2">
+            <p className="m-0">
+              Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
             </p>
-          )}
-          {/*
-            Only for the request it happened on — see {@link FailedAnswer}.
-            `role="alert"` for the reason `NextApp`'s own inline failure has
-            one: the reader pressed a button and the visible result is that
-            nothing happened, so this has to be announced rather than merely
-            drawn. It is safe to announce inside the card because the card is
-            where focus already is.
-          */}
-          {failed?.id === current.id && (
-            <div role="alert" className="text-sev">
-              <p className="m-0">
-                This request was not answered by you: your answer did not take effect. Try
-                again — if the call is no longer waiting, this prompt goes away on its own.
+            <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
+              <code>{JSON.stringify(current.args, null, 2)}</code>
+            </pre>
+            {queue.length > 1 && (
+              <p className="m-0 text-[0.6875rem] text-muted">
+                {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
               </p>
-              <FailureLine error={failed.error} className="mt-1" />
-            </div>
-          )}
-        </div>
-      }
-      confirmLabel="Approve"
-      cancelLabel="Deny"
-      danger
-      busy={busy}
-      onConfirm={() => void answer(true)}
-      onCancel={() => void answer(false)}
-    />
+            )}
+            {/*
+              Only for the request it happened on — see {@link FailedAnswer}.
+              `role="alert"` for the reason `NextApp`'s own inline failure has
+              one: the reader pressed a button and the visible result is that
+              nothing happened, so this has to be announced rather than merely
+              drawn. It is safe to announce inside the card because the card is
+              where focus already is.
+            */}
+            {failed?.id === current.id && (
+              <div role="alert" className="text-sev">
+                <p className="m-0">
+                  This request was not answered by you: your answer did not take effect. Try
+                  again — if the call is no longer waiting, this prompt goes away on its own.
+                </p>
+                <FailureLine error={failed.error} className="mt-1" />
+              </div>
+            )}
+          </div>
+        }
+        confirmLabel="Approve"
+        cancelLabel="Deny"
+        danger
+        busy={busy}
+        onConfirm={() => void answer(true)}
+        onCancel={() => void answer(false)}
+      />
+    </>
   );
 }

@@ -21,6 +21,23 @@ export async function respondToConfirm(id: string, approved: boolean): Promise<v
   await invoke("mcp_confirm_respond", { id, approved });
 }
 
+/**
+ * Every confirmation still waiting on an answer, as the backend holds them —
+ * the same shape `mcp://confirm-request` carries. For a listener that
+ * subscribed after the emit: the backend emits each request once
+ * (`mcp_confirm.rs`), so a subscriber that turned up late is handed what it
+ * missed from here rather than letting those calls time out unseen. Subscribe
+ * first, then call this; see `AgentConsent` for the order and the merge.
+ *
+ * Rejects rather than returning `[]` when the set cannot be read, for the
+ * reason `auditTail` does: "nothing is waiting" and "srelens could not find
+ * out what is waiting" are different facts, and the caller is the one with a
+ * surface to say so on.
+ */
+export async function pendingConfirms(): Promise<ConfirmRequest[]> {
+  return await invoke<ConfirmRequest[]>("mcp_confirm_pending");
+}
+
 export async function getMcpToken(): Promise<string | null> {
   return (await invoke<string | null>("mcp_token_get")) ?? null;
 }

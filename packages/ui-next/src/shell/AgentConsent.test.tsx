@@ -16,6 +16,7 @@ const bus = vi.hoisted(() => {
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
   respondToConfirm: vi.fn(async () => {}),
+  pendingConfirms: vi.fn<() => Promise<ConfirmRequest[]>>(async () => []),
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
   on: vi.fn((channel: string, handler: (payload: unknown) => void) => {
     const off = vi.fn();
@@ -28,6 +29,7 @@ vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   isTauri: core.isTauri,
   respondToConfirm: core.respondToConfirm,
+  pendingConfirms: core.pendingConfirms,
   notify: core.notify,
   vaultStatus: core.vaultStatus,
   on: (channel: string, handler: (payload: unknown) => void) => {
@@ -39,6 +41,7 @@ vi.mock("@srelens/core", async (orig) => ({
   },
 }));
 
+import type { ConfirmRequest } from "@srelens/core";
 import { AgentConsent } from "./AgentConsent";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 
@@ -60,6 +63,8 @@ beforeEach(() => {
   bus.offs.clear();
   core.isTauri.mockReturnValue(true);
   core.respondToConfirm.mockResolvedValue(undefined);
+  // Nothing was waiting when this mounted, unless a test says otherwise.
+  core.pendingConfirms.mockResolvedValue([]);
   // Nothing here renders the gate itself; the store is what this component
   // reads, and a raise in one test must not still be up in the next.
   resetLock();
@@ -214,6 +219,145 @@ describe("AgentConsent", () => {
     expect(document.querySelector('[data-slot="dialog-overlay"]')?.className).toContain("fixed");
   });
 
+  // ---- Requests raised before this mounted -----------------------------
+
+  /**
+   * The backend emits `mcp://confirm-request` exactly once (`mcp_confirm.rs`),
+   * and this component's listener is an effect that runs only once the new
+   * design's chunks have downloaded and `createRoot` has run (`main.tsx`). A
+   * request raised in that window used to be denied on timeout with nothing
+   * ever on screen — the third time the same gap surfaced, each fix having
+   * moved the listener earlier and left an earlier window. So a subscriber is
+   * HANDED what is already waiting: `pendingConfirms()` is the backend's live
+   * set, and a request in it is put to the reader exactly as an event would
+   * have been, and answered once.
+   */
+  describe("a request raised before it mounted", () => {
+    const PRE: ConfirmRequest = { id: "pre", tool: "k8s_deletePod", args: { name: "web-1" } };
+
+    it("is put to the reader after mount, and answered exactly once", async () => {
+      core.pendingConfirms.mockResolvedValue([PRE]);
+      render(<AgentConsent />);
+      expect(await screen.findByText(/k8s_deletePod/)).toBeTruthy();
+      expect(screen.getByText(/web-1/)).toBeTruthy();
+      await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("pre", true));
+      expect(core.respondToConfirm).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+
+    /**
+     * Subscribe FIRST, then fetch — the order is the whole point. Fetch-then-
+     * subscribe reopens the exact gap for a request raised between the two.
+     * And the two can overlap in the other direction: the backend registers
+     * the request before it emits, so a request that lands while the fetch is
+     * in flight can arrive BOTH as an event and in the snapshot. It is one
+     * request with one `oneshot::Sender`; it is shown once and answered once.
+     *
+     * The fixture plays that overlap: the fetch's own implementation delivers
+     * the event for the same id before resolving with it. With the order
+     * reversed there is no listener to deliver to when the fetch runs; without
+     * the merge by id there are two prompts for one call.
+     */
+    it("shows a request that arrived both by event and in the snapshot once", async () => {
+      core.pendingConfirms.mockImplementation(async () => {
+        const handler = bus.handlers.get(REQUEST);
+        if (!handler) throw new Error("fetched before subscribing: nothing is listening yet");
+        handler({ ...PRE });
+        return [PRE];
+      });
+      render(<AgentConsent />);
+      expect(await screen.findByText(/k8s_deletePod/)).toBeTruthy();
+      // The fetch has resolved by now — let its merge land before asserting.
+      await act(async () => {});
+      expect(screen.queryByText(/more request/i)).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: /deny/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("pre", false));
+      expect(core.respondToConfirm).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+
+    /**
+     * The snapshot is taken on the backend when the command runs and read here
+     * when the response lands; a call can settle between the two, and the
+     * backend announces that on `mcp://confirm-resolved` — which is already
+     * subscribed, that being the order. A resolution heard while the fetch was
+     * in flight wins over the snapshot: replaying that request would draw a
+     * prompt whose answer can no longer land, and nothing would ever take it
+     * down.
+     */
+    it("does not replay a request the backend resolved while the snapshot was in flight", async () => {
+      core.pendingConfirms.mockImplementation(async () => {
+        const resolved = bus.handlers.get(RESOLVED);
+        if (!resolved) throw new Error("fetched before subscribing: nothing is listening yet");
+        resolved({ id: "pre" });
+        return [PRE];
+      });
+      const { container } = render(<AgentConsent />);
+      await act(async () => {});
+      await act(async () => {});
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
+      expect(container.textContent).toBe("");
+    });
+
+    /**
+     * The cover applies to a replayed request exactly as to a live one. A
+     * request raised while the window booted meets, after mount, the same
+     * refusal a request raised over a sealed window does — it is not put to
+     * whoever is at the keyboard because it happened to be raised early.
+     */
+    it("is refused rather than shown when the window is covered", async () => {
+      core.pendingConfirms.mockResolvedValue([PRE]);
+      render(<AgentConsent />);
+      act(() => lockWorkspace());
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("pre", false));
+      expect(core.respondToConfirm).not.toHaveBeenCalledWith("pre", true);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
+    });
+
+    /**
+     * A snapshot that could not be read is not nothing waiting. Every request
+     * raised before this mounted is then lost to its timeout with nothing
+     * drawn — the very failure the replay exists for — and the reader is the
+     * only one who could go and look (the agent's transcript, the audit
+     * trail). So it is said, on screen, and it does not take the live path
+     * down with it: a request that arrives by event afterwards is still asked.
+     */
+    it("says on screen when what was waiting could not be read, and keeps listening", async () => {
+      core.pendingConfirms.mockRejectedValue(new Error("no such command: mcp_confirm_pending"));
+      render(<AgentConsent />);
+      const said = await screen.findByRole("alert");
+      expect(said.textContent).toMatch(/raised before/i);
+      // The reason comes from the backend, through `describeError`, not invented here.
+      expect(said.textContent).toMatch(/mcp_confirm_pending/);
+      ask("live", "k8s_scale");
+      expect(await screen.findByText(/k8s_scale/)).toBeTruthy();
+      await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("live", true));
+    });
+
+    it("lets the reader put that notice away", async () => {
+      core.pendingConfirms.mockRejectedValue(new Error("ipc down"));
+      render(<AgentConsent />);
+      await screen.findByRole("alert");
+      await userEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+      await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    });
+
+    /** A malformed entry is dropped, as a malformed event is. */
+    it("ignores a snapshot entry it cannot answer", async () => {
+      core.pendingConfirms.mockResolvedValue([
+        { id: "", tool: "k8s_scale", args: {} },
+        PRE,
+      ]);
+      render(<AgentConsent />);
+      expect(await screen.findByText(/k8s_deletePod/)).toBeTruthy();
+      expect(screen.queryByText(/more request/i)).toBeNull();
+    });
+  });
+
   it("stops listening when it goes away", () => {
     const { unmount } = render(<AgentConsent />);
     const offRequest = bus.offs.get(REQUEST);
@@ -227,10 +371,11 @@ describe("AgentConsent", () => {
    * Every vault command and `mcp_confirm_respond` alike are Tauri commands, so
    * in a browser there is no gate to answer and nothing that could emit for it.
    */
-  it("subscribes to nothing in web mode", () => {
+  it("subscribes to nothing in web mode, and asks the backend nothing", () => {
     core.isTauri.mockReturnValue(false);
     render(<AgentConsent />);
     expect(core.on).not.toHaveBeenCalled();
+    expect(core.pendingConfirms).not.toHaveBeenCalled();
   });
 
   // ---- While the window is covered ------------------------------------

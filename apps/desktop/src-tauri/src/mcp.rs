@@ -264,6 +264,20 @@ pub fn mcp_confirm_respond(
     }
 }
 
+/// Every confirmation still waiting on an answer, with enough to draw each
+/// prompt. For a listener that subscribed AFTER `mcp://confirm-request` was
+/// emitted — the frontend's consent component mounts once the new design's
+/// chunks have downloaded, and the emit is not repeated — so it can be handed
+/// what it missed rather than letting those calls time out with nothing on
+/// screen. The frontend subscribes first and reads this second, and merges by
+/// id: see `AgentConsent` (`packages/ui-next/src/shell/AgentConsent.tsx`).
+#[tauri::command]
+pub fn mcp_confirm_pending(
+    pending: State<'_, Arc<crate::mcp_confirm::Pending>>,
+) -> Vec<crate::mcp_confirm::PendingRequest> {
+    pending.snapshot()
+}
+
 /// The current MCP bearer token, if one has been generated.
 #[tauri::command]
 pub fn mcp_token_get(store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>) -> Option<String> {
