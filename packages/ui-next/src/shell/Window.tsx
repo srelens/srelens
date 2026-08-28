@@ -664,10 +664,10 @@ export function Window({
         answer. It must stay subscribed while the window is still BOOTING: the
         request is emitted once, and although a subscriber is now handed what
         is already waiting when it subscribes (`mcp_confirm_pending`, read by
-        `AgentConsent` after it installs its listeners), that replay is for the
-        window before the tree existed — not a licence to unmount and remount
-        the listener, which is two subscriptions and two prompts for one
-        `oneshot::Sender`. And whether the component gallery is up is a
+        `AgentConsent` once its listeners have LANDED — each registration is
+        awaited, not merely started), that replay is for the window before
+        the tree existed — not a licence to unmount and remount the listener,
+        which is two subscriptions and two prompts for one `oneshot::Sender`. And whether the component gallery is up is a
         developer surface's business: a call the backend is blocking on is not.
 
         Staying subscribed through boot is not a licence to ASK during it. This

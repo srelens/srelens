@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isTauri, on, pendingConfirms, respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { isTauri, pendingConfirms, respondToConfirm, subscribe, type ConfirmRequest } from "@srelens/core";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
@@ -34,12 +34,14 @@ import { useWorkspaceSealed } from "./LockGate";
  * Two things differ, both because of a package boundary rather than a
  * judgement:
  *
- * - The bus is core's `on` rather than `listen` from `@tauri-apps/api/event`.
- *   This package depends on `@srelens/core` and `@srelens/ui-kit` and nothing
- *   else, and `on` is the abstraction every other backend event in srelens goes
- *   through. It hands the payload as `unknown`, so {@link asRequest} narrows it
- *   instead of casting — a malformed payload is ignored rather than rendered as
- *   a question with `undefined` in it.
+ * - The bus is core's `subscribe` rather than `listen` from
+ *   `@tauri-apps/api/event`. This package depends on `@srelens/core` and
+ *   `@srelens/ui-kit` and nothing else, and core's bus is the abstraction every
+ *   other backend event in srelens goes through. It hands the payload as
+ *   `unknown`, so {@link asRequest} narrows it instead of casting — a malformed
+ *   payload is ignored rather than rendered as a question with `undefined` in
+ *   it. It is `subscribe` and not `on` for a reason the replay paragraph below
+ *   gives.
  * - The failure detail goes through `describeError`, as everything in this
  *   package does, rather than `String(e)`.
  *
@@ -132,12 +134,36 @@ import { useWorkspaceSealed } from "./LockGate";
  * listener earlier and left an earlier window in front of it. There is no
  * earliest listener; the class is fixed instead. `Pending` (`mcp_confirm.rs`)
  * now holds each request beside its answer channel, `mcp_confirm_pending`
- * returns that set, and the subscribe effect below reads it — AFTER
- * subscribing, and the order is the whole point. The backend registers a
+ * returns that set, and the subscribe effect below reads it — AFTER its
+ * listeners have LANDED, and that is the whole point. The backend registers a
  * request before it emits it, so with the listener installed first a request
  * is seen in the snapshot, or as an event, or as both, whatever the
  * interleaving; fetch-then-subscribe would reopen the exact gap for a request
  * raised between the two.
+ *
+ * "Installed" means registered, not requested. Tauri's `listen` is an IPC
+ * round trip, and core's `on` starts it and RETURNS while it is still in
+ * flight; a fetch issued after `on` was ordered after the call and not after
+ * the registration, and a request the backend registered after the snapshot
+ * was taken but before that `listen()` resolved was in neither the snapshot
+ * nor any delivered event — the same gap, one level down. So the effect uses
+ * core's `subscribe`, which resolves only once the registration has landed,
+ * and AWAITS each one before asking for the snapshot.
+ *
+ * The two listeners land in a fixed order, resolution first. Between one
+ * landing and the next an event can be lost, and the two events are not equal
+ * in what that costs: a request event lost there is recovered by the snapshot,
+ * read once both are in; a resolution lost there is recovered by nothing —
+ * `mcp://confirm-resolved` is emitted once and is the one thing that takes a
+ * prompt down once its answer can no longer land. Request-first would let a
+ * call heard live in that gap settle unheard in the same gap, and leave its
+ * prompt on screen with nothing to take it down.
+ *
+ * Awaiting means this can be unmounted mid-registration. The cleanup then has
+ * no disposer to call yet, and the ack still arrives, for a component that is
+ * gone; the listener it installs is disposed as it lands — the way core's `on`
+ * disposes after its own `listen` resolves — and the effect goes no further:
+ * no next listener, no snapshot, no state written to an unmounted component.
  *
  * "Or as both" is why the snapshot is MERGED BY ID and not appended: one
  * request has one `oneshot::Sender`, and two queue entries for it would be two
@@ -163,8 +189,8 @@ import { useWorkspaceSealed } from "./LockGate";
 /**
  * The payload the backend emits, narrowed rather than cast.
  *
- * `on` types a payload as `unknown` — correctly, it crosses a process boundary
- * — so this is the one place that decides a message is a request. A shape that
+ * `subscribe` types a payload as `unknown` — correctly, it crosses a process
+ * boundary — so this is the one place that decides a message is a request. A shape that
  * does not match is ignored: there is no id to answer with, and drawing a card
  * headed `undefined` over a call that will time out anyway tells the reader
  * nothing they can act on.
@@ -229,43 +255,77 @@ export function AgentConsent() {
     // and nothing in a browser emits this event — subscribing there would open
     // a channel for traffic that cannot arrive.
     if (!isTauri()) return;
-    const offRequest = on("mcp://confirm-request", (payload) => {
-      const request = asRequest(payload);
-      if (request) setQueue((q) => [...q, request]);
-    });
+    // Set by the cleanup. Every step below is on the far side of an `await`,
+    // so each checks it: a registration that lands for an unmounted component
+    // is disposed on the spot, and nothing past it runs.
+    let cancelled = false;
+    const offs: Array<() => void> = [];
     // Resolutions heard while the snapshot below is in flight. It is read on
     // the backend when the command runs and applied here when the response
     // lands; a call that settled in between is in the snapshot and must not be
     // replayed. Cleared once the snapshot has been applied — after that the
     // queue filter alone is the whole story, as it always was.
     let resolvedMeanwhile: Set<string> | null = new Set();
-    // The backend announces every resolution, however it settled.
-    const offResolved = on("mcp://confirm-resolved", (payload) => {
-      const id = resolvedId(payload);
-      if (id === null) return;
-      resolvedMeanwhile?.add(id);
-      setQueue((q) => q.filter((r) => r.id !== id));
-    });
-    // AFTER both subscriptions, and the order is the whole point — see the
-    // file comment. What was raised before this mounted is handed over here.
-    let cancelled = false;
-    pendingConfirms()
-      .then((waiting) => {
-        if (cancelled) return;
-        const settled = resolvedMeanwhile ?? new Set<string>();
-        resolvedMeanwhile = null;
-        const requests = waiting
-          .map(asRequest)
-          .filter((r): r is ConfirmRequest => r !== null && !settled.has(r.id));
-        if (requests.length > 0) setQueue((q) => mergeById(q, requests));
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setReplayFailed(e);
+
+    /**
+     * Register, and resolve only once the registration has LANDED — `subscribe`
+     * and not `on`; see the file comment. False if this was unmounted while
+     * the registration was in flight, in which case the listener it installed
+     * has already been let go.
+     */
+    async function listen(channel: string, handler: (payload: unknown) => void): Promise<boolean> {
+      const off = await subscribe(channel, handler);
+      if (cancelled) {
+        off();
+        return false;
+      }
+      offs.push(off);
+      return true;
+    }
+
+    void (async () => {
+      // RESOLUTION FIRST — the listener whose loss nothing recovers. See the
+      // file comment. The backend announces every resolution, however it
+      // settled.
+      const hearingResolutions = await listen("mcp://confirm-resolved", (payload) => {
+        const id = resolvedId(payload);
+        if (id === null) return;
+        resolvedMeanwhile?.add(id);
+        setQueue((q) => q.filter((r) => r.id !== id));
       });
+      if (!hearingResolutions) return;
+      const hearingRequests = await listen("mcp://confirm-request", (payload) => {
+        const request = asRequest(payload);
+        if (request) setQueue((q) => [...q, request]);
+      });
+      if (!hearingRequests) return;
+      // AFTER both have landed, and that is the whole point — see the file
+      // comment. What was raised before this mounted is handed over here.
+      let waiting: ConfirmRequest[];
+      try {
+        waiting = await pendingConfirms();
+      } catch (e) {
+        if (!cancelled) setReplayFailed(e);
+        return;
+      }
+      if (cancelled) return;
+      const settled = resolvedMeanwhile ?? new Set<string>();
+      resolvedMeanwhile = null;
+      const requests = waiting
+        .map(asRequest)
+        .filter((r): r is ConfirmRequest => r !== null && !settled.has(r.id));
+      if (requests.length > 0) setQueue((q) => mergeById(q, requests));
+    })();
+    // A registration that REJECTS is left to reject, as it was under `on`
+    // (whose own `listen()` rejection had no handler either): a bus that
+    // cannot install a listener is not something this component can report
+    // in a way the reader could act on, and hiding it would be worse.
+
     return () => {
       cancelled = true;
-      offRequest();
-      offResolved();
+      // What has landed is let go now; what is still in flight is let go by
+      // `listen` as it lands.
+      for (const off of offs) off();
     };
   }, []);
 

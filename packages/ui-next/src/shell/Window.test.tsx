@@ -65,10 +65,11 @@ const {
   // what `mcp_confirm.rs` emits.
   //
   // A SET of handlers per channel, not one. Tauri's `listen` — which core's
-  // `on` wraps — delivers to every subscriber, and a mock that kept only the
-  // last one would quietly absorb a second mount of a listener: two
-  // `AgentConsent`s would look exactly like one. The mount point is the whole
-  // of that component's design, so the mock has to be able to show it wrong.
+  // `on` and `subscribe` both wrap — delivers to every subscriber, and a mock
+  // that kept only the last one would quietly absorb a second mount of a
+  // listener: two `AgentConsent`s would look exactly like one. The mount point
+  // is the whole of that component's design, so the mock has to be able to
+  // show it wrong.
   bus: new Map<string, Set<(payload: unknown) => void>>(),
 }));
 
@@ -93,6 +94,21 @@ vi.mock("@srelens/core", async (importOriginal) => {
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
     pendingConfirms: () => pendingConfirms(),
     on: (channel: string, handler: (payload: unknown) => void) => {
+      const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
+      handlers.add(handler);
+      bus.set(channel, handlers);
+      return () => {
+        handlers.delete(handler);
+      };
+    },
+    // The same bus, behind the real one's contract: resolves once registered.
+    // `AgentConsent` AWAITS its registrations (it uses `subscribe`, not `on`,
+    // and the reason is in its file comment), so a mock without this would
+    // leave the window's consent listener never installed and every test
+    // below that asks it something with nothing to deliver to. The deferred
+    // shape itself is pinned in `AgentConsent.test.tsx`; here one microtask
+    // is enough, since these tests wait for boot before they ask.
+    subscribe: async (channel: string, handler: (payload: unknown) => void) => {
       const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
       handlers.add(handler);
       bus.set(channel, handlers);
