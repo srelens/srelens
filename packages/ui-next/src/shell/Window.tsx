@@ -17,7 +17,7 @@ import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
 import { loadMarks } from "../lib/marks";
-import { mcpAutoStartSettled } from "../lib/mcpAutoStart";
+import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadNamespaces } from "../lib/workspace";
@@ -420,29 +420,38 @@ export function Window({
    * nothing, and the web-mode test that passes either way is passing on the
    * gate's behaviour, which is where it belongs.
    *
-   * **The settlement is announced, because `McpServer` raced this and lost.**
-   * A saved Settings tab is restored at the same moment this fires, and that
-   * pane reads `mcpHttpStatus()` in an effect of its own — while
+   * **The start's state is published, because `McpServer` raced this and lost —
+   * twice.** A saved Settings tab is restored at the same moment this fires,
+   * and that pane reads `mcpHttpStatus()` in an effect of its own — while
    * `mcp_http_start` binds the listener before `McpHttpManager` records anything
    * as running, so the read can legitimately answer `null` with the bind still
    * in flight. Nothing told the pane afterwards, so it sat permanently on
    * `not running` offering a Start button that restarts a live server and drops
-   * every agent request in flight. It is told now, for both outcomes; see
-   * `lib/mcpAutoStart.ts` for why what crosses is a settlement rather than the
-   * URL this start returns.
+   * every agent request in flight. Announcing the settlement fixed the
+   * "permanently" and left the window: for as long as this call is in flight —
+   * up to two seconds, since `stop_running` (`mcp.rs`) waits that long on a
+   * listener a reload left behind — the pane still offered Start, and a click
+   * queued a second start that tore down the one this had just brought up. So
+   * `starting` is marked BEFORE the call and `settled` after it, for both
+   * outcomes, and the pane disables Start on the first and re-reads on the
+   * second; see `lib/mcpAutoStart.ts` for why what crosses is that state and
+   * not the URL this start returns.
    */
   useEffect(() => {
     if (!vaultReady) return;
     const mcp = loadMcpSettings();
     if (!mcp.enabled) return;
     void (async () => {
+      // Before the call, not inside it: no render may see `startMcpHttp` in
+      // flight while the store still says nothing is.
+      mcpAutoStartStarting();
       try {
         await startMcpHttp(mcp.port);
       } catch {
-        // Swallowed, as classic swallows it — see above. The announcement is
+        // Swallowed, as classic swallows it — see above. The settlement is
         // outside this catch on purpose: a refused start has still settled, and
         // a pane that only heard about successes could not tell one from a
-        // start that never happened.
+        // start that never happened — and would keep Start disabled forever.
       }
       mcpAutoStartSettled();
     })();

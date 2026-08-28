@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
@@ -18,7 +18,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import { McpServer } from "./McpServer";
-import { mcpAutoStartSettled, resetMcpAutoStart } from "../../lib/mcpAutoStart";
+import { mcpAutoStartSettled, mcpAutoStartStarting, resetMcpAutoStart } from "../../lib/mcpAutoStart";
 
 /**
  * A realistic bearer value. The real backend mints a 64-character hex string
@@ -478,6 +478,70 @@ describe("McpServer", () => {
       expect(screen.getByText("not running")).toBeTruthy();
       expect(screen.queryByText("running")).toBeNull();
       expect(core.mcpHttpStatus).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * The settlement alone left the other half of the race open. Between the
+     * shell calling `startMcpHttp` and that call settling — up to two seconds,
+     * since `stop_running` (`mcp.rs`) waits that long on a listener a reload
+     * left behind — this pane's read answers `null`, it shows Start, and a
+     * click queues a SECOND start that tears down the server the first has
+     * just brought up. So the store carries the state and not only the count:
+     * while the shell's start is in flight the control is disabled, and the
+     * address line says why — a disabled control with no reason is the shape
+     * this pane's own doc block refuses.
+     */
+    it("offers no Start while the shell's own start is in flight, and says why", async () => {
+      core.mcpHttpStatus.mockResolvedValueOnce(null).mockResolvedValue(STATUS_URL);
+      act(() => mcpAutoStartStarting());
+      render(<McpServer />);
+      const start = await screen.findByRole("button", { name: "Start server" });
+      expect(start.hasAttribute("disabled")).toBe(true);
+      expect(address()).toMatch(/starting the server you left enabled/i);
+      expect(address()).toContain(PORT_URL);
+
+      await act(async () => {
+        mcpAutoStartSettled();
+      });
+      // Settled, and the pane's own re-read found the listener: the control is
+      // back, as Stop, and the reason is gone with the state that warranted it.
+      const stop = await screen.findByRole("button", { name: "Stop server" });
+      expect(stop.hasAttribute("disabled")).toBe(false);
+      expect(address()).toMatch(/^Listening at /);
+      expect(address()).not.toMatch(/starting/i);
+    });
+
+    /**
+     * And the control comes back on a settlement that bound nothing — the
+     * refused start the shell swallows. `starting` is a claim about the shell's
+     * call, not about the listener, and it ends when the call does either way.
+     */
+    it("gives Start back once the shell's start settled without binding", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      act(() => mcpAutoStartStarting());
+      render(<McpServer />);
+      const start = await screen.findByRole("button", { name: "Start server" });
+      expect(start.hasAttribute("disabled")).toBe(true);
+      await act(async () => {
+        mcpAutoStartSettled();
+      });
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Start server" }).hasAttribute("disabled")).toBe(false),
+      );
+      expect(address()).toMatch(/^Not listening\. Start binds /);
+    });
+
+    /**
+     * The positive control for the two above: a Start the reader can press is
+     * the norm, and the pane's own `busy` is still the only other thing that
+     * takes it away. Without this the fix could be a permanently disabled Start.
+     */
+    it("offers Start when no shell start is in flight", async () => {
+      core.mcpHttpStatus.mockResolvedValue(null);
+      render(<McpServer />);
+      const start = await screen.findByRole("button", { name: "Start server" });
+      expect(start.hasAttribute("disabled")).toBe(false);
+      expect(address()).toMatch(/^Not listening\. Start binds /);
     });
   });
 

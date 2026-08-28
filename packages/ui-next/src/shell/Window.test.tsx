@@ -172,7 +172,7 @@ import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
 import { resetLock } from "./LockGate";
-import { mcpAutoStartSettlements, resetMcpAutoStart } from "../lib/mcpAutoStart";
+import { mcpAutoStartPhase, resetMcpAutoStart } from "../lib/mcpAutoStart";
 
 /** An open vault: the state every test in this file but the lock ones needs. */
 const VAULT_OPEN = {
@@ -1269,11 +1269,36 @@ describe("Window, and the MCP server the reader left enabled", () => {
     loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
     await booted();
     await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
-    await waitFor(() => expect(mcpAutoStartSettlements()).toBe(1));
-    // Once. A signal announced per render is a pane re-reading the backend on
-    // every keystroke elsewhere in the window.
+    await waitFor(() => expect(mcpAutoStartPhase()).toBe("settled"));
+    // And it stays settled. A store re-marked per render is a pane re-reading
+    // the backend on every keystroke elsewhere in the window.
     await act(async () => {});
-    expect(mcpAutoStartSettlements()).toBe(1);
+    expect(mcpAutoStartPhase()).toBe("settled");
+  });
+
+  /**
+   * The settlement alone left half the race open: between this call and its
+   * settling — up to two seconds, since `stop_running` (`mcp.rs`) waits that
+   * long on a listener a reload left behind — the pane's own read answers
+   * `null`, it offers Start, and a click queues a second start that tears down
+   * the server this one is bringing up. So the store carries the STATE: this
+   * marks `starting` before the call, and the pane disables Start on it.
+   */
+  it("marks the start as in flight before it calls, so the pane can refuse a second one", async () => {
+    loadMcpSettings.mockReturnValue({ enabled: true, port: 9111 });
+    let finish: (url: string) => void = () => {};
+    startMcpHttp.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await booted();
+    await waitFor(() => expect(startMcpHttp).toHaveBeenCalledWith(9111));
+    expect(mcpAutoStartPhase()).toBe("starting");
+    await act(async () => {
+      finish("http://127.0.0.1:9111/mcp");
+    });
+    await waitFor(() => expect(mcpAutoStartPhase()).toBe("settled"));
   });
 
   /**
@@ -1287,7 +1312,7 @@ describe("Window, and the MCP server the reader left enabled", () => {
     startMcpHttp.mockRejectedValue(new Error("address already in use"));
     await booted();
     await waitFor(() => expect(startMcpHttp).toHaveBeenCalled());
-    await waitFor(() => expect(mcpAutoStartSettlements()).toBe(1));
+    await waitFor(() => expect(mcpAutoStartPhase()).toBe("settled"));
   });
 
   /**
@@ -1299,7 +1324,7 @@ describe("Window, and the MCP server the reader left enabled", () => {
     loadMcpSettings.mockReturnValue({ enabled: false, port: 8765 });
     await booted();
     await act(async () => {});
-    expect(mcpAutoStartSettlements()).toBe(0);
+    expect(mcpAutoStartPhase()).toBe("idle");
   });
 
   /**

@@ -263,22 +263,33 @@ export function McpServer() {
   const statusSeq = useRef(0);
 
   /**
-   * The shell's auto-start, as a value that CHANGES when it settles — nothing
-   * more. `Window` brings an enabled server up the moment `LockGate` reports the
-   * vault usable, and a saved Settings tab is restored at that same moment: the
-   * status effect below can therefore answer `null` while the bind is still in
-   * flight (`mcp_http_start` binds the listener before `McpHttpManager` records
-   * anything as running), and until this existed nothing told this pane
-   * afterwards. It sat permanently on `not running`, offering a Start that
-   * restarts a live server and drops every agent request in flight.
+   * Where the shell's auto-start is: `idle`, `starting` or `settled`. `Window`
+   * brings an enabled server up the moment `LockGate` reports the vault usable,
+   * and a saved Settings tab is restored at that same moment: the status effect
+   * below can therefore answer `null` while the bind is still in flight
+   * (`mcp_http_start` binds the listener before `McpHttpManager` records
+   * anything as running). Two things follow, and each edge of this value is one
+   * of them:
    *
-   * A signal and not a status, deliberately. What the effect does with it is
-   * take its OWN `mcpHttpStatus()` read again — see the file comment on why
-   * `running` here is a live read of the process rather than a stored flag, and
-   * `lib/mcpAutoStart.ts` for why a URL published from the shell would be a
-   * second source of truth for it that could lie in the other direction.
+   * - While `starting`, the Start this pane would offer is a SECOND start over
+   *   a listener the shell is bringing up — `stop_running` tears the first one
+   *   down and drops every request in flight — so the control is disabled and
+   *   the address line says why. Not `busy`: that is this pane's own action,
+   *   and folding the shell's into it would lose which of the two is the
+   *   reason.
+   * - On the transition INTO `settled`, this pane takes its OWN
+   *   `mcpHttpStatus()` read again. A state and not a URL, deliberately — see
+   *   the file comment on why `running` here is a live read of the process
+   *   rather than a stored flag, and `lib/mcpAutoStart.ts` for why a URL
+   *   published from the shell would be a second source of truth for it that
+   *   could lie in the other direction.
    */
   const shellStart = useMcpAutoStart();
+  const shellStarting = shellStart === "starting";
+  /** The re-read's key: the transition into `settled`, not every change. An
+   *  `idle → starting` edge has nothing new to read — the bind is what is in
+   *  flight — and the mount read below already runs whatever the phase is. */
+  const shellSettled = shellStart === "settled";
 
   // Two independent effects, not one `Promise.all` — a status failure must
   // not cost an already-resolved token, and a token failure must not cost an
@@ -297,13 +308,12 @@ export function McpServer() {
     };
   }, []);
 
-  // Re-taken when the shell says its auto-start has settled, and that is the
-  // only thing `shellStart` is for — the value itself means nothing. See the
-  // note above `useMcpAutoStart` for the race: this pane's read can answer
-  // `null` with the bind still in flight, and until the shell said so nothing
-  // told it afterwards. Still THIS pane's own live read of the process; the
-  // signal carries no claim about what is listening, because `running` here is
-  // not a stored flag and must not become a proxy that can lie the other way.
+  // Re-taken when the shell's auto-start settles. See the note above
+  // `useMcpAutoStart` for the race: this pane's read can answer `null` with
+  // the bind still in flight, and until the shell said so nothing told it
+  // afterwards. Still THIS pane's own live read of the process; the phase
+  // carries no claim about what is listening, because `running` here is not a
+  // stored flag and must not become a proxy that can lie the other way.
   useEffect(() => {
     let cancelled = false;
     const seq = ++statusSeq.current;
@@ -319,7 +329,7 @@ export function McpServer() {
     return () => {
       cancelled = true;
     };
-  }, [shellStart]);
+  }, [shellSettled]);
 
   const token = tokenRead.kind === "ready" ? tokenRead.value : null;
   const hasToken = tokenRead.kind === "ready" && tokenRead.value !== null;
@@ -463,7 +473,9 @@ export function McpServer() {
             <Button
               variant={running ? "secondary" : "primary"}
               size="sm"
-              disabled={busy}
+              // Disabled by the shell's start as well as this pane's own action,
+              // and the address line beside it names which — see `shellStarting`.
+              disabled={busy || shellStarting}
               onClick={() => void (running ? stop() : start())}
             >
               {running ? "Stop server" : "Start server"}
@@ -475,8 +487,18 @@ export function McpServer() {
               data-testid="mcp-address"
               className="min-w-0 text-[0.75rem] leading-relaxed text-muted"
             >
-              {running ? "Listening at " : "Not listening. Start binds "}
+              {shellStarting
+                ? "Starting the server you left enabled at "
+                : running
+                  ? "Listening at "
+                  : "Not listening. Start binds "}
               <code className="code break-all rounded px-1.5 py-0.5 text-[0.6875rem]">{address}</code>
+              {/* Why the control beside this is disabled, said where the reader
+                  is looking. While the shell's call is in flight `address` is
+                  whichever the read found — the composed one, or the live URL if
+                  the read landed after the bind — and either is what that start
+                  is bringing up. */}
+              {shellStarting && ". The control is back once that start has settled."}
             </span>
           </div>
         </>

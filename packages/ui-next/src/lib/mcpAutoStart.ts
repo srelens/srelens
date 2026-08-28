@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * That the shell's MCP auto-start has SETTLED — nothing about how.
+ * Where the shell's MCP auto-start is: not begun, in flight, or finished.
  *
  * #374 item 2 left one half of itself behind. `Window` brings the HTTP server
  * back up when the reader left it enabled, and it does that at the moment
@@ -14,24 +14,37 @@ import { useSyncExternalStore } from "react";
  * button, and pressing that restarts a live server and drops every agent
  * request in flight.
  *
- * **A signal, not a status.** What crosses this store is one fact — the shell's
- * start has finished, either way — and the pane answers it by taking its own
- * `mcpHttpStatus()` read again. It deliberately does NOT carry the URL the start
- * returned: `running` on that pane is a live read of the process and not a
- * stored flag (see the file comment there), and a value published from here
- * would be a second source of truth for it — one that could lie in the other
- * direction, claiming a listener over a server that came up and then fell over.
- * The extra round trip buys the pane's own reasoning intact.
+ * **A settlement alone fixed half of that.** The first version of this store
+ * was a counter that changed when the shell's start had finished, and the pane
+ * re-read its status on the change — which closes the "permanently" and leaves
+ * the window open. Between `Window` calling `startMcpHttp` and that call
+ * settling — up to two seconds, since `stop_running` (`mcp.rs`) waits that long
+ * on a listener a webview reload left behind — the pane's read answers `null`,
+ * it offers Start, and a click queues a SECOND `startMcpHttp` that tears down
+ * the server the first has just brought up, dropping requests. The pane could
+ * not refuse the click because a count of settlements does not say whether one
+ * is in flight now. So this carries the state: {@link McpAutoStartPhase}.
  *
- * A counter rather than a boolean, because what an effect needs is something
- * that CHANGES. The value itself means nothing; only that it is not what it was
- * the last time the effect ran.
+ * **Three states, not a boolean.** "Not begun" and "finished" are both
+ * not-in-flight, and a boolean would collapse them; this codebase has done
+ * that four times and every one was a defect. The pane needs both edges —
+ * `starting` to take Start away and say why, the transition INTO `settled` to
+ * take its own read again — and only a value that names all three has both.
  *
- * Announced on a refused start as well as a successful one. The refusal is
+ * **A state about the shell's CALL, not about the listener.** What crosses here
+ * is where `Window`'s `startMcpHttp` is; the pane answers `settled` by taking
+ * its own `mcpHttpStatus()` read again. It deliberately does NOT carry the URL
+ * the start returned: `running` on that pane is a live read of the process and
+ * not a stored flag (see the file comment there), and a value published from
+ * here would be a second source of truth for it — one that could lie in the
+ * other direction, claiming a listener over a server that came up and then fell
+ * over. The extra round trip buys the pane's own reasoning intact.
+ *
+ * `settled` on a refused start as well as a successful one. The refusal is
  * swallowed where it happens, as classic swallows it, and the pane's Start
  * button is where a reader finds out — but the status is worth re-reading
- * either way, and a signal that only fired on success would be one the pane
- * could not distinguish from a start that never happened.
+ * either way, and Start has to come back either way: `starting` is a claim
+ * about the call, and it ends when the call does.
  *
  * **The token is not part of this.** `McpServer` re-reads the bearer after its
  * OWN start because the first start mints one, and this store might look like it
@@ -45,17 +58,30 @@ import { useSyncExternalStore } from "react";
  * other shell stores are: the shell writes it and a screen reads it, and a
  * screen receives only `{ route }`, so a prop could never reach one.
  */
-let settlements = 0;
+export type McpAutoStartPhase = "idle" | "starting" | "settled";
+
+let phase: McpAutoStartPhase = "idle";
 const listeners = new Set<() => void>();
+
+function publish(next: McpAutoStartPhase): void {
+  if (phase === next) return;
+  phase = next;
+  // A copy, because a listener may unsubscribe while this is running.
+  for (const listener of [...listeners]) listener();
+}
+
+/** The shell is about to call `startMcpHttp`. Marked BEFORE the call, so no
+ *  render can see the call in flight and the store not saying so. */
+export function mcpAutoStartStarting(): void {
+  publish("starting");
+}
 
 /**
  * The shell's auto-start has finished. Called by `Window` for both outcomes;
  * see above for why the outcome is not carried.
  */
 export function mcpAutoStartSettled(): void {
-  settlements += 1;
-  // A copy, because a listener may unsubscribe while this is running.
-  for (const listener of [...listeners]) listener();
+  publish("settled");
 }
 
 function subscribe(listener: () => void): () => void {
@@ -65,28 +91,27 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
-/** How many have settled, for a caller that is not inside a render. */
-export function mcpAutoStartSettlements(): number {
-  return settlements;
+/** The current phase, for a caller that is not inside a render. */
+export function mcpAutoStartPhase(): McpAutoStartPhase {
+  return phase;
 }
 
 /**
- * The current count, subscribed. A number, not an object: `useSyncExternalStore`
+ * The current phase, subscribed. A string, not an object: `useSyncExternalStore`
  * re-reads its snapshot after every render and compares by identity, so a getter
  * that allocates never settles — the same note `lib/clusters.ts` carries, which
  * shipped that bug once.
  */
-export function useMcpAutoStart(): number {
-  return useSyncExternalStore(subscribe, mcpAutoStartSettlements, mcpAutoStartSettlements);
+export function useMcpAutoStart(): McpAutoStartPhase {
+  return useSyncExternalStore(subscribe, mcpAutoStartPhase, mcpAutoStartPhase);
 }
 
 /**
  * Reset the module between tests, the way `resetLock` and `resetContexts` do for
  * their stores. Not called by anything shipped: vitest isolates files, not the
- * tests inside one, so a settlement announced in one test would otherwise still
- * be counted in the next.
+ * tests inside one, so a phase reached in one test would otherwise still be
+ * current in the next.
  */
 export function resetMcpAutoStart(): void {
-  settlements = 0;
-  for (const listener of [...listeners]) listener();
+  publish("idle");
 }
