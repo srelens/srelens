@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 
 const { notifyMock } = vi.hoisted(() => ({
@@ -18,6 +19,14 @@ beforeEach(() => {
 });
 
 describe("CopyAsKubectlButton", () => {
+  it("explains itself with a fast tooltip, not the browser's slow native title (#376)", async () => {
+    render(<CopyAsKubectlButton kind="Pod" name="web-1" namespace="default" context="kind-dev" />);
+    const button = screen.getByRole("button", { name: "Copy as kubectl" });
+    expect(button.hasAttribute("title")).toBe(false);
+    await userEvent.setup({ delay: null }).hover(button);
+    expect((await screen.findByRole("tooltip")).textContent).toBe("Copy as kubectl");
+  });
+
   it("copies the get command (as yaml) from the menu", async () => {
     render(<CopyAsKubectlButton kind="Pod" name="web-1" namespace="default" context="kind-dev" />);
     fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));

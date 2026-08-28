@@ -53,7 +53,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.nodeMetrics` | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
 | `k8s.podCount` | running vs total pod counts for a cluster, counted without listing pod bodies |
-| `k8s.podLogs` | fetch recent logs for a pod in a connected kube context |
+| `k8s.podLogs` | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large) |
 | `k8s.podMetrics` | pod CPU/memory usage (requires metrics-server) |
 | `k8s.podOverview` | pod totals, per-node counts and the pods that are not running, without listing pod bodies |
 | `k8s.podsForPvc` | list pods in a namespace that mount a given PersistentVolumeClaim |

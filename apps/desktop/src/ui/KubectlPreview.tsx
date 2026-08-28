@@ -1,5 +1,6 @@
 import React from "react";
 import { Copy } from "lucide-react";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 export interface KubectlPreviewProps {
   /** The kubectl-equivalent command. Omit (and pass `note` instead) when there's no faithful one-liner. */
@@ -27,10 +28,10 @@ export function KubectlPreview({ command, note, onCopy }: KubectlPreviewProps) {
       <span>Equivalent kubectl:</span>
       <code>{command}</code>
       {onCopy && (
+        <TitleTooltip title="Copy kubectl command">
         <button
           type="button"
           aria-label="Copy kubectl command"
-          title="Copy kubectl command"
           onClick={onCopy}
           style={{
             display: "inline-flex",
@@ -43,6 +44,7 @@ export function KubectlPreview({ command, note, onCopy }: KubectlPreviewProps) {
         >
           <Copy size={12} aria-hidden="true" />
         </button>
+        </TitleTooltip>
       )}
     </p>
   );

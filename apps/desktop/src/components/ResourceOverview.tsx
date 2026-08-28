@@ -45,6 +45,7 @@ import {
   type OpenResource,
   type ResourceTarget,
 } from "@srelens/core";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 type Pair = [label: string, value: React.ReactNode];
 
@@ -88,15 +89,16 @@ function ResourceLink({
   if (!onOpenResource || !target.name || !isNavigableResourceKind(target.kind))
     return <span className="fl-mono">{content}</span>;
   return (
-    <button
-      type="button"
-      className="fl-link fl-mono"
-      aria-label={`Open ${target.kind} ${target.name}`}
-      title={`Open ${target.kind}`}
-      onClick={() => onOpenResource(target)}
-    >
-      {content}
-    </button>
+    <TitleTooltip title={`Open ${target.kind}`}>
+      <button
+        type="button"
+        className="fl-link fl-mono"
+        aria-label={`Open ${target.kind} ${target.name}`}
+        onClick={() => onOpenResource(target)}
+      >
+        {content}
+      </button>
+    </TitleTooltip>
   );
 }
 

@@ -6,6 +6,7 @@ import {
 } from "../ui";
 import { ContextAvatar } from "./ContextAvatar";
 import { contextDisplayName, orderContexts, type ContextProfiles } from "@srelens/core";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 const EMPTY_LIST: string[] = [];
 
@@ -59,15 +60,15 @@ export function ClusterHotbar({
     const profile = contextProfiles[c.name];
     const displayName = contextDisplayName(c.name, profile);
     return (
-      <button
-        key={c.name}
-        className={`fl-hotbar__item${openContext === c.name ? " fl-hotbar__item--active" : ""}`}
-        title={c.isLocal ? `${displayName} (local)` : displayName}
-        aria-label={c.isLocal ? `${displayName} (local)` : displayName}
-        onClick={() => onOpenContext(c.name)}
-      >
-        <ContextAvatar context={c.name} profile={profile} />
-      </button>
+      <TitleTooltip key={c.name} title={c.isLocal ? `${displayName} (local)` : displayName}>
+        <button
+          className={`fl-hotbar__item${openContext === c.name ? " fl-hotbar__item--active" : ""}`}
+          aria-label={c.isLocal ? `${displayName} (local)` : displayName}
+          onClick={() => onOpenContext(c.name)}
+        >
+          <ContextAvatar context={c.name} profile={profile} />
+        </button>
+      </TitleTooltip>
     );
   };
 
@@ -90,42 +91,34 @@ export function ClusterHotbar({
         )}
         {localContexts.map(renderItem)}
       </div>
-      <button
-        className="fl-hotbar__theme"
-        aria-label={theme.mode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-        title="Toggle light/dark mode"
-        onClick={onToggleTheme}
-      >
-        {theme.mode === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-      </button>
-      {onOpenToolbox && (
+      <TitleTooltip title="Toggle light/dark mode">
         <button
           className="fl-hotbar__theme"
-          aria-label="Open toolbox"
-          title="Open toolbox"
-          onClick={onOpenToolbox}
+          aria-label={theme.mode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          onClick={onToggleTheme}
         >
-          <Wrench aria-hidden="true" />
+          {theme.mode === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
         </button>
+      </TitleTooltip>
+      {onOpenToolbox && (
+        <TitleTooltip title="Open toolbox">
+          <button className="fl-hotbar__theme" aria-label="Open toolbox" onClick={onOpenToolbox}>
+            <Wrench aria-hidden="true" />
+          </button>
+        </TitleTooltip>
       )}
       {onOpenAssistant && (
-        <button
-          className="fl-hotbar__theme"
-          aria-label="Open assistant"
-          title="Open assistant"
-          onClick={onOpenAssistant}
-        >
-          <Bot aria-hidden="true" />
-        </button>
+        <TitleTooltip title="Open assistant">
+          <button className="fl-hotbar__theme" aria-label="Open assistant" onClick={onOpenAssistant}>
+            <Bot aria-hidden="true" />
+          </button>
+        </TitleTooltip>
       )}
-      <button
-        className="fl-hotbar__theme"
-        aria-label="Open settings"
-        title="Open settings"
-        onClick={onOpenSettings}
-      >
-        <Settings aria-hidden="true" />
-      </button>
+      <TitleTooltip title="Open settings">
+        <button className="fl-hotbar__theme" aria-label="Open settings" onClick={onOpenSettings}>
+          <Settings aria-hidden="true" />
+        </button>
+      </TitleTooltip>
     </nav>
   );
 }

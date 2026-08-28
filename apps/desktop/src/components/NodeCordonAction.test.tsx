@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 
 vi.mock("@srelens/core/react", async (importOriginal) => {
@@ -115,7 +116,12 @@ describe("NodeCordonAction RBAC gating", () => {
     render(<NodeCordonAction context="kind-dev" name="node-a" getObjectFn={getObjectFn} />);
     const cordon = await screen.findByRole("button", { name: "Cordon" });
     expect((cordon as HTMLButtonElement).disabled).toBe(true);
-    expect(cordon.getAttribute("title")).toEqual(expect.stringContaining("patch nodes"));
+    // The reason is a Radix tooltip on the wrapper around the disabled button
+    // (#376) — a disabled <button> itself gets no pointer events.
+    const trigger = cordon.closest<HTMLElement>('[data-slot="tooltip-trigger"]');
+    if (!trigger) throw new Error("disabled Cordon has no tooltip trigger");
+    await userEvent.hover(trigger);
+    expect((await screen.findByRole("tooltip")).textContent).toEqual(expect.stringContaining("patch nodes"));
   });
 
   it("enables Cordon when allowed", async () => {

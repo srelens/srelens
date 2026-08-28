@@ -4,6 +4,7 @@ import { PodTerminal } from "./PodTerminal";
 import { LocalTerminal } from "./LocalTerminal";
 import { LogsView, type LogsSource } from "./LogsView";
 import { HelmOpPane } from "./HelmOpPane";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 export type DockKind = "terminal" | "logs" | "shell" | "helm";
 
@@ -181,14 +182,11 @@ export function Dock({
           ))}
         </div>
         {onNewTerminal && (
-          <button
-            className="fl-dock__new"
-            aria-label="New terminal"
-            title="New terminal (same context)"
-            onClick={onNewTerminal}
-          >
-            <Plus aria-hidden="true" />
-          </button>
+          <TitleTooltip title="New terminal (same context)">
+            <button className="fl-dock__new" aria-label="New terminal" onClick={onNewTerminal}>
+              <Plus aria-hidden="true" />
+            </button>
+          </TitleTooltip>
         )}
         <button className="fl-dock__close" aria-label="Close dock" onClick={onClose}>
           <X aria-hidden="true" />
