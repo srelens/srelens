@@ -130,6 +130,50 @@ suite("describe", () => {
     expect(describe("/edit/web-1", "c")).toMatchObject({ title: "Edit web-1", kind: "edit" });
   });
 
+  it("names a /resources tab whose name will not decode, instead of throwing", () => {
+    // `decodeURIComponent` THROWS a `URIError` on a malformed escape — `%zz`,
+    // a truncated multi-byte sequence — and `describe` runs DURING RENDER
+    // (`shell/Placeholder` calls it) over routes restored from storage, which
+    // `parseTab` accepts as any string. So one corrupted or legacy entry blanked
+    // the whole window on every launch, not one tab. This is the fourth site of
+    // the same bug: `parseLogsRoute` guarded it, `parseDetailRoute` was given the
+    // guard in 77f315a, and these two were missed.
+    //
+    // The fallback is the RAW segment, not "" and not an invented word:
+    // `describe`'s contract is to always name a tab, the raw string is what
+    // storage actually holds and what the last-resort branch below already
+    // titles from, and two undecodable tabs stay distinguishable in the strip.
+    expect(describe("/resources/%zz", "c")).toMatchObject({ title: "%zz", kind: "resource", sub: "c" });
+    // The three suffix shapes decorate the same undecodable name.
+    expect(describe("/resources/%zz/logs", "c")).toMatchObject({ title: "%zz \u00b7 logs", kind: "logs" });
+    expect(describe("/resources/%zz/shell", "c")).toMatchObject({ title: "%zz \u00b7 shell", kind: "terminal" });
+    expect(describe("/resources/%zz/forward", "c")).toMatchObject({ title: "%zz \u00b7 forward", kind: "forwards" });
+  });
+
+  it("names an /edit tab whose subject will not decode, instead of throwing", () => {
+    expect(describe("/edit/%zz", "c")).toMatchObject({ title: "Edit %zz", kind: "edit" });
+  });
+
+  it("never throws on any route, however malformed", () => {
+    // The contract this pins is `describe`'s, not one branch's: it always names
+    // a tab. Unlike the parsers around it, whose contract is `null`, it has no
+    // way to say "I cannot" — a throw here is the window's boot.
+    for (const route of [
+      "/resources/%",
+      "/resources/%zz",
+      "/resources/%e0%a4%a",
+      "/resources/%zz/logs",
+      "/edit/%",
+      "/edit/%zz",
+      "/k/Pod/default/%zz",
+      "/logs/Pod/checkout/%zz",
+      "/%zz",
+    ]) {
+      expect(() => describe(route, "c"), route).not.toThrow();
+      expect(describe(route, "c").title, route).not.toBe("");
+    }
+  });
+
   it("falls back to the path for a route it has never heard of", () => {
     expect(describe("/whatever", "c")).toMatchObject({ title: "whatever", kind: "control" });
   });

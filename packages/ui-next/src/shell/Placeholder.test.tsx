@@ -11,6 +11,21 @@ describe("Placeholder", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Pods" })).toBeDefined();
   });
 
+  it("still titles a restored route whose name will not decode", () => {
+    // The render path for the whole class of bug: `parseTab` accepts any string
+    // as a route, so a corrupted or legacy `/resources/%zz` comes back out of
+    // storage on every launch, `screenFor` has no screen for it, and this is
+    // what renders it. `describe` throwing a `URIError` here is the window
+    // failing to boot, not one bad tab.
+    render(<Placeholder route="/resources/%zz" clusterName="prod" ported={[]} onOpenInClassic={() => {}} />);
+    expect(screen.getByRole("heading", { level: 1, name: "%zz" })).toBeDefined();
+  });
+
+  it("still titles a restored /edit route whose subject will not decode", () => {
+    render(<Placeholder route="/edit/%zz" clusterName="prod" ported={[]} onOpenInClassic={() => {}} />);
+    expect(screen.getByRole("heading", { level: 1, name: "Edit %zz" })).toBeDefined();
+  });
+
   it("says this screen is not in the new design yet", () => {
     render(<Placeholder route="/helm" ported={[]} onOpenInClassic={() => {}} />);
     expect(screen.getByText(/not in the new design yet/i)).toBeDefined();

@@ -80,6 +80,35 @@ const CLUSTER_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   });
 
 /**
+ * One route segment, decoded — or left exactly as it arrived when it will not
+ * decode.
+ *
+ * `decodeURIComponent` THROWS a `URIError` on a malformed escape (`%zz`, a
+ * truncated multi-byte sequence), and {@link describe} runs DURING RENDER —
+ * `shell/Placeholder` calls it — over routes restored from storage, which
+ * `parseTab` accepts as any string at all. So one corrupted or legacy entry is
+ * not a bad tab: it is the whole new-design window failing to boot, on every
+ * launch, with nothing on screen to say why.
+ *
+ * `parseLogsRoute` and `parseDetailRoute` answer the same hazard with `null`,
+ * which is their contract for a route they cannot make a subject of.
+ * `describe` has no such answer — its contract is that a tab is ALWAYS named —
+ * so it needs a fallback rather than a refusal, and the raw segment is it: it
+ * is what storage actually holds, it is what the last-resort branch at the end
+ * of `describe` already titles from, and it keeps two undecodable tabs
+ * distinguishable in the strip where an invented word would collapse them.
+ * `hostOf` in `screens/connections/clusterText.ts` makes the same call for the
+ * same reason — an unparseable server prints verbatim.
+ */
+function decodedSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * Turn a route into what its tab shows. The cluster name is the real one,
  * passed in by whoever knows it; the mock hard-coded "prod-eu".
  */
@@ -87,7 +116,7 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   const sub = clusterName || undefined;
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");
-    const name = decodeURIComponent(rawName ?? "");
+    const name = decodedSegment(rawName ?? "");
     // `/resources/<name>/logs|shell|forward` shares the bare
     // `/resources/<name>` prefix — so without this a pod opened three ways
     // ("Open in new tab", "Follow logs", "Open shell") got three tabs with the
@@ -104,7 +133,7 @@ export function describe(route: string, clusterName?: string): RouteInfo {
     return { route, title: name, sub, kind: "resource" };
   }
   if (route.startsWith("/edit/")) {
-    return { route, title: `Edit ${decodeURIComponent(route.split("/")[2] ?? "")}`, sub, kind: "edit" };
+    return { route, title: `Edit ${decodedSegment(route.split("/")[2] ?? "")}`, sub, kind: "edit" };
   }
   // `/logs/<kind>/<namespace>/<name>` — five segments, matched by none of the
   // exact tables below, so without this it fell to the last-resort branch and
