@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 
 const { applyManifestMock, diffManifestMock, notifyMock } = vi.hoisted(() => ({
@@ -32,6 +33,15 @@ import { ManifestEditor } from "./ManifestEditor";
 // DOM properties instead of `toBeDisabled` sugar.
 function isDisabled(el: HTMLElement): boolean {
   return (el as HTMLButtonElement).disabled;
+}
+
+// A disabled control explains itself through a Radix tooltip, not a native
+// title (#376): hover its trigger — the wrapper around a disabled button,
+// which is what still receives pointer events — and read the tooltip.
+async function tooltipOf(el: HTMLElement): Promise<string | null> {
+  const trigger = el.closest<HTMLElement>('[data-slot="tooltip-trigger"]') ?? el;
+  await userEvent.hover(trigger);
+  return (await screen.findByRole("tooltip")).textContent;
 }
 
 function Harness({ mode }: { mode: "create" | "edit" }) {
@@ -334,7 +344,7 @@ describe("ManifestEditor", () => {
     );
     const btn = screen.getByRole("button", { name: /apply/i });
     expect(isDisabled(btn)).toBe(true);
-    expect(btn.getAttribute("title")).toBe("You don't have permission to patch deployments in prod");
+    expect(await tooltipOf(btn)).toBe("You don't have permission to patch deployments in prod");
   });
 
   it("edit mode: disables Apply while the access check is still loading (fail-closed, no title yet)", async () => {
@@ -400,7 +410,7 @@ describe("ManifestEditor", () => {
     );
     const btn = screen.getByRole("button", { name: /apply/i });
     expect(isDisabled(btn)).toBe(true);
-    expect(btn.getAttribute("title")).toBe("You don't have permission to patch deployments in prod");
+    expect(await tooltipOf(btn)).toBe("You don't have permission to patch deployments in prod");
   });
 
   it("edit mode: does NOT gate Apply when the manifest declares no namespace (avoids a wrong-scope false-disable)", async () => {

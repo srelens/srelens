@@ -42,6 +42,7 @@ import { CopyAsKubectlButton } from "./CopyAsKubectlButton";
 import { toKubectl } from "@srelens/core";
 import { copyKubectlCommand } from "@srelens/core";
 import type { AssistantContext } from "./AssistantDrawer";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 type Opener = (s: { context: string; namespace: string; pod: string; container?: string }) => void;
 /** Opens the assistant drawer with the current resource attached as context. */
@@ -220,11 +221,10 @@ export function PodActions({
         </PopoverAnchor>
         <PopoverContent align="start" role="menu" className="w-auto min-w-44 gap-0 p-1">
           {containers.map((c) => (
+            <TitleTooltip key={c.name} title={`Shell into ${c.name}${c.running ? "" : " (not running)"}`}>
             <button
-              key={c.name}
               type="button"
               role="menuitem"
-              title={`Shell into ${c.name}${c.running ? "" : " (not running)"}`}
               className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent hover:text-accent-foreground ${
                 c.running ? "" : "text-muted-foreground"
               }`}
@@ -239,6 +239,7 @@ export function PodActions({
               />
               <span className="min-w-0 truncate">{c.name}</span>
             </button>
+            </TitleTooltip>
           ))}
         </PopoverContent>
       </Popover>

@@ -49,11 +49,21 @@ async function bootstrap(root: HTMLElement): Promise<void> {
     );
     return;
   }
-  const [, { default: AppGate }] = await Promise.all([
+  const [, { default: AppGate }, { TooltipProvider }] = await Promise.all([
     import("./styles/globals.css"),
     import("./AppGate"),
+    import("./components/ui/tooltip"),
   ]);
-  createRoot(root).render(<AppGate />);
+  // One tooltip provider for the whole classic window: every tooltip shares
+  // its open delay and, once one has shown, its neighbours open at once for a
+  // moment (the "sweep across the toolbar" the native `title` never allowed,
+  // #376). The delay values are the provider's defaults — see tooltip.tsx for
+  // why. The next design is not wrapped: its kit carries its own tooltip.
+  createRoot(root).render(
+    <TooltipProvider>
+      <AppGate />
+    </TooltipProvider>,
+  );
 }
 
 void bootstrap(container);

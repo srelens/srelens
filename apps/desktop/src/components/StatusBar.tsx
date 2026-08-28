@@ -3,6 +3,7 @@ import { SquareTerminal } from "lucide-react";
 import { ClusterUsage } from "./ClusterUsage";
 import { ForwardsIndicator } from "./ForwardsIndicator";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /** A context a terminal can be opened for. */
 export interface TerminalContext {
@@ -73,22 +74,25 @@ export function StatusBar({
       <span className="fl-statusbar__meta ml-auto flex items-center gap-3">
         {showTerminal && (
           <Popover open={picker} onOpenChange={setPicker}>
-            <PopoverAnchor asChild>
-              <button
-                type="button"
-                className="fl-statusbar__terminal flex items-center gap-1 hover:text-foreground"
-                onClick={launch}
-                title={
-                  terminalContexts.length === 1
-                    ? `Open a kubectl terminal for ${terminalContexts[0].label}`
-                    : "Open a kubectl terminal — choose a context"
-                }
-                aria-label="Open kubectl terminal"
-              >
-                <SquareTerminal className="size-3.5" aria-hidden="true" />
-                Terminal
-              </button>
-            </PopoverAnchor>
+            <TitleTooltip
+              title={
+                terminalContexts.length === 1
+                  ? `Open a kubectl terminal for ${terminalContexts[0].label}`
+                  : "Open a kubectl terminal — choose a context"
+              }
+            >
+              <PopoverAnchor asChild>
+                <button
+                  type="button"
+                  className="fl-statusbar__terminal flex items-center gap-1 hover:text-foreground"
+                  onClick={launch}
+                  aria-label="Open kubectl terminal"
+                >
+                  <SquareTerminal className="size-3.5" aria-hidden="true" />
+                  Terminal
+                </button>
+              </PopoverAnchor>
+            </TitleTooltip>
             {/* Capped and scrollable: a kubeconfig with twenty contexts would
                 otherwise open a menu taller than the window. */}
             <PopoverContent
@@ -98,11 +102,10 @@ export function StatusBar({
               className="max-h-64 w-auto min-w-40 max-w-80 gap-0 overflow-y-auto p-1 text-xs"
             >
               {ordered.map((c) => (
+                <TitleTooltip key={c.name} title={`Open a kubectl terminal for ${c.label}`}>
                 <button
-                  key={c.name}
                   type="button"
                   role="menuitem"
-                  title={`Open a kubectl terminal for ${c.label}`}
                   className="flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent hover:text-accent-foreground"
                   onClick={() => {
                     setPicker(false);
@@ -117,6 +120,7 @@ export function StatusBar({
                   />
                   <span className="min-w-0 truncate">{c.label}</span>
                 </button>
+                </TitleTooltip>
               ))}
             </PopoverContent>
           </Popover>

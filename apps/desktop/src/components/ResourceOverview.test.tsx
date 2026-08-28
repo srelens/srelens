@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 // Workload relations fetch their own data; stub them so the overview tests
 // stay focused on the Properties rendering (they have their own test file).
@@ -51,6 +52,15 @@ import {
   summarizeAffinity,
 } from "./ResourceOverview";
 import type { K8sObject } from "@srelens/core";
+
+// A disabled control explains itself through a Radix tooltip, not a native
+// title (#376): hover its trigger — the wrapper around a disabled button,
+// which is what still receives pointer events — and read the tooltip.
+async function tooltipOf(el: HTMLElement): Promise<string | null> {
+  const trigger = el.closest<HTMLElement>('[data-slot="tooltip-trigger"]') ?? el;
+  await userEvent.hover(trigger);
+  return (await screen.findByRole("tooltip")).textContent;
+}
 
 const NOW = Date.parse("2026-01-01T00:00:00Z");
 
@@ -535,7 +545,7 @@ describe("ObjectDetail (ConfigMap / Secret)", () => {
     );
   });
 
-  it("disables Save and explains why when the user can't update the ConfigMap", () => {
+  it("disables Save and explains why when the user can't update the ConfigMap", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -551,7 +561,7 @@ describe("ObjectDetail (ConfigMap / Secret)", () => {
     fireEvent.change(screen.getByLabelText("Value for app.conf"), { target: { value: "level=debug" } });
     const save = screen.getByRole("button", { name: "Save" });
     expect((save as HTMLButtonElement).disabled).toBe(true);
-    expect(save.getAttribute("title")).toEqual(expect.stringContaining("permission to update configmaps in prod"));
+    expect(await tooltipOf(save)).toEqual(expect.stringContaining("permission to update configmaps in prod"));
   });
 
   it("enables Save when the user can update the ConfigMap", () => {
