@@ -229,7 +229,20 @@ function KindList({
   // stable array reference from `useNamespaces` (it only changes identity
   // when its contents actually change), so this does not fire on every
   // render.
-  useEffect(() => setSelected(new Set()), [selection]);
+  //
+  // A CLUSTER switch makes the WHOLE key meaningless, and `selection` cannot
+  // see that one: `useNamespaces` answers every cluster with no selection out
+  // of one shared empty array, so on "all namespaces" — the setting most
+  // readers leave it on — both clusters hand back the same identity and the
+  // dependency above never moves. Nothing remounts either (the rail switches
+  // `context` in place), so the checked keys survived into a cluster the
+  // reader had checked nothing in, matched whatever `namespace/name` the new
+  // rows happened to share, and `ResourceBulk` pinned the NEW `name` when the
+  // bar was pressed — so its own cluster gate saw no divergence to warn
+  // about. `name` is the identity every write below is addressed to, which is
+  // why it is what this resets on; it is a string, so the effect still only
+  // fires when the cluster actually changes.
+  useEffect(() => setSelected(new Set()), [selection, name]);
 
   // The peek's subject: which row the pane beside the table is showing, or
   // `null` for no pane at all. Only the row's identity is held — the pane

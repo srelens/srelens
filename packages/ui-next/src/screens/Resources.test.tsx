@@ -152,6 +152,21 @@ const CTX: ClusterContext = {
   authKind: "client certificate",
 };
 
+/**
+ * A SECOND cluster, for the rail switch. Same shape as `CTX` and a different
+ * `stableId`, which is what the workspace holds and what a namespace selection
+ * is filed under.
+ */
+const STAGE: ClusterContext = {
+  name: "stage-eu",
+  stableId: "stage",
+  cluster: "stage",
+  server: "https://stage",
+  isCurrent: false,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
+};
+
 const PODS = [
   { name: "web-1", namespace: "default", ready: "1/1", phase: "Running", restarts: 3, node: "n1", age: "2d", image: "acme/checkout-api:118a7e" },
   { name: "api-7", namespace: "billing", ready: "1/1", phase: "Running", restarts: 1, node: "n2", age: "5d", image: "redis:7.4-alpine" },
@@ -815,6 +830,52 @@ describe("Resources", () => {
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
     expect((screen.getByRole("checkbox", { name: "Select default/web-1" }) as HTMLInputElement).checked).toBe(false);
     expect(screen.queryByText("1 selected")).toBeNull();
+  });
+
+  // Round 4's P1, and the sixth finding of the cluster-switch class: the reset
+  // above reasoned only about NAMESPACES. `KindList` is not remounted when the
+  // rail switches cluster — `Resources` renders it with a new `context` prop
+  // and nothing else changes — so the selected keys are only cleared if
+  // something in that effect's dependencies moved.
+  //
+  // With ALL NAMESPACES selected, nothing did. `useNamespaces` answers an unset
+  // cluster with one shared `NO_NAMESPACES` constant, so both clusters read
+  // back the SAME array identity and the namespace dependency is unchanged
+  // across the switch — which is why this fixture must leave both selections
+  // unset. A fixture that picked a namespace per cluster would see the
+  // identity change and pass against the unfixed screen, saying nothing.
+  it("clears the bulk selection when the rail switches cluster, with all namespaces selected", async () => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+
+    open("/k/pods");
+    await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+    // The fixture's own premise, asserted rather than assumed: neither cluster
+    // has a namespace selection, so both are on "all namespaces" and the
+    // selection this screen watches cannot change identity below.
+    expect(getView().namespaces).toEqual({});
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
+    await screen.findByText("1 selected");
+
+    act(() => store.setActiveCluster(STAGE.stableId, STAGE.name));
+
+    // The switch has landed and the new cluster's rows are on screen — the
+    // moment the stale keys would match again, since both clusters here have a
+    // `default/web-1` (which is the ordinary case: the same workloads deployed
+    // to two environments).
+    await waitFor(() =>
+      expect(watchResource.mock.calls.some((call) => call[0] === STAGE.name)).toBe(true),
+    );
+    await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+    expect((screen.getByRole("checkbox", { name: "Select default/web-1" }) as HTMLInputElement).checked).toBe(false);
+    // And nothing to confirm: the bar is what carries Delete, Evict and
+    // Restart rollout, and it is only mounted for a selection that resolves.
+    expect(screen.queryByText("1 selected")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(deleteResource).not.toHaveBeenCalled();
   });
 
   it("shows the rows and says the stream dropped when the watch is reconnecting", async () => {
