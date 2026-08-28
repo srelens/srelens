@@ -145,11 +145,12 @@ interface ToolRow {
  * from the probe the shell already ran at launch rather than from a request of
  * its own.
  *
- * **Three things §17 asks for are deliberately absent.** Each is argued where
- * it would have gone: the `update` state ({@link ToolState}), most of the Note
- * column ({@link noteFor}), and the Size column ({@link COLUMNS}). The fourth
- * departure is the action column, which exists on the desktop and not in the
- * browser — see {@link Toolbox} below.
+ * **Two things §17 asks for are deliberately absent**, and each is argued where
+ * it would have gone: the `update` state ({@link ToolState}) and most of the
+ * Note column ({@link noteFor}). The third departure is the action column,
+ * which exists on the desktop and not in the browser — see {@link Toolbox}
+ * below. §17's Size column IS drawn; what it can and cannot claim is argued at
+ * {@link COLUMNS}.
  *
  * **Loading is a real state here.** `toolbox.status` shells out to locate each
  * binary and run it for its version; on a cold PATH that is not instant, and a
@@ -315,17 +316,25 @@ function progressLabel(percent: number | null): string {
 }
 
 /**
- * The columns every platform draws, in §17's order — **minus `Size`.**
+ * The columns every platform draws, in §17's order, **including §17's `Size`**
+ * (`54.2 MB`, `48.9 MB`, `9.1 MB`, right-aligned).
  *
- * §17 puts a right-aligned size on every row (`54.2 MB`, `48.9 MB`, `9.1 MB`).
- * `Size` reads the byte length of the file at `path`, following symlinks —
- * these entries are usually symlinks, and a link's own length is a handful of
- * bytes: a plausible-looking wrong number, which is worse than none.
+ * The figure is `sizeBytes` exactly as `toolbox.status` reports it, and the
+ * backend reads it with `std::fs::metadata`, which FOLLOWS symlinks — see
+ * `tool_size` in `crates/kube/src/toolbox.rs`, where following is the
+ * deliberate choice and argued as such: entries under `~/.srelens/bin` and
+ * `/usr/local/bin` are frequently symlinks (a Homebrew shim, a version-pinned
+ * install), and a LINK's own length is a handful of bytes — a number that looks
+ * like an answer and is wrong. Followed, the number is the size of the binary
+ * the tool actually runs, which is the thing the reader is asking about.
  *
- * A tool with no readable size renders a dash, never `0 B`. A zero is a
- * measurement, and a tool that is not installed — or whose path cannot be
- * stat'd — has not been measured. That rule has held from the cluster overview
- * through every screen since.
+ * A tool with no readable size renders a dash, never `0 B`. `sizeBytes` is
+ * absent rather than `0` whenever nothing was measured — `tool_size` answers
+ * `None` for a tool that is not installed, a dangling symlink or a permission
+ * error, and never `unwrap_or(0)` — and `formatBytes` answers `""` for an
+ * absent value, which is why the cell reads `formatBytes(…) || ABSENT`. A zero
+ * is a measurement. That rule has held from the cluster overview through every
+ * screen since.
  */
 const COLUMNS: Column<ToolRow>[] = [
   {
