@@ -19,6 +19,73 @@ function nextChannel(): string {
 }
 
 /**
+ * How long to wait for a subscription to be acknowledged before giving up on
+ * the shell.
+ *
+ * Exported so a test can wait exactly this long rather than hard-coding a
+ * number that would go quietly stale beside it.
+ */
+export const SUBSCRIBE_TIMEOUT_MS = 10_000;
+
+/**
+ * {@link subscribe}, with an end to the waiting.
+ *
+ * On the DESKTOP `subscribe` is Tauri's `listen`, which settles on its own. On
+ * the WEB it resolves only when the `subbed` ack comes back over the socket,
+ * and `wsClient` has no timeout: if the socket is down it retries with a
+ * backoff up to 10s, forever, and this promise stays pending forever with it.
+ * So: web session open, server dies, reader clicks "Open shell" — no error, no
+ * rejection, a spinner that never resolves. The project's rule is that a
+ * timeout surfaces as an error.
+ *
+ * Before the subscribe-before-start reorder, exec used fire-and-forget `on()`
+ * and the first failure came from `invokeCommand` over HTTP, which rejects
+ * promptly. The reorder is right and stays — the exit event can be emitted in
+ * the same tick the session spawns, and it is the only one there will ever be —
+ * so the wait it introduced is what gets a bound.
+ *
+ * The message says "timed out" on purpose: `describeError` classifies on it, so
+ * the reader gets "Request timed out" and a remedy for their platform instead of
+ * a raw string, with `subject` naming what actually timed out in the original it
+ * keeps.
+ */
+async function subscribeWithin(
+  channel: string,
+  subject: string,
+  handler: (payload: unknown) => void,
+): Promise<() => void> {
+  const pending = subscribe(channel, handler);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `subscribing to the ${subject} timed out after ${SUBSCRIBE_TIMEOUT_MS / 1000}s (the srelens server never acknowledged it)`,
+          ),
+        ),
+      SUBSCRIBE_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([pending, bound]);
+  } catch (e) {
+    // The subscription may still land after the wait was given up — the web
+    // transport registers the handler SYNCHRONOUSLY and awaits only the ack, so
+    // a late `subbed` would leave a live handler on a channel nobody reads, and
+    // `wsClient` resubscribes it on every reconnect. Dispose it whenever it
+    // arrives.
+    void pending.then(
+      (dispose) => dispose(),
+      () => {},
+    );
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Open an interactive shell into a pod. `onData` receives stdout chunks;
  * `onExit` fires when the session ends (with an optional error). `size` sizes
  * the remote PTY at attach so it matches the panel from the first prompt.
@@ -45,10 +112,24 @@ export async function startPodExec(
   size?: { cols: number; rows: number },
 ): Promise<ExecSession> {
   const channel = nextChannel();
-  const disposeOut = await subscribe(`exec:out:${channel}`, (p) => onData(p as string));
-  const disposeExit = await subscribe(`exec:exit:${channel}`, (p) =>
-    onExit((p as string | null) ?? null),
+  // Bounded, so a socket that never acknowledges is an error and not a spinner
+  // — see {@link subscribeWithin}. Ordered so the second failing still drops
+  // the first: an exec session is never started below unless BOTH listeners are
+  // live, because a session with no listener on its exit channel is a row
+  // attached forever and, for a node session, a privileged debug pod left
+  // running on the node.
+  const disposeOut = await subscribeWithin(`exec:out:${channel}`, "shell's output", (p) =>
+    onData(p as string),
   );
+  let disposeExit: () => void;
+  try {
+    disposeExit = await subscribeWithin(`exec:exit:${channel}`, "shell's exit", (p) =>
+      onExit((p as string | null) ?? null),
+    );
+  } catch (e) {
+    disposeOut();
+    throw e;
+  }
   let session: number;
   try {
     session = await invokeCommand<number>("start_pod_exec", {

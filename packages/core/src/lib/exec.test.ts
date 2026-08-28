@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const { invokeCommandMock, subscribeMock } = vi.hoisted(() => ({
   invokeCommandMock: vi.fn(),
@@ -9,7 +9,8 @@ vi.mock("../transport/transport", () => ({
   subscribe: subscribeMock,
 }));
 
-import { startPodExec } from "./exec";
+import { startPodExec, SUBSCRIBE_TIMEOUT_MS } from "./exec";
+import { describeError } from "./errors";
 
 /** The subscription token `startPodExec` handed the backend, read back off
  *  the invoke it made — the test never guesses how it is spelled. */
@@ -128,5 +129,97 @@ describe("startPodExec", () => {
       "no such context",
     );
     expect(disposals).toEqual([`exec:out:${channelOf()}`, `exec:exit:${channelOf()}`]);
+  });
+
+  /**
+   * Subscribing BEFORE the backend starts is right and stays — the exec task
+   * can emit its exit event in the same tick it is spawned, and that is the
+   * only exit event there will ever be. But on the web `subscribe` resolves
+   * only when the `subbed` ack comes back over the socket, with no timeout of
+   * its own: if the socket is down, `wsClient` retries forever and the promise
+   * stays pending forever. Before the reorder, exec used fire-and-forget `on()`
+   * and the first failure came from `invokeCommand` over HTTP, which rejects
+   * promptly.
+   *
+   * So: web session open, server dies, reader clicks "Open shell" — no error,
+   * no rejection, a spinner that never resolves. The project's rule is that a
+   * timeout surfaces as an error.
+   */
+  describe("when the subscription is never acknowledged", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("rejects rather than hanging forever", async () => {
+      subscribeMock.mockImplementation(() => new Promise(() => {}));
+      const started = startPodExec("kind-dev", "default", "web-1", vi.fn(), vi.fn());
+      const settled = vi.fn();
+      void started.then(settled, settled);
+
+      // Long past any plausible ack, and still nothing had happened.
+      await vi.advanceTimersByTimeAsync(SUBSCRIBE_TIMEOUT_MS - 1);
+      expect(settled).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2);
+      await expect(started).rejects.toThrow(/timed out/);
+    });
+
+    it("words the failure through describeError rather than at the reader raw", async () => {
+      subscribeMock.mockImplementation(() => new Promise(() => {}));
+      const started = startPodExec("kind-dev", "default", "web-1", vi.fn(), vi.fn());
+      const caught = started.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(SUBSCRIBE_TIMEOUT_MS + 1);
+      const friendly = describeError(await caught);
+      expect(friendly.title).toBe("Request timed out");
+      // And the original still names what actually timed out, one click away.
+      expect(friendly.raw).toContain("shell");
+    });
+
+    it("never starts the backend session it could not listen for", async () => {
+      subscribeMock.mockImplementation(() => new Promise(() => {}));
+      const started = startPodExec("kind-dev", "default", "web-1", vi.fn(), vi.fn());
+      const caught = started.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(SUBSCRIBE_TIMEOUT_MS + 1);
+      await caught;
+      // An exec session started with no listener on its exit channel is a row
+      // attached forever and, for a node session, a privileged debug pod left
+      // running on the node.
+      expect(invokeCommandMock).not.toHaveBeenCalled();
+    });
+
+    it("drops a subscription that lands after the wait was given up", async () => {
+      // The web transport registers the handler synchronously and awaits only
+      // the ACK, so a late `subbed` leaves a live handler on a channel nobody
+      // reads — and `wsClient` resubscribes it on every reconnect.
+      const disposals: string[] = [];
+      let release: (() => void) | undefined;
+      subscribeMock.mockImplementation(
+        (channel: string) =>
+          new Promise<() => void>((resolve) => {
+            release = () => resolve(() => disposals.push(channel));
+          }),
+      );
+      const started = startPodExec("kind-dev", "default", "web-1", vi.fn(), vi.fn());
+      const caught = started.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(SUBSCRIBE_TIMEOUT_MS + 1);
+      await caught;
+
+      release?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(disposals).toHaveLength(1);
+    });
+
+    it("drops the output listener when it is the EXIT one that never lands", async () => {
+      const disposals: string[] = [];
+      subscribeMock.mockImplementation(async (channel: string) => {
+        if (channel.startsWith("exec:exit:")) return new Promise<() => void>(() => {});
+        return () => disposals.push(channel);
+      });
+      const started = startPodExec("kind-dev", "default", "web-1", vi.fn(), vi.fn());
+      const caught = started.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(SUBSCRIBE_TIMEOUT_MS + 1);
+      await caught;
+      expect(disposals).toHaveLength(1);
+      expect(disposals[0]).toMatch(/^exec:out:/);
+    });
   });
 });
