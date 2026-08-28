@@ -638,4 +638,90 @@ describe("useRowMenu — the cluster the row was picked on", () => {
     // layer up.
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals" && t.sub === PINNED)).toBe(true);
   });
+
+  /**
+   * `Port forward` is the one entry whose dialog is not a confirm — it is
+   * §A.4's own form, with its own fields, its own equivalent command and its
+   * own submit. So the pin has to travel INTO it: the cluster its namespace
+   * list comes from, the cluster the equivalent command names, and the cluster
+   * `startPortForward` reaches must all be the one the row was picked on.
+   *
+   * Following the rail here does not delete anything — it opens a tunnel to a
+   * DIFFERENT cluster's workload of the same name, on the reader's own
+   * loopback, while the dialog still names the row they picked. A forward is a
+   * write with a consequence, so it gets the tick, not just the banner.
+   */
+  const forwardArgs = (context: string): UseRowMenuArgs => ({
+    context,
+    kind: "Pod",
+    actions: { forward: true },
+  });
+
+  /** Open the forward dialog on `prod-eu`, move the rail, then name a port. */
+  async function pickForwardThenMove() {
+    const view = await pickThenMove("Port forward", forwardArgs);
+    await waitFor(() =>
+      expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("pod/checkout"),
+    );
+    await userEvent.type(screen.getByLabelText("Remote port"), "8080");
+    return view;
+  }
+
+  it("forwards the workload on the cluster the row was picked on, not the one the rail moved to", async () => {
+    await pickForwardThenMove();
+    await userEvent.click(tickFor("forward"));
+    await userEvent.click(box().getByRole("button", { name: "Start forward" }));
+
+    await waitFor(() => expect(forwardCore.startPortForward).toHaveBeenCalledTimes(1));
+    expect(forwardCore.startPortForward).toHaveBeenCalledWith({
+      context: PINNED,
+      namespace: "default",
+      kind: "Pod",
+      name: "checkout",
+      remotePort: 8080,
+    });
+  });
+
+  it("refuses to start the forward until the reader confirms which cluster, and says why", async () => {
+    await pickForwardThenMove();
+    await userEvent.click(box().getByRole("button", { name: "Start forward" }));
+
+    expect(forwardCore.startPortForward).not.toHaveBeenCalled();
+    expect(box().getByText(REFUSAL)).toBeTruthy();
+
+    // And the tick is all it takes — the question is which cluster, not
+    // whether to forward at all.
+    await userEvent.click(tickFor("forward"));
+    await userEvent.click(box().getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(forwardCore.startPortForward).toHaveBeenCalledTimes(1));
+  });
+
+  it("says the rail moved, and keeps naming the pinned cluster in the equivalent command", async () => {
+    await pickForwardThenMove();
+    expect(box().getByText(`This still runs against ${PINNED}, not ${MOVED}`)).toBeTruthy();
+    // The command under the fields is the one that would be run: same cluster
+    // as the banner names, not the one in focus.
+    await waitFor(() =>
+      expect(box().getByText(new RegExp(`--context ${PINNED}\\b`))).toBeTruthy(),
+    );
+    expect(box().queryByText(new RegExp(`--context ${MOVED}\\b`))).toBeNull();
+  });
+
+  it("lists the pinned cluster's namespaces, and does not re-list when the rail moves", async () => {
+    // The dialog's own listings are the other half of the same promise: a
+    // namespace select that followed the rail would offer another cluster's
+    // namespaces under a prefilled row from this one.
+    await pickForwardThenMove();
+    expect(forwardCore.listNamespaces).toHaveBeenCalledTimes(1);
+    expect(forwardCore.listNamespaces).toHaveBeenCalledWith(PINNED);
+    expect(forwardCore.listPods).toHaveBeenCalledWith(PINNED, "default");
+  });
+
+  it("says nothing, and asks nothing, while the rail has not moved under the forward", async () => {
+    render(<Harness args={forwardArgs(PINNED)} row={ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Port forward" }));
+    await screen.findByRole("dialog");
+    expect(screen.queryByText(new RegExp(`This still runs against`))).toBeNull();
+    expect(box().queryByRole("checkbox", { name: /Yes, still/ })).toBeNull();
+  });
 });

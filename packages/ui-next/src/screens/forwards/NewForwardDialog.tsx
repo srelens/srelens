@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   type ActiveForward,
   browsable,
@@ -25,7 +25,7 @@ import {
   Switch,
   TextInput,
 } from "@srelens/ui-kit";
-import { FailureAlert } from "../../lib/errorCopy";
+import { FailureAlert, FailureLine } from "../../lib/errorCopy";
 
 /** §A.4's width, in px. */
 const WIDTH = 480;
@@ -107,6 +107,24 @@ export interface NewForwardDialogProps {
    * action, which starts on nothing.
    */
   target?: ForwardTarget;
+  /**
+   * The cluster-moved banner and its acknowledgement, from the caller's own
+   * `useClusterGate` — see `lib/clusterMoved`. `undefined` from a door that
+   * has nothing to compare, which is every door but the row menu's today.
+   *
+   * The banner is drawn ABOVE everything else in the body: it changes what
+   * every other name in the dialog refers to.
+   */
+  moved?: ReactNode;
+  /**
+   * Why the forward must not start yet, or `null`/`undefined` when it may.
+   *
+   * Checked by {@link NewForwardDialog}'s own submit rather than by disabling
+   * `Start forward`, which is the shape `ResourceMenu`'s confirms already use:
+   * the reader presses the button they meant to press and is told why it did
+   * not go, with everything they typed still in front of them.
+   */
+  refusal?: string | null;
   /** Cancel, escape, the header's control, and a forward that came up. */
   onClose: () => void;
 }
@@ -204,6 +222,8 @@ export function NewForwardDialog({
   context,
   namespace: initial,
   target: arrivedFrom,
+  moved,
+  refusal,
   onClose,
 }: NewForwardDialogProps) {
   const forwards = useSyncExternalStore(subscribeForwards, getForwards, getForwards);
@@ -243,6 +263,17 @@ export function NewForwardDialog({
   );
   const [inBrowser, setInBrowser] = useState(false);
   const [busy, setBusy] = useState(false);
+  /**
+   * Has `Start forward` been pressed while a {@link NewForwardDialogProps.refusal}
+   * stood? Only then is the sentence shown — a banner the reader has not
+   * argued with yet does not need a refusal under it as well.
+   *
+   * Derived against the LIVE refusal rather than latched, so acknowledging the
+   * cluster clears the line without a second render pass, and a rail that
+   * moves on again brings back a sentence that names the new divergence.
+   */
+  const [pressedWhileRefused, setPressedWhileRefused] = useState(false);
+  const blocked = pressedWhileRefused ? (refusal ?? null) : null;
 
   /**
    * The last thing that went wrong, whichever it was: a listing that came back
@@ -391,6 +422,14 @@ export function NewForwardDialog({
 
   async function start() {
     if (!chosen || !localUsable || remotePort === null || clash) return;
+    // Asked before anything else: it is the only question on screen whose
+    // answer changes what every other name in the dialog refers to. The
+    // forward still goes to `context` either way — this re-arms the
+    // confirmation, it does not retarget it.
+    if (refusal) {
+      setPressedWhileRefused(true);
+      return;
+    }
     setFailure(null);
     setBusy(true);
     try {
@@ -447,6 +486,11 @@ export function NewForwardDialog({
       }
     >
       <div className="flex flex-col gap-3 p-3">
+        {/* First, above the target's own name: it changes what that name
+            refers to, and it is the only thing here the reader does not
+            already know. See `lib/clusterMoved`. */}
+        {moved}
+        {blocked && <FailureLine error={blocked} className="text-sev" />}
         {failure && <FailureAlert tone="sev" title={failure.title} error={failure.error} />}
 
         {/* §A.4's two-column grid, in §A.4's order. Target and Namespace share

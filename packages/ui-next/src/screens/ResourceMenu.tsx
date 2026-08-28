@@ -81,6 +81,22 @@ function isSuspended(row: ListRow): boolean {
   return typeof value === "boolean" && value;
 }
 
+/**
+ * The row `Port forward` was picked on, plus the cluster it was picked ON.
+ *
+ * Pinned for exactly the reason {@link Pending} spells out, and it is the same
+ * hazard with a different ending: §A.4's dialog reads its context to list
+ * namespaces, to write the equivalent command and to hand to
+ * `startPortForward`. Handed the LIVE prop, a forward opened on production's
+ * `checkout` and confirmed after a rail switch opened a tunnel to staging's
+ * same-named workload — on the reader's own loopback, under a dialog still
+ * naming production's row. Nothing is deleted; something is exposed.
+ */
+interface Forwarding {
+  row: ListRow;
+  context: string;
+}
+
 /** What `Open shell` is waiting on, once the pod turned out to run more than
  *  one container worth asking about. See {@link startShell}. */
 interface ShellPick {
@@ -136,7 +152,7 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
    * confirm — it has its own fields, its own equivalent command and its own
    * error line, none of which `PendingDialog` has a shape for.
    */
-  const [forwarding, setForwarding] = useState<ListRow | null>(null);
+  const [forwarding, setForwarding] = useState<Forwarding | null>(null);
   /**
    * The pod `Open shell` was picked on, waiting on which container to attach
    * to — set only when {@link startShell} found more than one candidate worth
@@ -162,6 +178,19 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     pinned: pending?.context ?? null,
     live: context,
     verb: verbOf(pending),
+  });
+  /**
+   * The same, for §A.4's forward dialog — see {@link Forwarding}.
+   *
+   * A gate rather than the bare banner `shellPick` gets: opening a shell
+   * writes nothing and lands in a terminal captioned with its own cluster,
+   * while starting a forward exposes a port and then says it is up. The verb
+   * is fixed, because this dialog's button does one thing.
+   */
+  const forwardGate = useClusterGate({
+    pinned: forwarding?.context ?? null,
+    live: context,
+    verb: "forward",
   });
   /** The same, for the container picker — see {@link ShellPick.context}. */
   const shellMoved = shellPick !== null && shellPick.context !== context;
@@ -334,7 +363,12 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
         // `/resources/<name>/forward`, which no screen is registered for and
         // which therefore rendered a Placeholder — the menu offering a way in
         // to a dead end. The same mistake Follow logs shipped with (#346).
-        onPick: () => setForwarding(row),
+        onPick: () => {
+          forwardGate.reset();
+          // The cluster the reader picked this ON, read once, here — the same
+          // rule `open` follows for every confirm. See {@link Forwarding}.
+          setForwarding({ row, context });
+        },
       });
     }
     list.push({
@@ -407,10 +441,17 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     // so the remote one is the reader's to name — and the dialog stays fully
     // editable either way: a prefill is a starting point.
     <NewForwardDialog
-      context={context}
-      namespace={forwarding.namespace}
-      target={{ kind, name: forwarding.name }}
-      onClose={() => setForwarding(null)}
+      // Captured, not current: the namespace list, the equivalent command and
+      // the forward itself all belong to the cluster the row was picked on.
+      context={forwarding.context}
+      namespace={forwarding.row.namespace}
+      target={{ kind, name: forwarding.row.name }}
+      moved={forwardGate.alert}
+      refusal={forwardGate.refusal}
+      onClose={() => {
+        setForwarding(null);
+        forwardGate.reset();
+      }}
     />
   ) : shellPick ? (
     <ConfirmDialog
