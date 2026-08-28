@@ -360,7 +360,13 @@ async function connect(
   }
   // A session the reader ended while the connect was still in flight has no
   // row left to attach to; close what just opened rather than leaking a PTY.
-  if (!emulators.has(id)) {
+  //
+  // And the same for a session whose FAR END went while the connect was in
+  // flight: an exec the backend refused emits its exit event in the same tick
+  // it is spawned, so `close` has already run for this id by the time the
+  // handle arrives. Wiring it now would attach a dead session — and its event
+  // listeners — to a row nothing will ever unwire again.
+  if (!emulators.has(id) || sessions.some((s) => s.id === id && s.state === "closed")) {
     handle.close();
     return;
   }

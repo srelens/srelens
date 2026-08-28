@@ -473,6 +473,44 @@ describe("a node session's debug pod", () => {
     expect(row?.error).not.toContain("handler error:");
   });
 
+  it("deletes the debug pod when the exec exits before the handle even arrives", async () => {
+    // The same-tick exit: `start_pod_exec` spawns its task and that task can
+    // emit `exec:exit` before the invoke resolves — an invalid context, an
+    // RBAC refusal — so `onExit` runs while `connect` is still awaiting the
+    // handle. The row must close and the privileged pod must go, and the
+    // handle that lands afterwards must NOT be wired to a row that is already
+    // closed: nothing would ever unwire it, and its listeners would outlive
+    // the session.
+    const handle = { send: vi.fn(), resize: vi.fn(), close: vi.fn() };
+    startPodExec.mockImplementation(
+      async (
+        _context: string,
+        _namespace: string,
+        _pod: string,
+        _data: (c: string) => void,
+        exit: (e: string | null) => void,
+      ) => {
+        exit('pods "srelens-node-debug-x1" is forbidden');
+        return handle;
+      },
+    );
+
+    const id = await startPodSession(nodeDebugPod);
+
+    await vi.waitFor(() => expect(deletePod).toHaveBeenCalledTimes(1));
+    expect(deletePod).toHaveBeenCalledWith(
+      "kind-srelens-demo",
+      "srelens-debug",
+      "srelens-node-debug-x1",
+    );
+    const row = getSessions().find((s) => s.id === id);
+    expect(row?.state).toBe("closed");
+    // Described, not raw — the same rule as the neighbouring closures.
+    expect(row?.error).toBeDefined();
+    expect(row?.error).not.toContain("is forbidden");
+    expect(handle.close).toHaveBeenCalledTimes(1);
+  });
+
   it("deletes the debug pod when the exec never opened at all", async () => {
     // `startPodSession` records the pod BEFORE the connect, so a node session
     // RBAC refused has a debug pod on the cluster and no shell that will ever

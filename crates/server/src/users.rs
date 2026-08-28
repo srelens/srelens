@@ -495,6 +495,7 @@ mod tests {
                 "nope".into(),
                 "ns".into(),
                 "pod-a".into(),
+                "exec-0-abcd".into(),
                 ExecOpts::default(),
             )
             .await

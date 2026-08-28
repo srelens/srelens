@@ -149,6 +149,10 @@ struct ExecStart {
     context: String,
     namespace: String,
     pod: String,
+    /// The client's subscription token: it is already listening on
+    /// `exec:out:<channel>` / `exec:exit:<channel>` when this arrives, which
+    /// is what keeps a same-tick exit from being lost (see `ExecManager::start`).
+    channel: String,
     #[serde(default)]
     container: Option<String>,
     #[serde(default)]
@@ -265,6 +269,7 @@ async fn run(
                     a.context,
                     a.namespace,
                     a.pod,
+                    a.channel,
                     ExecOpts {
                         container: a.container,
                         shell: a.shell,
@@ -474,7 +479,7 @@ mod tests {
         let (status, body) = authed_post(
             &state,
             "start_pod_exec",
-            json!({ "context": "c", "namespace": "n", "pod": "p" }),
+            json!({ "context": "c", "namespace": "n", "pod": "p", "channel": "exec-0-abcd" }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
