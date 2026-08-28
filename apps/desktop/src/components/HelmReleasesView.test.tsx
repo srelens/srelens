@@ -8,7 +8,7 @@ const { listHelmReleasesMock, getHelmReleaseMock, useNamespaceOptionsMock } = vi
   getHelmReleaseMock: vi.fn(),
   useNamespaceOptionsMock: vi.fn(),
 }));
-vi.mock("../lib/helm", () => ({
+vi.mock("@srelens/core/lib/helm", () => ({
   listHelmReleases: listHelmReleasesMock,
   getHelmRelease: getHelmReleaseMock,
   helmVersion: vi.fn().mockResolvedValue({ version: "v3.14.0" }),
@@ -18,7 +18,7 @@ vi.mock("../lib/helm", () => ({
 // Namespace dropdown options come from this hook now (not the loaded
 // releases) — stub it so the dropdown has options without exercising the
 // real listNamespaces/listContexts backend calls.
-vi.mock("../lib/useNamespaceOptions", () => ({
+vi.mock("@srelens/core/lib/useNamespaceOptions", () => ({
   useNamespaceOptions: useNamespaceOptionsMock,
 }));
 // CodeMirror needs real layout; stand in a textarea.

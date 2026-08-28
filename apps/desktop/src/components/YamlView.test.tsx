@@ -6,8 +6,8 @@ const { getManifestMock, applyManifestMock } = vi.hoisted(() => ({
   getManifestMock: vi.fn(),
   applyManifestMock: vi.fn(),
 }));
-vi.mock("../lib/manifest", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/manifest")>();
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/manifest")>();
   return { ...actual, getManifest: getManifestMock, applyManifest: applyManifestMock };
 });
 // CodeMirror needs real layout (unavailable in jsdom); stand in a controlled
@@ -28,8 +28,8 @@ vi.mock("../ui/CodeEditor", () => ({
 // ManifestEditor gates Apply (fail-closed) on a preflight access check in edit
 // mode; stub the hook to "allowed" so these tests exercise the apply flow
 // rather than the RBAC gate (covered in ManifestEditor.test.tsx).
-vi.mock("../lib/access", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/access")>();
+vi.mock("@srelens/core/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/access")>();
   return {
     ...actual,
     useAccess: () => ({ allowed: () => true, reason: () => "", known: () => true, loading: false }),

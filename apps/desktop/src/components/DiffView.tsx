@@ -1,5 +1,5 @@
 import React from "react";
-import type { DiffDoc } from "../lib/manifest";
+import type { DiffDoc } from "@srelens/core";
 
 /**
  * Side-by-side render of one document's dry-run diff: current (live) lines on

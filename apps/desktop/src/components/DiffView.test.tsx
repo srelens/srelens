@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { DiffView } from "./DiffView";
-import type { DiffDoc } from "../lib/manifest";
+import type { DiffDoc } from "@srelens/core";
 
 function doc(rows: DiffDoc["rows"], over: Partial<DiffDoc> = {}): DiffDoc {
   return { kind: "ConfigMap", name: "a", namespace: "d", exists: true, changed: true, rows, currentResourceVersion: "1", ...over };

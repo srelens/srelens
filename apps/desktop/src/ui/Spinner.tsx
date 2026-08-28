@@ -1,5 +1,5 @@
 import React from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@/ui/utils";
 
 export interface SpinnerProps extends Omit<React.ComponentProps<"svg">, "aria-label"> {
   /** Accessible label; defaults to "Loading". */

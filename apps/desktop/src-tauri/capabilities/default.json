@@ -8,6 +8,7 @@
   "permissions": [
     "core:default",
     "core:webview:allow-set-webview-zoom",
+    "core:window:allow-set-decorations",
     "process:default",
     "deep-link:default",
     "window-state:default"

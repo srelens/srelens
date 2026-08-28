@@ -8,13 +8,23 @@ FROM node:26-slim@sha256:4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e7
 RUN npm install -g pnpm@9
 WORKDIR /src
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+# Every workspace member's manifest must land before install: @srelens/desktop
+# depends on @srelens/core as workspace:*, and pnpm cannot link a package whose
+# package.json is not in the image.
 COPY apps/desktop/package.json apps/desktop/package.json
+COPY packages/core/package.json packages/core/package.json
+COPY packages/ui-kit/package.json packages/ui-kit/package.json
+COPY packages/ui-next/package.json packages/ui-next/package.json
 RUN pnpm install --frozen-lockfile
+# Sources after install, so a source-only change does not re-run install.
+COPY packages/core packages/core
+COPY packages/ui-kit packages/ui-kit
+COPY packages/ui-next packages/ui-next
 COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
 # ---- Stage 2: build the headless server binary ------------------------------
-FROM rust:1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS backend
+FROM rust:1-slim-bookworm@sha256:94e9efa4033213dbb70d4f665527e7ece3944ddb7ba1dd2e43f6fd6e2490af58 AS backend
 WORKDIR /src
 # Only C toolchain + perl are needed (no GTK/webkit — this binary isn't Tauri).
 RUN apt-get update && apt-get install -y --no-install-recommends \

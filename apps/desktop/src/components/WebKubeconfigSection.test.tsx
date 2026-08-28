@@ -6,7 +6,7 @@ const webKubeconfigs = vi.hoisted(() => ({
   upload: vi.fn(),
   remove: vi.fn(),
 }));
-vi.mock("../lib/webKubeconfigs", () => webKubeconfigs);
+vi.mock("@srelens/core/lib/webKubeconfigs", () => webKubeconfigs);
 
 import { WebKubeconfigSection } from "./WebKubeconfigSection";
 

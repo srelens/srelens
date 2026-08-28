@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Boxes, Cloud, Database, Globe2, Server, Shield } from "lucide-react";
 import { avatarColor, avatarInitials } from "../ui";
-import type { ContextLogo, ContextProfile } from "../lib/settings";
+import type { ContextLogo, ContextProfile } from "@srelens/core";
 
 const LOGOS: Record<Exclude<ContextLogo, "initials" | "custom">, React.ElementType> = {
   cluster: Boxes,

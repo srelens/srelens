@@ -5,8 +5,8 @@ import {
   type PodSummary,
   type DeploymentSummary,
   type ServiceSummary,
-} from "../lib/workloads";
-import { useNamespaceOptions } from "../lib/useNamespaceOptions";
+} from "@srelens/core";
+import { useNamespaceOptions } from "@srelens/core/react";
 import {
   listNodes,
   listResource,
@@ -14,7 +14,7 @@ import {
   type NodeSummary,
   type ResourceRow,
   type EventSummary,
-} from "../lib/manifest";
+} from "@srelens/core";
 import {
   type StatefulSetSummary,
   type DaemonSetSummary,
@@ -24,47 +24,47 @@ import {
   type SecretSummary,
   type ResourceQuotaSummary,
   type LimitRangeSummary,
-} from "../lib/controllers";
+} from "@srelens/core";
 import {
   type IngressSummary,
   type EndpointSliceSummary,
   type NetworkPolicySummary,
-} from "../lib/network";
+} from "@srelens/core";
 import {
   formatStorageSize,
   type PvcSummary,
   type PvSummary,
   type StorageClassSummary,
-} from "../lib/storage";
+} from "@srelens/core";
 import {
   type ServiceAccountSummary,
   type RoleSummary,
   type ClusterRoleSummary,
   type RoleBindingSummary,
   type ClusterRoleBindingSummary,
-} from "../lib/rbac";
+} from "@srelens/core";
 
 type NodeRow = NodeSummary & { cpu?: number; memory?: number };
 type PodRow = PodSummary & { cpu?: number; memory?: number };
-import { watchResource, WATCHABLE_KINDS, type WatchHandle, type WatchStatus } from "../lib/watch";
-import type { TabViewState } from "../lib/tabView";
+import { watchResource, WATCHABLE_KINDS, type WatchHandle, type WatchStatus } from "@srelens/core";
+import type { TabViewState } from "@srelens/core";
 import {
   parseNamespaceSelection,
   serializeNamespaceSelection,
   watchNamespaceForSelection,
   rowInSelection,
-} from "../lib/namespaces";
+} from "@srelens/core";
 import { NamespaceMultiSelect } from "../ui/NamespaceMultiSelect";
 import { PodActions, ResourceActions, ServiceForwardAction, desiredReplicasForDetail } from "./DetailActions";
 import { BulkActionBar } from "./BulkActionBar";
 import { NodeCordonAction } from "./NodeCordonAction";
 import { ResourceDetail } from "./ResourceDetail";
 import { AssistantDrawer, type AssistantContext } from "./AssistantDrawer";
-import { isTauri } from "../transport/platform";
-import type { OpenResource } from "../lib/resourceNavigation";
-import { describeError } from "../lib/errors";
-import { ageSortValue } from "../lib/age";
-import { emptyListMessage } from "../lib/onboarding";
+import { isTauri } from "@srelens/core/platform";
+import type { OpenResource } from "@srelens/core";
+import { describeError } from "@srelens/core";
+import { ageSortValue } from "@srelens/core";
+import { emptyListMessage } from "@srelens/core";
 import {
   Table,
   filterTableData,
@@ -82,143 +82,10 @@ import {
   type Column,
   type StatusKind,
 } from "../ui";
+import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 
-export type ResourceKind =
-  | "overview"
-  | "pods"
-  | "deployments"
-  | "statefulsets"
-  | "daemonsets"
-  | "replicasets"
-  | "jobs"
-  | "cronjobs"
-  | "configmaps"
-  | "secrets"
-  | "resourcequotas"
-  | "limitranges"
-  | "horizontalpodautoscalers"
-  | "poddisruptionbudgets"
-  | "priorityclasses"
-  | "runtimeclasses"
-  | "leases"
-  | "mutatingwebhookconfigurations"
-  | "validatingwebhookconfigurations"
-  | "serviceaccounts"
-  | "clusterroles"
-  | "roles"
-  | "clusterrolebindings"
-  | "rolebindings"
-  | "services"
-  | "endpoints"
-  | "endpointslices"
-  | "ingresses"
-  | "ingressclasses"
-  | "networkpolicies"
-  | "persistentvolumeclaims"
-  | "persistentvolumes"
-  | "storageclasses"
-  | "namespaces"
-  | "events"
-  | "nodes"
-  | "portforwards"
-  | "helmreleases"
-  | "settings"
-  | "toolbox"
-  | "assistant"
-  | "newresource"
-  | "editresource";
 
-export const RESOURCE_LABELS: Record<ResourceKind, string> = {
-  overview: "Overview",
-  pods: "Pods",
-  deployments: "Deployments",
-  statefulsets: "StatefulSets",
-  daemonsets: "DaemonSets",
-  replicasets: "ReplicaSets",
-  jobs: "Jobs",
-  cronjobs: "CronJobs",
-  configmaps: "ConfigMaps",
-  secrets: "Secrets",
-  resourcequotas: "Resource Quotas",
-  limitranges: "Limit Ranges",
-  horizontalpodautoscalers: "Horizontal Pod Autoscalers",
-  poddisruptionbudgets: "Pod Disruption Budgets",
-  priorityclasses: "Priority Classes",
-  runtimeclasses: "Runtime Classes",
-  leases: "Leases",
-  mutatingwebhookconfigurations: "Mutating Webhook Configs",
-  validatingwebhookconfigurations: "Validating Webhook Configs",
-  serviceaccounts: "Service Accounts",
-  clusterroles: "Cluster Roles",
-  roles: "Roles",
-  clusterrolebindings: "Cluster Role Bindings",
-  rolebindings: "Role Bindings",
-  services: "Services",
-  endpoints: "Endpoints",
-  endpointslices: "Endpoint Slices",
-  ingresses: "Ingresses",
-  ingressclasses: "Ingress Classes",
-  networkpolicies: "Network Policies",
-  persistentvolumeclaims: "Persistent Volume Claims",
-  persistentvolumes: "Persistent Volumes",
-  storageclasses: "Storage Classes",
-  namespaces: "Namespaces",
-  events: "Events",
-  nodes: "Nodes",
-  portforwards: "Port Forwards",
-  helmreleases: "Helm Releases",
-  settings: "Settings",
-  toolbox: "Toolbox",
-  assistant: "Assistant",
-  newresource: "New Resource",
-  editresource: "Edit Resource",
-};
 
-export const K8S_KIND: Record<ResourceKind, string> = {
-  overview: "",
-  pods: "Pod",
-  deployments: "Deployment",
-  statefulsets: "StatefulSet",
-  daemonsets: "DaemonSet",
-  replicasets: "ReplicaSet",
-  jobs: "Job",
-  cronjobs: "CronJob",
-  configmaps: "ConfigMap",
-  secrets: "Secret",
-  resourcequotas: "ResourceQuota",
-  limitranges: "LimitRange",
-  horizontalpodautoscalers: "HorizontalPodAutoscaler",
-  poddisruptionbudgets: "PodDisruptionBudget",
-  priorityclasses: "PriorityClass",
-  runtimeclasses: "RuntimeClass",
-  leases: "Lease",
-  mutatingwebhookconfigurations: "MutatingWebhookConfiguration",
-  validatingwebhookconfigurations: "ValidatingWebhookConfiguration",
-  serviceaccounts: "ServiceAccount",
-  clusterroles: "ClusterRole",
-  roles: "Role",
-  clusterrolebindings: "ClusterRoleBinding",
-  rolebindings: "RoleBinding",
-  services: "Service",
-  endpoints: "Endpoints",
-  endpointslices: "EndpointSlice",
-  ingresses: "Ingress",
-  ingressclasses: "IngressClass",
-  networkpolicies: "NetworkPolicy",
-  persistentvolumeclaims: "PersistentVolumeClaim",
-  persistentvolumes: "PersistentVolume",
-  storageclasses: "StorageClass",
-  namespaces: "Namespace",
-  events: "Event",
-  nodes: "Node",
-  portforwards: "",
-  helmreleases: "",
-  settings: "",
-  toolbox: "",
-  assistant: "",
-  newresource: "",
-  editresource: "",
-};
 
 const CLUSTER_SCOPED: ResourceKind[] = [
   "nodes",

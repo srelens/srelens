@@ -6,7 +6,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { formatShortcut, groupedShortcuts, isApplePlatform } from "../lib/shortcuts";
+import { formatShortcut, groupedShortcuts, isApplePlatform } from "@srelens/core";
 
 /**
  * The `?` overlay: every shortcut the app answers to, grouped by where it

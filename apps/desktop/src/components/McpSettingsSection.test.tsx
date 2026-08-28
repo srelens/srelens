@@ -11,8 +11,8 @@ const { mcp } = vi.hoisted(() => ({
     srelensCliStatus: vi.fn(),
   },
 }));
-vi.mock("../lib/mcp", () => mcp);
-vi.mock("../lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+vi.mock("@srelens/core/lib/mcp", () => mcp);
+vi.mock("@srelens/core/lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
 const { mcpSecurity } = vi.hoisted(() => ({
   mcpSecurity: {
@@ -28,7 +28,7 @@ const { mcpSecurity } = vi.hoisted(() => ({
     vaultBiometricUnlock: vi.fn(),
   },
 }));
-vi.mock("../lib/mcpSecurity", () => mcpSecurity);
+vi.mock("@srelens/core/lib/mcpSecurity", () => mcpSecurity);
 
 import { McpSettingsSection } from "./McpSettingsSection";
 

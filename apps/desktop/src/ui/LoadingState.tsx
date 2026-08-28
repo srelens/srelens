@@ -1,6 +1,6 @@
 import React from "react";
 import { Spinner } from "./Spinner";
-import { cn } from "@/lib/utils";
+import { cn } from "@/ui/utils";
 
 export interface LoadingStateProps {
   /** Text shown beneath the spinner; also the spinner's accessible label. */

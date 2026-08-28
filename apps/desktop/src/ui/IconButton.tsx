@@ -18,6 +18,10 @@ export interface IconButtonProps {
  * A compact icon-only button (shadcn Button, ghost). The label is both the
  * accessible name and the hover tooltip (unless `title` overrides it), so the
  * icon never stands alone.
+ *
+ * The tooltip is `Button`'s own `title` handling — a Radix tooltip, not the
+ * native attribute with its fixed ~1 s delay (#376) — so a disabled button's
+ * reason stays reachable and there is one mechanism for every button.
  */
 export function IconButton({ icon, label, onClick, danger, disabled, title }: IconButtonProps) {
   const Icon = icon;

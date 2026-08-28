@@ -4,9 +4,9 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 const actions = vi.hoisted(() => ({ deleteResource: vi.fn(), rolloutRestart: vi.fn() }));
 const workloads = vi.hoisted(() => ({ deletePod: vi.fn(), evictPod: vi.fn() }));
 const notifyMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
-vi.mock("../lib/actions", () => actions);
-vi.mock("../lib/workloads", () => workloads);
-vi.mock("../lib/notify", () => ({ notify: notifyMock }));
+vi.mock("@srelens/core/lib/actions", () => actions);
+vi.mock("@srelens/core/lib/workloads", () => workloads);
+vi.mock("@srelens/core/lib/notify", () => ({ notify: notifyMock }));
 
 import { BulkActionBar } from "./BulkActionBar";
 

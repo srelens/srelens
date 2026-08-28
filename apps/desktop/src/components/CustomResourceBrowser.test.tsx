@@ -6,12 +6,12 @@ const { listCustomResourceMock, listNamespacesMock } = vi.hoisted(() => ({
   listCustomResourceMock: vi.fn(),
   listNamespacesMock: vi.fn(),
 }));
-vi.mock("../lib/crds", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/crds")>();
+vi.mock("@srelens/core/lib/crds", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/crds")>();
   return { ...actual, listCustomResource: listCustomResourceMock };
 });
-vi.mock("../lib/workloads", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/workloads")>();
+vi.mock("@srelens/core/lib/workloads", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/workloads")>();
   return { ...actual, listNamespaces: listNamespacesMock };
 });
 

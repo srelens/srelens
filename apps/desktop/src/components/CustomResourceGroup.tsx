@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Braces, ChevronRight } from "lucide-react";
-import { listCrds, type CrdRef } from "../lib/crds";
-import { cn } from "@/lib/utils";
+import { listCrds, type CrdRef } from "@srelens/core";
+import { cn } from "@/ui/utils";
 
 /**
  * The sidebar's "Custom Resources" group for one cluster: lazily discovers CRDs

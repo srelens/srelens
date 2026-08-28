@@ -8,9 +8,9 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-import { cn } from "@/lib/utils";
+import { cn } from "@/ui/utils";
 import { EmptyState } from "./Dashboard";
-import { nextSort, type TableSort } from "@/lib/tabView";
+import { nextSort, type TableSort } from "@srelens/core";
 
 export interface Column<T> {
   key: string;

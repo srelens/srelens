@@ -38,11 +38,11 @@ const { checkForUpdateMock, notifyUpdateAvailableMock } = vi.hoisted(() => ({
   checkForUpdateMock: vi.fn(),
   notifyUpdateAvailableMock: vi.fn(),
 }));
-vi.mock("./lib/updater", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./lib/updater")>()),
+vi.mock("@srelens/core/lib/updater", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/updater")>()),
   checkForUpdate: checkForUpdateMock,
 }));
-vi.mock("./lib/notify", () => ({
+vi.mock("@srelens/core/lib/notify", () => ({
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), updateAvailable: notifyUpdateAvailableMock },
 }));
 
@@ -85,7 +85,9 @@ vi.mock("./components/ClusterOverview", () => ({
     <div data-testid="overview">{context}</div>
   ),
 }));
-vi.mock("./components/ResourceBrowser", () => ({
+// The kind tables moved to lib/kinds; the reduced set stays mocked here so the
+// sidebar renders five entries rather than the real forty.
+vi.mock("@srelens/core/lib/kinds", () => ({
   RESOURCE_LABELS: {
     overview: "Overview",
     pods: "Pods",
@@ -94,6 +96,8 @@ vi.mock("./components/ResourceBrowser", () => ({
     assistant: "Assistant",
   },
   K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "", assistant: "" },
+}));
+vi.mock("./components/ResourceBrowser", () => ({
   ResourceBrowser: ({
     context,
     kind,
@@ -135,13 +139,13 @@ vi.mock("./components/Dock", () => ({
 // The host shell is desktop-only, and `isWeb` is decided once at import time,
 // so it has to be replaced rather than set up per test. `isTauri` is left real:
 // flipping it too would switch on every Tauri-only effect in these tests.
-vi.mock("./transport/platform", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./transport/platform")>()),
+vi.mock("@srelens/core/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/platform")>()),
   isWeb: false,
 }));
 const { listContextsMock } = vi.hoisted(() => ({ listContextsMock: vi.fn() }));
-vi.mock("./lib/clusters", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./lib/clusters")>()),
+vi.mock("@srelens/core/lib/clusters", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/clusters")>()),
   listContexts: listContextsMock,
 }));
 vi.mock("./components/EditResourceTab", () => ({

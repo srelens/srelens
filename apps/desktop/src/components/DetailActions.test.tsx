@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 
 const {
@@ -21,11 +22,11 @@ const {
   cronjobTriggerNowMock: vi.fn(),
   debugPodMock: vi.fn(),
 }));
-vi.mock("../lib/workloads", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/workloads")>();
+vi.mock("@srelens/core/lib/workloads", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/workloads")>();
   return { ...actual, deletePod: deletePodMock, evictPod: evictPodMock };
 });
-vi.mock("../lib/actions", () => ({
+vi.mock("@srelens/core/lib/actions", () => ({
   deleteResource: deleteResourceMock,
   scaleResource: scaleResourceMock,
   rolloutRestart: rolloutRestartMock,
@@ -34,21 +35,21 @@ vi.mock("../lib/actions", () => ({
   debugPod: debugPodMock,
 }));
 const { getObjectMock } = vi.hoisted(() => ({ getObjectMock: vi.fn() }));
-vi.mock("../lib/manifest", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/manifest")>();
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/manifest")>();
   return { ...actual, getObject: getObjectMock };
 });
 const { notifyMock } = vi.hoisted(() => ({
   notifyMock: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
-vi.mock("../lib/notify", () => ({ notify: notifyMock }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify: notifyMock }));
 
-vi.mock("../lib/access", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/access")>();
+vi.mock("@srelens/core/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/access")>();
   return { ...actual, useAccess: vi.fn() };
 });
-import { useAccess } from "../lib/access";
-import { describeError } from "../lib/errors";
+import { useAccess } from "@srelens/core/react";
+import { describeError } from "@srelens/core";
 
 import {
   PodActions,
@@ -74,6 +75,24 @@ function isDisabled(el: HTMLElement): boolean {
 }
 function titleOf(el: HTMLElement): string | null {
   return el.getAttribute("title");
+}
+// IconButton explains itself through a Radix tooltip, not a native title
+// (#376): hover its trigger — the button, or the wrapper around a disabled
+// one, which is what still gets pointer events — and read the tooltip.
+async function tooltipOf(el: HTMLElement): Promise<string | null> {
+  const trigger = el.closest<HTMLElement>('[data-slot="tooltip-trigger"]') ?? el;
+  await userEvent.hover(trigger);
+  // Resolved through THIS trigger's `aria-describedby` rather than by asking
+  // for the first thing with the tooltip role. Opening a menu focuses its
+  // first item, and Radix opens a tooltip on focus as well as on hover — so a
+  // bare `findByRole("tooltip")` returns the first item's tooltip however far
+  // down the menu the hover went, and the assertion reads a sibling's text.
+  const id = await waitFor(() => {
+    const described = trigger.getAttribute("aria-describedby");
+    if (!described) throw new Error("no tooltip is open for this trigger");
+    return described;
+  });
+  return document.getElementById(id)?.textContent ?? null;
 }
 
 beforeEach(() => {
@@ -218,7 +237,7 @@ describe("PodActions", () => {
     const items = await screen.findAllByRole("menuitem");
     expect(items.map((i) => i.textContent)).toEqual(["mongodb", "metrics", "generate-tls-certs"]);
     // The finished init container is shown but marked, not silently dropped.
-    expect(titleOf(items[2])).toBe("Shell into generate-tls-certs (not running)");
+    expect(await tooltipOf(items[2])).toBe("Shell into generate-tls-certs (not running)");
   });
 
   it("re-reads the containers when the menu opens", async () => {
@@ -868,7 +887,7 @@ describe("ResourceActions", () => {
 describe("PodActions RBAC gating", () => {
   const prodPod = { ...pod, namespace: "prod" };
 
-  it("disables the Delete control and explains why when the user can't delete", () => {
+  it("disables the Delete control and explains why when the user can't delete", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -878,7 +897,7 @@ describe("PodActions RBAC gating", () => {
     render(<PodActions context="kind-dev" pod={prodPod} onDeleted={() => {}} />);
     const del = screen.getByRole("button", { name: "Delete" });
     expect(isDisabled(del)).toBe(true);
-    expect(titleOf(del)).toEqual(expect.stringContaining("permission to delete pods in prod"));
+    expect(await tooltipOf(del)).toEqual(expect.stringContaining("permission to delete pods in prod"));
   });
 
   it("enables Delete when allowed", () => {
@@ -892,7 +911,7 @@ describe("PodActions RBAC gating", () => {
     expect(isDisabled(screen.getByRole("button", { name: "Delete" }))).toBe(false);
   });
 
-  it("disables Evict and explains why when the user can't evict", () => {
+  it("disables Evict and explains why when the user can't evict", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -902,10 +921,10 @@ describe("PodActions RBAC gating", () => {
     render(<PodActions context="kind-dev" pod={prodPod} onDeleted={() => {}} />);
     const evict = screen.getByRole("button", { name: "Evict" });
     expect(isDisabled(evict)).toBe(true);
-    expect(titleOf(evict)).toEqual(expect.stringContaining("permission to create pods/eviction in prod"));
+    expect(await tooltipOf(evict)).toEqual(expect.stringContaining("permission to create pods/eviction in prod"));
   });
 
-  it("disables the pod Edit control and explains why when the user can't patch pods", () => {
+  it("disables the pod Edit control and explains why when the user can't patch pods", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -915,7 +934,7 @@ describe("PodActions RBAC gating", () => {
     render(<PodActions context="kind-dev" pod={prodPod} onDeleted={() => {}} onEdit={() => {}} />);
     const edit = screen.getByRole("button", { name: "Edit" });
     expect(isDisabled(edit)).toBe(true);
-    expect(titleOf(edit)).toEqual(expect.stringContaining("permission to patch pods in prod"));
+    expect(await tooltipOf(edit)).toEqual(expect.stringContaining("permission to patch pods in prod"));
   });
 
   it("enables the pod Edit control when allowed", () => {
@@ -931,7 +950,7 @@ describe("PodActions RBAC gating", () => {
 });
 
 describe("ResourceActions RBAC gating", () => {
-  it("disables the Delete control and explains why when the user can't delete", () => {
+  it("disables the Delete control and explains why when the user can't delete", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -949,7 +968,7 @@ describe("ResourceActions RBAC gating", () => {
     );
     const del = screen.getByRole("button", { name: "Delete" });
     expect(isDisabled(del)).toBe(true);
-    expect(titleOf(del)).toEqual(expect.stringContaining("permission to delete deployments in prod"));
+    expect(await tooltipOf(del)).toEqual(expect.stringContaining("permission to delete deployments in prod"));
   });
 
   it("enables Delete when allowed", () => {
@@ -971,7 +990,7 @@ describe("ResourceActions RBAC gating", () => {
     expect(isDisabled(screen.getByRole("button", { name: "Delete" }))).toBe(false);
   });
 
-  it("disables Scale when the user can't patch the scale subresource", () => {
+  it("disables Scale when the user can't patch the scale subresource", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -989,7 +1008,7 @@ describe("ResourceActions RBAC gating", () => {
     );
     const scale = screen.getByRole("button", { name: "Scale" });
     expect(isDisabled(scale)).toBe(true);
-    expect(titleOf(scale)).toEqual(expect.stringContaining("permission to patch deployments/scale in prod"));
+    expect(await tooltipOf(scale)).toEqual(expect.stringContaining("permission to patch deployments/scale in prod"));
   });
 
   it("disables Restart when the user can't patch the workload", () => {

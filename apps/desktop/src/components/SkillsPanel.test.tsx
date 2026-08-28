@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-vi.mock("../lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
 const skillsLibMock = vi.hoisted(() => ({
   listSkills: vi.fn(),
@@ -9,7 +9,7 @@ const skillsLibMock = vi.hoisted(() => ({
   saveSkill: vi.fn(),
   deleteSkill: vi.fn(),
 }));
-vi.mock("../lib/skills", () => skillsLibMock);
+vi.mock("@srelens/core/lib/skills", () => skillsLibMock);
 
 const chatLibMock = vi.hoisted(() => ({
   listAgents: vi.fn(),
@@ -17,11 +17,11 @@ const chatLibMock = vi.hoisted(() => ({
   sendChat: vi.fn(),
   cancelChat: vi.fn(),
 }));
-vi.mock("../lib/chat", () => chatLibMock);
+vi.mock("@srelens/core/lib/chat", () => chatLibMock);
 
 import { SkillsPanel } from "./SkillsPanel";
-import type { Skill, SkillMeta } from "../lib/skills";
-import type { AgentEvent, AgentInfo } from "../lib/chat";
+import type { Skill, SkillMeta } from "@srelens/core";
+import type { AgentEvent, AgentInfo } from "@srelens/core";
 
 const AVAILABLE_AGENT: AgentInfo = {
   kind: "claude",

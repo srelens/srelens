@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { LogIn, LogOut, Pencil } from "lucide-react";
 import { Button } from "../ui";
-import { listClusters, clusterLogout, type OidcClusterRow } from "../lib/webClusters";
-import { notify } from "../lib/notify";
-import { isTauri } from "../transport/platform";
-import { invokeCommand } from "../transport/transport";
+import { listClusters, clusterLogout, type OidcClusterRow } from "@srelens/core";
+import { notify } from "@srelens/core";
+import { isTauri } from "@srelens/core/platform";
+import { invokeCommand } from "@srelens/core/transport";
 
 export interface WebClusterSignInSectionProps {
   /** Bumped by the parent (e.g. after adding a cluster) to force a refresh. */

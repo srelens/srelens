@@ -13,25 +13,25 @@ const mocks = vi.hoisted(() => ({
   clearPersistedOverview: vi.fn(),
 }));
 
-vi.mock("../lib/workloads", () => ({
+vi.mock("@srelens/core/lib/workloads", () => ({
   listNamespaces: mocks.listNamespaces,
   listPods: mocks.listPods,
 }));
 
-vi.mock("../lib/manifest", () => ({
+vi.mock("@srelens/core/lib/manifest", () => ({
   listNodes: mocks.listNodes,
   listResource: mocks.listResource,
   listEvents: mocks.listEvents,
 }));
 
-vi.mock("../lib/overviewSnapshot", () => ({
+vi.mock("@srelens/core/lib/overviewSnapshot", () => ({
   loadPersistedOverview: mocks.loadPersistedOverview,
   persistOverview: mocks.persistOverview,
   clearPersistedOverview: mocks.clearPersistedOverview,
 }));
 
 import { ClusterOverview, clearClusterOverviewCache } from "./ClusterOverview";
-import type { OverviewSnapshot } from "../lib/overviewSnapshot";
+import type { OverviewSnapshot } from "@srelens/core";
 
 beforeEach(() => {
   clearClusterOverviewCache();

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { getManifest } from "../lib/manifest";
+import { getManifest } from "@srelens/core";
 import { Spinner } from "../ui";
 import { ManifestEditor } from "./ManifestEditor";
 

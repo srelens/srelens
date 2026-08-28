@@ -1,10 +1,11 @@
 import React, { useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, MessageSquarePlus, Plus, Trash2, Wrench } from "lucide-react";
 import { Button } from "../ui";
-import { relativeTime } from "../lib/relativeTime";
-import type { SessionMeta } from "../lib/chatHistory";
+import { relativeTime } from "@srelens/core";
+import type { SessionMeta } from "@srelens/core";
 import { AssistantConversation, type AssistantConversationHandle } from "./AssistantConversation";
 import { SkillsPanel } from "./SkillsPanel";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /**
  * Left history rail for the full-tab assistant: New Chat plus the saved
@@ -83,15 +84,16 @@ function HistoryRail({
                 key={s.id}
                 className="group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm hover:bg-accent"
               >
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 truncate text-left"
-                  title={s.title}
-                  onClick={() => onSelectSession(s.id)}
-                >
-                  <span className="block truncate font-medium">{s.title}</span>
-                  <span className="block text-xs text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
-                </button>
+                <TitleTooltip title={s.title}>
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left"
+                    onClick={() => onSelectSession(s.id)}
+                  >
+                    <span className="block truncate font-medium">{s.title}</span>
+                    <span className="block text-xs text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
+                  </button>
+                </TitleTooltip>
                 <button
                   type="button"
                   aria-label={`Delete ${s.title}`}

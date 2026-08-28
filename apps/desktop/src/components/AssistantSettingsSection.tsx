@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Check, ChevronDown, RefreshCw, Trash2 } from "lucide-react";
 import { Button, TextInput } from "../ui";
-import { notify } from "../lib/notify";
-import { listAgents, type AgentInfo } from "../lib/chat";
+import { notify } from "@srelens/core";
+import { listAgents, type AgentInfo } from "@srelens/core";
 import {
   PROVIDERS,
   providerSlug,
@@ -15,7 +15,7 @@ import {
   type LlmSettings,
   type ModelInfo,
   type ProviderKind,
-} from "../lib/llm";
+} from "@srelens/core";
 
 const DEFAULT_SETTINGS: LlmSettings = {
   defaultProvider: "anthropic",

@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Clock, Download, DownloadCloud, History, Pause, Play, RefreshCw, WrapText } from "lucide-react";
-import { podLogs, podsForSelector } from "../lib/workloads";
-import { getObject } from "../lib/manifest";
-import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "../lib/logsStream";
-import { saveTextFile } from "../lib/files";
+import { podLogs, podsForSelector } from "@srelens/core";
+import { getObject } from "@srelens/core";
+import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "@srelens/core";
+import { saveTextFile } from "@srelens/core";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
 import { computeLogWindow } from "./logWindow";
-import { isTauri } from "../transport/platform";
+import { isTauri } from "@srelens/core/platform";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /**
  * Save `content` to `filename`: in the desktop app via the native save
@@ -91,22 +92,23 @@ function ToggleButton({
   title?: string;
 }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      aria-pressed={active}
-      title={title ?? label}
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors disabled:opacity-40 ${
-        active
-          ? "bg-primary/15 text-primary"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground"
-      }`}
-    >
-      <Icon className="size-3.5" aria-hidden={true} />
-      {text}
-    </button>
+    <TitleTooltip title={title ?? label} disabled={disabled}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={active}
+        onClick={onClick}
+        disabled={disabled}
+        className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors disabled:opacity-40 ${
+          active
+            ? "bg-primary/15 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+        }`}
+      >
+        <Icon className="size-3.5" aria-hidden={true} />
+        {text}
+      </button>
+    </TitleTooltip>
   );
 }
 
@@ -406,7 +408,10 @@ export function LogsView({
   }
 
   // Full dump: every container of every in-scope pod, ignoring the container
-  // filter, each section headed `==> pod/container <==` (tail-style).
+  // filter, each section headed `==> pod/container <==` (tail-style). Asks
+  // for every retained line and leaves the view's tail/since bounds out:
+  // inheriting them made "all" mean "the last 200 lines" (#353). `previous`
+  // and `timestamps` still apply — they pick which stream, not how much.
   function downloadAll() {
     const base = srcType === "pod" ? srcPod : srcName;
     setSaveError("");
@@ -421,8 +426,7 @@ export function LogsView({
             container: c,
             previous,
             timestamps,
-            tailLines,
-            sinceSeconds,
+            allLines: true,
           });
           parts.push(`==> ${p}${c ? `/${c}` : ""} <==`);
           parts.push(out.error ? `(error: ${out.error})` : out.logs ?? "");
@@ -540,10 +544,10 @@ export function LogsView({
           <IconButton icon={Download} label="Download" onClick={download} disabled={entries.length === 0} />
           <IconButton
             icon={DownloadCloud}
-            label="Download all containers"
+            label="Download all container logs"
             onClick={downloadAll}
             disabled={savingAll || targetPods.length === 0}
-            title="Download every container's logs for the in-scope pods"
+            title="Save everything the cluster still holds for every container of these pods, not just the lines shown here"
           />
           <IconButton icon={RefreshCw} label="Refresh" onClick={() => load()} disabled={follow || loading} />
         </div>

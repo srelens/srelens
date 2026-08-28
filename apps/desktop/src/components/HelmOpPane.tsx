@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { startHelmOp } from "../lib/helm";
+import { startHelmOp } from "@srelens/core";
 import type { DockSession } from "./Dock";
 
 export function HelmOpPane({ session }: { session: DockSession }) {

@@ -6,17 +6,17 @@ import {
   stripDataUri,
   type AssistantConversationHandle,
 } from "./AssistantConversation";
-import * as chat from "../lib/chat";
-import * as chatHistory from "../lib/chatHistory";
-import type { StoredMessage } from "../lib/chatHistory";
-import * as prompts from "../lib/prompts";
-import * as skills from "../lib/skills";
+import * as chat from "@srelens/core";
+import * as chatHistory from "@srelens/core";
+import type { StoredMessage } from "@srelens/core";
+import * as prompts from "@srelens/core";
+import * as skills from "@srelens/core";
 
-vi.mock("../lib/chat");
-vi.mock("../lib/chatHistory");
-vi.mock("../lib/prompts");
-vi.mock("../lib/skills");
-vi.mock("../lib/mcpSecurity", () => ({
+vi.mock("@srelens/core/lib/chat");
+vi.mock("@srelens/core/lib/chatHistory");
+vi.mock("@srelens/core/lib/prompts");
+vi.mock("@srelens/core/lib/skills");
+vi.mock("@srelens/core/lib/mcpSecurity", () => ({
   respondToConfirm: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({

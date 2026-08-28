@@ -11,8 +11,8 @@ const toolbox = vi.hoisted(() => ({
   removePlugin: vi.fn(),
   upgradePlugin: vi.fn(),
 }));
-vi.mock("../lib/toolbox", () => toolbox);
-vi.mock("../lib/clusters", () => ({
+vi.mock("@srelens/core/lib/toolbox", () => toolbox);
+vi.mock("@srelens/core/lib/clusters", () => ({
   listContexts: vi.fn().mockResolvedValue({ contexts: [{ name: "dev" }] }),
 }));
 

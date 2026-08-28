@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { listNamespaces, listPods } from "../lib/workloads";
-import { listNodes, listResource, listEvents } from "../lib/manifest";
+import { listNamespaces, listPods } from "@srelens/core";
+import { listNodes, listResource, listEvents } from "@srelens/core";
 import {
   DashboardSegmentBar,
   EmptyState,
@@ -14,16 +14,16 @@ import {
   Spinner,
   StatusMeter,
 } from "../ui";
-import { describeError, isExecAuthError } from "../lib/errors";
+import { describeError, isExecAuthError } from "@srelens/core";
 import {
   clearPersistedOverview,
   loadPersistedOverview,
   persistOverview,
   type OverviewSnapshot,
   type OverviewStats as Stats,
-} from "../lib/overviewSnapshot";
-import { isTauri } from "../transport/platform";
-import type { ResourceKind } from "./ResourceBrowser";
+} from "@srelens/core";
+import { isTauri } from "@srelens/core/platform";
+import type { ResourceKind } from "@srelens/core";
 
 const CACHE_TTL_MS = 30_000;
 const overviewCache = new Map<string, OverviewSnapshot>();

@@ -1,17 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { AssistantTab } from "./AssistantTab";
-import * as chat from "../lib/chat";
-import * as chatHistory from "../lib/chatHistory";
-import * as skills from "../lib/skills";
+import * as chat from "@srelens/core";
+import * as chatHistory from "@srelens/core";
+import * as skills from "@srelens/core";
 
 // This repo doesn't pull in @testing-library/jest-dom, so assert directly on
 // DOM presence (`getByText`/`queryByText` throws-or-null) instead of
 // `toBeInTheDocument`.
 
-vi.mock("../lib/chat");
-vi.mock("../lib/chatHistory");
-vi.mock("../lib/skills");
+vi.mock("@srelens/core/lib/chat");
+vi.mock("@srelens/core/lib/chatHistory");
+vi.mock("@srelens/core/lib/skills");
 // Stub the Skills panel down to a close affordance so a test can drive its
 // close callback without standing up the whole editor dialog.
 vi.mock("./SkillsPanel", () => ({
@@ -19,7 +19,7 @@ vi.mock("./SkillsPanel", () => ({
     <button onClick={onClose}>close-skills-panel</button>
   ),
 }));
-vi.mock("../lib/mcpSecurity", () => ({
+vi.mock("@srelens/core/lib/mcpSecurity", () => ({
   respondToConfirm: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({

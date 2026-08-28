@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { TerminalPane } from "./TerminalPane";
-import { podExecDriver } from "../lib/terminalDriver";
+import { podExecDriver } from "@srelens/core";
 
 /**
  * Interactive in-pod shell (and node shells, via a `command` override). A thin

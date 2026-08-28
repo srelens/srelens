@@ -2,17 +2,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantDrawer } from "./AssistantDrawer";
-import * as chat from "../lib/chat";
-import * as chatHistory from "../lib/chatHistory";
+import * as chat from "@srelens/core";
+import * as chatHistory from "@srelens/core";
 
 const respondToConfirm = vi.fn();
 const eventHandlers: Record<string, (e: { payload: unknown }) => void> = {};
 const emitConfirm = (payload: unknown) => eventHandlers["mcp://confirm-request"]({ payload });
 const emitConfirmResolved = (id: string) => eventHandlers["mcp://confirm-resolved"]({ payload: { id } });
 
-vi.mock("../lib/chat");
-vi.mock("../lib/chatHistory");
-vi.mock("../lib/mcpSecurity", () => ({
+vi.mock("@srelens/core/lib/chat");
+vi.mock("@srelens/core/lib/chatHistory");
+vi.mock("@srelens/core/lib/mcpSecurity", () => ({
   respondToConfirm: (...a: unknown[]) => respondToConfirm(...a),
 }));
 vi.mock("@tauri-apps/api/event", () => ({

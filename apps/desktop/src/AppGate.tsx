@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { App } from "./App";
 import { LoginScreen } from "./components/LoginScreen";
-import { fetchMe, type Me } from "./lib/session";
-import { isWeb } from "./transport/platform";
+import { fetchMe, type Me } from "@srelens/core";
+import { isWeb } from "@srelens/core/platform";
 import { LoadingState } from "./ui";
 
 type Auth = { status: "pending" } | { status: "authed"; me: Me | null } | { status: "anon" };

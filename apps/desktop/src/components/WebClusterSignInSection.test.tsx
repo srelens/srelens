@@ -11,14 +11,14 @@ const { listClustersMock, clusterLogoutMock, notifySuccessMock, notifyErrorMock,
     notifyErrorMock: vi.fn(),
     invokeCommandMock: vi.fn(),
   }));
-vi.mock("../lib/webClusters", () => ({
+vi.mock("@srelens/core/lib/webClusters", () => ({
   listClusters: listClustersMock,
   clusterLogout: clusterLogoutMock,
 }));
-vi.mock("../lib/notify", () => ({
+vi.mock("@srelens/core/lib/notify", () => ({
   notify: { success: notifySuccessMock, error: notifyErrorMock },
 }));
-vi.mock("../transport/transport", () => ({ invokeCommand: invokeCommandMock }));
+vi.mock("@srelens/core/transport", () => ({ invokeCommand: invokeCommandMock }));
 
 import { WebClusterSignInSection } from "./WebClusterSignInSection";
 

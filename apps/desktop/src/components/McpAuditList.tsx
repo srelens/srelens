@@ -1,4 +1,4 @@
-import { auditTail, type AuditEntry } from "../lib/mcpSecurity";
+import { auditTail, type AuditEntry } from "@srelens/core";
 import { Badge, Button, Spinner, Table, type BadgeVariant, type Column } from "../ui";
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";

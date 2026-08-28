@@ -9,8 +9,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button, TextInput, Field, Select, Spinner } from "../ui";
 import { DiffView } from "./DiffView";
-import { helmTemplate, helmSearchRepo, diffTextLines, type HelmChartRef } from "../lib/helm";
-import type { DiffDoc } from "../lib/manifest";
+import { helmTemplate, helmSearchRepo, diffTextLines, type HelmChartRef } from "@srelens/core";
+import type { DiffDoc } from "@srelens/core";
 
 const CodeEditor = lazy(() => import("../ui/CodeEditor").then((m) => ({ default: m.CodeEditor })));
 

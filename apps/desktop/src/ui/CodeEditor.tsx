@@ -24,8 +24,8 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { autocompletion, completionKeymap, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import { parseAllDocuments } from "yaml";
 import { tags as t } from "@lezer/highlight";
-import type { SchemaBundle } from "../lib/schema";
-import { extractApiVersionKind, pathAtCursor, fieldCompletions, valueCompletions } from "../lib/schemaComplete";
+import type { SchemaBundle } from "@srelens/core";
+import { extractApiVersionKind, pathAtCursor, fieldCompletions, valueCompletions } from "@srelens/core";
 
 /**
  * Parse YAML (one or more `---`-separated documents) and return syntax

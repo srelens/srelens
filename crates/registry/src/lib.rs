@@ -517,7 +517,9 @@ mod tests {
     fn capability_catalog_json_is_in_sync() {
         // The committed JSON is the bridge to the frontend palette audit. It MUST
         // equal the live registry; regenerate with `UPDATE_CATALOG=1 cargo test`.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/desktop/src/lib/capability-catalog.json");
+        // Lives with the service layer it describes (@srelens/core), which is
+        // what the frontend palette audit reads.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/core/src/lib/capability-catalog.json");
         let want = serde_json::to_string_pretty(&capability_catalog()).unwrap() + "\n";
         if std::env::var("UPDATE_CATALOG").is_ok() {
             std::fs::write(path, &want).unwrap();

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-vi.mock("../lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
 const { mcpSecurity } = vi.hoisted(() => ({
   mcpSecurity: {
@@ -13,7 +13,7 @@ const { mcpSecurity } = vi.hoisted(() => ({
     vaultChangePassword: vi.fn(),
   },
 }));
-vi.mock("../lib/mcpSecurity", () => mcpSecurity);
+vi.mock("@srelens/core/lib/mcpSecurity", () => mcpSecurity);
 
 import { SecuritySettingsSection } from "./SecuritySettingsSection";
 

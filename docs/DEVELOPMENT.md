@@ -124,7 +124,7 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 | --- | --- |
 | `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly. |
 | `assert_mutating_capabilities_are_gated` (`crates/mcp/src/completeness.rs`) | Every capability that is not `read_only` is `requires_confirm`. Note the predicate is *mutating*, not *destructive* — a non-destructive capability can still need consent. |
-| `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `apps/desktop/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
+| `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
 | `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `integration` CI job. |
 
 ### Long-lived streams
@@ -134,11 +134,11 @@ Watches, pod exec, log tails, terminals, helm operations, and port-forwards don'
 - **Desktop** implements `EventSink` over Tauri events (`apps/desktop/src-tauri/src/sink.rs`); the streams are started by dedicated Tauri commands (`start_resource_watch`, `start_pod_exec`, `start_log_stream`, `start_port_forward`, plus matching stop/input commands).
 - **Web** implements it over WebSocket frames (`crates/server/src/ws/`, `crates/server/src/streams.rs`), started through `/api/command/*`.
 
-The frontend side is identical in both cases and lives in `apps/desktop/src/lib/` (`watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
+The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
 
 ### The transport shim
 
-`apps/desktop/src/transport/` is the only frontend code that knows which host it is running in. `transport.ts` picks `tauriTransport` or `webTransport` at load time based on `isTauri()`, and re-exports one interface (`invokeCapability`, `invokeCommand`, `on`, `subscribe`, …). Everything else — stores, components, tests — depends only on that interface. This is what makes the UI testable in jsdom *and* what makes web mode possible at all, so keep `@tauri-apps/api` imports confined to `src/transport/`.
+`packages/core/src/transport/` is the only frontend code that knows which host it is running in. `transport.ts` picks `tauriTransport` or `webTransport` at load time based on `isTauri()`, and re-exports one interface (`invokeCapability`, `invokeCommand`, `on`, `subscribe`, …). Everything else — stores, components, tests — depends only on that interface. This is what makes the UI testable in jsdom *and* what makes web mode possible at all, so keep `@tauri-apps/api` imports confined to `packages/core/src/transport/`.
 
 ### Running the MCP server
 
@@ -198,7 +198,11 @@ Development is **test-driven — this is mandatory, not aspirational**:
 
 **Coverage floors, enforced in CI:**
 
-- TypeScript: **80% lines** (Vitest `thresholds` in `apps/desktop/vitest.config.ts`). Ratcheting toward 85 — see issue #28. `src/main.tsx`, the test setup, and `PodTerminal.tsx` (xterm DOM integration, verified live) are excluded.
+- TypeScript: **85% lines, 80% branches, 76% functions** (Vitest `thresholds` in the root `vitest.config.ts`).
+  Measured across `apps/desktop` and `packages/core` together: the floors were set when all
+  frontend code lived in one package, and each alone now sits below one of them. Run with
+  `pnpm test` — `pnpm -r test` skips the workspace root and so enforces nothing.
+  `src/main.tsx`, the test setup, and `PodTerminal.tsx` (xterm DOM integration, verified live) are excluded.
 - Rust: **55% lines, ratcheting toward 85** — the Tauri runtime shell is excluded from measurement via `--ignore-filename-regex`, and much of `crates/kube` needs a live cluster to exercise; the floor rises as cluster-bound integration tests land.
 
 Never lower either floor.
@@ -263,9 +267,9 @@ technology, and its version.
 1. **Write the handler test-first** in the right `crates/kube` module (or a new one): a `pub fn <name>_capability(cache: …) -> Capability` returning schemas derived with `schemars` and an async handler.
 2. **Register it** in `crates/registry/src/lib.rs` — the Tauri, web, and MCP surfaces all appear automatically.
 3. **Annotate safety** — mark it `read_only`, or `requires_confirm` (plus `destructive`/`sensitive` where they apply) so MCP hints and UI confirmations are driven from one place. A mutating capability that is not confirm-gated fails the build. (Web denial is *not* annotation-driven — see step 7.)
-4. **Regenerate the catalog** — `UPDATE_CATALOG=1 cargo test -p srelens-registry`, and commit the updated `apps/desktop/src/lib/capability-catalog.json`.
+4. **Regenerate the catalog** — `UPDATE_CATALOG=1 cargo test -p srelens-registry`, and commit the updated `packages/core/src/lib/capability-catalog.json`.
 5. **Add an e2e case** in `apps/desktop/src-tauri/tests/e2e.rs`, or exclude it there with an explicit reason.
-6. **Consume it in the UI** — call it through the data layer in `apps/desktop/src/lib/`, never directly from a component.
+6. **Consume it in the UI** — call it through the data layer in `@srelens/core`, never directly from a component.
 7. **Consider web mode** — if the capability cannot be safe on a shared multi-user container, add it to `WEB_DENIED_CAPABILITIES` in `crates/server/src/api.rs`.
 8. Run `cargo test && pnpm test` and check coverage before opening a PR.
 

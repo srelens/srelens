@@ -4,7 +4,7 @@ import React from "react";
 
 const listContexts = vi.fn();
 
-vi.mock("../lib/clusters", () => ({
+vi.mock("@srelens/core/lib/clusters", () => ({
   listContexts: () => listContexts(),
 }));
 

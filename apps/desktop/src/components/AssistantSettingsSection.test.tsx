@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-vi.mock("../lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
 const { llm, chat } = vi.hoisted(() => ({
   llm: {
@@ -14,11 +14,11 @@ const { llm, chat } = vi.hoisted(() => ({
   },
   chat: { listAgents: vi.fn() },
 }));
-vi.mock("../lib/llm", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/llm")>();
+vi.mock("@srelens/core/lib/llm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/llm")>();
   return { ...actual, ...llm };
 });
-vi.mock("../lib/chat", () => chat);
+vi.mock("@srelens/core/lib/chat", () => chat);
 
 import { AssistantSettingsSection } from "./AssistantSettingsSection";
 

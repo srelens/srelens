@@ -5,7 +5,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 const respondToConfirm = vi.fn();
 const handlers: Record<string, (e: { payload: unknown }) => void> = {};
 
-vi.mock("../lib/mcpSecurity", () => ({
+vi.mock("@srelens/core/lib/mcpSecurity", () => ({
   respondToConfirm: (...a: unknown[]) => respondToConfirm(...a),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -19,7 +19,7 @@ const emitResolved = (id: string) => handlers["mcp://confirm-resolved"]({ payloa
 const { notify } = vi.hoisted(() => ({
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
-vi.mock("../lib/notify", () => ({ notify }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify }));
 
 import { McpConfirmDialog } from "./McpConfirmDialog";
 

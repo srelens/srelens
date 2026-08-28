@@ -3,8 +3,8 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import React from "react";
 
 const { applyManifestMock } = vi.hoisted(() => ({ applyManifestMock: vi.fn() }));
-vi.mock("../lib/manifest", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../lib/manifest")>()),
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/manifest")>()),
   applyManifest: applyManifestMock,
 }));
 vi.mock("../ui/CodeEditor", () => ({

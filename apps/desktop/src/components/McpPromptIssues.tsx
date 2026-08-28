@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { promptIssues, type PromptIssue } from "../lib/mcpSecurity";
+import { promptIssues, type PromptIssue } from "@srelens/core";
 
 interface McpPromptIssuesProps {
   /**

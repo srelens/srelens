@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React, { useState } from "react";
 
 const { applyManifestMock, diffManifestMock, notifyMock } = vi.hoisted(() => ({
@@ -7,24 +8,24 @@ const { applyManifestMock, diffManifestMock, notifyMock } = vi.hoisted(() => ({
   diffManifestMock: vi.fn(),
   notifyMock: { success: vi.fn(), error: vi.fn(), info: vi.fn(), updateAvailable: vi.fn() },
 }));
-vi.mock("../lib/manifest", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../lib/manifest")>()),
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/manifest")>()),
   applyManifest: applyManifestMock,
   diffManifest: diffManifestMock,
   validateManifest: vi.fn().mockResolvedValue({ valid: true }),
 }));
-vi.mock("../lib/notify", () => ({ notify: notifyMock }));
-vi.mock("../lib/schema", () => ({ openApiSchema: vi.fn().mockResolvedValue({ error: "n/a" }) }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify: notifyMock }));
+vi.mock("@srelens/core/lib/schema", () => ({ openApiSchema: vi.fn().mockResolvedValue({ error: "n/a" }) }));
 vi.mock("../ui/CodeEditor", () => ({
   CodeEditor: ({ value, onChange, ariaLabel }: { value: string; onChange?: (v: string) => void; ariaLabel?: string }) => (
     <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange?.(e.target.value)} />
   ),
 }));
-vi.mock("../lib/access", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/access")>();
+vi.mock("@srelens/core/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/access")>();
   return { ...actual, useAccess: vi.fn() };
 });
-import { useAccess } from "../lib/access";
+import { useAccess } from "@srelens/core/react";
 
 import { ManifestEditor } from "./ManifestEditor";
 
@@ -32,6 +33,15 @@ import { ManifestEditor } from "./ManifestEditor";
 // DOM properties instead of `toBeDisabled` sugar.
 function isDisabled(el: HTMLElement): boolean {
   return (el as HTMLButtonElement).disabled;
+}
+
+// A disabled control explains itself through a Radix tooltip, not a native
+// title (#376): hover its trigger — the wrapper around a disabled button,
+// which is what still receives pointer events — and read the tooltip.
+async function tooltipOf(el: HTMLElement): Promise<string | null> {
+  const trigger = el.closest<HTMLElement>('[data-slot="tooltip-trigger"]') ?? el;
+  await userEvent.hover(trigger);
+  return (await screen.findByRole("tooltip")).textContent;
 }
 
 function Harness({ mode }: { mode: "create" | "edit" }) {
@@ -334,7 +344,7 @@ describe("ManifestEditor", () => {
     );
     const btn = screen.getByRole("button", { name: /apply/i });
     expect(isDisabled(btn)).toBe(true);
-    expect(btn.getAttribute("title")).toBe("You don't have permission to patch deployments in prod");
+    expect(await tooltipOf(btn)).toBe("You don't have permission to patch deployments in prod");
   });
 
   it("edit mode: disables Apply while the access check is still loading (fail-closed, no title yet)", async () => {
@@ -400,7 +410,7 @@ describe("ManifestEditor", () => {
     );
     const btn = screen.getByRole("button", { name: /apply/i });
     expect(isDisabled(btn)).toBe(true);
-    expect(btn.getAttribute("title")).toBe("You don't have permission to patch deployments in prod");
+    expect(await tooltipOf(btn)).toBe("You don't have permission to patch deployments in prod");
   });
 
   it("edit mode: does NOT gate Apply when the manifest declares no namespace (avoids a wrong-scope false-disable)", async () => {

@@ -3,8 +3,8 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import React from "react";
 
 const { listContextsMock } = vi.hoisted(() => ({ listContextsMock: vi.fn() }));
-vi.mock("../lib/clusters", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/clusters")>();
+vi.mock("@srelens/core/lib/clusters", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/clusters")>();
   return { ...actual, listContexts: listContextsMock };
 });
 

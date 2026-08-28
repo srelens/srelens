@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import React from "react";
 import { ShortcutCheatSheet } from "./ShortcutCheatSheet";
-import { visibleShortcuts } from "../lib/shortcuts";
+import { visibleShortcuts } from "@srelens/core";
 
 describe("ShortcutCheatSheet", () => {
   it("lists every shortcut the registry declares", () => {

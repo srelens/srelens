@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { HelmOpDialog } from "./HelmOpDialog";
-import type { HelmChartRef } from "../lib/helm";
+import type { HelmChartRef } from "@srelens/core";
 
 const helmSearchRepoMock = vi.fn(
   async (_context: string, _chart: string): Promise<{ entries?: HelmChartRef[]; error?: string }> => ({ entries: [] }),
 );
 
-vi.mock("../lib/helm", async (orig) => {
-  const actual = await orig<typeof import("../lib/helm")>();
+vi.mock("@srelens/core/lib/helm", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core/lib/helm")>();
   return {
     ...actual,
     helmTemplate: vi.fn(async () => ({ output: "apiVersion: v1\nkind: ConfigMap\ndata:\n  x: '2'" })),

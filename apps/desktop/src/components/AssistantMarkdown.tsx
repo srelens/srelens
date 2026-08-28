@@ -1,5 +1,5 @@
-import { parseAssistantMarkdown } from "../lib/assistantMarkdown";
-import type { NoteSpan } from "../lib/releaseNotes";
+import { parseAssistantMarkdown } from "@srelens/core";
+import type { NoteSpan } from "@srelens/core";
 
 // Renders an assistant chat reply as real markdown (bold, inline code,
 // bullets, numbered lists, fenced code) instead of dumping raw `**`/`` ` ``/`-`

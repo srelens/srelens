@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "./SettingsView";
-import { DEFAULT_WORKSPACE_LAYOUT } from "../lib/settings";
+import { DEFAULT_WORKSPACE_LAYOUT } from "@srelens/core";
 
 // These tests exercise desktop-only UI (native kubeconfig picker, in-app
 // updater, relaunch) that Task 5 gates behind `isTauri()`. Give the suite a
@@ -20,22 +20,22 @@ const fileMocks = vi.hoisted(() => ({
   savePastedKubeconfig: vi.fn(),
 }));
 
-vi.mock("../lib/files", () => fileMocks);
+vi.mock("@srelens/core/lib/files", () => fileMocks);
 
 const updaterMocks = vi.hoisted(() => ({
   checkForUpdate: vi.fn(),
   installUpdate: vi.fn(),
 }));
-vi.mock("../lib/updater", () => updaterMocks);
+vi.mock("@srelens/core/lib/updater", () => updaterMocks);
 
 const transportMocks = vi.hoisted(() => ({
   appVersion: vi.fn(async () => "0.1.0"),
   relaunchApp: vi.fn(async () => {}),
   setWebviewZoom: vi.fn(async () => {}),
 }));
-vi.mock("../transport/transport", () => transportMocks);
+vi.mock("@srelens/core/transport", () => transportMocks);
 
-vi.mock("../lib/clusters", () => ({
+vi.mock("@srelens/core/lib/clusters", () => ({
   listContexts: () =>
     Promise.resolve({
       contexts: [

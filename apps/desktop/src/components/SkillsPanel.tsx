@@ -8,9 +8,9 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Button, ConfirmDialog, Field, TextInput } from "../ui";
-import { notify } from "../lib/notify";
-import { listSkills, loadSkill, saveSkill, deleteSkill, type Skill, type SkillMeta } from "../lib/skills";
-import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "../lib/chat";
+import { notify } from "@srelens/core";
+import { listSkills, loadSkill, saveSkill, deleteSkill, type Skill, type SkillMeta } from "@srelens/core";
+import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
 
 const BLANK: Skill = { name: "", description: "", body: "" };
 

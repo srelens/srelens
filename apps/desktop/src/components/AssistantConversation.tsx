@@ -3,10 +3,12 @@ import { Bot, Check, ChevronDown, ChevronRight, Copy, Paperclip, Sparkles, Wrenc
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
-import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo, type ToolStatus } from "../lib/chat";
-import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
-import { getPrompt, listPrompts, type PromptSummary } from "../lib/prompts";
-import { listSkills, loadSkill, type SkillMeta } from "../lib/skills";
+import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
+// Named the same as toolbox's ToolStatus, so taken from its own module.
+import type { ToolStatus } from "@srelens/core/lib/chat";
+import { respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { getPrompt, listPrompts, type PromptSummary } from "@srelens/core";
+import { listSkills, loadSkill, type SkillMeta } from "@srelens/core";
 import {
   deleteSession as deleteSessionCmd,
   listSessions,
@@ -16,10 +18,11 @@ import {
   type SessionMeta,
   type StoredMessage,
   type StoredToolCall,
-} from "../lib/chatHistory";
-import { relativeTime } from "../lib/relativeTime";
-import { settingsStorage } from "../lib/settingsStorage";
+} from "@srelens/core";
+import { relativeTime } from "@srelens/core";
+import { settingsStorage } from "@srelens/core";
 import { AssistantMarkdown } from "./AssistantMarkdown";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 export type AssistantContext = { context: string; namespace?: string; kind?: string; name?: string };
 
@@ -617,18 +620,19 @@ function HistoryPopover({
           <ul className="mt-1 max-h-72 overflow-y-auto">
             {sessions.map((s) => (
               <li key={s.id} className="flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-accent">
-                <button
-                  type="button"
-                  className="min-w-0 flex-1 truncate text-left"
-                  title={s.title}
-                  onClick={() => {
-                    onSelectSession(s.id);
-                    setOpen(false);
-                  }}
-                >
-                  <span className="block truncate">{s.title}</span>
-                  <span className="block text-[10px] text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
-                </button>
+                <TitleTooltip title={s.title}>
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left"
+                    onClick={() => {
+                      onSelectSession(s.id);
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="block truncate">{s.title}</span>
+                    <span className="block text-[10px] text-muted-foreground">{relativeTime(s.updatedAt, now)}</span>
+                  </button>
+                </TitleTooltip>
                 <button
                   type="button"
                   aria-label={`Delete ${s.title}`}
@@ -1652,21 +1656,20 @@ export const AssistantConversation = forwardRef<
             />
           </div>
           <div className="flex items-center gap-1">
-            <label
-              title="Attach image"
-              className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              <Paperclip aria-hidden="true" className="size-4" />
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                aria-label="Attach image"
-                onChange={onAttachFiles}
-                disabled={sending}
-                className="hidden"
-              />
-            </label>
+            <TitleTooltip title="Attach image">
+              <label className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground">
+                <Paperclip aria-hidden="true" className="size-4" />
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  aria-label="Attach image"
+                  onChange={onAttachFiles}
+                  disabled={sending}
+                  className="hidden"
+                />
+              </label>
+            </TitleTooltip>
             {agentPicker}
             {availableContexts !== undefined && (
               <ContextMultiSelect available={availableContexts} selected={selectedContexts} onChange={setSelectedContexts} />

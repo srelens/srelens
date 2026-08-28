@@ -3,13 +3,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 
 const { loadEditableManifestMock } = vi.hoisted(() => ({ loadEditableManifestMock: vi.fn() }));
-vi.mock("../lib/manifestEdit", () => ({ loadEditableManifest: loadEditableManifestMock }));
-vi.mock("../lib/manifest", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../lib/manifest")>()),
+vi.mock("@srelens/core/lib/manifestEdit", () => ({ loadEditableManifest: loadEditableManifestMock }));
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/manifest")>()),
   applyManifest: vi.fn(),
   validateManifest: vi.fn().mockResolvedValue({ valid: true }),
 }));
-vi.mock("../lib/schema", () => ({ openApiSchema: vi.fn().mockResolvedValue({ error: "n/a" }) }));
+vi.mock("@srelens/core/lib/schema", () => ({ openApiSchema: vi.fn().mockResolvedValue({ error: "n/a" }) }));
 vi.mock("../ui/CodeEditor", () => ({
   CodeEditor: ({ value, ariaLabel }: { value: string; ariaLabel?: string }) => (
     <textarea aria-label={ariaLabel} value={value} readOnly />

@@ -6,8 +6,8 @@ const { startPortForwardMock, saveForwardMock } = vi.hoisted(() => ({
   startPortForwardMock: vi.fn(),
   saveForwardMock: vi.fn(),
 }));
-vi.mock("../lib/forward", () => ({ startPortForward: startPortForwardMock }));
-vi.mock("../lib/savedForwards", () => ({ saveForward: saveForwardMock }));
+vi.mock("@srelens/core/lib/forward", () => ({ startPortForward: startPortForwardMock }));
+vi.mock("@srelens/core/lib/savedForwards", () => ({ saveForward: saveForwardMock }));
 
 import { ForwardDialog } from "./ForwardDialog";
 

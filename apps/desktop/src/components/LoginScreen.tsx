@@ -1,6 +1,6 @@
 import srelensMark from "../assets/srelens-mark.svg";
 import { Button } from "@/components/ui/button";
-import { devLogin, loginUrl } from "../lib/session";
+import { devLogin, loginUrl } from "@srelens/core";
 
 /**
  * Pre-auth gate shown on web when no session cookie is present. Mirrors

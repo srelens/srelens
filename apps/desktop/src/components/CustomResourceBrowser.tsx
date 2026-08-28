@@ -6,12 +6,12 @@ import {
   printerSortValue,
   type CrdRef,
   type CustomRow,
-} from "../lib/crds";
-import { listNamespaces } from "../lib/workloads";
+} from "@srelens/core";
+import { listNamespaces } from "@srelens/core";
 import { YamlView } from "./YamlView";
 import { Table, filterTableData, Select, Button, ColumnPicker, useColumnVisibility, Spinner, Drawer, TextInput, type Column } from "../ui";
-import { ageSortValue } from "../lib/age";
-import type { TabViewState } from "../lib/tabView";
+import { ageSortValue } from "@srelens/core";
+import type { TabViewState } from "@srelens/core";
 
 interface Selected {
   name: string;

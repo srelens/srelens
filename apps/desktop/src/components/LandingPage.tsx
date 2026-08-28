@@ -13,11 +13,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
-import { listContexts, type ClusterContext } from "../lib/clusters";
+import { listContexts, type ClusterContext } from "@srelens/core";
 import { ContextAvatar } from "./ContextAvatar";
 import type { SettingsSection } from "./SettingsView";
-import { contextDisplayName, orderContexts, type ContextProfiles } from "../lib/settings";
-import { loadOnboarded, saveOnboarded, shouldShowFirstRun } from "../lib/onboarding";
+import { contextDisplayName, orderContexts, type ContextProfiles } from "@srelens/core";
+import { loadOnboarded, saveOnboarded, shouldShowFirstRun } from "@srelens/core";
 
 const EMPTY_LIST: string[] = [];
 

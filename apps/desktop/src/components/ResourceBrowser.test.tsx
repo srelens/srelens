@@ -22,8 +22,8 @@ const {
   listResourceMock: vi.fn(),
   listContextsMock: vi.fn(),
 }));
-vi.mock("../lib/workloads", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/workloads")>();
+vi.mock("@srelens/core/lib/workloads", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/workloads")>();
   return {
     ...actual,
     listNamespaces: listNamespacesMock,
@@ -31,8 +31,8 @@ vi.mock("../lib/workloads", async (importOriginal) => {
     podMetrics: async () => ({ metrics: [] }),
   };
 });
-vi.mock("../lib/manifest", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/manifest")>();
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/manifest")>();
   return {
     ...actual,
     listNodes: listNodesMock,
@@ -41,14 +41,14 @@ vi.mock("../lib/manifest", async (importOriginal) => {
     listResource: listResourceMock,
   };
 });
-vi.mock("../lib/clusters", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/clusters")>();
+vi.mock("@srelens/core/lib/clusters", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/clusters")>();
   return {
     ...actual,
     listContexts: listContextsMock,
   };
 });
-vi.mock("../lib/watch", () => ({
+vi.mock("@srelens/core/lib/watch", () => ({
   watchResource: watchResourceMock,
   WATCHABLE_KINDS: [
     "pods",
@@ -94,8 +94,8 @@ vi.mock("../ui/CodeEditor", () => ({
 // and NodeCordonAction.test.tsx for that); stub `useAccess` as always-allowed
 // so header actions stay enabled/clickable as they were before preflight
 // access checks existed.
-vi.mock("../lib/access", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/access")>();
+vi.mock("@srelens/core/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/access")>();
   return {
     ...actual,
     useAccess: () => ({

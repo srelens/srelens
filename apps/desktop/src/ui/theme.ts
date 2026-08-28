@@ -1,4 +1,4 @@
-import { settingsStorage } from "../lib/settingsStorage";
+import { settingsStorage } from "@srelens/core";
 
 export type ThemeMode = "dark" | "light" | "system";
 export type ThemeName = "slate" | "srelens" | "graphite";

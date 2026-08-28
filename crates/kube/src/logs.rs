@@ -31,6 +31,19 @@ impl Default for StreamOpts {
     }
 }
 
+/// How many trailing lines a one-shot `k8s.podLogs` fetch asks for. `None`
+/// means "no bound": the API then returns every line the container runtime
+/// still retains, which is the only way to get a pod's complete history and
+/// is why `all_lines` overrides `tail_lines` rather than combining with it.
+/// Pure, so the precedence is unit-tested.
+pub fn effective_tail_lines(all_lines: bool, tail_lines: Option<i64>) -> Option<i64> {
+    if all_lines {
+        None
+    } else {
+        Some(tail_lines.unwrap_or(DEFAULT_TAIL_LINES))
+    }
+}
+
 /// Build the kube `LogParams` for a target + options. Pure, so the mapping
 /// (follow, tail, since, timestamps, previous) is unit-tested.
 pub fn build_log_params(
@@ -149,9 +162,17 @@ pub struct PodLogsIn {
     /// for any pod with more than one (it does not pick one for you).
     #[serde(default)]
     pub container: Option<String>,
-    /// Number of trailing lines to return (default 200).
+    /// Number of trailing lines to return (default 200). Ignored when
+    /// `all_lines` is set.
     #[serde(default)]
     pub tail_lines: Option<i64>,
+    /// Return every line the container runtime still retains instead of a
+    /// tail. Wins over `tail_lines` when both are given. Kubernetes keeps only
+    /// what log rotation has not yet discarded, and the response can be very
+    /// large — prefer `tail_lines`/`since_seconds` unless the whole history is
+    /// needed (e.g. to save it to a file). Default false.
+    #[serde(default)]
+    pub all_lines: bool,
     /// Logs from the previous, terminated instance (post-crash triage).
     #[serde(default)]
     pub previous: bool,
@@ -168,11 +189,11 @@ pub struct PodLogsOut {
     pub logs: String,
 }
 
-/// `k8s.podLogs` — return the last N lines of a pod's logs.
+/// `k8s.podLogs` — return the last N lines of a pod's logs, or all of them.
 pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<PodLogsIn, PodLogsOut, _, _>(
         "k8s.podLogs",
-        "fetch recent logs for a pod in a connected kube context",
+        "fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large)",
         Annotations::READ_ONLY,
         move |input: PodLogsIn| {
             let cache = cache.clone();
@@ -185,7 +206,7 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
                 let params = build_log_params(
                     input.container.clone(),
                     false,
-                    Some(input.tail_lines.unwrap_or(DEFAULT_TAIL_LINES)),
+                    effective_tail_lines(input.all_lines, input.tail_lines),
                     input.since_seconds,
                     input.timestamps,
                     input.previous,
@@ -221,6 +242,35 @@ mod tests {
         assert_eq!(p.since_seconds, Some(300));
         assert!(p.timestamps);
         assert!(p.previous);
+    }
+
+    #[test]
+    fn all_lines_drops_the_tail_bound_and_wins_over_tail_lines() {
+        // `all_lines` is the only way to get `tail_lines: None`, which is what
+        // makes the API return everything the runtime still retains.
+        assert_eq!(effective_tail_lines(true, None), None);
+        assert_eq!(effective_tail_lines(true, Some(50)), None);
+    }
+
+    #[test]
+    fn without_all_lines_the_tail_defaults_to_200_or_the_given_count() {
+        // The default path — every existing caller, MCP agents included — is
+        // unchanged: omit both and you still get the last 200 lines.
+        assert_eq!(effective_tail_lines(false, None), Some(DEFAULT_TAIL_LINES));
+        assert_eq!(effective_tail_lines(false, Some(50)), Some(50));
+    }
+
+    #[test]
+    fn pod_logs_input_defaults_all_lines_to_false() {
+        let input: PodLogsIn =
+            serde_json::from_str(r#"{"context":"c","namespace":"n","pod":"p"}"#).unwrap();
+        assert!(!input.all_lines);
+        assert_eq!(input.tail_lines, None);
+        let input: PodLogsIn = serde_json::from_str(
+            r#"{"context":"c","namespace":"n","pod":"p","all_lines":true,"tail_lines":50}"#,
+        )
+        .unwrap();
+        assert!(input.all_lines);
     }
 
     #[test]

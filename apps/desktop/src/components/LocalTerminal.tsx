@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { TerminalPane } from "./TerminalPane";
-import { localTerminalDriver } from "../lib/terminalDriver";
+import { localTerminalDriver } from "@srelens/core";
 
 /**
  * A local shell (the user's login shell) scoped to a kube context so `kubectl`

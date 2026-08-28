@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Spinner } from "../ui";
-import { loadEditableManifest } from "../lib/manifestEdit";
+import { loadEditableManifest } from "@srelens/core";
 import { ManifestEditor } from "./ManifestEditor";
 
 /**

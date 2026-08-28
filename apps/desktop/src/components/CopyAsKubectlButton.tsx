@@ -2,8 +2,8 @@ import React, { useState } from "react";
 import { Copy, ScrollText } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { toKubectl } from "../lib/kubectlMapper";
-import { copyKubectlCommand } from "../lib/copyKubectl";
+import { toKubectl } from "@srelens/core";
+import { copyKubectlCommand } from "@srelens/core";
 
 const MENU_ITEM_CLASS =
   "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent";

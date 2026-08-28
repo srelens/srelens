@@ -5,11 +5,11 @@ import {
   podMetrics,
   type ReplicaSetSummary,
   type PodSummary,
-} from "../lib/workloads";
-import { listJobs, type JobSummary } from "../lib/controllers";
+} from "@srelens/core";
+import { listJobs, type JobSummary } from "@srelens/core";
 import { Spinner, StatusPill, Table, type StatusKind, type Column } from "../ui";
-import type { OpenResource } from "../lib/resourceNavigation";
-import { ageSortValue } from "../lib/age";
+import type { OpenResource } from "@srelens/core";
+import { ageSortValue } from "@srelens/core";
 
 function phaseKind(phase: string): StatusKind {
   if (phase === "Running" || phase === "Succeeded") return "success";

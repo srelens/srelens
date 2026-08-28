@@ -9,7 +9,7 @@ import {
   CommandGroup,
   CommandItem,
 } from "@/components/ui/command";
-import { cn } from "@/lib/utils";
+import { cn } from "@/ui/utils";
 
 export interface ComboboxOption {
   value: string;

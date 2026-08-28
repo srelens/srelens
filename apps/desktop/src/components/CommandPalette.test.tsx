@@ -7,25 +7,25 @@ const { listResourceMock, listCrdsMock } = vi.hoisted(() => ({
   listResourceMock: vi.fn(),
   listCrdsMock: vi.fn(),
 }));
-vi.mock("../lib/manifest", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/manifest")>();
+vi.mock("@srelens/core/lib/manifest", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/manifest")>();
   return { ...actual, listResource: listResourceMock };
 });
-vi.mock("../lib/crds", () => ({ listCrds: listCrdsMock }));
+vi.mock("@srelens/core/lib/crds", () => ({ listCrds: listCrdsMock }));
 
 const { deleteResourceMock, rolloutRestartMock } = vi.hoisted(() => ({
   deleteResourceMock: vi.fn(),
   rolloutRestartMock: vi.fn(),
 }));
-vi.mock("../lib/actions", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/actions")>();
+vi.mock("@srelens/core/lib/actions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core/lib/actions")>();
   return { ...actual, deleteResource: deleteResourceMock, rolloutRestart: rolloutRestartMock };
 });
 
 const { notifyMock } = vi.hoisted(() => ({
   notifyMock: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
-vi.mock("../lib/notify", () => ({ notify: notifyMock }));
+vi.mock("@srelens/core/lib/notify", () => ({ notify: notifyMock }));
 
 import { CommandPalette } from "./CommandPalette";
 

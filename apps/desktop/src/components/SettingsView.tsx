@@ -49,8 +49,8 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
-import { listContexts, deleteContext, type ClusterContext } from "../lib/clusters";
-import { notify } from "../lib/notify";
+import { listContexts, deleteContext, type ClusterContext } from "@srelens/core";
+import { notify } from "@srelens/core";
 import {
   DEFAULT_WORKSPACE_LAYOUT,
   REQUEST_TIMEOUT,
@@ -66,22 +66,24 @@ import {
   type UpdateChannel,
   type WorkspaceLayoutSettings,
   orderContexts,
-} from "../lib/settings";
-import { UI_SCALE, applyUiScale, getUiScale, setUiScale, stepUiScale } from "../lib/uiScale";
-import { updateRequestTimeout } from "../lib/requestTimeout";
+} from "@srelens/core";
+import { UI_SCALE, applyUiScale, getUiScale, setUiScale, stepUiScale } from "@srelens/core";
+import { updateRequestTimeout } from "@srelens/core";
 import { ContextAvatar, CONTEXT_LOGO_OPTIONS } from "./ContextAvatar";
 import { McpSettingsSection } from "./McpSettingsSection";
 import { AssistantSettingsSection } from "./AssistantSettingsSection";
 import { SecuritySettingsSection } from "./SecuritySettingsSection";
+import { AppearanceSettingsSection } from "./AppearanceSettingsSection";
 import { AppLogView } from "./AppLogView";
-import { pickKubeconfigFiles, savePastedKubeconfig } from "../lib/files";
-import { checkForUpdate, installUpdate, type UpdateMeta } from "../lib/updater";
-import { appVersion, relaunchApp } from "../transport/transport";
-import { isTauri } from "../transport/platform";
+import { pickKubeconfigFiles, savePastedKubeconfig } from "@srelens/core";
+import { checkForUpdate, installUpdate, type UpdateMeta } from "@srelens/core";
+import { appVersion, relaunchApp } from "@srelens/core/transport";
+import { isTauri } from "@srelens/core/platform";
 import { WebKubeconfigSection } from "./WebKubeconfigSection";
 import { WebAddClusterSection } from "./WebAddClusterSection";
 import { WebClusterSignInSection } from "./WebClusterSignInSection";
 import { ReleaseNotes } from "./ReleaseNotes";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 const MODE_OPTIONS: Array<{ mode: ThemeMode; label: string; description: string; icon: React.ElementType }> = [
   { mode: "dark", label: "Dark", description: "Low-light operational workspace", icon: Moon },
@@ -585,6 +587,7 @@ export function SettingsView({
                   </button>
                 ))}
               </div>
+              <AppearanceSettingsSection />
             </SectionPanel>
           )}
 
@@ -884,20 +887,22 @@ export function SettingsView({
                         </span>
                         <div className="fl-context-editor__order">
                           {selectedContext.isCurrent && <span className="fl-settings-context-current">Current</span>}
-                          <button
-                            type="button"
-                            onClick={() => moveContext(selectedContext.name, -1)}
-                            disabled={orderedContexts[0]?.name === selectedContext.name}
-                            aria-label={`Move ${selectedContext.name} up`}
-                            title="Move up"
-                          ><ArrowUp aria-hidden="true" /></button>
-                          <button
-                            type="button"
-                            onClick={() => moveContext(selectedContext.name, 1)}
-                            disabled={orderedContexts.at(-1)?.name === selectedContext.name}
-                            aria-label={`Move ${selectedContext.name} down`}
-                            title="Move down"
-                          ><ArrowDown aria-hidden="true" /></button>
+                          <TitleTooltip title="Move up" disabled={orderedContexts[0]?.name === selectedContext.name}>
+                            <button
+                              type="button"
+                              onClick={() => moveContext(selectedContext.name, -1)}
+                              disabled={orderedContexts[0]?.name === selectedContext.name}
+                              aria-label={`Move ${selectedContext.name} up`}
+                            ><ArrowUp aria-hidden="true" /></button>
+                          </TitleTooltip>
+                          <TitleTooltip title="Move down" disabled={orderedContexts.at(-1)?.name === selectedContext.name}>
+                            <button
+                              type="button"
+                              onClick={() => moveContext(selectedContext.name, 1)}
+                              disabled={orderedContexts.at(-1)?.name === selectedContext.name}
+                              aria-label={`Move ${selectedContext.name} down`}
+                            ><ArrowDown aria-hidden="true" /></button>
+                          </TitleTooltip>
                         </div>
                       </header>
 
@@ -1007,14 +1012,16 @@ export function SettingsView({
                               aria-label={`Set ${selectedContext.name} color to ${color}`}
                             />
                           ))}
-                          <label title="Custom color">
-                            <input
-                              type="color"
-                              value={selectedProfile.color ?? "#3b82f6"}
-                              onChange={(event) => updateContext(selectedContext.name, { color: event.target.value })}
-                              aria-label={`Custom color for ${selectedContext.name}`}
-                            />
-                          </label>
+                          <TitleTooltip title="Custom color">
+                            <label>
+                              <input
+                                type="color"
+                                value={selectedProfile.color ?? "#3b82f6"}
+                                onChange={(event) => updateContext(selectedContext.name, { color: event.target.value })}
+                                aria-label={`Custom color for ${selectedContext.name}`}
+                              />
+                            </label>
+                          </TitleTooltip>
                           <code>{selectedProfile.color ?? "Automatic"}</code>
                         </div>
                       </section>

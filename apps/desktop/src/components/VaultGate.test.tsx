@@ -10,7 +10,7 @@ const { mcpSecurity } = vi.hoisted(() => ({
     vaultBiometricUnlock: vi.fn(),
   },
 }));
-vi.mock("../lib/mcpSecurity", () => mcpSecurity);
+vi.mock("@srelens/core/lib/mcpSecurity", () => mcpSecurity);
 
 import { VaultGate } from "./VaultGate";
 

@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { ArrowDownToLine, CircleCheck, CircleSlash2, SquareTerminal } from "lucide-react";
-import { getObject } from "../lib/manifest";
-import { cordonNode, drainNode, createNodeDebugPod } from "../lib/actions";
-import { notify } from "../lib/notify";
-import { useAccess, rbac, denyReason, reportActionError } from "../lib/access";
+import { getObject } from "@srelens/core";
+import { cordonNode, drainNode, createNodeDebugPod } from "@srelens/core";
+import { notify } from "@srelens/core";
+import { useAccess, rbac, denyReason, reportActionError } from "@srelens/core/react";
 import { IconButton, ConfirmDialog, KubectlPreview } from "../ui";
-import { toKubectl } from "../lib/kubectlMapper";
-import { copyKubectlCommand } from "../lib/copyKubectl";
+import { toKubectl } from "@srelens/core";
+import { copyKubectlCommand } from "@srelens/core";
 
 /** Enter the host's namespaces from the privileged debug pod for a real node
  *  shell — run via exec (the pod itself just stays alive). */

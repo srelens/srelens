@@ -1,6 +1,6 @@
 import React from "react";
 import { AlertTriangle } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@/ui/utils";
 import { Button } from "./Button";
 
 export type DashboardTone = "primary" | "success" | "warning" | "danger" | "info" | "neutral";

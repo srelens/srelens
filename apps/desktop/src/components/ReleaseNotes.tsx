@@ -1,4 +1,4 @@
-import { parseReleaseNotes, type NoteSpan } from "../lib/releaseNotes";
+import { parseReleaseNotes, type NoteSpan } from "@srelens/core";
 
 // Renders the update dialog's release notes as real headings and lists instead
 // of dumping the raw markdown into a <pre>. Everything goes through React

@@ -8,8 +8,8 @@ import {
   forwardUrl,
   forwardAddress,
   type ActiveForward,
-} from "../lib/forward";
-import { listSavedForwards, deleteSavedForward, type SavedForward } from "../lib/savedForwards";
+} from "@srelens/core";
+import { listSavedForwards, deleteSavedForward, type SavedForward } from "@srelens/core";
 
 /**
  * Network overview of every active port-forward across all connected clusters.

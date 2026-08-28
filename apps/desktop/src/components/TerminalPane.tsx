@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Eraser, RotateCw, Search, X } from "lucide-react";
 import { IconButton } from "../ui";
-import type { TerminalConnection, TerminalDriver } from "../lib/terminalDriver";
+import type { TerminalConnection, TerminalDriver } from "@srelens/core";
 import {
   type ExitReason,
   type TermStatus,
   nextStatusOnExit,
   sessionEarnedRetryReset,
   reconnectDelayMs,
-} from "../lib/terminalReconnect";
+} from "@srelens/core";
 
 /**
  * Shared xterm terminal host for every terminal kind (in-pod exec, local PTY,

@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Download, RefreshCw, Search, Trash2, Wrench } from "lucide-react";
 import { Badge, Button, PageHeader, SectionPanel, Spinner, StatusPill, TextInput } from "../ui";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { listContexts } from "../lib/clusters";
-import { isTauri } from "../transport/platform";
+import { listContexts } from "@srelens/core";
+import { isTauri } from "@srelens/core/platform";
 import {
   diagnoseContext,
   installKubectl,
@@ -15,8 +15,9 @@ import {
   type DiagnosisReport,
   type Plugin,
   type RequirementStatus,
-  type ToolStatus,
-} from "../lib/toolbox";
+} from "@srelens/core";
+// Named the same as chat's ToolStatus, so taken from its own module.
+import type { ToolStatus } from "@srelens/core/lib/toolbox";
 
 const STATUS_KIND: Record<RequirementStatus, "success" | "warning" | "danger"> = {
   found: "success",

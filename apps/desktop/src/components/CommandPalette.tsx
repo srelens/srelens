@@ -9,14 +9,14 @@ import {
   CommandGroup,
   CommandItem,
 } from "./ui/command";
-import { RESOURCE_LABELS, K8S_KIND, type ResourceKind } from "./ResourceBrowser";
-import { listResource } from "../lib/manifest";
-import { listCrds, type CrdRef } from "../lib/crds";
-import { getRecents, pushRecent, recentId, type RecentItem } from "../lib/recents";
+import { RESOURCE_LABELS, K8S_KIND, type ResourceKind } from "@srelens/core";
+import { listResource } from "@srelens/core";
+import { listCrds, type CrdRef } from "@srelens/core";
+import { getRecents, pushRecent, recentId, type RecentItem } from "@srelens/core";
 import { iconForResourceKind } from "../ui/NavIcon";
-import { actionsForKind, type PaletteAction, type PaletteActionCtx } from "../lib/paletteActions";
+import { actionsForKind, type PaletteAction, type PaletteActionCtx } from "@srelens/core";
 import { ConfirmDialog } from "../ui";
-import { notify } from "../lib/notify";
+import { notify } from "@srelens/core";
 
 /** Kinds indexed for name search when the palette opens. */
 const SEARCH_KINDS: ResourceKind[] = [

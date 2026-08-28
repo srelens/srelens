@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { PlusCircle, Plug } from "lucide-react";
 import { Button, TextInput } from "../ui";
-import { addCluster, testClusterForm, type CreateClusterInput, type TestResult } from "../lib/addCluster";
-import { notify } from "../lib/notify";
+import { addCluster, testClusterForm, type CreateClusterInput, type TestResult } from "@srelens/core";
+import { notify } from "@srelens/core";
 
 export interface WebAddClusterSectionProps {
   /** Called after a cluster is added. On desktop the argument is the saved

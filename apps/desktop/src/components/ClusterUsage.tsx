@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { nodeMetrics } from "../lib/manifest";
+import { nodeMetrics } from "@srelens/core";
 
 /** Format MiB compactly: GiB once it's large enough. */
 function fmtMem(mib: number): string {

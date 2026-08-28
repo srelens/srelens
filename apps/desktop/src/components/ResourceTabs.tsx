@@ -7,7 +7,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
-import { cn } from "@/lib/utils";
+import { cn } from "@/ui/utils";
 
 export interface TabDescriptor {
   id: number;

@@ -8,7 +8,7 @@ import {
   vaultStatus,
   vaultUnlockPassword,
   type VaultStatus,
-} from "../lib/mcpSecurity";
+} from "@srelens/core";
 
 /**
  * The mandatory master-password gate (mqlens-style, issue #208): a blocking

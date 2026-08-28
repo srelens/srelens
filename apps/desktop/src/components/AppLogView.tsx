@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Copy, FolderOpen, RefreshCw } from "lucide-react";
-import { appLogPath, readAppLog, revealAppLog } from "../lib/appLog";
+import { appLogPath, readAppLog, revealAppLog } from "@srelens/core";
 import { Button, IconButton, Select, Spinner, TextInput } from "../ui";
-import { isTauri } from "../transport/platform";
+import { isTauri } from "@srelens/core/platform";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /** Log levels emitted by tauri-plugin-log, most→least severe. */
 const LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] as const;
@@ -120,15 +121,16 @@ export function AppLogView() {
       </div>
 
       {path && (
-        <button
-          type="button"
-          onClick={() => void copyPath()}
-          title="Copy log file path"
-          className="flex items-center gap-1.5 self-start rounded font-mono text-[11px] text-muted-foreground hover:text-foreground"
-        >
-          {copied ? <Check aria-hidden="true" className="size-3 text-emerald-600 dark:text-emerald-400" /> : <Copy aria-hidden="true" className="size-3" />}
-          <span className="max-w-[52ch] truncate">{path}</span>
-        </button>
+        <TitleTooltip title="Copy log file path">
+          <button
+            type="button"
+            onClick={() => void copyPath()}
+            className="flex items-center gap-1.5 self-start rounded font-mono text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            {copied ? <Check aria-hidden="true" className="size-3 text-emerald-600 dark:text-emerald-400" /> : <Copy aria-hidden="true" className="size-3" />}
+            <span className="max-w-[52ch] truncate">{path}</span>
+          </button>
+        </TitleTooltip>
       )}
 
       <div

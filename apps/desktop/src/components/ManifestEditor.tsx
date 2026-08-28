@@ -9,11 +9,13 @@ import {
   type ApplyDoc,
   type Conflict,
   type DiffDoc,
-} from "../lib/manifest";
-import { notify } from "../lib/notify";
-import { openApiSchema } from "../lib/schema";
-import { useAccess, rbac, kindToResource, reportActionError, type AccessCheck } from "../lib/access";
-import { describeError } from "../lib/errors";
+} from "@srelens/core";
+import { notify } from "@srelens/core";
+import { openApiSchema } from "@srelens/core";
+import { useAccess, rbac, reportActionError, type AccessCheck } from "@srelens/core/react";
+// Pure kind mapping, so it comes from the React-free entry point.
+import { kindToResource } from "@srelens/core";
+import { describeError } from "@srelens/core";
 import { Spinner, Button, ConfirmDialog } from "../ui";
 import { DiffView } from "./DiffView";
 

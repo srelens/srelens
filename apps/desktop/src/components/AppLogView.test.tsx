@@ -8,7 +8,7 @@ const { readAppLogMock, appLogPathMock, revealAppLogMock } = vi.hoisted(() => ({
   appLogPathMock: vi.fn(),
   revealAppLogMock: vi.fn(),
 }));
-vi.mock("../lib/appLog", () => ({
+vi.mock("@srelens/core/lib/appLog", () => ({
   readAppLog: readAppLogMock,
   appLogPath: appLogPathMock,
   revealAppLog: revealAppLogMock,

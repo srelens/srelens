@@ -8,9 +8,9 @@ import {
   helmRepoAdd,
   type HelmReleaseSummary,
   type HelmReleaseDetail,
-} from "../lib/helm";
+} from "@srelens/core";
 import { ageFromTimestamp, absoluteTimestamp, Section, KV } from "./ResourceOverview";
-import type { TabViewState } from "../lib/tabView";
+import type { TabViewState } from "@srelens/core";
 import {
   Table,
   filterTableData,
@@ -37,9 +37,9 @@ import {
   serializeNamespaceSelection,
   watchNamespaceForSelection,
   rowInSelection,
-} from "../lib/namespaces";
-import { useNamespaceOptions } from "../lib/useNamespaceOptions";
-import { describeError } from "../lib/errors";
+} from "@srelens/core";
+import { useNamespaceOptions } from "@srelens/core/react";
+import { describeError } from "@srelens/core";
 import { HelmOpDialog, type HelmOpRelease } from "./HelmOpDialog";
 
 const CodeEditor = lazy(() => import("../ui/CodeEditor").then((m) => ({ default: m.CodeEditor })));

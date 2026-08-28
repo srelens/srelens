@@ -6,10 +6,13 @@
     "tauri": "pnpm --filter @srelens/desktop tauri",
     "build": "pnpm --filter @srelens/desktop build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "vitest run --coverage",
+    "test:packages": "pnpm -r test"
   },
   "devDependencies": {
-    "turbo": "^2.0.0"
+    "@vitest/coverage-v8": "^3.2.7",
+    "turbo": "^2.0.0",
+    "vitest": "^3.2.7"
   },
   "pnpm": {
     "overrides": {

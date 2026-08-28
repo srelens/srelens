@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const auditTail = vi.fn();
-vi.mock("../lib/mcpSecurity", () => ({ auditTail: (...a: unknown[]) => auditTail(...a) }));
+vi.mock("@srelens/core/lib/mcpSecurity", () => ({ auditTail: (...a: unknown[]) => auditTail(...a) }));
 
 import { McpAuditList } from "./McpAuditList";
 

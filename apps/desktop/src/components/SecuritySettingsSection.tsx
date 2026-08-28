@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, TextInput } from "../ui";
-import { notify } from "../lib/notify";
+import { notify } from "@srelens/core";
 import {
   getMcpTokenStorage,
   vaultBiometricDisable,
@@ -10,7 +10,7 @@ import {
   vaultChangePassword,
   type VaultBiometricStatus,
   type VaultKeySource,
-} from "../lib/mcpSecurity";
+} from "@srelens/core";
 
 /**
  * Settings → Security: everything protecting the secrets vault (the master

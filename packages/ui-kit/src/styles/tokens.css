@@ -1,0 +1,216 @@
+@import "tailwindcss";
+
+/* Tailwind scans the source tree of whatever app builds it, and this package
+   sits outside that tree, so utilities used only by the kit were never
+   generated: `h-[5px]` and `text-[0.6875rem]` produced no rule at all, and
+   `text-muted` was dropped despite `--color-muted` being a theme colour. The
+   Meter's track collapsed to no height, which made every bar invisible in a
+   real build while the unit tests stayed green. Declared beside the import so
+   the kit carries its own scan into any consumer rather than each app
+   remembering to add it. (#317 review) */
+@source "../**/*.tsx";
+@source not "../**/*.test.tsx";
+
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* ---------------------------------------------------------------
+   srelens design tokens — "instrument paper"
+   Light: lavender paper, white instruments, one violet accent.
+   Dark:  ink-violet control room, same rules, same rhythm.
+   --------------------------------------------------------------- */
+:root {
+  --canvas: #f5f4f8;
+  --canvas-deep: #eceaf2;
+  --surface: #ffffff;
+  --surface-sunk: #fafaFc;
+  --surface-raised: #ffffff;
+
+  --ink: #141219;
+  --ink-soft: #443f52;
+  --ink-muted: #6b6678;
+  --ink-faint: #9b97a6;
+
+  --rule: #e7e5ed;
+  --rule-strong: #d7d4e0;
+
+  --accent: #4b3bd6;
+  --accent-ink: #ffffff;
+  --accent-wash: #efedfd;
+  --accent-line: #c9c2f7;
+
+  --sev: #b4342a;
+  --sev-wash: #fdefee;
+  --warn: #a2670f;
+  --warn-wash: #fdf4e6;
+  --ok: #1f7a52;
+  --ok-wash: #e9f6ef;
+  --info: #2a5fa8;
+  --info-wash: #ecf2fb;
+
+  --field: rgba(20, 18, 25, 0.05);
+  --shadow-lift: 0 1px 0 rgba(20, 18, 25, 0.02);
+}
+
+[data-theme="dark"] {
+  --canvas: #0d0c12;
+  --canvas-deep: #08080c;
+  --surface: #16151d;
+  --surface-sunk: #121118;
+  --surface-raised: #1c1b24;
+
+  --ink: #f3f1f8;
+  --ink-soft: #cbc7d6;
+  --ink-muted: #8f8a9d;
+  --ink-faint: #6a6577;
+
+  --rule: #272531;
+  --rule-strong: #35323f;
+
+  --accent: #8f80ff;
+  --accent-ink: #100e1a;
+  --accent-wash: #1d1a30;
+  --accent-line: #3b3468;
+
+  --sev: #f2776c;
+  --sev-wash: #2a1917;
+  --warn: #dda446;
+  --warn-wash: #2a2015;
+  --ok: #55cd97;
+  --ok-wash: #12241c;
+  --info: #7aa9ea;
+  --info-wash: #151d2b;
+
+  --field: rgba(255, 255, 255, 0.05);
+  --shadow-lift: none;
+}
+
+
+/* --- paper: warm light, easier under office lighting ---------------- */
+[data-theme="paper"] {
+  --canvas: #f4f1ea;
+  --canvas-deep: #eae5da;
+  --surface: #fffdf9;
+  --surface-sunk: #f8f5ee;
+  --surface-raised: #fffdf9;
+  --ink: #1b1712;
+  --ink-soft: #453d33;
+  --ink-muted: #6d6255;
+  --ink-faint: #9b8f7f;
+  --rule: #e4ded1;
+  --rule-strong: #d3ccbb;
+  --accent-wash: #efecfb;
+  --accent-line: #cbc3f5;
+  --field: rgba(27, 23, 18, 0.05);
+}
+
+/* --- midnight: near black, for a dark room -------------------------- */
+[data-theme="midnight"] {
+  --canvas: #000105;
+  --canvas-deep: #000000;
+  --surface: #0a0b10;
+  --surface-sunk: #06070b;
+  --surface-raised: #101219;
+  --ink: #eef0f6;
+  --ink-soft: #c2c6d4;
+  --ink-muted: #838999;
+  --ink-faint: #5d6273;
+  --rule: #1b1d26;
+  --rule-strong: #282b37;
+  --accent: #9184ff;
+  --accent-ink: #07070e;
+  --accent-wash: #14142a;
+  --accent-line: #302a5e;
+  --sev: #f2776c;
+  --sev-wash: #24120f;
+  --warn: #dda446;
+  --warn-wash: #241b0f;
+  --ok: #55cd97;
+  --ok-wash: #0c1c15;
+  --info: #7aa9ea;
+  --info-wash: #0f1622;
+  --field: rgba(255, 255, 255, 0.06);
+  --shadow-lift: none;
+}
+
+/* --- contrast: WCAG AAA text, heavier rules, no washes -------------- */
+[data-theme="contrast"] {
+  --canvas: #ffffff;
+  --canvas-deep: #ffffff;
+  --surface: #ffffff;
+  --surface-sunk: #f2f2f2;
+  --surface-raised: #ffffff;
+  --ink: #000000;
+  --ink-soft: #1a1a1a;
+  --ink-muted: #3d3d3d;
+  --ink-faint: #565656;
+  --rule: #767676;
+  --rule-strong: #000000;
+  --accent: #2b1ba8;
+  --accent-ink: #ffffff;
+  --accent-wash: #e8e5ff;
+  --accent-line: #2b1ba8;
+  --sev: #970d00;
+  --sev-wash: #ffecea;
+  --warn: #6b3f00;
+  --warn-wash: #fff2dc;
+  --ok: #0a5c38;
+  --ok-wash: #e3f6ec;
+  --info: #10387a;
+  --info-wash: #e7eefc;
+  --field: rgba(0, 0, 0, 0.09);
+  --shadow-lift: none;
+}
+
+/* --- accent axis: independent of the theme -------------------------- */
+[data-accent="blue"]   { --accent: #1f5fd0; --accent-wash: #e9f0fd; --accent-line: #b7cdf5; }
+[data-accent="teal"]   { --accent: #0d7068; --accent-wash: #e4f4f2; --accent-line: #a8ded8; }
+[data-accent="amber"]  { --accent: #9a5c05; --accent-wash: #fdf1de; --accent-line: #efd0a0; }
+[data-accent="rose"]   { --accent: #ad2456; --accent-wash: #fdeaf1; --accent-line: #f0bbcf; }
+
+[data-theme="dark"][data-accent="blue"],
+[data-theme="midnight"][data-accent="blue"]  { --accent: #7fa8f5; --accent-wash: #141c2e; --accent-line: #2c3f66; }
+[data-theme="dark"][data-accent="teal"],
+[data-theme="midnight"][data-accent="teal"]  { --accent: #55c9bd; --accent-wash: #0f2422; --accent-line: #235049; }
+[data-theme="dark"][data-accent="amber"],
+[data-theme="midnight"][data-accent="amber"] { --accent: #e0a94e; --accent-wash: #26200f; --accent-line: #574326; }
+[data-theme="dark"][data-accent="rose"],
+[data-theme="midnight"][data-accent="rose"]  { --accent: #ef7fa4; --accent-wash: #2a1620; --accent-line: #5c2f43; }
+
+/* --- density: row height and padding, independent of zoom ----------- */
+:root { --row-h: 27px; --pad-y: 0.2rem; --pane-head-h: 27px; }
+[data-density="compact"]     { --row-h: 22px; --pad-y: 0.1rem; --pane-head-h: 24px; }
+[data-density="comfortable"] { --row-h: 29px; --pad-y: 0.24rem; --pane-head-h: 28px; }
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-canvas-deep: var(--canvas-deep);
+  --color-surface: var(--surface);
+  --color-sunk: var(--surface-sunk);
+  --color-raised: var(--surface-raised);
+  --color-ink: var(--ink);
+  --color-soft: var(--ink-soft);
+  --color-muted: var(--ink-muted);
+  --color-faint: var(--ink-faint);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-wash: var(--accent-wash);
+  --color-accent-line: var(--accent-line);
+  --color-sev: var(--sev);
+  --color-sev-wash: var(--sev-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-ok: var(--ok);
+  --color-ok-wash: var(--ok-wash);
+  --color-info: var(--info);
+  --color-info-wash: var(--info-wash);
+
+  --font-sans: system-ui, -apple-system, "SF Pro Text", "Segoe UI Variable Text",
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono",
+    "Roboto Mono", Menlo, Consolas, monospace;
+
+  --radius-card: 9px;
+  --radius-tile: 7px;
+}

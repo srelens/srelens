@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { FilePlus2, Plug, Trash2, Upload } from "lucide-react";
 import { Button, TextInput } from "../ui";
-import { list, remove, upload, type KubeconfigMeta } from "../lib/webKubeconfigs";
-import { testKubeconfigYaml, type TestResult } from "../lib/addCluster";
+import { list, remove, upload, type KubeconfigMeta } from "@srelens/core";
+import { testKubeconfigYaml, type TestResult } from "@srelens/core";
 
 /**
  * Settings → Kubernetes (web mode). Desktop merges local kubeconfig files

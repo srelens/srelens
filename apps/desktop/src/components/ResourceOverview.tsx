@@ -1,14 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, ScrollText, SquareTerminal } from "lucide-react";
 import type { X509Certificate } from "@peculiar/x509";
-import { getObject, getSecret, type K8sObject } from "../lib/manifest";
-import { listEndpointSlices } from "../lib/network";
-import { serviceExternalAddress } from "../lib/serviceAddress";
-import { podsForPvc, formatStorageSize } from "../lib/storage";
-import { bindingsForServiceAccount, podsForServiceAccount, type SaBinding } from "../lib/rbac";
-import { updateConfigData } from "../lib/actions";
-import { useAccess, denyReason, reportActionError, type AccessCheck } from "../lib/access";
-import { describeError } from "../lib/errors";
+import { getObject, getSecret, type K8sObject } from "@srelens/core";
+import { listEndpointSlices } from "@srelens/core";
+import { serviceExternalAddress } from "@srelens/core";
+import { podsForPvc, formatStorageSize } from "@srelens/core";
+import { bindingsForServiceAccount, podsForServiceAccount, type SaBinding } from "@srelens/core";
+import { updateConfigData } from "@srelens/core";
+import { useAccess, denyReason, reportActionError, type AccessCheck } from "@srelens/core/react";
+import { describeError } from "@srelens/core";
 import {
   Spinner,
   StatusPill,
@@ -28,7 +28,8 @@ import {
   targetNamespace,
   type OpenResource,
   type ResourceTarget,
-} from "../lib/resourceNavigation";
+} from "@srelens/core";
+import { TitleTooltip } from "@/components/ui/tooltip";
 
 /* ------------------------------------------------------------------ */
 /* small value helpers                                                 */
@@ -135,15 +136,16 @@ function ResourceLink({
   if (!onOpenResource || !target.name || !isNavigableResourceKind(target.kind))
     return <span className="fl-mono">{content}</span>;
   return (
-    <button
-      type="button"
-      className="fl-link fl-mono"
-      aria-label={`Open ${target.kind} ${target.name}`}
-      title={`Open ${target.kind}`}
-      onClick={() => onOpenResource(target)}
-    >
-      {content}
-    </button>
+    <TitleTooltip title={`Open ${target.kind}`}>
+      <button
+        type="button"
+        className="fl-link fl-mono"
+        aria-label={`Open ${target.kind} ${target.name}`}
+        onClick={() => onOpenResource(target)}
+      >
+        {content}
+      </button>
+    </TitleTooltip>
   );
 }
 

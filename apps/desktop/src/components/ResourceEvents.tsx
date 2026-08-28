@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { listEvents, type EventSummary } from "../lib/manifest";
+import { listEvents, type EventSummary } from "@srelens/core";
 import { Spinner, StatusPill, Table, type Column } from "../ui";
-import { ageSortValue } from "../lib/age";
+import { ageSortValue } from "@srelens/core";
 
 /**
  * Events involving a single object, shown in its detail drawer. Fetches the

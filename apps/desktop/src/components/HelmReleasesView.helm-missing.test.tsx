@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
-vi.mock("../lib/helm", () => ({
+vi.mock("@srelens/core/lib/helm", () => ({
   listHelmReleases: vi.fn().mockResolvedValue({ releases: [] }),
   getHelmRelease: vi.fn().mockResolvedValue({ release: null }),
   helmVersion: vi.fn().mockResolvedValue({ error: "helm not found on PATH" }),
   helmRepoUpdate: vi.fn(),
   helmRepoAdd: vi.fn(),
 }));
-vi.mock("../lib/useNamespaceOptions", () => ({
+vi.mock("@srelens/core/lib/useNamespaceOptions", () => ({
   useNamespaceOptions: () => ({ namespaces: [], scope: "", error: "" }),
 }));
 vi.mock("../ui/CodeEditor", () => ({ CodeEditor: () => null }));

@@ -2,10 +2,10 @@ import { useState } from "react";
 import { Trash2, RotateCw, LogOut } from "lucide-react";
 import { Button } from "../ui";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { deleteResource, rolloutRestart } from "../lib/actions";
-import { deletePod, evictPod } from "../lib/workloads";
-import { runBulk, summarize, type ActionOutcome } from "../lib/bulk";
-import { notify } from "../lib/notify";
+import { deleteResource, rolloutRestart } from "@srelens/core";
+import { deletePod, evictPod } from "@srelens/core";
+import { runBulk, summarize, type ActionOutcome } from "@srelens/core";
+import { notify } from "@srelens/core";
 
 export interface BulkRow {
   name: string;

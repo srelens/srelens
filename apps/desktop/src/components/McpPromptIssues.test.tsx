@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const promptIssues = vi.fn();
-vi.mock("../lib/mcpSecurity", () => ({ promptIssues: () => promptIssues() }));
+vi.mock("@srelens/core/lib/mcpSecurity", () => ({ promptIssues: () => promptIssues() }));
 
 import { McpPromptIssues } from "./McpPromptIssues";
 

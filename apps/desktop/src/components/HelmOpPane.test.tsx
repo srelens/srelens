@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, type Mock } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { HelmOpPane } from "./HelmOpPane";
-import { startHelmOp } from "../lib/helm";
+import { startHelmOp } from "@srelens/core";
 
-vi.mock("../lib/helm", () => ({
+vi.mock("@srelens/core/lib/helm", () => ({
   startHelmOp: vi.fn(async (_ctx, _args, onData, onExit) => {
     onData("Release \"web\" has been upgraded.");
     onExit(null);

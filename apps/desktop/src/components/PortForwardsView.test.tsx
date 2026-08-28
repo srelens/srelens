@@ -6,21 +6,21 @@ const { invokeCommandMock, onMock } = vi.hoisted(() => ({
   invokeCommandMock: vi.fn(),
   onMock: vi.fn((_channel: string, _handler: (payload?: unknown) => void) => () => {}),
 }));
-vi.mock("../transport/transport", () => ({ invokeCommand: invokeCommandMock, on: onMock }));
+vi.mock("@srelens/core/transport", () => ({ invokeCommand: invokeCommandMock, on: onMock }));
 
 const { listSavedForwardsMock, saveForwardMock, deleteSavedForwardMock } = vi.hoisted(() => ({
   listSavedForwardsMock: vi.fn(),
   saveForwardMock: vi.fn(),
   deleteSavedForwardMock: vi.fn(),
 }));
-vi.mock("../lib/savedForwards", () => ({
+vi.mock("@srelens/core/lib/savedForwards", () => ({
   listSavedForwards: listSavedForwardsMock,
   saveForward: saveForwardMock,
   deleteSavedForward: deleteSavedForwardMock,
 }));
 
 import { PortForwardsView } from "./PortForwardsView";
-import { startPortForward, stopPortForward, getForwards } from "../lib/forward";
+import { startPortForward, stopPortForward, getForwards } from "@srelens/core";
 
 // Capture `forward:status:<id>` handlers so tests can fire status events.
 const statusHandlers = new Map<string, (payload: unknown) => void>();

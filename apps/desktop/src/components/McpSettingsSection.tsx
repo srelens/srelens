@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Copy, Download, Eye, EyeOff, Radio, RefreshCw, Trash2 } from "lucide-react";
 import { Button, ConfirmDialog, TextInput } from "../ui";
-import { notify } from "../lib/notify";
+import { notify } from "@srelens/core";
 import {
   loadMcpSettings,
   saveMcpSettings,
   type McpSettings,
-} from "../lib/settings";
+} from "@srelens/core";
 import {
   startMcpHttp,
   stopMcpHttp,
@@ -14,9 +14,9 @@ import {
   installSrelensCli,
   srelensCliStatus,
   type CliStatus,
-} from "../lib/mcp";
-import { getMcpToken, revokeMcpToken, rotateMcpToken } from "../lib/mcpSecurity";
-import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "../lib/mcpClients";
+} from "@srelens/core";
+import { getMcpToken, revokeMcpToken, rotateMcpToken } from "@srelens/core";
+import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "@srelens/core";
 import { McpAuditList } from "./McpAuditList";
 import { McpPromptIssues } from "./McpPromptIssues";
 

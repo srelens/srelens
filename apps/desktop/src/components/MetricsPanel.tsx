@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { podMetrics, podsForSelector } from "../lib/workloads";
-import { nodeMetrics } from "../lib/manifest";
+import { podMetrics, podsForSelector } from "@srelens/core";
+import { nodeMetrics } from "@srelens/core";
 import { Sparkline } from "../ui";
 
 interface Sample {

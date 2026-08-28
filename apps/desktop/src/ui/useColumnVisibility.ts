@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { loadHiddenColumns, saveHiddenColumns } from "@/lib/settings";
+import { loadHiddenColumns, saveHiddenColumns } from "@srelens/core";
 import type { Column } from "./Table";
 import type { ColumnOption } from "./ColumnPicker";
 

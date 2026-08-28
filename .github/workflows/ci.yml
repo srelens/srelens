@@ -47,8 +47,11 @@ jobs:
       - name: Build
         run: pnpm build
       - name: Unit tests with coverage
-        # Vitest enforces the 85% line-coverage floor (vitest.config.ts).
-        run: pnpm -r test
+        # `pnpm test`, NOT `pnpm -r test`: recursive commands skip the workspace
+        # root, and the 85/80/76 floors live in the root vitest.config.ts because
+        # they are measured across apps/desktop and packages/core together.
+        # Running the packages individually would report green with no gate at all.
+        run: pnpm test
       - name: Performance-baseline script tests
         # The size classifier decides which artifacts are compared against
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
@@ -92,11 +95,11 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       # Same reason: pinned, so the tool comes from an input rather than the tag.
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.16.3
       - name: Create kind cluster

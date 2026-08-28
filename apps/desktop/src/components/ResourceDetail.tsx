@@ -3,7 +3,7 @@ import { Tabs } from "../ui";
 import { ResourceOverview } from "./ResourceOverview";
 import { ResourceEvents } from "./ResourceEvents";
 import { YamlView } from "./YamlView";
-import type { OpenResource } from "../lib/resourceNavigation";
+import type { OpenResource } from "@srelens/core";
 
 type DetailTab = "overview" | "yaml" | "events";
 

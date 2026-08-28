@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { respondToConfirm, type ConfirmRequest } from "../lib/mcpSecurity";
-import { notify } from "../lib/notify";
+import { respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { notify } from "@srelens/core";
 import { ConfirmDialog } from "../ui";
 
 /**

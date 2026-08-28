@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { ConfirmDialog, TextInput, Button } from "../ui";
-import { startPortForward } from "../lib/forward";
-import { saveForward } from "../lib/savedForwards";
+import { startPortForward } from "@srelens/core";
+import { saveForward } from "@srelens/core";
 
 function validPort(v: string): number | null {
   const n = Number(v);
