@@ -28,6 +28,9 @@ const store = vi.hoisted(() => ({
 }));
 const core = vi.hoisted(() => ({
   stopPortForward: vi.fn(),
+  // The dialog's own write, so what the header's `New forward` finally starts —
+  // and the cluster it starts it on — can be read rather than inferred.
+  startPortForward: vi.fn(),
   rehydrateForwards: vi.fn(),
   openExternal: vi.fn(),
   // Only so the mounted dialog has something to list. What it does with them
@@ -47,8 +50,11 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
-import { type ActiveForward, kindToForwardTarget, toKubectl } from "@srelens/core";
+import { type ActiveForward, type ClusterContext, kindToForwardTarget, toKubectl } from "@srelens/core";
 import { Forwards } from "./Forwards";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { setActiveCluster, setState } from "../lib/tabsStore";
+import { defaultState } from "../lib/tabs";
 
 const ROUTE = "/forwards";
 
@@ -119,6 +125,29 @@ function fixture(now: number): ActiveForward[] {
   ];
 }
 
+/**
+ * Two clusters for the rail to move between. This screen lists every cluster's
+ * forwards, but a NEW one is made in exactly one — whichever the rail had when
+ * the dialog was asked for.
+ */
+const PROD: ClusterContext = {
+  name: "prod-eu",
+  stableId: "prod",
+  cluster: "prod",
+  server: "https://prod",
+  isCurrent: true,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
+};
+const STAGE: ClusterContext = { ...PROD, name: "stage-eu", stableId: "stage", cluster: "stage", server: "https://stage", isCurrent: false };
+
+/** Both clusters in the workspace, with `PROD` in focus — the rail's start. */
+function withClusters() {
+  resetContexts();
+  setContexts([PROD, STAGE]);
+  setState(defaultState([PROD, STAGE]));
+}
+
 let NOW = 0;
 let windowOpen: ReturnType<typeof vi.fn>;
 
@@ -135,6 +164,14 @@ beforeEach(() => {
   core.listNamespaces.mockResolvedValue({ namespaces: ["checkout"] });
   core.listServices.mockResolvedValue({ services: [] });
   core.listPods.mockResolvedValue({ pods: [] });
+  core.startPortForward.mockImplementation(async (req: { localPort?: number }) => ({
+    id: 9,
+    localPort: req.localPort ?? 0,
+    startedAt: Date.now(),
+  }));
+  // No cluster in the rail by default — every test above this line predates
+  // the rail mattering to this screen, and reads the same as it always did.
+  resetContexts();
   NOW = Date.now();
   store.list = fixture(NOW);
   store.listeners.clear();
@@ -588,6 +625,94 @@ describe("Forwards — the screen around the table", () => {
     expect(within(dialog).getByText("New port forward")).toBeTruthy();
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  /**
+   * Open the dialog on `PROD`, fill in §A.4's four fields from that cluster's
+   * listings, then move the rail to `STAGE` under it.
+   *
+   * Since #357 a dialog covers only its own tab, so the rail is live behind
+   * this one and `setActiveCluster` switches the active cluster in place with
+   * nothing remounting — the same premise `ResourceMenu`'s own forward gate is
+   * built on. This screen's door is the other one into the same dialog.
+   */
+  async function fillNewForwardThenMove() {
+    withClusters();
+    core.listServices.mockResolvedValue({ services: [{ name: "checkout-api", namespace: "checkout" }] });
+    open();
+    const actions = document.querySelector('[data-slot="screen-actions"]') as HTMLElement;
+    await userEvent.click(within(actions).getByRole("button", { name: "New forward" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu"));
+
+    await userEvent.selectOptions(screen.getByLabelText("Namespace"), "checkout");
+    await waitFor(() => expect(core.listServices).toHaveBeenCalledWith("prod-eu", "checkout"));
+    await waitFor(() =>
+      expect(
+        within(screen.getByLabelText("Target")).queryByRole("option", { name: "svc/checkout-api" }),
+      ).toBeTruthy(),
+    );
+    await userEvent.selectOptions(screen.getByLabelText("Target"), "svc/checkout-api");
+    await userEvent.clear(screen.getByLabelText("Local port"));
+    await userEvent.type(screen.getByLabelText("Local port"), "9099");
+    await userEvent.clear(screen.getByLabelText("Remote port"));
+    await userEvent.type(screen.getByLabelText("Remote port"), "8080");
+
+    act(() => setActiveCluster(STAGE.stableId, STAGE.name));
+  }
+
+  it("keeps the new-forward dialog on the cluster it was opened against when the rail moves", async () => {
+    await fillNewForwardThenMove();
+
+    // The listings stay with the pinned cluster: a namespace select that
+    // followed the rail would offer another cluster's namespaces under a
+    // target picked from this one.
+    expect(core.listNamespaces).toHaveBeenCalledTimes(1);
+    expect(core.listNamespaces).not.toHaveBeenCalledWith("stage-eu");
+    expect(core.listServices).not.toHaveBeenCalledWith("stage-eu", "checkout");
+    // And the equivalent command names the cluster the forward will be made
+    // in, which is the same one the banner does.
+    expect(screen.getByText(/--context prod-eu\b/)).toBeTruthy();
+    expect(screen.queryByText(/--context stage-eu\b/)).toBeNull();
+    expect(screen.getByText("This still runs against prod-eu, not stage-eu")).toBeTruthy();
+  });
+
+  it("refuses the start until the reader confirms the cluster, then forwards on that one", async () => {
+    await fillNewForwardThenMove();
+
+    // Pressed while the divergence stands: nothing goes out.
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(core.startPortForward).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Yes, still forward on prod-eu." }));
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
+    // `prod-eu`, where the target was picked — never `stage-eu`, where the
+    // rail went. A tunnel to staging under a name read off production is the
+    // whole of the defect.
+    expect(core.startPortForward).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: "prod-eu",
+        namespace: "checkout",
+        kind: "Service",
+        name: "checkout-api",
+        localPort: 9099,
+        remotePort: 8080,
+      }),
+    );
+  });
+
+  it("says nothing, and asks nothing, while the rail has not moved under the dialog", async () => {
+    withClusters();
+    open();
+    const actions = document.querySelector('[data-slot="screen-actions"]') as HTMLElement;
+    await userEvent.click(within(actions).getByRole("button", { name: "New forward" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu"));
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Yes, still/ })).toBeNull();
   });
 
   it("opens the SAME dialog from the empty state's way out", async () => {

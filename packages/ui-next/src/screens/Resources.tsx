@@ -253,7 +253,37 @@ function KindList({
   // change. `useObject` is keyed on the primitives below and would not refetch
   // either way, but a re-render per click of a list that already answers is
   // work nobody asked for, and holding the identity stable says so.
-  const [peek, setPeek] = useState<{ namespace: string | null; name: string } | null>(null);
+  const [peek, setPeek] = useState<{ context: string; namespace: string | null; name: string } | null>(
+    null,
+  );
+
+  /**
+   * The cluster the peek was opened on, held WITH the row and checked here —
+   * and a peek held for any other cluster is dropped before it can be
+   * rendered.
+   *
+   * The comment above is why this has to be said separately: "the pane reads
+   * the object itself" is what makes a row leaving the table harmless, and it
+   * holds for a namespace change while failing for a cluster one.
+   * `namespace/name` is not unique across clusters, so the held identity
+   * survived a rail switch and quietly resolved against the NEW cluster — a
+   * pane the reader opened on one cluster's row, showing another cluster's
+   * object, with that object's ports and its actions under it. (`Helm` drops
+   * its own pane's subject on a re-list for exactly this reason.)
+   *
+   * Adjusted DURING render rather than in an effect, which is the same choice
+   * `useObject` and `useDetailPaneState` both make and for the same reason: a
+   * child's effects run before this component's, so an effect here would let
+   * the pane mount once against the new cluster and send a `getObject` for an
+   * object the reader never asked about. React re-runs this component with the
+   * cleared state before committing anything, so the pane is not merely
+   * closed again — it is never opened on the wrong cluster at all. That is
+   * also why the JSX below tests `peek` alone: a second copy of this
+   * comparison down there was measured to be unfalsifiable (removing it
+   * changed no test), because a render that adjusts state here is discarded
+   * before it can commit.
+   */
+  if (peek && peek.context !== name) setPeek(null);
 
   // How wide that pane is. Module state rather than this screen's, so the
   // width the reader dragged is the width every resource list opens at — and
@@ -272,7 +302,10 @@ function KindList({
     setPeek((prev) =>
       prev && prev.name === rowName && prev.namespace === rowNamespace
         ? prev
-        : { namespace: rowNamespace, name: rowName },
+        : // The cluster is captured with the row, at the click — see the gate
+          // above. `name` is the cluster the row was listed from, which is
+          // the only cluster this pane is ever about.
+          { context: name, namespace: rowNamespace, name: rowName },
     );
   }
 

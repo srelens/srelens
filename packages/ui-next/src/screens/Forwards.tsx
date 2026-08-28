@@ -31,6 +31,7 @@ import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureWord } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { formatBytes } from "../lib/numbers";
+import { useClusterGate } from "../lib/clusterMoved";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
 
 /**
@@ -252,9 +253,35 @@ export function Forwards(_props: { route: string }) {
    * §A.4's dialog, opened from the header action and from the empty state's
    * way out — one handler behind both, so a reader with no tunnels reaches the
    * same dialog as one with four.
+   *
+   * **The cluster is captured here, when the reader ASKS for the dialog**, not
+   * read live while it is open. Since #357 a dialog covers only its own tab, so
+   * the rail is live behind this one and `setActiveCluster` switches the active
+   * cluster in place with nothing remounting. Read live, everything the dialog
+   * had already been told followed the rail: the namespace and target the
+   * reader picked out of one cluster's listings stayed in the fields while
+   * `Start forward` went to another cluster — a tunnel to staging under a name
+   * read off production. `ResourceMenu`'s door into this same dialog pinned it
+   * for exactly that reason (see `Forwarding` there); this is the other door.
    */
-  const [newForwardOpen, setNewForwardOpen] = useState(false);
-  const openNewForward = () => setNewForwardOpen(true);
+  const [newForward, setNewForward] = useState<{ context: string; namespace?: string } | null>(null);
+
+  /**
+   * What the dialog says, and asks again, when the rail moves out from under
+   * it — `lib/clusterMoved`'s gate, wired exactly as the row menu's forward
+   * door wires it. A forward exposes a port and then reports it as up, which is
+   * why this re-arms the confirmation rather than only stating the divergence.
+   */
+  const forwardGate = useClusterGate({
+    pinned: newForward?.context ?? null,
+    live: cluster?.name ?? "",
+    verb: "forward",
+  });
+
+  const openNewForward = () => {
+    forwardGate.reset();
+    setNewForward({ context: cluster?.name ?? "", namespace: cluster?.namespace });
+  };
 
   const newForwardButton = (
     <Button variant="primary" size="sm" onClick={openNewForward}>
@@ -379,15 +406,22 @@ export function Forwards(_props: { route: string }) {
     <Screen title="Port forwards" eyebrow="all clusters" actions={newForwardButton} fill>
       {/* Beside the body rather than inside either branch of it, so the dialog
           opens the same from a populated screen and an empty one. */}
-      {newForwardOpen && (
+      {newForward && (
         <NewForwardDialog
-          // The cluster in focus. A forward is made in one cluster even though
-          // this screen lists every cluster's, and the rail's selection is the
-          // only answer the app has to *which*; the dialog says so itself when
-          // there is none rather than being opened against an empty context.
-          context={cluster?.name ?? ""}
-          namespace={cluster?.namespace}
-          onClose={() => setNewForwardOpen(false)}
+          // The cluster that was in focus when the dialog was asked for, not
+          // the one in focus now. A forward is made in one cluster even though
+          // this screen lists every cluster's, and the rail's selection at the
+          // moment of the gesture is the only answer the app has to *which*;
+          // the dialog says so itself when there was none rather than being
+          // opened against an empty context.
+          context={newForward.context}
+          namespace={newForward.namespace}
+          moved={forwardGate.alert}
+          refusal={forwardGate.refusal}
+          onClose={() => {
+            setNewForward(null);
+            forwardGate.reset();
+          }}
         />
       )}
       {failure && (

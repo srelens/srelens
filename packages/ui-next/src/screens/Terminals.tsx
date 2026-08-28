@@ -12,6 +12,7 @@ import {
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { useActiveContext } from "../lib/clusters";
+import { ClusterMovedAlert } from "../lib/clusterMoved";
 import {
   endSession,
   getSessions,
@@ -193,7 +194,18 @@ export function Terminals(_props: { route: string }) {
   const cluster = useActiveContext();
   const { ask } = useConsole();
   const [picked, setPicked] = useState<number | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
+  /**
+   * The `New session` menu, and the cluster it was opened against.
+   *
+   * **Captured at the gesture, not read live.** Since #357 a dialog covers only
+   * its own tab, so the rail stays live behind this menu and `setActiveCluster`
+   * switches the active cluster in place with nothing remounting. The menu's
+   * namespace, pod, container and node are all identities out of one cluster's
+   * listings; with a live context they stayed in the fields while the shell
+   * opened somewhere else — a pod name read off production, exec'd on staging.
+   * `ResourceMenu`'s `Open shell` pinned its own pick for the same reason.
+   */
+  const [newSession, setNewSession] = useState<{ context: string; namespace: string } | null>(null);
 
   /**
    * A session started anywhere — this screen's menu, or the resource row
@@ -250,21 +262,38 @@ export function Terminals(_props: { route: string }) {
           >
             Draft a command
           </Button>
-          <Button variant="primary" size="sm" onClick={() => setMenuOpen(true)}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() =>
+              setNewSession({ context: cluster?.name ?? "", namespace: cluster?.namespace ?? "" })
+            }
+          >
             New session
           </Button>
         </>
       }
     >
-      {menuOpen && (
+      {newSession && (
         <NewSessionMenu
-          // The cluster in focus, not the active session's: a new session is
-          // started where the reader is, and the menu says so itself when
-          // there is no cluster rather than opening on an empty context.
-          context={cluster?.name ?? ""}
-          namespace={cluster?.namespace}
+          // The cluster that was in focus when `New session` was pressed, not
+          // the active session's and not the one in focus now: a new session is
+          // started where the reader ASKED for it, and the menu says so itself
+          // when there was no cluster rather than opening on an empty context.
+          context={newSession.context}
+          namespace={newSession.namespace}
+          // Stated, and nothing more — a session writes nothing to the cluster
+          // and the terminal it opens is captioned with its own context. Same
+          // rule as the row menu's container picker.
+          moved={
+            newSession.context !== (cluster?.name ?? "") ? (
+              <ClusterMovedAlert pinned={newSession.context} live={cluster?.name ?? ""}>
+                {` Cancel and open New session again to start one on ${cluster?.name ?? "the cluster in focus"}.`}
+              </ClusterMovedAlert>
+            ) : undefined
+          }
           onStarted={setPicked}
-          onClose={() => setMenuOpen(false)}
+          onClose={() => setNewSession(null)}
         />
       )}
       <SideRail
@@ -275,7 +304,12 @@ export function Terminals(_props: { route: string }) {
             sessions={sessions}
             activeId={active?.id ?? null}
             onSelect={setPicked}
-            onNewSession={() => setMenuOpen(true)}
+            // The rail's own door into the menu, pinning the cluster exactly as
+            // the toolbar's does above: two doors to one dialog is how the two
+            // start disagreeing about which cluster they opened it on.
+            onNewSession={() =>
+              setNewSession({ context: cluster?.name ?? "", namespace: cluster?.namespace ?? "" })
+            }
           />
         }
         mainHead={

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   createNodeDebugPod,
   defaultContainer,
@@ -46,10 +46,29 @@ type Kind = "pod" | "node" | "local";
 const KIND_LABEL: Record<Kind, string> = { pod: "Pod", node: "Node", local: "Local shell" };
 
 export interface NewSessionMenuProps {
-  /** The cluster to start a session in — a kubeconfig context name. */
+  /**
+   * The cluster to start a session in — a kubeconfig context name.
+   *
+   * Pinned by the caller at the moment the menu was asked for, not read live:
+   * everything picked here (the namespace, the pod, its containers, the node)
+   * is an identity out of THIS cluster's listings, and a prop that followed the
+   * cluster rail would open the shell somewhere else under those same names.
+   * See {@link NewSessionMenuProps.moved}.
+   */
   context: string;
   /** Where the namespace select starts, when the caller knows a good one. */
   namespace?: string;
+  /**
+   * The cluster-moved banner, from the caller's own comparison — see
+   * `lib/clusterMoved`. `undefined` from a door with nothing to compare.
+   *
+   * Drawn above everything else in the body: it changes what every other name
+   * in the menu refers to. STATED and nothing more, which is the rule the row
+   * menu's own container picker settled on for a shell — a session writes
+   * nothing to the cluster and lands in a terminal captioned with its own
+   * context, so the reader is told rather than asked again.
+   */
+  moved?: ReactNode;
   /** A session came up: its id, so the caller can make it the active one. */
   onStarted: (id: number) => void;
   /** Cancel, escape, the header's control, and a session that came up. */
@@ -91,7 +110,7 @@ export interface NewSessionMenuProps {
  * `execCandidates`, and the container select only ever sees what survives
  * that filter.
  */
-export function NewSessionMenu({ context, namespace: initial, onStarted, onClose }: NewSessionMenuProps) {
+export function NewSessionMenu({ context, namespace: initial, moved, onStarted, onClose }: NewSessionMenuProps) {
   const desktop = isTauri();
   const [kind, setKind] = useState<Kind>("pod");
 
@@ -262,6 +281,9 @@ export function NewSessionMenu({ context, namespace: initial, onStarted, onClose
       }
     >
       <div className="flex flex-col gap-3 p-3">
+        {/* First, above the kind and everything under it: see
+            {@link NewSessionMenuProps.moved}. */}
+        {moved}
         {failure && <FailureAlert tone="sev" title={failure.title} error={failure.error} />}
 
         <Field label="Kind">

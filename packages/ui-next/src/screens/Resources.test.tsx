@@ -878,6 +878,36 @@ describe("Resources", () => {
     expect(deleteResource).not.toHaveBeenCalled();
   });
 
+  // The same class as the bulk selection above, one state over: the peek holds
+  // a `namespace/name` too, and its comment reasons only about the LIST ("the
+  // pane reads the object itself, so nothing here can go stale") — which is
+  // true of a namespace change and false of a cluster one, where the identical
+  // identity resolves to a different object. Helm's own pane settled this
+  // first: a pane about a row the table no longer has is a pane about nothing.
+  it("closes the peek when the rail switches cluster", async () => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+
+    open("/k/pods");
+    await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+    await userEvent.click(screen.getByText("web-1"));
+    await paneReadyFor("web-1");
+
+    act(() => store.setActiveCluster(STAGE.stableId, STAGE.name));
+
+    await waitFor(() => expect(peekPane()).toBeNull());
+    // Not merely blank: the pane must not have gone and read the OTHER
+    // cluster's `default/web-1` — the object the reader never asked about.
+    expect(getObject.mock.calls.some((call) => call[0] === STAGE.name)).toBe(false);
+
+    // And it is DROPPED, not merely hidden: coming back to the cluster it was
+    // opened on must not resurrect a pane the reader never re-opened — the
+    // same rule the bulk selection's own comment states for namespaces.
+    act(() => store.setActiveCluster(CTX.stableId, CTX.name));
+    await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+    expect(peekPane()).toBeNull();
+  });
+
   it("shows the rows and says the stream dropped when the watch is reconnecting", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toHaveLength(2));

@@ -64,6 +64,16 @@ const CTX: ClusterContext = {
   authKind: "client certificate",
 };
 
+/** The cluster the rail can move to while the new-session menu is open. */
+const STAGE: ClusterContext = {
+  ...CTX,
+  name: "stage-eu",
+  stableId: "stage",
+  cluster: "stage",
+  server: "https://stage",
+  isCurrent: false,
+};
+
 /** jsdom has no `matchMedia`; xterm's `CoreBrowserService` reads it on open(). */
 function stubMatchMedia(target: typeof globalThis) {
   (target as unknown as { matchMedia: (query: string) => MediaQueryList }).matchMedia = (
@@ -346,6 +356,90 @@ describe("Terminals", () => {
     await user.click(within(headerActions()).getByRole("button", { name: "New session" }));
 
     expect(await screen.findByRole("button", { name: "Start session" })).toBeTruthy();
+  });
+
+  /**
+   * Open the menu on `CTX`, pick a namespace and a pod out of THAT cluster's
+   * listings, then move the rail to `STAGE` under it.
+   *
+   * The menu is mounted on a boolean beside the screen's body, and since #357 a
+   * dialog covers only its own tab — so the rail is live behind it and
+   * `setActiveCluster` switches the active cluster in place with nothing
+   * remounting.
+   */
+  async function pickPodThenMove(user: ReturnType<typeof userEvent.setup>) {
+    setContexts([CTX, STAGE]);
+    tabs.setState(defaultState([CTX, STAGE]));
+    core.listNamespaces.mockResolvedValue({ namespaces: ["checkout"] });
+    core.listPods.mockResolvedValue({ pods: [{ name: "checkout-api-0" }] });
+    core.getObject.mockResolvedValue({
+      object: {
+        kind: "Pod",
+        apiVersion: "v1",
+        metadata: { name: "checkout-api-0", namespace: "checkout" },
+        spec: { containers: [{ name: "api" }] },
+        status: { phase: "Running", containerStatuses: [{ name: "api", ready: true, started: true, state: { running: {} } }] },
+      },
+    });
+    draw();
+
+    await user.click(within(headerActions()).getByRole("button", { name: "New session" }));
+    await screen.findByRole("button", { name: "Start session" });
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu"));
+
+    await user.selectOptions(screen.getByLabelText("Namespace"), "checkout");
+    await waitFor(() => expect(core.listPods).toHaveBeenCalledWith("prod-eu", "checkout"));
+    await user.selectOptions(screen.getByLabelText("Pod"), "checkout-api-0");
+    await waitFor(() =>
+      expect(core.getObject).toHaveBeenCalledWith("prod-eu", "Pod", "checkout", "checkout-api-0"),
+    );
+
+    act(() => tabs.setActiveCluster(STAGE.stableId, STAGE.name));
+  }
+
+  it("keeps the new-session menu on the cluster it was opened against when the rail moves", async () => {
+    const user = userEvent.setup();
+    await pickPodThenMove(user);
+
+    // The listings stay with the cluster the pod was picked in: a namespace
+    // select that followed the rail would offer another cluster's namespaces
+    // under a pod name read off this one.
+    expect(core.listNamespaces).toHaveBeenCalledTimes(1);
+    expect(core.listNamespaces).not.toHaveBeenCalledWith("stage-eu");
+    expect(core.listPods).not.toHaveBeenCalledWith("stage-eu", "checkout");
+    // And the divergence is said, rather than the menu quietly renaming its
+    // own target: a shell writes nothing, so this states it and stops.
+    expect(screen.getByText("This still runs against prod-eu, not stage-eu")).toBeTruthy();
+  });
+
+  it("opens the shell on the cluster the pod was picked in, not the one the rail moved to", async () => {
+    const user = userEvent.setup();
+    await pickPodThenMove(user);
+
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => expect(core.startPodExec).toHaveBeenCalledTimes(1));
+    // `startPodExec(context, namespace, pod, …)` — the first three arguments
+    // are the whole of the claim.
+    expect(core.startPodExec.mock.calls[0].slice(0, 3)).toEqual([
+      "prod-eu",
+      "checkout",
+      "checkout-api-0",
+    ]);
+  });
+
+  it("says nothing while the rail has not moved under the menu", async () => {
+    const user = userEvent.setup();
+    setContexts([CTX, STAGE]);
+    tabs.setState(defaultState([CTX, STAGE]));
+    core.listNamespaces.mockResolvedValue({ namespaces: ["checkout"] });
+    draw();
+
+    await user.click(within(headerActions()).getByRole("button", { name: "New session" }));
+    await screen.findByRole("button", { name: "Start session" });
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu"));
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
   });
 
   it("hands the console a question about the session on screen", async () => {
