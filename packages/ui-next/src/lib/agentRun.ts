@@ -102,9 +102,67 @@ function emit() {
   for (const listener of listeners) listener();
 }
 
+/**
+ * The one way the snapshot changes: take the rebuilt run only if something in
+ * it actually differs from the current one. Identity is the snapshot's
+ * contract, and every call site rebuilds its slice of the run with a fresh
+ * object or array — `updateTurn`'s `{ ...t, text: t.text + e.text }` for a
+ * zero-length delta, `noteGate` re-merging a gate whose outcome did not
+ * change, a `clearAgentRun` on a run that is already empty — none of which
+ * change any value a reader could see. Centralized here rather than at each
+ * call site: a guard `chooseAgent` remembers to add and `updateTurn` forgets
+ * is no guard at all, just one that fails silently for tool calls and text.
+ */
 function commit(next: AgentRun) {
+  if (sameRun(next, run)) return;
   run = next;
   emit();
+}
+
+function sameRun(a: AgentRun, b: AgentRun): boolean {
+  return (
+    a === b ||
+    (a.busy === b.busy &&
+      a.generation === b.generation &&
+      a.agentKind === b.agentKind &&
+      a.error === b.error &&
+      sameList(a.turns, b.turns, sameTurn) &&
+      sameList(a.gates, b.gates, sameGate))
+  );
+}
+
+function sameList<T>(a: T[], b: T[], sameItem: (x: T, y: T) => boolean): boolean {
+  return a === b || (a.length === b.length && a.every((item, i) => sameItem(item, b[i])));
+}
+
+function sameTurn(a: Turn, b: Turn): boolean {
+  return (
+    a === b ||
+    (a.id === b.id &&
+      a.role === b.role &&
+      a.text === b.text &&
+      a.thoughts === b.thoughts &&
+      a.at === b.at &&
+      sameStrings(a.images, b.images) &&
+      sameList(a.calls, b.calls, sameCall))
+  );
+}
+
+function sameCall(a: ToolCallRecord, b: ToolCallRecord): boolean {
+  return (
+    a === b ||
+    (a.id === b.id && a.tool === b.tool && a.status === b.status && a.ms === b.ms && a.args === b.args)
+  );
+}
+
+function sameGate(a: GateRecord, b: GateRecord): boolean {
+  return a === b || (a.id === b.id && a.tool === b.tool && a.outcome === b.outcome && a.args === b.args);
+}
+
+function sameStrings(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 /** Subscribe to store changes (for `useSyncExternalStore`). */
@@ -256,12 +314,13 @@ export function clearAgentRun(): void {
   if (run.busy && session) void cancelChat(session, run.generation).catch(() => {});
   session = null;
   resume = null;
+  // A no-op — clearing a run that is already idle and empty — is left to
+  // `commit`'s own guard rather than special-cased here.
   commit({ ...run, turns: [], busy: false, error: undefined });
 }
 
 /** Pick which agent CLI the next question is sent to. */
 export function chooseAgent(kind: string): void {
-  if (run.agentKind === kind) return;
   commit({ ...run, agentKind: kind });
 }
 
