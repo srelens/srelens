@@ -331,3 +331,114 @@ lUc3RsBva1V3RlPz+Jo=
     });
   });
 });
+
+// `k8s.getSecret` is its own SENSITIVE_READ capability with its own timeout, so
+// a consent refusal, a 403 scoped to `secrets`, and a timeout are all ordinary
+// paths. The fixture below is the only one that can express what happens on
+// them: `getObject` SUCCEEDED — so `object.data` carries the real KEY NAMES
+// with every value blanked to `""` by `redact_secret_data` — while `getSecret`
+// FAILED. Put real values in `object.data` (as the suites above do, for
+// brevity) and the defect is unreachable, because the fallback then happens to
+// hold the truth.
+describe("when the values could not be read (getSecret refused, getObject's blanks are all there is)", () => {
+  const REFUSED = "consent denied for k8s.getSecret";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getSecret.mockResolvedValue({ error: REFUSED });
+    podsForSelector.mockResolvedValue({ pods: [] });
+    podMetrics.mockResolvedValue({ metrics: [] });
+  });
+
+  /** A Secret as `getObject` returns one: keys intact, every value blanked. */
+  const blanked = (keys: string[], overrides: Partial<K8sObject> = {}) =>
+    secret(Object.fromEntries(keys.map((k) => [k, ""])), overrides);
+
+  it("says the values could not be read rather than leaving the reader to read the blanks as facts", async () => {
+    render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+  });
+
+  it("offers the refusal the cluster actually gave, folded away", async () => {
+    render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+    expect(document.body.textContent).toContain(REFUSED);
+  });
+
+  it("withholds Reveal rather than offering a toggle onto an empty pre", async () => {
+    render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+    const toggle = screen.getByRole("button", { name: "Reveal" });
+    // Enabled, this button decodes `""` and shows an empty `<pre>`: a key the
+    // reader may not read looks identical to a key whose value is empty.
+    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(toggle);
+    expect(screen.getByText("••••••••")).toBeDefined();
+  });
+
+  it("still names every key it does know — the key names survived the redaction", async () => {
+    render(<SecretDetailsBody object={blanked(["token", "ca.crt"])} context="ctx" />);
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+    expect(screen.getByText("Data (2 keys)")).toBeDefined();
+    expect(screen.getByText("token")).toBeDefined();
+    expect(screen.getByText("ca.crt")).toBeDefined();
+  });
+
+  it("does not state a TLS Secret that has tls.crt and tls.key as Missing", async () => {
+    render(
+      <SecretDetailsBody
+        object={blanked(["tls.crt", "tls.key"], { type: "kubernetes.io/tls" })}
+        context="ctx"
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+    expect(screen.getByText("TLS material")).toBeDefined();
+    // The Secret HAS both. Neither row may claim otherwise; the whole point is
+    // that the pane does not know, and rows it cannot answer are omitted.
+    expect(screen.queryByText("Missing tls.crt")).toBeNull();
+    expect(screen.queryByText("Missing")).toBeNull();
+    expect(screen.queryByText("Certificates")).toBeNull();
+    expect(screen.queryByText("Private key")).toBeNull();
+  });
+
+  it("does not state a Docker Secret as 0 registries with no valid credentials", async () => {
+    render(
+      <SecretDetailsBody
+        object={blanked([".dockerconfigjson"], { type: "kubernetes.io/dockerconfigjson" })}
+        context="ctx"
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+    expect(screen.getByText("Docker registries")).toBeDefined();
+    expect(screen.queryByText("0 registries")).toBeNull();
+    expect(screen.queryByText("No valid registry credentials found")).toBeNull();
+    expect(screen.queryByText("Registries")).toBeNull();
+  });
+
+  // The peek renders this body while the fetch is still in flight, so the gate
+  // has to cover `loading` by exactly the same argument: the pane does not
+  // know yet either.
+  it("withholds the same assertions while the fetch is still in flight", () => {
+    getSecret.mockImplementation(() => new Promise(() => {}));
+    render(
+      <SecretDetailsBody
+        object={blanked(["tls.crt", "tls.key"], { type: "kubernetes.io/tls" })}
+        context="ctx"
+      />,
+    );
+    expect(screen.queryByText("Missing tls.crt")).toBeNull();
+    expect(screen.queryByText("Missing")).toBeNull();
+    // Both keys — tls.crt and tls.key.
+    const toggles = screen.getAllByRole("button", { name: "Reveal" }) as HTMLButtonElement[];
+    expect(toggles).toHaveLength(2);
+    for (const t of toggles) expect(t.disabled).toBe(true);
+    // ...and does not say the read FAILED, because it has not.
+    expect(screen.queryByText("This Secret's values could not be read")).toBeNull();
+  });
+
+  it("also reads a rejected promise as a failure, not as an empty Secret", async () => {
+    getSecret.mockRejectedValue(new Error(REFUSED));
+    render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
+    await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+  });
+});
