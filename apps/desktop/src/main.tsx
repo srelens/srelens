@@ -2,6 +2,7 @@ import "./styles/globals.css"; // Tailwind + shadcn tokens — must load first.
 import React from "react";
 import { createRoot } from "react-dom/client";
 import AppGate from "./AppGate";
+import { TooltipProvider } from "./components/ui/tooltip";
 import { applyPersistedTimeout } from "./lib/requestTimeout";
 import { isTauri } from "./transport/platform";
 import { initializeSettingsStorage } from "./lib/settingsStorage";
@@ -19,7 +20,15 @@ if (!container) throw new Error("Root element #root not found");
 async function bootstrap(root: HTMLElement): Promise<void> {
   await initializeSettingsStorage();
   if (isTauri()) void applyPersistedTimeout();
-  createRoot(root).render(<AppGate />);
+  // One tooltip provider for the whole window: every tooltip shares its open
+  // delay and, once one has shown, its neighbours open at once for a moment
+  // (the "sweep across the toolbar" the native `title` never allowed, #376).
+  // The delay values are the provider's defaults — see tooltip.tsx for why.
+  createRoot(root).render(
+    <TooltipProvider>
+      <AppGate />
+    </TooltipProvider>,
+  );
 }
 
 void bootstrap(container);

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 
 const {
@@ -74,6 +75,14 @@ function isDisabled(el: HTMLElement): boolean {
 }
 function titleOf(el: HTMLElement): string | null {
   return el.getAttribute("title");
+}
+// IconButton explains itself through a Radix tooltip, not a native title
+// (#376): hover its trigger — the button, or the wrapper around a disabled
+// one, which is what still gets pointer events — and read the tooltip.
+async function tooltipOf(el: HTMLElement): Promise<string | null> {
+  const trigger = el.closest<HTMLElement>('[data-slot="tooltip-trigger"]') ?? el;
+  await userEvent.hover(trigger);
+  return (await screen.findByRole("tooltip")).textContent;
 }
 
 beforeEach(() => {
@@ -868,7 +877,7 @@ describe("ResourceActions", () => {
 describe("PodActions RBAC gating", () => {
   const prodPod = { ...pod, namespace: "prod" };
 
-  it("disables the Delete control and explains why when the user can't delete", () => {
+  it("disables the Delete control and explains why when the user can't delete", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -878,7 +887,7 @@ describe("PodActions RBAC gating", () => {
     render(<PodActions context="kind-dev" pod={prodPod} onDeleted={() => {}} />);
     const del = screen.getByRole("button", { name: "Delete" });
     expect(isDisabled(del)).toBe(true);
-    expect(titleOf(del)).toEqual(expect.stringContaining("permission to delete pods in prod"));
+    expect(await tooltipOf(del)).toEqual(expect.stringContaining("permission to delete pods in prod"));
   });
 
   it("enables Delete when allowed", () => {
@@ -892,7 +901,7 @@ describe("PodActions RBAC gating", () => {
     expect(isDisabled(screen.getByRole("button", { name: "Delete" }))).toBe(false);
   });
 
-  it("disables Evict and explains why when the user can't evict", () => {
+  it("disables Evict and explains why when the user can't evict", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -902,10 +911,10 @@ describe("PodActions RBAC gating", () => {
     render(<PodActions context="kind-dev" pod={prodPod} onDeleted={() => {}} />);
     const evict = screen.getByRole("button", { name: "Evict" });
     expect(isDisabled(evict)).toBe(true);
-    expect(titleOf(evict)).toEqual(expect.stringContaining("permission to create pods/eviction in prod"));
+    expect(await tooltipOf(evict)).toEqual(expect.stringContaining("permission to create pods/eviction in prod"));
   });
 
-  it("disables the pod Edit control and explains why when the user can't patch pods", () => {
+  it("disables the pod Edit control and explains why when the user can't patch pods", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -915,7 +924,7 @@ describe("PodActions RBAC gating", () => {
     render(<PodActions context="kind-dev" pod={prodPod} onDeleted={() => {}} onEdit={() => {}} />);
     const edit = screen.getByRole("button", { name: "Edit" });
     expect(isDisabled(edit)).toBe(true);
-    expect(titleOf(edit)).toEqual(expect.stringContaining("permission to patch pods in prod"));
+    expect(await tooltipOf(edit)).toEqual(expect.stringContaining("permission to patch pods in prod"));
   });
 
   it("enables the pod Edit control when allowed", () => {
@@ -931,7 +940,7 @@ describe("PodActions RBAC gating", () => {
 });
 
 describe("ResourceActions RBAC gating", () => {
-  it("disables the Delete control and explains why when the user can't delete", () => {
+  it("disables the Delete control and explains why when the user can't delete", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -949,7 +958,7 @@ describe("ResourceActions RBAC gating", () => {
     );
     const del = screen.getByRole("button", { name: "Delete" });
     expect(isDisabled(del)).toBe(true);
-    expect(titleOf(del)).toEqual(expect.stringContaining("permission to delete deployments in prod"));
+    expect(await tooltipOf(del)).toEqual(expect.stringContaining("permission to delete deployments in prod"));
   });
 
   it("enables Delete when allowed", () => {
@@ -971,7 +980,7 @@ describe("ResourceActions RBAC gating", () => {
     expect(isDisabled(screen.getByRole("button", { name: "Delete" }))).toBe(false);
   });
 
-  it("disables Scale when the user can't patch the scale subresource", () => {
+  it("disables Scale when the user can't patch the scale subresource", async () => {
     vi.mocked(useAccess).mockReturnValue({
       allowed: () => false,
       reason: () => "RBAC: no rule",
@@ -989,7 +998,7 @@ describe("ResourceActions RBAC gating", () => {
     );
     const scale = screen.getByRole("button", { name: "Scale" });
     expect(isDisabled(scale)).toBe(true);
-    expect(titleOf(scale)).toEqual(expect.stringContaining("permission to patch deployments/scale in prod"));
+    expect(await tooltipOf(scale)).toEqual(expect.stringContaining("permission to patch deployments/scale in prod"));
   });
 
   it("disables Restart when the user can't patch the workload", () => {
