@@ -72,6 +72,23 @@ describe("a run's transcript", () => {
     expect(screen.getByText("code text").closest("pre")).toBeTruthy();
   });
 
+  // Ruling K (review round 2): classic tiers a heading's class by level
+  // (`AssistantMarkdown.tsx:62-70`); a flattened single class, or the branch
+  // deleted outright so headings fall to the paragraph path, must both fail
+  // this — asserting text presence alone let a deleted `heading` branch pass
+  // every other assertion in the suite.
+  it("gives a heading's level its own weight, not one style for every level", () => {
+    const md = ["# H1 text", "", "### H3 text"].join("\n");
+    render(<Transcript turns={[turn({ text: md })]} gates={[]} />);
+    const h1 = screen.getByText("H1 text").closest("p");
+    const h3 = screen.getByText("H3 text").closest("p");
+    expect(h1).toBeTruthy();
+    expect(h3).toBeTruthy();
+    expect(h1!.className).not.toBe(h3!.className);
+    expect(h1!.className).toContain("text-base");
+    expect(h3!.className).toContain("text-sm");
+  });
+
   it("omits the thoughts row entirely for an agent that streamed none", () => {
     render(<Transcript turns={[turn({ text: "done" })]} gates={[]} />);
     expect(screen.queryByText(/thought/i)).toBeNull();

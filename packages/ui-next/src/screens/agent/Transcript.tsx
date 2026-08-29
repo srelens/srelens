@@ -129,13 +129,19 @@ function Spans({ spans }: { spans: NoteSpan[] }) {
  */
 function Block({ block }: { block: MdBlock }) {
   if (block.kind === "heading") {
+    // Three tiers by level, matching classic's own `AssistantMarkdown.tsx`
+    // (:62-70) — a heading inside a chat bubble stays a `<p>`, not document
+    // structure, but a level-1 and a level-4 heading must not read alike.
+    // Classic's `text-muted-foreground` is shadcn's vocabulary; `text-muted`
+    // is this design's own token for the same idea.
+    const headingClass =
+      block.level <= 1
+        ? "text-base font-semibold"
+        : block.level === 2
+          ? "text-[0.95rem] font-semibold"
+          : "text-sm font-semibold text-muted";
     return (
-      <p
-        className={cx(
-          "break-words",
-          block.level <= 2 ? "font-medium" : "text-[0.8125rem] font-medium text-muted",
-        )}
-      >
+      <p className={cx("break-words", headingClass)}>
         <Spans spans={block.spans} />
       </p>
     );
