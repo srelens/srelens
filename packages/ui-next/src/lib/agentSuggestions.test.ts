@@ -18,6 +18,21 @@ describe("what the dock offers to ask", () => {
     expect(suggestionsFor("/k/Pod/checkout/api-0")).toContain("Why is this workload degraded?");
   });
 
+  it("offers resource questions on a legacy /resources/<name> tab too", () => {
+    // A tab a previous session persisted at the pre-`/k/` shape is still a
+    // resource — `describe` gives it `kind: "resource"` for exactly this
+    // reason (see `routes.ts`'s legacy branch) — so it must not fall through
+    // to the fallback set just because `parseDetailRoute` cannot parse it.
+    expect(suggestionsFor("/resources/api-0")).toContain("Why is this workload degraded?");
+  });
+
+  it("does not mistake the browsed workloads list for a single resource", () => {
+    // `/resources` (no name segment) is the LIST screen, `kind: "workloads"`
+    // — the guard against over-correcting the fix above into a literal
+    // `/resources` prefix match, which would wrongly claim this route too.
+    expect(suggestionsFor("/resources")).toEqual(suggestionsFor("/settings"));
+  });
+
   it("offers incident questions on the control room", () => {
     expect(suggestionsFor("/")).toContain("Why is checkout-api returning 5xx?");
   });

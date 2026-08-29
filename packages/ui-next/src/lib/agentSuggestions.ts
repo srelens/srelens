@@ -49,13 +49,20 @@ const FALLBACK_SUGGESTIONS = [
  * §F's route-aware `Start here` prompts. Matched by route shape, in the order
  * §F lists them, with the fallback set always last.
  *
- * The resource set is matched via {@link parseDetailRoute} rather than a
- * `/resources/` prefix: the mock predates `detailRoute`'s `/k/<kind>/<ns>/<name>`
- * shape, and a real resource tab's route never starts with `/resources/`.
+ * The resource set is matched via `describe(route).kind === "resource"` rather
+ * than a `/resources/` prefix or `parseDetailRoute` alone: the mock predates
+ * `detailRoute`'s `/k/<kind>/<ns>/<name>` shape, and a real resource tab's
+ * route never starts with `/resources/` any more — but a tab a previous
+ * session persisted still can (`describe`'s own legacy branch, `routes.ts`
+ * around line 133), and it is just as much a resource as the modern shape.
+ * `describe` already tells the two `/resources` shapes apart from the
+ * WORKLOADS LIST at that exact route (`kind: "workloads"`, not `"resource"`),
+ * so reusing its `kind` here catches both resource shapes without also
+ * catching the list.
  */
 export function suggestionsFor(route: string): readonly string[] {
   if (route.startsWith("/logs")) return LOGS_SUGGESTIONS;
-  if (parseDetailRoute(route)) return RESOURCE_SUGGESTIONS;
+  if (describe(route).kind === "resource") return RESOURCE_SUGGESTIONS;
   if (route.startsWith("/helm")) return HELM_SUGGESTIONS;
   if (route === "/incidents" || route === "/") return INCIDENTS_SUGGESTIONS;
   return FALLBACK_SUGGESTIONS;
