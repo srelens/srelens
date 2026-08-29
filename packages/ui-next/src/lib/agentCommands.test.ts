@@ -1,7 +1,3 @@
-// jsdom, not node: `logsRoute` is imported from `screens/Logs.tsx`, whose own
-// graph reaches the Terminals screen through `@xterm/addon-fit`, a UMD bundle
-// that reads `self` while it evaluates — see `agentSuggestions.test.ts` for
-// the same note against the same hazard.
 import { describe, it, expect, vi } from "vitest";
 import { commandsFor, matchCommands, type CommandDeps } from "./agentCommands";
 
@@ -14,6 +10,7 @@ const base: Omit<CommandDeps, "route"> = {
   switchWorkspace: vi.fn(),
   onToggleTheme: vi.fn(),
   openAction: vi.fn(),
+  openResource: vi.fn(),
 };
 
 describe("the / palette", () => {
@@ -54,6 +51,18 @@ describe("the / palette", () => {
     expect(onPod.some((c) => c.id === "forward")).toBe(true);
   });
 
+  it("gates Action commands by the kind's own KindActions too — a kind with neither offers none", () => {
+    // Review finding: every prior Action assertion used the Deployment
+    // fixture, which has BOTH `restart` and `scale` true — so dropping the
+    // `actions.restart`/`actions.scale` gates entirely still passed every
+    // test in this file. `ConfigMap` (`descriptors.ts`) sets neither, so this
+    // is the fixture that actually exercises the gate.
+    const onConfigMap = commandsFor({ ...base, route: "/k/ConfigMap/checkout/cm-1" });
+    expect(onConfigMap.some((c) => c.group === "Action")).toBe(false);
+    expect(onConfigMap.some((c) => c.id === "restart")).toBe(false);
+    expect(onConfigMap.some((c) => c.id === "scale")).toBe(false);
+  });
+
   it("routes a destructive action through openAction, never straight to the capability", () => {
     const openAction = vi.fn();
     const all = commandsFor({ ...base, route: "/k/Deployment/checkout/api", openAction });
@@ -68,6 +77,25 @@ describe("the / palette", () => {
     expect(all.find((c) => c.id === "restart")?.danger).toBe(true);
     expect(all.find((c) => c.id === "scale")?.danger).toBe(true);
     expect(all.find((c) => c.id === "logs")?.danger).toBeUndefined();
+  });
+
+  it("routes Go commands through openResource with the resource's identity, never a bare openTab", () => {
+    const openResource = vi.fn();
+    const openTab = vi.fn();
+    const all = commandsFor({ ...base, route: "/k/Pod/checkout/api-0", openResource, openTab });
+    all.find((c) => c.id === "logs")?.run();
+    all.find((c) => c.id === "shell")?.run();
+    all.find((c) => c.id === "forward")?.run();
+    expect(openResource).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "Pod", namespace: "checkout", name: "api-0", context: "prod-eu", as: "logs" }),
+    );
+    expect(openResource).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "Pod", namespace: "checkout", name: "api-0", context: "prod-eu", as: "shell" }),
+    );
+    expect(openResource).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "Pod", namespace: "checkout", name: "api-0", context: "prod-eu", as: "forward" }),
+    );
+    expect(openTab).not.toHaveBeenCalled();
   });
 
   it("pins the context at build time, not read live off some later call", () => {
@@ -91,6 +119,15 @@ describe("the / palette", () => {
     const all = commandsFor({ ...base, route: "/settings", setActiveCluster });
     all.find((c) => c.group === "Cluster")?.run();
     expect(setActiveCluster).toHaveBeenCalledWith("id-stage", "stage-eu");
+  });
+
+  it("carries the cluster name into the Cluster switch's own openTab, not just setActiveCluster", () => {
+    // A workspace with no "/" tab open yet mints one via `openTab` rather
+    // than relabelling an existing one — that mint must carry the label too.
+    const openTab = vi.fn();
+    const all = commandsFor({ ...base, route: "/settings", openTab });
+    all.find((c) => c.group === "Cluster")?.run();
+    expect(openTab).toHaveBeenCalledWith("/", { clusterName: "stage-eu" });
   });
 
   it("switches workspace by id", () => {

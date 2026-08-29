@@ -38,7 +38,6 @@
 import { K8S_KIND } from "@srelens/core";
 import { parseDetailRoute } from "./detailRoute";
 import { descriptorFor } from "./kinds/descriptors";
-import { logsRoute } from "../screens/Logs";
 
 export type CommandGroup = "Action" | "Go" | "Cluster" | "Workspace";
 
@@ -58,7 +57,14 @@ export interface CommandDeps {
   context: string;
   clusters: readonly { id: string; name: string }[];
   workspaces: readonly { id: string; name: string }[];
-  openTab: (route: string) => void;
+  /**
+   * Opens a route in a tab. Takes the same `clusterName` the real store
+   * function does — `ResourceMenu.tsx`'s own Follow-logs / detail / edit
+   * navigations always pass `{ clusterName: context }`, so a tab this module
+   * opens must too, or it carries no cluster label (or a stale one after a
+   * cluster switch) where every other navigation of the same actions does.
+   */
+  openTab: (route: string, opts?: { clusterName?: string }) => void;
   /**
    * Switches the active cluster. **Both arguments, always**: since the tab
    * strip's relabel fix, a caller that passes only `id` leaves the strip
@@ -78,6 +84,22 @@ export interface CommandDeps {
     name: string;
     context: string;
     action: "scale" | "restart";
+  }) => void;
+  /**
+   * Opens `Follow logs` / `Open shell` / `Port forward` on a resource, with
+   * the identity carried across — the same reason `openAction` exists rather
+   * than a bare navigation: `Open shell` and `Port forward` have no route of
+   * their own (a session and a dialog, not a route), so a bare `openTab`
+   * lands on `/terminals` or `/forwards` with nothing to say which resource
+   * it was for. Task 6 implements this against the real capability and
+   * screen; this module only names the intent.
+   */
+  openResource: (r: {
+    kind: string;
+    namespace: string;
+    name: string;
+    context: string;
+    as: "logs" | "shell" | "forward";
   }) => void;
 }
 
@@ -135,19 +157,21 @@ function resourceCommands(deps: CommandDeps): Command[] {
     });
   }
 
-  // Follow logs has a real subject route of its own; Open shell and Port
-  // forward do not (a session and a dialog, not a route), so per §F they land
-  // on the screen that shows them — `shell → /terminals`, `forward →
-  // /forwards` — rather than this module reaching into `sessions.ts` or the
-  // forward dialog itself, which would be building a capability this step
-  // does not own.
+  // Every `Go` command hands the full resource identity to `openResource`
+  // rather than opening a bare route: `Open shell` and `Port forward` have no
+  // route of their own to carry the subject through (a session and a dialog,
+  // not a route), and building that capability here — reaching into
+  // `sessions.ts` or the forward dialog directly — is not this step's to do.
+  // `Follow logs` goes through the same door for the same reason `openAction`
+  // is one door rather than two: one hand-off, fully specified, that Task 6
+  // maps to `openTab(logsRoute(...), { clusterName: context })` on its side.
   if (actions.logs) {
     commands.push({
       id: "logs",
       group: "Go",
       label: `Follow logs · ${name}`,
       hint: "all containers",
-      run: () => deps.openTab(logsRoute(kind, ns, name)),
+      run: () => deps.openResource({ kind, namespace: ns, name, context, as: "logs" }),
     });
   }
   if (actions.shell) {
@@ -156,7 +180,7 @@ function resourceCommands(deps: CommandDeps): Command[] {
       group: "Go",
       label: `Open shell in ${name}`,
       hint: "pod exec",
-      run: () => deps.openTab("/terminals"),
+      run: () => deps.openResource({ kind, namespace: ns, name, context, as: "shell" }),
     });
   }
   if (actions.forward) {
@@ -165,7 +189,7 @@ function resourceCommands(deps: CommandDeps): Command[] {
       group: "Go",
       label: `Port forward ${name}`,
       hint: "expose a port locally",
-      run: () => deps.openTab("/forwards"),
+      run: () => deps.openResource({ kind, namespace: ns, name, context, as: "forward" }),
     });
   }
 
@@ -183,10 +207,13 @@ function clusterCommands(deps: CommandDeps): Command[] {
     hint: c.id,
     // §F: "a Cluster command → /" — the reader lands on the control room
     // rather than a tab that may name nothing on the cluster just switched
-    // to.
+    // to. `clusterName` is passed here too, not left to `setActiveCluster`'s
+    // own relabel alone: that relabels tabs the workspace ALREADY has, and a
+    // workspace with no "/" tab open yet would otherwise mint one with no
+    // cluster label at all.
     run: () => {
       deps.setActiveCluster(c.id, c.name);
-      deps.openTab("/");
+      deps.openTab("/", { clusterName: c.name });
     },
   }));
 }
