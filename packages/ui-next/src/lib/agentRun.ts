@@ -50,6 +50,15 @@ export type GateRecord = {
   tool: string;
   args: unknown;
   outcome: "pending" | "approved" | "denied";
+  /**
+   * When this gate was resolved, `Date.now()`-shaped — absent while it is
+   * still `pending`. Stamped by `AgentConsent` at the moment `outcome`
+   * actually changes, never here and never at render time: this module has
+   * no window onto when an answer arrived, and a time taken from anywhere
+   * else would report when something drew rather than when the gate itself
+   * resolved.
+   */
+  at?: number;
 };
 
 /** One turn of the conversation — the reader's question, or the agent's
@@ -156,7 +165,10 @@ function sameCall(a: ToolCallRecord, b: ToolCallRecord): boolean {
 }
 
 function sameGate(a: GateRecord, b: GateRecord): boolean {
-  return a === b || (a.id === b.id && a.tool === b.tool && a.outcome === b.outcome && a.args === b.args);
+  return (
+    a === b ||
+    (a.id === b.id && a.tool === b.tool && a.outcome === b.outcome && a.args === b.args && a.at === b.at)
+  );
 }
 
 function sameStrings(a: string[] | undefined, b: string[] | undefined): boolean {

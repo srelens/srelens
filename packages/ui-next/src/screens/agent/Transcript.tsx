@@ -71,6 +71,24 @@ function ToolCallRow({ call }: { call: ToolCallRecord }) {
   );
 }
 
+/** Zero-padded `HH:MM`, local time — the same shape the spec's own mock
+ * illustrates (`Applied 14:06`). Hand-rolled rather than `toLocaleTimeString`
+ * so the badge reads the same regardless of the host's ICU data or locale. */
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** `Applied 14:06`, or bare `Applied` while nothing has stamped a time yet
+ * (Ruling I: `at` is only ever set by `AgentConsent`, once, at resolution —
+ * never fabricated here and never taken from render time, which would report
+ * when the badge drew rather than when the gate itself resolved). */
+function gateLabel(gate: GateRecord): string {
+  const word = GATE_WORD[gate.outcome];
+  if (gate.at === undefined) return word;
+  const d = new Date(gate.at);
+  return `${word} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
 /** One gate, as decision 1's record — never a second set of answer buttons. */
 function GateRow({ gate }: { gate: GateRecord }) {
   const args = summarizeArgs(gate.args);
@@ -78,7 +96,7 @@ function GateRow({ gate }: { gate: GateRecord }) {
     <div className="tool-call flex min-w-0 items-center gap-2">
       <span className="shrink-0 text-accent">{gate.tool}</span>
       {args !== "" && <span className="min-w-0 flex-1 truncate text-faint">{args}</span>}
-      <Badge tone={GATE_TONE[gate.outcome]}>{GATE_WORD[gate.outcome]}</Badge>
+      <Badge tone={GATE_TONE[gate.outcome]}>{gateLabel(gate)}</Badge>
     </div>
   );
 }
@@ -91,7 +109,7 @@ function Spans({ spans }: { spans: NoteSpan[] }) {
       {spans.map((span, i) => {
         if (span.kind === "code") {
           return (
-            <code key={i} className="rounded-tile bg-sunk px-1 py-0.5 font-mono text-[0.8em]">
+            <code key={i} className="break-words rounded-tile bg-sunk px-1 py-0.5 font-mono text-[0.8em]">
               {span.text}
             </code>
           );
@@ -112,7 +130,12 @@ function Spans({ spans }: { spans: NoteSpan[] }) {
 function Block({ block }: { block: MdBlock }) {
   if (block.kind === "heading") {
     return (
-      <p className={block.level <= 2 ? "font-medium" : "text-[0.8125rem] font-medium text-muted"}>
+      <p
+        className={cx(
+          "break-words",
+          block.level <= 2 ? "font-medium" : "text-[0.8125rem] font-medium text-muted",
+        )}
+      >
         <Spans spans={block.spans} />
       </p>
     );
@@ -121,7 +144,7 @@ function Block({ block }: { block: MdBlock }) {
     return (
       <ul className="flex list-disc flex-col gap-1 pl-5">
         {block.items.map((item, j) => (
-          <li key={j}>
+          <li key={j} className="break-words">
             <Spans spans={item} />
           </li>
         ))}
@@ -132,7 +155,7 @@ function Block({ block }: { block: MdBlock }) {
     return (
       <ol className="flex list-decimal flex-col gap-1 pl-5">
         {block.items.map((item, j) => (
-          <li key={j}>
+          <li key={j} className="break-words">
             <Spans spans={item} />
           </li>
         ))}
@@ -153,7 +176,10 @@ function Block({ block }: { block: MdBlock }) {
           <thead>
             <tr>
               {block.headers.map((h, j) => (
-                <th key={j} className="border-b border-rule px-2 py-1 text-left font-medium text-faint">
+                <th
+                  key={j}
+                  className="break-words border-b border-rule px-2 py-1 text-left font-medium text-faint"
+                >
                   <Spans spans={h} />
                 </th>
               ))}
@@ -163,7 +189,7 @@ function Block({ block }: { block: MdBlock }) {
             {block.rows.map((row, r) => (
               <tr key={r}>
                 {row.map((cell, c) => (
-                  <td key={c} className="border-b border-rule px-2 py-1 align-top">
+                  <td key={c} className="break-words border-b border-rule px-2 py-1 align-top">
                     <Spans spans={cell} />
                   </td>
                 ))}
@@ -176,7 +202,7 @@ function Block({ block }: { block: MdBlock }) {
   }
   // Only "paragraph" is left.
   return (
-    <p>
+    <p className="break-words">
       <Spans spans={block.spans} />
     </p>
   );
@@ -222,6 +248,12 @@ function UserTurn({ turn }: { turn: Turn }) {
  * carries one of its own in its header, and repeating it per turn is exactly
  * the rail-side chrome the dock has no room for.
  *
+ * **The mark carries a label here (Ruling J).** `AgentMark`'s own doc makes it
+ * decoration, `aria-hidden`, by default — correct beside the literal word
+ * "Agent", but here it stands alone next to tool-call and answer content with
+ * no such word beside it, so a screen-reader user needs the label to know
+ * whose turn this is.
+ *
  * **The thoughts row is absent, not merely empty, when the agent streamed
  * none.** Claude's headless mode redacts thinking entirely and Codex cannot
  * be timed (see `lib/agentRun.ts`'s `Turn.thoughts` doc) — `undefined` is the
@@ -230,10 +262,10 @@ function UserTurn({ turn }: { turn: Turn }) {
 function AgentTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
-      {!compact && <AgentMark size={20} className="mt-0.5" />}
+      {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         {turn.thoughts && (
-          <p className="min-w-0 whitespace-pre-wrap text-xs text-faint">
+          <p className="min-w-0 whitespace-pre-wrap break-words text-xs text-faint">
             <span className="font-medium text-muted">Thoughts</span> · {turn.thoughts}
           </p>
         )}
@@ -260,8 +292,8 @@ function AgentTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
 function ErrorTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
-      {!compact && <AgentMark size={20} className="mt-0.5" />}
-      <p className="min-w-0 flex-1 text-sm text-sev">{turn.text}</p>
+      {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
+      <p className="min-w-0 flex-1 break-words text-sm text-sev">{turn.text}</p>
     </div>
   );
 }
