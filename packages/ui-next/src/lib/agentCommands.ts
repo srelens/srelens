@@ -1,0 +1,233 @@
+/**
+ * The `/` command palette the console dock turns into when the reader's query
+ * starts with a slash — pure over injected deps, like `agentSuggestions.ts`
+ * beside it: no React, no store, no I/O, so the palette's *contents* can be
+ * reasoned about without mounting the dock at all.
+ *
+ * Design: `docs/superpowers/specs/mock-full-design.md` §F (the agent dock).
+ *
+ * **`Go` is resource-scoped, not the route table.** §F's actual list reads
+ * `Follow logs · checkout-api`, `Open shell in checkout-api`,
+ * `Port forward checkout-api` — navigations about the resource the active
+ * route names, the same subject `Action` uses, not a way to jump to an
+ * app-scoped screen by name. `Action` and `Go` are therefore both absent on a
+ * route with no resource (`parseDetailRoute` returns `null`): a command that
+ * cannot say what it would act on is not a command, and a missing group is
+ * absent, never an empty heading — which falls out for free here, since a
+ * group with no `Command` in the flat list below renders no heading at all.
+ *
+ * **No Roll back.** Core has no rollout-undo capability for a Deployment's
+ * revision history — `rolloutRestart`, `scale`, `evict`, `deletePod`,
+ * `cordonNode`, `drainNode` and Helm's own `helmRollback` exist, but nothing
+ * walks a Deployment's revision history back. A command that refuses the
+ * moment it is run is worse than a command that was never drawn, so this
+ * module draws none.
+ *
+ * **A destructive command navigates; it does not open a second dialog over
+ * the dock.** `openAction` is the hand-off: Task 6 wires it to the exact
+ * confirm the resource's own row menu opens, with the intent (`kind`,
+ * `namespace`, `name`, `context`, `action`) carried across. That is what
+ * keeps there being exactly one confirm for a mutation, in the tab that owns
+ * the resource, rather than a second ungated door floating over the console.
+ * `deps.context` is read once, here, into each command's closure at BUILD
+ * time — the same pin `useRowMenu`'s `Pending.context` takes and for the same
+ * reason (`ResourceMenu.tsx`): the cluster rail can move between the
+ * keystroke that built this list and the pick that runs one of its commands,
+ * and the write must still reach the cluster the reader read this list on.
+ */
+import { K8S_KIND } from "@srelens/core";
+import { parseDetailRoute } from "./detailRoute";
+import { descriptorFor } from "./kinds/descriptors";
+import { logsRoute } from "../screens/Logs";
+
+export type CommandGroup = "Action" | "Go" | "Cluster" | "Workspace";
+
+export interface Command {
+  id: string;
+  group: CommandGroup;
+  label: string;
+  hint: string;
+  danger?: true;
+  run: () => void;
+}
+
+export interface CommandDeps {
+  /** The active tab's route — what `Action` and `Go` are scoped to. */
+  route: string;
+  /** The kubeconfig context in focus, pinned into every command built here. */
+  context: string;
+  clusters: readonly { id: string; name: string }[];
+  workspaces: readonly { id: string; name: string }[];
+  openTab: (route: string) => void;
+  /**
+   * Switches the active cluster. **Both arguments, always**: since the tab
+   * strip's relabel fix, a caller that passes only `id` leaves the strip
+   * showing the previous cluster's name over the new cluster's tabs.
+   */
+  setActiveCluster: (id: string, name: string) => void;
+  switchWorkspace: (id: string) => void;
+  onToggleTheme: () => void;
+  /**
+   * Opens the row menu's own confirm for a destructive action, with the
+   * intent — never the capability — carried across. See the module doc for
+   * why this replaces calling `rolloutRestart`/`scaleResource` here directly.
+   */
+  openAction: (a: {
+    kind: string;
+    namespace: string;
+    name: string;
+    context: string;
+    action: "scale" | "restart";
+  }) => void;
+}
+
+/**
+ * `k8sKind → slug`, the reverse of core's own `K8S_KIND`, so this module can
+ * ask the list screen's own `KindDescriptor` which actions a kind offers —
+ * the same question `detailData.tsx`'s `SLUG_BY_K8S_KIND` asks, built the
+ * same way (from core's table, not hand-duplicated) for the same reason: a
+ * kind added there must never go silently unresolvable here.
+ */
+const SLUG_BY_K8S_KIND: Record<string, string> = Object.fromEntries(
+  Object.entries(K8S_KIND)
+    .filter(([, k8sKind]) => k8sKind !== "")
+    .map(([slug, k8sKind]) => [k8sKind, slug]),
+);
+
+/**
+ * `Action` and `Go` — both scoped to the one resource `deps.route` names, and
+ * both absent when it names none.
+ */
+function resourceCommands(deps: CommandDeps): Command[] {
+  const detail = parseDetailRoute(deps.route);
+  if (!detail) return [];
+  const { kind, namespace, name } = detail;
+  const ns = namespace ?? "";
+  const slug = SLUG_BY_K8S_KIND[kind];
+  // A kind absent from `K8S_KIND` (a CRD) resolves no descriptor and offers
+  // no `Action`/`Go` command here — the same refusal `KindActions` documents
+  // for Delete on a custom resource: offering an action that cannot say what
+  // it would run against is worse than not offering it.
+  const actions = slug ? (descriptorFor(slug)?.actions ?? {}) : {};
+  // Read once, into every command's closure below — see the module doc.
+  const context = deps.context;
+
+  const commands: Command[] = [];
+
+  if (actions.restart) {
+    commands.push({
+      id: "restart",
+      group: "Action",
+      label: `Restart ${kind}/${name}`,
+      hint: "rollout restart",
+      danger: true,
+      run: () => deps.openAction({ kind, namespace: ns, name, context, action: "restart" }),
+    });
+  }
+  if (actions.scale) {
+    commands.push({
+      id: "scale",
+      group: "Action",
+      label: `Scale ${kind}/${name}`,
+      hint: "adjust replica count",
+      danger: true,
+      run: () => deps.openAction({ kind, namespace: ns, name, context, action: "scale" }),
+    });
+  }
+
+  // Follow logs has a real subject route of its own; Open shell and Port
+  // forward do not (a session and a dialog, not a route), so per §F they land
+  // on the screen that shows them — `shell → /terminals`, `forward →
+  // /forwards` — rather than this module reaching into `sessions.ts` or the
+  // forward dialog itself, which would be building a capability this step
+  // does not own.
+  if (actions.logs) {
+    commands.push({
+      id: "logs",
+      group: "Go",
+      label: `Follow logs · ${name}`,
+      hint: "all containers",
+      run: () => deps.openTab(logsRoute(kind, ns, name)),
+    });
+  }
+  if (actions.shell) {
+    commands.push({
+      id: "shell",
+      group: "Go",
+      label: `Open shell in ${name}`,
+      hint: "pod exec",
+      run: () => deps.openTab("/terminals"),
+    });
+  }
+  if (actions.forward) {
+    commands.push({
+      id: "forward",
+      group: "Go",
+      label: `Port forward ${name}`,
+      hint: "expose a port locally",
+      run: () => deps.openTab("/forwards"),
+    });
+  }
+
+  return commands;
+}
+
+/** One `Switch to <cluster>` per cluster the strip knows about — never
+ *  filtered to "not the current one": the palette lists what it can do, not
+ *  what it thinks the reader wants. */
+function clusterCommands(deps: CommandDeps): Command[] {
+  return deps.clusters.map((c) => ({
+    id: `cluster-${c.id}`,
+    group: "Cluster" as const,
+    label: `Switch to ${c.name}`,
+    hint: c.id,
+    // §F: "a Cluster command → /" — the reader lands on the control room
+    // rather than a tab that may name nothing on the cluster just switched
+    // to.
+    run: () => {
+      deps.setActiveCluster(c.id, c.name);
+      deps.openTab("/");
+    },
+  }));
+}
+
+/**
+ * `Switch to <workspace>` per workspace, plus `Toggle theme`.
+ *
+ * Theme has no group of its own among the design's four (`Action`, `Go`,
+ * `Cluster`, `Workspace`) — it is a window-level preference, not scoped to a
+ * cluster or a resource, so it sits here rather than inventing a fifth
+ * `CommandGroup` member for one command.
+ */
+function workspaceCommands(deps: CommandDeps): Command[] {
+  const switches: Command[] = deps.workspaces.map((w) => ({
+    id: `workspace-${w.id}`,
+    group: "Workspace",
+    label: `Switch to ${w.name}`,
+    hint: "workspace",
+    run: () => deps.switchWorkspace(w.id),
+  }));
+  return [
+    ...switches,
+    {
+      id: "theme",
+      group: "Workspace",
+      label: "Toggle theme",
+      hint: "light / dark",
+      run: () => deps.onToggleTheme(),
+    },
+  ];
+}
+
+export function commandsFor(deps: CommandDeps): readonly Command[] {
+  return [...resourceCommands(deps), ...clusterCommands(deps), ...workspaceCommands(deps)];
+}
+
+/** Case-insensitive substring match on the label — nothing else, so a match
+ *  the reader can see none of the reason for (a hidden id, a hint) can never
+ *  come back. */
+export function matchCommands(all: readonly Command[], query: string): readonly Command[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return all;
+  return all.filter((c) => c.label.toLowerCase().includes(q));
+}
