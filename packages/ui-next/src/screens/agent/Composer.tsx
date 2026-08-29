@@ -1,0 +1,307 @@
+import { useEffect, useState } from "react";
+import {
+  describeError,
+  getPrompt,
+  listAgents,
+  listPrompts,
+  listSkills,
+  type AgentInfo,
+  type PromptSummary,
+  type SkillMeta,
+} from "@srelens/core";
+import { Button, Popover, TextInput, cx } from "@srelens/ui-kit";
+import { askAgent, chooseAgent, stopAgentRun, useAgentRun } from "../../lib/agentRun";
+
+/**
+ * The one composer — mounted by both the console dock (`compact`) and the
+ * full `/agent` screen, per the spec's "one store, one submit path" (see
+ * `Transcript`'s own doc for the sibling half of that). It owns the input,
+ * the agent picker, the `/` menu of prompts and skills, and Send/Stop; the
+ * conversation itself (`turns`, `gates`, `busy`, `generation`) stays in
+ * `useAgentRun`, so neither host keeps its own copy.
+ *
+ * **Every kind srelens can ever drive, named without `listAgents()`.** A
+ * fresh install reports an EMPTY list, not four entries marked unavailable —
+ * so the "install one to get started" sentence below can't be built from
+ * its result. `AgentInfo["kind"]` is a closed union (`chat.ts`'s `AgentKind`)
+ * and this is its label for every member, kept here rather than derived.
+ */
+const AGENT_KIND_LABELS = ["Claude", "Codex", "Cursor", "srelens"];
+
+/**
+ * The `/` menu: srelens's diagnostic prompts and saved skills, each under its
+ * own heading, exactly as classic's `AssistantConversation.tsx` groups them.
+ * A hand-rolled positioned panel rather than the kit's `Popover` — it has to
+ * open from the composer's OWN INPUT VALUE (a `/`-prefixed token), not a
+ * trigger click, and fighting Radix's open/anchor model for that is exactly
+ * what classic's own comment on this menu warns against.
+ */
+function SlashMenu({
+  prompts,
+  skills,
+  onPickPrompt,
+  onPickSkill,
+}: {
+  prompts: PromptSummary[];
+  skills: SkillMeta[];
+  onPickPrompt: (p: PromptSummary) => void;
+  onPickSkill: (s: SkillMeta) => void;
+}) {
+  return (
+    <div className="absolute bottom-full left-0 z-50 mb-1 max-h-64 w-80 min-w-0 overflow-y-auto rounded-card border border-rule bg-raised p-1 shadow-lg">
+      {prompts.length === 0 && skills.length === 0 ? (
+        <p className="px-2 py-1.5 text-xs text-muted">No matches.</p>
+      ) : (
+        <>
+          {prompts.length > 0 && (
+            <div>
+              <p className="px-2 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted">Prompts</p>
+              {prompts.map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  className="flex w-full min-w-0 flex-col items-start gap-0.5 rounded-tile px-2 py-1.5 text-left hover:bg-sunk"
+                  onClick={() => onPickPrompt(p)}
+                >
+                  <span className="min-w-0 truncate font-mono text-xs font-medium">{p.name}</span>
+                  <span className="min-w-0 w-full truncate break-words text-xs text-muted">{p.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {skills.length > 0 && (
+            <div>
+              <p className="px-2 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted">Skills</p>
+              {skills.map((s) => (
+                <button
+                  key={s.name}
+                  type="button"
+                  className="flex w-full min-w-0 flex-col items-start gap-0.5 rounded-tile px-2 py-1.5 text-left hover:bg-sunk"
+                  onClick={() => onPickSkill(s)}
+                >
+                  <span className="min-w-0 truncate text-xs font-medium">{s.name}</span>
+                  <span className="min-w-0 w-full truncate break-words text-xs text-muted">{s.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The agent picker: a popover over `agents`, ALREADY FILTERED to
+ * `available && !gated` by the caller. Never rendered with a `disabled`
+ * entry for a gated agent (Ruling: an agent that is installed but gated must
+ * not be offered) — the whole point of filtering before this component ever
+ * sees the list, rather than filtering here and risking a call site that
+ * forgets to.
+ */
+function AgentPicker({
+  agents,
+  selectedKind,
+  onSelect,
+}: {
+  agents: AgentInfo[];
+  selectedKind: string;
+  onSelect: (kind: string) => void;
+}) {
+  const current = agents.find((a) => a.kind === selectedKind);
+  return (
+    <Popover label="Choose agent" trigger={<span className="truncate">{current?.label ?? "Agent"}</span>}>
+      {(close) => (
+        <div role="listbox" className="flex min-w-0 flex-col">
+          {agents.map((a) => {
+            const selected = a.kind === selectedKind;
+            return (
+              <button
+                key={a.kind}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                onClick={() => {
+                  onSelect(a.kind);
+                  close();
+                }}
+                className="flex min-w-0 items-center gap-2 rounded-tile px-2 py-1.5 text-left text-sm hover:bg-sunk"
+              >
+                <span className="min-w-0 flex-1 truncate">{a.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </Popover>
+  );
+}
+
+export function Composer({ compact }: { compact?: boolean }) {
+  const { busy, agentKind } = useAgentRun();
+  const [input, setInput] = useState("");
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [prompts, setPrompts] = useState<PromptSummary[]>([]);
+  const [skills, setSkills] = useState<SkillMeta[]>([]);
+  const [activeSkills, setActiveSkills] = useState<string[]>([]);
+  const [menuDismissed, setMenuDismissed] = useState(false);
+  const [promptError, setPromptError] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    listAgents()
+      .then(setAgents)
+      .catch(() => setAgents([]));
+  }, []);
+  useEffect(() => {
+    listPrompts()
+      .then(setPrompts)
+      .catch(() => setPrompts([]));
+  }, []);
+  useEffect(() => {
+    listSkills()
+      .then(setSkills)
+      .catch(() => setSkills([]));
+  }, []);
+
+  // An agent that is `available` but `gated` must not be offered — Codex and
+  // Cursor are installed-but-gated today, and offering one would put the
+  // reader in a conversation that cannot start.
+  const offered = agents.filter((a) => a.available && !a.gated);
+
+  // The store's `agentKind` can name a kind that just went missing from
+  // `offered` (nothing loaded yet, or the last-picked kind un-gated to
+  // gated) — reconcile it to the first one this composer can actually
+  // offer, rather than leaving the picker pointed at a kind it never shows.
+  useEffect(() => {
+    if (offered.length > 0 && !offered.some((a) => a.kind === agentKind)) {
+      chooseAgent(offered[0].kind);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents]);
+
+  const slashMatch = /^\/(\S*)$/.exec(input);
+  const menuOpen = slashMatch !== null && !menuDismissed && (prompts.length > 0 || skills.length > 0);
+  const query = (slashMatch?.[1] ?? "").toLowerCase();
+  const filteredPrompts = query ? prompts.filter((p) => p.name.toLowerCase().includes(query)) : prompts;
+  const filteredSkills = query ? skills.filter((s) => s.name.toLowerCase().includes(query)) : skills;
+
+  function handleChange(value: string) {
+    setInput(value);
+    setMenuDismissed(false);
+    setPromptError(undefined);
+  }
+
+  /** Renders `p` into the input for review — never auto-sent. A rejected
+   *  `getPrompt` (e.g. a required arg this menu can't fill) surfaces inline
+   *  through `describeError`, never the raw backend string, and leaves the
+   *  input untouched. */
+  async function pickPrompt(p: PromptSummary) {
+    try {
+      const text = await getPrompt(p.name, {});
+      setInput(text);
+      setMenuDismissed(true);
+      setPromptError(undefined);
+    } catch (e) {
+      setPromptError(describeError(e).detail);
+    }
+  }
+
+  /** Activates a skill for THIS RUN only — `Session.skills` stays
+   *  "always empty for now", so this is component state, never persisted,
+   *  and gone the moment the composer unmounts. */
+  function pickSkill(s: SkillMeta) {
+    setActiveSkills((prev) => (prev.includes(s.name) ? prev : [...prev, s.name]));
+    setMenuDismissed(true);
+  }
+
+  function removeSkill(name: string) {
+    setActiveSkills((prev) => prev.filter((n) => n !== name));
+  }
+
+  async function submit() {
+    const question = input.trim();
+    if (!question || busy) return;
+    setInput("");
+    await askAgent(question);
+  }
+
+  // With no agent available at all, say what srelens can drive and offer no
+  // send control — not a disabled one. A control that can never work is
+  // worse than its absence.
+  if (offered.length === 0) {
+    return (
+      <p className={cx("min-w-0 break-words text-sm text-muted", compact && "text-xs")}>
+        No agent is available. srelens can drive {AGENT_KIND_LABELS.join(", ")} — install one to get
+        started.
+      </p>
+    );
+  }
+
+  const selectedKind = offered.some((a) => a.kind === agentKind) ? agentKind : offered[0].kind;
+
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      {activeSkills.length > 0 && (
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          {activeSkills.map((name) => (
+            <span
+              key={name}
+              className="inline-flex max-w-[10rem] min-w-0 items-center gap-1 rounded-tile border border-accent-line bg-accent-wash px-2 py-1 text-xs text-accent"
+            >
+              <span className="min-w-0 truncate break-words">{name}</span>
+              <button
+                type="button"
+                aria-label={`Remove skill ${name}`}
+                onClick={() => removeSkill(name)}
+                className="shrink-0 opacity-70 hover:opacity-100"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {promptError && <p className="min-w-0 break-words text-xs text-sev">{promptError}</p>}
+      <div className="relative min-w-0">
+        {menuOpen && (
+          <SlashMenu
+            prompts={filteredPrompts}
+            skills={filteredSkills}
+            onPickPrompt={(p) => void pickPrompt(p)}
+            onPickSkill={pickSkill}
+          />
+        )}
+        <TextInput
+          value={input}
+          onValueChange={handleChange}
+          onEnter={() => {
+            if (!menuOpen) void submit();
+          }}
+          onEscape={() => {
+            if (menuOpen) setMenuDismissed(true);
+          }}
+          placeholder="Ask about this cluster…   /  for prompts & skills"
+          disabled={busy}
+          aria-label="Ask the agent"
+        />
+      </div>
+      <div className="flex min-w-0 items-center gap-2">
+        <AgentPicker
+          agents={offered}
+          selectedKind={selectedKind}
+          onSelect={(kind) => chooseAgent(kind)}
+        />
+        <div className="flex-1" />
+        {busy ? (
+          <Button type="button" variant="secondary" size="sm" onClick={() => stopAgentRun()}>
+            Stop
+          </Button>
+        ) : (
+          <Button type="button" variant="primary" size="sm" onClick={() => void submit()} disabled={!input.trim()}>
+            Send
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
