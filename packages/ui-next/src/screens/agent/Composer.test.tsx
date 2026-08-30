@@ -18,13 +18,14 @@ vi.mock("@srelens/core", async (orig) => ({
   getPrompt,
 }));
 
-const { useAgentRun, askAgent, stopAgentRun, chooseAgent } = vi.hoisted(() => ({
+const { useAgentRun, askAgent, stopAgentRun, chooseAgent, setSkillActive } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
   stopAgentRun: vi.fn(),
   chooseAgent: vi.fn(),
+  setSkillActive: vi.fn(),
 }));
-vi.mock("../../lib/agentRun", () => ({ useAgentRun, askAgent, stopAgentRun, chooseAgent }));
+vi.mock("../../lib/agentRun", () => ({ useAgentRun, askAgent, stopAgentRun, chooseAgent, setSkillActive }));
 
 const CLAUDE: AgentInfo = {
   kind: "claude",
@@ -47,13 +48,21 @@ const CODEX_GATED: AgentInfo = {
 
 /** The store's shape, defaulted to idle-and-empty — every test overrides only
  *  the fields it cares about. */
-function runState(overrides: { busy?: boolean; agentKind?: string; turns?: { id: number }[] } = {}) {
+function runState(
+  overrides: {
+    busy?: boolean;
+    agentKind?: string;
+    turns?: { id: number }[];
+    activeSkills?: string[];
+  } = {},
+) {
   return {
     turns: [],
     gates: [],
     busy: false,
     generation: 0,
     agentKind: "claude",
+    activeSkills: [],
     ...overrides,
   };
 }
@@ -174,52 +183,36 @@ describe("the composer", () => {
     expect(await screen.findByText(detail)).toBeTruthy();
   });
 
-  it("activates a picked skill as a chip, deduped on re-pick", async () => {
-    listAgents.mockResolvedValue([CLAUDE]);
-    render(<Composer context="" />);
-    const box = await screen.findByRole("textbox");
-    await userEvent.type(box, "/");
-    // Scoped to the menu's own "Skills" group throughout: once the chip
-    // exists, "Rollout forensics" appears twice on screen (chip and reopened
-    // menu item), and an unscoped query can't tell them apart.
-    await userEvent.click(within(screen.getByText("Skills").parentElement as HTMLElement).getByText("Rollout forensics"));
-    expect(screen.getAllByText("Rollout forensics")).toHaveLength(1);
-    await userEvent.clear(box);
-    await userEvent.type(box, "/");
-    await userEvent.click(within(screen.getByText("Skills").parentElement as HTMLElement).getByText("Rollout forensics"));
-    expect(screen.getAllByText("Rollout forensics")).toHaveLength(1);
-  });
-
-  it("removes an active skill's chip", async () => {
+  it("picking a skill from the menu writes to the shared store, not local state (C1/Ruling S)", async () => {
     listAgents.mockResolvedValue([CLAUDE]);
     render(<Composer context="" />);
     await userEvent.type(await screen.findByRole("textbox"), "/");
-    await userEvent.click(await screen.findByText("Rollout forensics"));
+    await userEvent.click(
+      within(screen.getByText("Skills").parentElement as HTMLElement).getByText("Rollout forensics"),
+    );
+    // The write goes through `setSkillActive` — the SAME function
+    // `RunsRail`'s switch calls — never a copy of the set kept here. Whether
+    // the store then dedupes a re-pick is `setSkillActive`'s own contract,
+    // pinned in `agentRun.test.ts`, not this component's to re-prove.
+    expect(setSkillActive).toHaveBeenCalledWith("Rollout forensics", true);
+  });
+
+  it("renders a chip for each skill active in the store, and Remove deactivates it there", async () => {
+    listAgents.mockResolvedValue([CLAUDE]);
+    useAgentRun.mockReturnValue(runState({ activeSkills: ["Rollout forensics"] }));
+    render(<Composer context="" />);
+    expect(await screen.findByText("Rollout forensics")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: /remove skill rollout forensics/i }));
-    expect(screen.queryByText("Rollout forensics")).toBeNull();
+    expect(setSkillActive).toHaveBeenCalledWith("Rollout forensics", false);
   });
 
-  it("passes active skills to askAgent", async () => {
+  it("sends only the question — the active skills askAgent applies are the store's own default, not an opt this composer passes", async () => {
     listAgents.mockResolvedValue([CLAUDE]);
+    useAgentRun.mockReturnValue(runState({ activeSkills: ["Rollout forensics"] }));
     render(<Composer context="" />);
     const box = await screen.findByRole("textbox");
-    await userEvent.type(box, "/");
-    await userEvent.click(await screen.findByText("Rollout forensics"));
-    await userEvent.clear(box);
     await userEvent.type(box, "check this{Enter}");
-    expect(askAgent).toHaveBeenCalledWith("check this", { skills: ["Rollout forensics"] });
-  });
-
-  it("drops an active skill when the conversation clears", async () => {
-    listAgents.mockResolvedValue([CLAUDE]);
-    useAgentRun.mockReturnValue(runState({ turns: [{ id: 1 }] }));
-    const { rerender } = render(<Composer context="" />);
-    await userEvent.type(await screen.findByRole("textbox"), "/");
-    await userEvent.click(await screen.findByText("Rollout forensics"));
-    expect(screen.getByText("Rollout forensics")).toBeTruthy();
-    useAgentRun.mockReturnValue(runState({ turns: [] }));
-    rerender(<Composer context="" />);
-    expect(screen.queryByText("Rollout forensics")).toBeNull();
+    expect(askAgent).toHaveBeenCalledWith("check this");
   });
 
   it("submits on Enter when the slash menu is closed, and clears the input", async () => {
@@ -227,7 +220,7 @@ describe("the composer", () => {
     render(<Composer context="" />);
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "hello{Enter}");
-    expect(askAgent).toHaveBeenCalledWith("hello", { skills: [] });
+    expect(askAgent).toHaveBeenCalledWith("hello");
     expect((box as HTMLInputElement).value).toBe("");
   });
 
@@ -245,7 +238,7 @@ describe("the composer", () => {
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "  hi there  ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
-    expect(askAgent).toHaveBeenCalledWith("hi there", { skills: [] });
+    expect(askAgent).toHaveBeenCalledWith("hi there");
     expect((box as HTMLInputElement).value).toBe("");
   });
 

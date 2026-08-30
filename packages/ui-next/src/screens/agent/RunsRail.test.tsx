@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { RunsRail } from "./RunsRail";
+import { getAgentRun, resetAgentRun } from "../../lib/agentRun";
 
 const { listSessions, listSkills } = vi.hoisted(() => ({
   listSessions: vi.fn(),
@@ -16,6 +18,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   listSessions.mockResolvedValue([]);
   listSkills.mockResolvedValue([]);
+  // The real store, not a double — the whole point of this suite's switch
+  // test is proving the rail reaches the SAME `activeSkills` the composer
+  // writes to, and a mocked `useAgentRun` can only ever assert the render,
+  // never whether the write landed anywhere real.
+  resetAgentRun();
 });
 
 describe("the agent screen's rail", () => {
@@ -23,6 +30,21 @@ describe("the agent screen's rail", () => {
     listSessions.mockResolvedValue([{ id: "s1", title: "Diagnose checkout-api 5xx", createdAt: 1, updatedAt: 2 }]);
     render(<RunsRail />);
     expect(await screen.findByText("Diagnose checkout-api 5xx")).toBeTruthy();
+  });
+
+  it("reads the last-touched time off updatedAt, not createdAt", async () => {
+    // G3: a session whose two timestamps disagree, far enough apart that the
+    // two readings render different words — `relativeTime`'s buckets are
+    // minutes/hours/days, so one second apart would round to the same
+    // "just now" either way and prove nothing.
+    const now = Date.now();
+    listSessions.mockResolvedValue([
+      { id: "s1", title: "Diagnose", createdAt: now - 3 * 60 * 60 * 1000, updatedAt: now - 5 * 60 * 1000 },
+    ]);
+    render(<RunsRail />);
+    await screen.findByText("Diagnose");
+    expect(await screen.findByText("5m ago")).toBeTruthy();
+    expect(screen.queryByText("3h ago")).toBeNull();
   });
 
   it("draws no call count, because none is stored", async () => {
@@ -51,10 +73,22 @@ describe("the agent screen's rail", () => {
     expect(await screen.findByText(/no recent runs/i)).toBeTruthy();
   });
 
-  it("lets a skill be activated for this run via its own switch", async () => {
+  it("writes an activated skill into the shared run store, not merely its own render", async () => {
     listSkills.mockResolvedValue([{ name: "Rollout forensics", description: "Correlates a revision diff" }]);
     render(<RunsRail />);
     const toggle = await screen.findByRole("switch", { name: /activate rollout forensics/i });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(getAgentRun().activeSkills).toEqual([]);
+
+    await userEvent.click(toggle);
+
+    // Observable in the STORE, not merely in this component's own re-render —
+    // the assertion a mocked `useAgentRun` could never make, and the one that
+    // tells "wired" apart from "inert".
+    expect(getAgentRun().activeSkills).toEqual(["Rollout forensics"]);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+
+    await userEvent.click(toggle);
+    expect(getAgentRun().activeSkills).toEqual([]);
   });
 });

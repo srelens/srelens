@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   describeError,
   getPrompt,
@@ -10,7 +10,7 @@ import {
   type SkillMeta,
 } from "@srelens/core";
 import { Button, Popover, TextInput } from "@srelens/ui-kit";
-import { askAgent, chooseAgent, stopAgentRun, useAgentRun } from "../../lib/agentRun";
+import { askAgent, chooseAgent, setSkillActive, stopAgentRun, useAgentRun } from "../../lib/agentRun";
 
 /**
  * The one composer — mounted by the full `/agent` screen alone. The console
@@ -171,7 +171,7 @@ function unfillableArgs(p: PromptSummary, context: string): string[] {
 }
 
 export function Composer({ context }: { context: string }) {
-  const { busy, agentKind, turns } = useAgentRun();
+  const { busy, agentKind, activeSkills } = useAgentRun();
   const [input, setInput] = useState("");
   // Three states, not two: `null` is "the read hasn't landed yet", `[]` is
   // "it landed and there is nothing installed" — a boolean can't tell those
@@ -180,7 +180,6 @@ export function Composer({ context }: { context: string }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
-  const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [promptError, setPromptError] = useState<string | undefined>(undefined);
 
@@ -199,21 +198,6 @@ export function Composer({ context }: { context: string }) {
       .then(setSkills)
       .catch(() => setSkills([]));
   }, []);
-
-  // Skill activation is per-run, never a stored preference (`Session.skills`
-  // stays "always empty for now") — so it is plain component state, and it
-  // must be dropped the moment the conversation it was picked for is gone.
-  // `turns` going from non-empty to empty is exactly a "New chat" (or a
-  // deleted session) reaching this composer through the shared store;
-  // starting empty (a fresh mount) must NOT trigger this, so the comparison
-  // is against the previous render, not against zero outright.
-  const prevTurnsLen = useRef(turns.length);
-  useEffect(() => {
-    if (prevTurnsLen.current > 0 && turns.length === 0) {
-      setActiveSkills([]);
-    }
-    prevTurnsLen.current = turns.length;
-  }, [turns.length]);
 
   // An agent that is `available` but `gated` must not be offered — Codex and
   // Cursor are installed-but-gated today, and offering one would put the
@@ -271,24 +255,26 @@ export function Composer({ context }: { context: string }) {
     }
   }
 
-  /** Activates a skill for THIS RUN only — `Session.skills` stays
-   *  "always empty for now", so this is component state, never persisted,
-   *  and dropped the moment the conversation clears (see the effect above)
-   *  or the composer unmounts. */
+  /** Activates a skill for THIS RUN only, through the shared store
+   *  (`setSkillActive`) — never a stored preference (`Session.skills` stays
+   *  "always empty for now"). The store, not this component, is what drops
+   *  it once the conversation it was picked for is gone (`clearAgentRun`),
+   *  so it survives this composer unmounting and reaches `RunsRail`'s own
+   *  switch on the same run. */
   function pickSkill(s: SkillMeta) {
-    setActiveSkills((prev) => (prev.includes(s.name) ? prev : [...prev, s.name]));
+    setSkillActive(s.name, true);
     setMenuDismissed(true);
   }
 
   function removeSkill(name: string) {
-    setActiveSkills((prev) => prev.filter((n) => n !== name));
+    setSkillActive(name, false);
   }
 
   async function submit() {
     const question = input.trim();
     if (!question || busy) return;
     setInput("");
-    await askAgent(question, { skills: activeSkills });
+    await askAgent(question);
   }
 
   // Stop must survive whatever `agents`/`offered` are doing — a turn already

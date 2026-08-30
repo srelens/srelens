@@ -31,14 +31,22 @@ vi.mock("@srelens/core", async (orig) => ({
   getPrompt,
 }));
 
-const { useAgentRun, askAgent, stopAgentRun, chooseAgent, clearAgentRun } = vi.hoisted(() => ({
+const { useAgentRun, askAgent, stopAgentRun, chooseAgent, clearAgentRun, setSkillActive } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
   stopAgentRun: vi.fn(),
   chooseAgent: vi.fn(),
   clearAgentRun: vi.fn(),
+  setSkillActive: vi.fn(),
 }));
-vi.mock("../lib/agentRun", () => ({ useAgentRun, askAgent, stopAgentRun, chooseAgent, clearAgentRun }));
+vi.mock("../lib/agentRun", () => ({
+  useAgentRun,
+  askAgent,
+  stopAgentRun,
+  chooseAgent,
+  clearAgentRun,
+  setSkillActive,
+}));
 
 const CLAUDE: AgentInfo = {
   kind: "claude",
@@ -60,13 +68,16 @@ const CTX: ClusterContext = {
   authKind: "client certificate",
 };
 
-function runState(overrides: { turns?: unknown[]; gates?: unknown[]; busy?: boolean } = {}) {
+function runState(
+  overrides: { turns?: unknown[]; gates?: unknown[]; busy?: boolean; activeSkills?: string[] } = {},
+) {
   return {
     turns: [],
     gates: [],
     busy: false,
     generation: 0,
     agentKind: "claude",
+    activeSkills: [],
     ...overrides,
   };
 }
@@ -121,5 +132,27 @@ describe("the agent screen", () => {
     await userEvent.type(box, "/");
     await userEvent.click(await screen.findByText("diagnose"));
     expect(getPrompt).toHaveBeenCalledWith("diagnose", { context: "prod-eu" });
+  });
+
+  it("heads the transcript with when the run started, off the first turn's own timestamp", async () => {
+    const at = new Date(2026, 0, 1, 14, 4).getTime();
+    useAgentRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "checkout-api is throwing 5xx", calls: [], at }] }),
+    );
+    render(<Agent route="/agent" />);
+    expect(await screen.findByText("started 14:04")).toBeTruthy();
+  });
+
+  it("draws no started time for a run with no turns yet", async () => {
+    render(<Agent route="/agent" />);
+    await screen.findByRole("textbox", { name: /ask the agent/i });
+    expect(screen.queryByText(/^started /)).toBeNull();
+  });
+
+  it("tells the reader this screen and the console dock share one run", async () => {
+    render(<Agent route="/agent" />);
+    expect(
+      await screen.findByText("Continue this run from the console at the bottom of the window"),
+    ).toBeTruthy();
   });
 });

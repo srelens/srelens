@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listSessions, listSkills, relativeTime, type SessionMeta, type SkillMeta } from "@srelens/core";
 import { Section, Switch } from "@srelens/ui-kit";
+import { setSkillActive, useAgentRun } from "../../lib/agentRun";
 
 /** §5's rail width, and this screen's alone — see `SideRail`'s note on why the
  *  width is a number per screen rather than a scale. */
@@ -20,9 +21,12 @@ export const AGENT_RAIL_WIDTH = 312;
  *
  * **`Skills` draws a name and a description, and a switch for THIS run — no
  * usage count.** §5's `used <n>×` has no counter behind it anywhere in
- * srelens (#387); the switch itself is real; it activates a skill the way
- * the composer's own `/` menu does, for the run that is open right now, never
- * a stored preference (`Session.skills` stays "always empty for now").
+ * srelens (#387). The switch reads and writes `lib/agentRun.ts`'s
+ * `activeSkills` through `setSkillActive` — the SAME set the composer's own
+ * `/` menu writes to — so flipping a skill on here and picking the same
+ * skill from the composer are two doors onto one fact, never two copies of
+ * it that can disagree. Never a stored preference (`Session.skills` stays
+ * "always empty for now").
  *
  * **`MCP clients` says why it is empty, rather than being empty.** srelens
  * generates the config an MCP client reads; it has no channel back from a
@@ -33,10 +37,10 @@ export const AGENT_RAIL_WIDTH = 312;
 export function RunsRail() {
   const [sessions, setSessions] = useState<SessionMeta[] | null>(null);
   const [skills, setSkills] = useState<SkillMeta[] | null>(null);
-  // Which skills are active for the run open right now — plain component
-  // state, exactly like the composer's own `activeSkills`: nothing here is
-  // persisted, and there is nowhere it would be persisted to.
-  const [active, setActive] = useState<ReadonlySet<string>>(new Set());
+  // The one set the composer's own `/` menu writes to as well — read here,
+  // never copied into local state, so the two controls cannot disagree about
+  // which skills are active for this run.
+  const { activeSkills } = useAgentRun();
 
   useEffect(() => {
     listSessions()
@@ -48,15 +52,6 @@ export function RunsRail() {
       .then(setSkills)
       .catch(() => setSkills([]));
   }, []);
-
-  function toggle(name: string, on: boolean) {
-    setActive((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(name);
-      else next.delete(name);
-      return next;
-    });
-  }
 
   const now = Date.now();
 
@@ -88,8 +83,8 @@ export function RunsRail() {
                   <p className="min-w-0 break-words text-xs text-muted">{s.description}</p>
                 </div>
                 <Switch
-                  on={active.has(s.name)}
-                  onChange={(next) => toggle(s.name, next)}
+                  on={activeSkills.includes(s.name)}
+                  onChange={(next) => setSkillActive(s.name, next)}
                   ariaLabel={`Activate ${s.name} for this run`}
                 />
               </div>

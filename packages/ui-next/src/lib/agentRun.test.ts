@@ -7,6 +7,7 @@ import {
   getAgentRun,
   noteGate,
   resetAgentRun,
+  setSkillActive,
   stopAgentRun,
   subscribeAgentRun,
 } from "./agentRun";
@@ -126,6 +127,7 @@ describe("the run store", () => {
     await askAgent("q");
     noteGate({ id: "g1", tool: "k8s.scale", args: {}, outcome: "pending" });
     chooseAgent("codex");
+    setSkillActive("rollout", true);
 
     clearAgentRun();
 
@@ -134,6 +136,9 @@ describe("the run store", () => {
     expect(run.busy).toBe(false);
     expect(run.gates).toHaveLength(1);
     expect(run.agentKind).toBe("codex");
+    // Unlike the gates and the chosen agent, a skill picked for the run that
+    // just ended is not "still active" for whatever run comes next.
+    expect(run.activeSkills).toEqual([]);
   });
 
   it("stopAgentRun turns a failed cancel into a top-level error, described rather than raw", async () => {
@@ -247,6 +252,72 @@ describe("the run store", () => {
       const run = getAgentRun();
       expect(run.busy).toBe(false);
       expect(run.turns.at(-1)?.role).not.toBe("error");
+    });
+  });
+
+  // C1/Ruling S: one set, two writers (the composer's `/` menu, the rail's
+  // switch — both call `setSkillActive` and nothing else), one reader
+  // (`askAgent`, which falls back to it whenever a call omits `opts.skills`).
+  describe("skill activation (setSkillActive)", () => {
+    it("starts with no skill active", () => {
+      expect(getAgentRun().activeSkills).toEqual([]);
+    });
+
+    it("activates a skill, idempotently", () => {
+      const before = getAgentRun();
+      setSkillActive("rollout", true);
+      expect(getAgentRun().activeSkills).toEqual(["rollout"]);
+      expect(getAgentRun()).not.toBe(before);
+
+      const after = getAgentRun();
+      setSkillActive("rollout", true);
+      // Already active: no new snapshot, per `commit`'s own no-op guard.
+      expect(getAgentRun()).toBe(after);
+    });
+
+    it("deactivates a skill, idempotently", () => {
+      setSkillActive("rollout", true);
+      const before = getAgentRun();
+      setSkillActive("rollout", false);
+      expect(getAgentRun().activeSkills).toEqual([]);
+      expect(getAgentRun()).not.toBe(before);
+
+      const after = getAgentRun();
+      setSkillActive("rollout", false);
+      // Already inactive: no new snapshot.
+      expect(getAgentRun()).toBe(after);
+    });
+
+    it("is the ONE set two different writers reach — a skill set active by one call reads back active from either", () => {
+      // Stands in for "the composer's pick" and "the rail's switch": neither
+      // this module nor the test cares which caller made the call, which is
+      // the entire point — there is exactly one place this fact lives.
+      setSkillActive("rollout", true);
+      expect(getAgentRun().activeSkills).toContain("rollout");
+      setSkillActive("oom-triage", true);
+      expect(getAgentRun().activeSkills).toEqual(["rollout", "oom-triage"]);
+    });
+
+    it("askAgent folds the store's active skills into its guidance when the caller passes none of its own", async () => {
+      loadSkill.mockResolvedValue({ name: "rollout", description: "d", body: "Check the rollout history." });
+      sendChat.mockImplementation(async () => null);
+      setSkillActive("rollout", true);
+
+      await askAgent("why is checkout-api 5xx?");
+
+      expect(sendChat.mock.calls[0][1]).toBe(
+        "Apply these skills:\n\nCheck the rollout history.\n\nwhy is checkout-api 5xx?",
+      );
+    });
+
+    it("an explicit opts.skills still overrides the store, for a caller that has its own list in hand", async () => {
+      loadSkill.mockImplementation(async (name: string) => ({ name, description: "d", body: `${name} body` }));
+      sendChat.mockImplementation(async () => null);
+      setSkillActive("rollout", true);
+
+      await askAgent("q", { skills: ["oom-triage"] });
+
+      expect(sendChat.mock.calls[0][1]).toBe("Apply these skills:\n\noom-triage body\n\nq");
     });
   });
 });

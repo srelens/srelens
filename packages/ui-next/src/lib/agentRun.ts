@@ -86,6 +86,20 @@ export type AgentRun = {
    *  turn is dropped. */
   generation: number;
   agentKind: string;
+  /**
+   * Skill names active for the run open right now — never persisted
+   * (`Session.skills` stays "always empty for now"), and dropped whenever
+   * the run clears (`clearAgentRun`).
+   *
+   * **One set, two writers, one reader.** The composer's `/` menu and the
+   * rail's own switch (`RunsRail`) both write here through
+   * {@link setSkillActive}; `askAgent` is the only reader, folding whichever
+   * names are active into the guidance it sends. Living here rather than in
+   * either component's own state is what keeps the two controls from
+   * disagreeing about which skills are on — a `Composer`-local copy is
+   * exactly the split that once left the rail's switch flipping nothing.
+   */
+  activeSkills: string[];
   error?: string;
 };
 
@@ -95,6 +109,7 @@ let run: AgentRun = {
   busy: false,
   generation: 0,
   agentKind: "claude",
+  activeSkills: [],
 };
 
 /** The CLI's own session id for this conversation — `null` until the first
@@ -137,6 +152,7 @@ function sameRun(a: AgentRun, b: AgentRun): boolean {
       a.generation === b.generation &&
       a.agentKind === b.agentKind &&
       a.error === b.error &&
+      sameStrings(a.activeSkills, b.activeSkills) &&
       sameList(a.turns, b.turns, sameTurn) &&
       sameList(a.gates, b.gates, sameGate))
   );
@@ -242,14 +258,22 @@ async function loadSkillsGuidance(names: string[]): Promise<string> {
 }
 
 /**
- * Ask the current agent one question, optionally under one or more active
- * skills' guidance (`opts.skills`) — the store's own business, per this
- * module's transmitted-vs-recorded split (see `loadSkillsGuidance`): the
- * caller passes skill NAMES, this fetches and prepends their bodies, and the
- * turn recorded in `run.turns` holds `question` alone. A component that
- * prepended the guidance itself would either leak it into the visible
- * transcript or force this function to grow a second, display-only
- * parameter — the same split, computed in the wrong layer.
+ * Ask the current agent one question, under whichever skills' guidance are
+ * active for this run — the store's own business, per this module's
+ * transmitted-vs-recorded split (see `loadSkillsGuidance`): this fetches and
+ * prepends their bodies, and the turn recorded in `run.turns` holds
+ * `question` alone. A component that prepended the guidance itself would
+ * either leak it into the visible transcript or force this function to grow
+ * a second, display-only parameter — the same split, computed in the wrong
+ * layer.
+ *
+ * **`opts.skills` is an explicit override, not the ordinary path.** The
+ * ordinary path reads `run.activeSkills` — the one set `setSkillActive`'s two
+ * writers (the composer's `/` menu, the rail's switch) both write to — so a
+ * ordinary caller (the console dock's own `askAgent(question)`, every screen's
+ * `ask()`) picks up whatever is active without saying so itself. `opts.skills`
+ * exists for a caller that has a list in hand it wants sent instead, which
+ * today is only ever this module's own tests.
  *
  * The reader's turn (and an empty placeholder for the agent's) land in the
  * run before anything is awaited, so "records the reader's question before
@@ -260,6 +284,7 @@ async function loadSkillsGuidance(names: string[]): Promise<string> {
  */
 export async function askAgent(question: string, opts?: { images?: string[]; skills?: string[] }): Promise<void> {
   const images = opts?.images;
+  const skills = opts?.skills ?? run.activeSkills;
   const userTurn: Turn = { id: ++turnSeq, role: "user", text: question, calls: [], images, at: Date.now() };
   const agentTurnId = ++turnSeq;
   const agentTurn: Turn = { id: agentTurnId, role: "agent", text: "", calls: [], at: Date.now() };
@@ -320,7 +345,7 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
 
   try {
     if (!session) session = await startChat();
-    const guidance = await loadSkillsGuidance(opts?.skills ?? []);
+    const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
     const agentPath = agents.find((a) => a.kind === agentKind)?.path ?? "";
     const result = await sendChat(
@@ -362,19 +387,40 @@ export function stopAgentRun(): void {
  *  token with them, so the next question opens a new session rather than
  *  quietly resuming the one just cleared. A turn still in flight is asked to
  *  stop, best-effort — its own answer, if one still lands, is stale and the
- *  generation check in `askAgent` drops it. */
+ *  generation check in `askAgent` drops it.
+ *
+ *  Drops `activeSkills` too — a skill picked for a run that no longer exists
+ *  is not "still active", and this is the one place that is true regardless
+ *  of which component (if any) is mounted to have noticed the run end. */
 export function clearAgentRun(): void {
   if (run.busy && session) void cancelChat(session, run.generation).catch(() => {});
   session = null;
   resume = null;
   // A no-op — clearing a run that is already idle and empty — is left to
   // `commit`'s own guard rather than special-cased here.
-  commit({ ...run, turns: [], busy: false, error: undefined });
+  commit({ ...run, turns: [], busy: false, error: undefined, activeSkills: [] });
 }
 
 /** Pick which agent CLI the next question is sent to. */
 export function chooseAgent(kind: string): void {
   commit({ ...run, agentKind: kind });
+}
+
+/**
+ * Activate, or deactivate, one skill for the run open right now — the write
+ * side of {@link AgentRun.activeSkills}. Idempotent: activating an
+ * already-active skill, or deactivating one that is not, commits nothing.
+ *
+ * Both of this store's writers call this and nothing else: the composer's
+ * `/` menu picks a skill on (never off — see its own `removeSkill`, which
+ * also calls this), and `RunsRail`'s switch calls it either way from its
+ * `on`/`off` change handler.
+ */
+export function setSkillActive(name: string, active: boolean): void {
+  const already = run.activeSkills.includes(name);
+  if (active === already) return;
+  const activeSkills = active ? [...run.activeSkills, name] : run.activeSkills.filter((n) => n !== name);
+  commit({ ...run, activeSkills });
 }
 
 /** Record one MCP confirm request's outcome — merged by id, so a request
@@ -388,7 +434,7 @@ export function noteGate(record: GateRecord): void {
 
 /** Reset the module-level store between tests. */
 export function resetAgentRun(): void {
-  run = { turns: [], gates: [], busy: false, generation: 0, agentKind: "claude" };
+  run = { turns: [], gates: [], busy: false, generation: 0, agentKind: "claude", activeSkills: [] };
   session = null;
   resume = null;
   turnSeq = 0;
