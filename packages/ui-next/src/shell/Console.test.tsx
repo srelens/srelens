@@ -3,9 +3,11 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { ConsoleProvider, useConsole } from "../console";
+import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock } from "./LockGate";
+import type { ClusterContext } from "@srelens/core";
 
 const { useAgentRun, askAgent, clearAgentRun } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
@@ -40,12 +42,26 @@ function setup({ apple = true, onToggleTheme = () => {} }: { apple?: boolean; on
   );
 }
 
+/** The same shape `Window.test.tsx`'s own `ctx` builds, for the tests below
+ *  that need a real, resolvable cluster context rather than the empty
+ *  default. */
+const ctx = (stableId: string, name = stableId): ClusterContext => ({
+  name,
+  stableId,
+  cluster: name,
+  server: "",
+  isCurrent: false,
+  sourceFile: "/home/dana/.kube/config",
+  authKind: "client certificate",
+});
+
 beforeEach(() => {
   // A clean workspace for every test: the route-aware suggestions test opens
   // a `/logs` tab of its own, and nothing here may leak into a later test —
   // the store is module-level, not reset between tests on its own.
   tabsStore.setState(defaultState([]));
   resetLock();
+  resetContexts();
   useAgentRun.mockReset().mockReturnValue(runState());
   askAgent.mockReset();
   clearAgentRun.mockReset();
@@ -133,5 +149,114 @@ describe("Console", () => {
     lockWorkspace();
     setup();
     expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});
+
+
+/**
+ * I2's own point: `agentCommands.test.ts` proves `commandsFor` builds the
+ * right commands against a MOCK `CommandDeps` — it never runs the real
+ * closures `Console.tsx` assembles (`openAction`/`openResource` calling into
+ * `detailRoute`/`logsRoute`/`openTab`). These tests run a command end to end
+ * through the real dock, and check the real `tabsStore`'s resulting state —
+ * not a spy on `openTab`, so a passing test means the actual navigation
+ * happened, not merely that some function was invoked.
+ */
+describe("Console — debt 2's real navigation", () => {
+  it("Follow logs opens the real logs route, carrying the resource's identity and the cluster", async () => {
+    const user = userEvent.setup();
+    const contexts = [ctx("prod", "prod-eu")];
+    setContexts(contexts);
+    // `defaultState`, not `setActiveCluster` on top of the empty default: the
+    // latter refuses unless the id is already in the WORKSPACE's own
+    // `clusters` list, which the plain `defaultState([])` from `beforeEach`
+    // never populated.
+    tabsStore.setState(defaultState(contexts));
+    // No `clusterName` here on purpose: the tab starts with no `sub`, so a
+    // `sub` of "prod-eu" after the command can only have come from the real
+    // `openAction`/`openResource` closure actually calling `openTab` with it.
+    tabsStore.openTab("/k/Pod/checkout/api-0");
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/follow logs{Enter}");
+    expect(tabsStore.activeRoute()).toBe("/logs/Pod/checkout/api-0");
+    const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/logs/Pod/checkout/api-0");
+    expect(tab?.sub).toBe("prod-eu");
+  });
+
+  it("Open a shell reaches Terminals — generic navigation, per debt 2's resolution", async () => {
+    const user = userEvent.setup();
+    tabsStore.openTab("/k/Pod/checkout/api-0");
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/open a shell{Enter}");
+    expect(tabsStore.activeRoute()).toBe("/terminals");
+  });
+
+  it("Port forward reaches Forwards — generic navigation, per debt 2's resolution", async () => {
+    const user = userEvent.setup();
+    tabsStore.openTab("/k/Pod/checkout/api-0");
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/port forward{Enter}");
+    expect(tabsStore.activeRoute()).toBe("/forwards");
+  });
+
+  it("an Action command opens the detail route with the resource's identity and the cluster", async () => {
+    const user = userEvent.setup();
+    const contexts = [ctx("prod", "prod-eu")];
+    setContexts(contexts);
+    tabsStore.setState(defaultState(contexts));
+    // Same "no `sub` yet" setup as the logs test above, and for the same
+    // reason: a `sub` of "prod-eu" afterward can only be the real
+    // `openAction` closure's own `openTab({ clusterName })`.
+    tabsStore.openTab("/k/Deployment/checkout/api");
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/restart{Enter}");
+    expect(tabsStore.activeRoute()).toBe("/k/Deployment/checkout/api");
+    const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/k/Deployment/checkout/api");
+    expect(tab?.sub).toBe("prod-eu");
+  });
+});
+
+describe("Console — header details", () => {
+  it("uses a fallback placeholder before the dock has a scope", () => {
+    setup();
+    const input = screen.getByRole("textbox", { name: "Console prompt" });
+    expect(input.getAttribute("placeholder")).toBe("Ask about this cluster");
+  });
+
+  it("uses the scope in the placeholder once Window has scoped the dock", () => {
+    render(
+      <ConsoleProvider initialScope="prod-eu / checkout-api">
+        <Console apple onToggleTheme={() => {}} />
+      </ConsoleProvider>,
+    );
+    const input = screen.getByRole("textbox", { name: "Console prompt" });
+    expect(input.getAttribute("placeholder")).toBe("Ask about prod-eu / checkout-api");
+  });
+
+  it("shows the exchange count in the header, pluralised", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "hi", calls: [], at: 0 }] }),
+    );
+    const { rerender } = setup();
+    await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
+    expect(screen.getByText("1 exchange")).toBeDefined();
+
+    useAgentRun.mockReturnValue(
+      runState({
+        turns: [
+          { id: 1, role: "user", text: "hi", calls: [], at: 0 },
+          { id: 2, role: "agent", text: "hello", calls: [], at: 0 },
+          { id: 3, role: "user", text: "again", calls: [], at: 0 },
+        ],
+      }),
+    );
+    rerender(
+      <ConsoleProvider>
+        <Elsewhere />
+        <Console apple onToggleTheme={() => {}} />
+      </ConsoleProvider>,
+    );
+    expect(screen.getByText("2 exchanges")).toBeDefined();
   });
 });
