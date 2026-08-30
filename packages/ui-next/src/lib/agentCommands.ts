@@ -6,7 +6,7 @@
  *
  * Design: `docs/superpowers/specs/mock-full-design.md` §F (the agent dock).
  *
- * **`Go` is resource-scoped, not the route table.** §F's actual list reads
+ * **`Go` is resource-scoped, not the route table.** §F's own mock reads
  * `Follow logs · checkout-api`, `Open shell in checkout-api`,
  * `Port forward checkout-api` — navigations about the resource the active
  * route names, the same subject `Action` uses, not a way to jump to an
@@ -15,6 +15,25 @@
  * cannot say what it would act on is not a command, and a missing group is
  * absent, never an empty heading — which falls out for free here, since a
  * group with no `Command` in the flat list below renders no heading at all.
+ *
+ * **`shell` and `forward` do not carry the mock's copy verbatim — a
+ * deliberate deviation, decided in Task 6.** §F's `Open shell in
+ * checkout-api` and `Port forward checkout-api` name the resource because the
+ * mock's dock never actually navigates anywhere; the real one does, through
+ * `openTab`, and neither destination has a way to arrive pre-selected.
+ * `NewSessionMenuProps` (`screens/terminals/NewSessionMenu.tsx`) takes only
+ * `context` and `namespace` — no pod field at all — and nothing wires a
+ * target into `/forwards`' own header action either. Both dialogs open only
+ * from a local button click on their own screen; there is no route-level or
+ * cross-tab channel today that could hand a resource's identity to a dialog
+ * mounted by a *different* screen's navigation, and building one is real
+ * plumbing across two screens this step does not own. Landing a reader on
+ * `/terminals` under a label that says `Open shell in checkout-api` would be
+ * a promise the navigation cannot keep — worse than a generic label that
+ * says what actually happens. So the labels below name the SCREEN the
+ * command opens, not the resource, until one of those dialogs grows a way to
+ * take it. `Follow logs` keeps the resource's name because `logsRoute` bakes
+ * the identity into the URL itself — that promise the navigation does keep.
  *
  * **No Roll back.** Core has no rollout-undo capability for a Deployment's
  * revision history — `rolloutRestart`, `scale`, `evict`, `deletePod`,
@@ -165,6 +184,10 @@ function resourceCommands(deps: CommandDeps): Command[] {
   // `Follow logs` goes through the same door for the same reason `openAction`
   // is one door rather than two: one hand-off, fully specified, that Task 6
   // maps to `openTab(logsRoute(...), { clusterName: context })` on its side.
+  // `kind`/`namespace`/`name` still travel to `openResource` for `shell` and
+  // `forward` too, even though Task 6's own wiring cannot use them today (see
+  // the module doc) — a future widening of either destination reads them off
+  // this same call rather than a second one threaded through later.
   if (actions.logs) {
     commands.push({
       id: "logs",
@@ -178,8 +201,10 @@ function resourceCommands(deps: CommandDeps): Command[] {
     commands.push({
       id: "shell",
       group: "Go",
-      label: `Open shell in ${name}`,
-      hint: "pod exec",
+      // Not `Open shell in ${name}` — see the module doc's "deliberate
+      // deviation" note. This opens Terminals; it does not attach to `name`.
+      label: "Open a shell",
+      hint: "Terminals · pick the pod there",
       run: () => deps.openResource({ kind, namespace: ns, name, context, as: "shell" }),
     });
   }
@@ -187,8 +212,9 @@ function resourceCommands(deps: CommandDeps): Command[] {
     commands.push({
       id: "forward",
       group: "Go",
-      label: `Port forward ${name}`,
-      hint: "expose a port locally",
+      // Not `Port forward ${name}` — same reason as `shell`, above.
+      label: "Port forward",
+      hint: "Forwards · pick the target there",
       run: () => deps.openResource({ kind, namespace: ns, name, context, as: "forward" }),
     });
   }

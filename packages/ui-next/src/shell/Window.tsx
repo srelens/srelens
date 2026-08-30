@@ -13,6 +13,7 @@ import {
   type ClusterContext,
 } from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
+import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
@@ -131,10 +132,17 @@ export function Window({
   // under Tauri. In a browser the native zoom already does this (see core's
   // uiScale doc), so a zoom chord here has to fall through to it untouched.
   const desktop = useMemo(() => isTauri(), []);
-  const { setOpen } = useConsole();
+  const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
   const activeIdCluster = useActiveCluster();
   const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
+  // The console dock's own scope label — `Window`'s job because it is the one
+  // place that already knows both the active tab's route and the active
+  // cluster's name; `Console` itself only reads `scope` back off the provider.
+  const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
+  useEffect(() => {
+    setScope(contextLabelFor(activeTabRoute, activeCtx?.name ?? ""));
+  }, [activeTabRoute, activeCtx?.name, setScope]);
 
   useEffect(() => {
     let cancelled = false;
@@ -562,7 +570,7 @@ export function Window({
             </TabSurface>
           ))}
         </div>
-        {active && <Console apple={apple} />}
+        {active && <Console apple={apple} onToggleTheme={onToggleTheme} />}
       </div>
       <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
         <div className="flex flex-col gap-3 px-3 py-3">
