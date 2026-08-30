@@ -3,9 +3,11 @@ import {
   cancelChat,
   describeError,
   listAgents,
+  loadSkill,
   sendChat,
   startChat,
   type AgentEvent,
+  type Skill,
   type ToolStatus,
 } from "@srelens/core";
 
@@ -218,7 +220,36 @@ function markTurnError(id: number, reason: unknown) {
 }
 
 /**
- * Ask the current agent one question.
+ * Fetches each active skill's body and folds them into a guidance block sent
+ * ahead of the question — never recorded in the turn itself (`askAgent`
+ * stamps the reader's own turn with `question` alone), so what is
+ * TRANSMITTED and what is RECORDED can differ without either turning into
+ * the other's job. Matches classic's own `loadSkillsGuidance`
+ * (`AssistantConversation.tsx`) wording exactly.
+ *
+ * `allSettled` rather than `all`: an active skill can go missing (deleted
+ * from disk after being activated), and one `loadSkill` rejection must not
+ * cost the turn every OTHER skill's guidance along with it.
+ */
+async function loadSkillsGuidance(names: string[]): Promise<string> {
+  if (names.length === 0) return "";
+  const results = await Promise.allSettled(names.map((name) => loadSkill(name)));
+  const bodies = results
+    .filter((r): r is PromiseFulfilledResult<Skill> => r.status === "fulfilled")
+    .map((r) => r.value.body);
+  if (bodies.length === 0) return "";
+  return `Apply these skills:\n\n${bodies.join("\n\n")}\n\n`;
+}
+
+/**
+ * Ask the current agent one question, optionally under one or more active
+ * skills' guidance (`opts.skills`) — the store's own business, per this
+ * module's transmitted-vs-recorded split (see `loadSkillsGuidance`): the
+ * caller passes skill NAMES, this fetches and prepends their bodies, and the
+ * turn recorded in `run.turns` holds `question` alone. A component that
+ * prepended the guidance itself would either leak it into the visible
+ * transcript or force this function to grow a second, display-only
+ * parameter — the same split, computed in the wrong layer.
  *
  * The reader's turn (and an empty placeholder for the agent's) land in the
  * run before anything is awaited, so "records the reader's question before
@@ -227,7 +258,7 @@ function markTurnError(id: number, reason: unknown) {
  * question; every question after reuses it and carries `resume` so the CLI
  * picks the conversation back up.
  */
-export async function askAgent(question: string, opts?: { images?: string[] }): Promise<void> {
+export async function askAgent(question: string, opts?: { images?: string[]; skills?: string[] }): Promise<void> {
   const images = opts?.images;
   const userTurn: Turn = { id: ++turnSeq, role: "user", text: question, calls: [], images, at: Date.now() };
   const agentTurnId = ++turnSeq;
@@ -289,9 +320,19 @@ export async function askAgent(question: string, opts?: { images?: string[] }): 
 
   try {
     if (!session) session = await startChat();
+    const guidance = await loadSkillsGuidance(opts?.skills ?? []);
     const agents = await listAgents();
     const agentPath = agents.find((a) => a.kind === agentKind)?.path ?? "";
-    const result = await sendChat(session, question, agentPath, onEvent, images, agentKind, myGeneration, resume);
+    const result = await sendChat(
+      session,
+      `${guidance}${question}`,
+      agentPath,
+      onEvent,
+      images,
+      agentKind,
+      myGeneration,
+      resume,
+    );
     // A later question already moved the conversation on; this answer no
     // longer says anything about where the resume token stands.
     if (run.generation === myGeneration) resume = result;

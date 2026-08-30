@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   describeError,
   getPrompt,
@@ -137,10 +137,28 @@ function AgentPicker({
   );
 }
 
-export function Composer({ compact }: { compact?: boolean }) {
-  const { busy, agentKind } = useAgentRun();
+/** The required argument every builtin prompt declares (Ruling M) — the one
+ *  this composer knows how to fill from its own `context` prop. Any OTHER
+ *  required argument means firing `getPrompt` would only ever be refused
+ *  (`assistant_prompts.rs` rejects a missing/blank required argument), so
+ *  `pickPrompt` below never calls it for one — a menu entry that always
+ *  fails is worse than one that says why it can't run. */
+const KNOWN_ARG = "context";
+
+/** The required arguments a prompt declares beyond the one this composer can
+ *  fill on its own. */
+function unfillableArgs(p: PromptSummary): string[] {
+  return p.arguments.filter((a) => a.required && a.name !== KNOWN_ARG).map((a) => a.name);
+}
+
+export function Composer({ compact, context }: { compact?: boolean; context: string }) {
+  const { busy, agentKind, turns } = useAgentRun();
   const [input, setInput] = useState("");
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  // Three states, not two: `null` is "the read hasn't landed yet", `[]` is
+  // "it landed and there is nothing installed" — a boolean can't tell those
+  // apart, and collapsing them is exactly what put "No agent is available"
+  // on screen for a tick on every mount, agent or no agent (Ruling N).
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
@@ -163,10 +181,26 @@ export function Composer({ compact }: { compact?: boolean }) {
       .catch(() => setSkills([]));
   }, []);
 
+  // Skill activation is per-run, never a stored preference (`Session.skills`
+  // stays "always empty for now") — so it is plain component state, and it
+  // must be dropped the moment the conversation it was picked for is gone.
+  // `turns` going from non-empty to empty is exactly a "New chat" (or a
+  // deleted session) reaching this composer through the shared store;
+  // starting empty (a fresh mount) must NOT trigger this, so the comparison
+  // is against the previous render, not against zero outright.
+  const prevTurnsLen = useRef(turns.length);
+  useEffect(() => {
+    if (prevTurnsLen.current > 0 && turns.length === 0) {
+      setActiveSkills([]);
+    }
+    prevTurnsLen.current = turns.length;
+  }, [turns.length]);
+
   // An agent that is `available` but `gated` must not be offered — Codex and
   // Cursor are installed-but-gated today, and offering one would put the
   // reader in a conversation that cannot start.
-  const offered = agents.filter((a) => a.available && !a.gated);
+  const offered = agents === null ? [] : agents.filter((a) => a.available && !a.gated);
+  const agentsLoaded = agents !== null;
 
   // The store's `agentKind` can name a kind that just went missing from
   // `offered` (nothing loaded yet, or the last-picked kind un-gated to
@@ -191,13 +225,21 @@ export function Composer({ compact }: { compact?: boolean }) {
     setPromptError(undefined);
   }
 
-  /** Renders `p` into the input for review — never auto-sent. A rejected
-   *  `getPrompt` (e.g. a required arg this menu can't fill) surfaces inline
-   *  through `describeError`, never the raw backend string, and leaves the
-   *  input untouched. */
+  /** Renders `p` into the input for review — never auto-sent. A prompt
+   *  declaring a required argument this composer has no source for is never
+   *  called at all (Ruling M): it says so instead of firing a `getPrompt`
+   *  the backend will only ever refuse. A rejection from a call this DOES
+   *  make surfaces through `describeError`, never the raw backend string,
+   *  and leaves the input untouched. */
   async function pickPrompt(p: PromptSummary) {
+    const missing = unfillableArgs(p);
+    if (missing.length > 0) {
+      setPromptError(`"${p.name}" needs ${missing.join(", ")} — open it outside the composer.`);
+      setMenuDismissed(true);
+      return;
+    }
     try {
-      const text = await getPrompt(p.name, {});
+      const text = await getPrompt(p.name, { context });
       setInput(text);
       setMenuDismissed(true);
       setPromptError(undefined);
@@ -208,7 +250,8 @@ export function Composer({ compact }: { compact?: boolean }) {
 
   /** Activates a skill for THIS RUN only — `Session.skills` stays
    *  "always empty for now", so this is component state, never persisted,
-   *  and gone the moment the composer unmounts. */
+   *  and dropped the moment the conversation clears (see the effect above)
+   *  or the composer unmounts. */
   function pickSkill(s: SkillMeta) {
     setActiveSkills((prev) => (prev.includes(s.name) ? prev : [...prev, s.name]));
     setMenuDismissed(true);
@@ -222,7 +265,32 @@ export function Composer({ compact }: { compact?: boolean }) {
     const question = input.trim();
     if (!question || busy) return;
     setInput("");
-    await askAgent(question);
+    await askAgent(question, { skills: activeSkills });
+  }
+
+  // Stop must survive whatever `agents`/`offered` are doing — a turn already
+  // running does not stop being real because the picker's list emptied out
+  // from under it (P3): a reader who loses Send when nothing can be offered
+  // must never also lose the only way to stop what IS running.
+  if (busy && offered.length === 0) {
+    return (
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <p className={cx("min-w-0 break-words text-sm text-muted", compact && "text-xs")}>
+          {agentsLoaded
+            ? `No agent is available. srelens can drive ${AGENT_KIND_LABELS.join(", ")} — install one to get started.`
+            : "Loading agents…"}
+        </p>
+        <Button type="button" variant="secondary" size="sm" onClick={() => stopAgentRun()}>
+          Stop
+        </Button>
+      </div>
+    );
+  }
+
+  // The read hasn't landed yet — say nothing about "no agent" until it has
+  // (Ruling N), rather than asserting an absence this hasn't checked for.
+  if (!agentsLoaded) {
+    return <p className={cx("min-w-0 break-words text-sm text-muted", compact && "text-xs")}>Loading agents…</p>;
   }
 
   // With no agent available at all, say what srelens can drive and offer no
