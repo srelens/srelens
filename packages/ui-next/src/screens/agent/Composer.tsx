@@ -145,10 +145,25 @@ function AgentPicker({
  *  fails is worse than one that says why it can't run. */
 const KNOWN_ARG = "context";
 
-/** The required arguments a prompt declares beyond the one this composer can
- *  fill on its own. */
-function unfillableArgs(p: PromptSummary): string[] {
-  return p.arguments.filter((a) => a.required && a.name !== KNOWN_ARG).map((a) => a.name);
+/**
+ * The required arguments a prompt declares that this composer has no way to
+ * fill — either a required argument OTHER than `context`, or `context`
+ * itself when nothing has actually been selected.
+ *
+ * A blank `context` is not a filled one (G1): the prop's TYPE is `string`,
+ * but `""` satisfies that type while carrying none of the value a real
+ * cluster name would, and the backend's own check
+ * (`assistant_prompts.rs:637-641`, `trim().is_empty()`) refuses it exactly
+ * as it refuses a missing argument. Folding it into the same "unfillable"
+ * list — rather than trusting `arguments` by name alone — means a reader
+ * with no cluster selected gets the same local explanation a prompt with a
+ * genuinely unfillable argument gets, not a call fired only to be bounced.
+ */
+function unfillableArgs(p: PromptSummary, context: string): string[] {
+  return p.arguments
+    .filter((a) => a.required)
+    .filter((a) => a.name !== KNOWN_ARG || context.trim() === "")
+    .map((a) => a.name);
 }
 
 export function Composer({ compact, context }: { compact?: boolean; context: string }) {
@@ -232,9 +247,13 @@ export function Composer({ compact, context }: { compact?: boolean; context: str
    *  make surfaces through `describeError`, never the raw backend string,
    *  and leaves the input untouched. */
   async function pickPrompt(p: PromptSummary) {
-    const missing = unfillableArgs(p);
+    const missing = unfillableArgs(p, context);
     if (missing.length > 0) {
-      setPromptError(`"${p.name}" needs ${missing.join(", ")} — open it outside the composer.`);
+      setPromptError(
+        missing.includes(KNOWN_ARG)
+          ? `"${p.name}" needs a cluster in context — select one first.`
+          : `"${p.name}" needs ${missing.join(", ")} — open it outside the composer.`,
+      );
       setMenuDismissed(true);
       return;
     }

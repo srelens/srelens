@@ -11,12 +11,12 @@ import {
   subscribeAgentRun,
 } from "./agentRun";
 
-const { startChat, sendChat, listAgents, cancelChat } = vi.hoisted(() => ({
-  startChat: vi.fn(), sendChat: vi.fn(), listAgents: vi.fn(), cancelChat: vi.fn(),
+const { startChat, sendChat, listAgents, cancelChat, loadSkill } = vi.hoisted(() => ({
+  startChat: vi.fn(), sendChat: vi.fn(), listAgents: vi.fn(), cancelChat: vi.fn(), loadSkill: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
-  startChat, sendChat, listAgents, cancelChat,
+  startChat, sendChat, listAgents, cancelChat, loadSkill,
 }));
 
 /** Let queued microtasks run until `sendChat` has been called `n` times, or
@@ -39,6 +39,7 @@ beforeEach(() => {
   sendChat.mockReset();
   listAgents.mockReset();
   cancelChat.mockReset();
+  loadSkill.mockReset();
   startChat.mockResolvedValue("sess-1");
   listAgents.mockResolvedValue([{ kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false }]);
   cancelChat.mockResolvedValue(undefined);
@@ -198,5 +199,54 @@ describe("the run store", () => {
       3,
       "live-token",
     );
+  });
+
+  // G2: `opts.skills`'s transmitted-vs-recorded split, and its per-skill
+  // fault tolerance, had no coverage of their own — every existing test
+  // either omits `skills` or (in `Composer.test.tsx`) mocks `askAgent`
+  // itself, which pins the call boundary but nothing behind it.
+  describe("skill guidance (opts.skills)", () => {
+    it("sends the bare question when no skill is active — never an empty guidance preamble", async () => {
+      sendChat.mockImplementation(async () => null);
+      await askAgent("q");
+      expect(sendChat.mock.calls[0][1]).toBe("q");
+      expect(loadSkill).not.toHaveBeenCalled();
+    });
+
+    it("prepends active skills' guidance to what sendChat sends, but never into the recorded turn's text", async () => {
+      loadSkill.mockResolvedValue({ name: "rollout", description: "d", body: "Check the rollout history." });
+      sendChat.mockImplementation(async () => null);
+
+      await askAgent("why is checkout-api 5xx?", { skills: ["rollout"] });
+
+      expect(sendChat).toHaveBeenCalledWith(
+        "sess-1",
+        "Apply these skills:\n\nCheck the rollout history.\n\nwhy is checkout-api 5xx?",
+        "/c",
+        expect.any(Function),
+        undefined,
+        "claude",
+        1,
+        null,
+      );
+      // The reader's own turn holds exactly what they typed — the guidance
+      // block is TRANSMITTED, never RECORDED.
+      expect(getAgentRun().turns[0].text).toBe("why is checkout-api 5xx?");
+    });
+
+    it("drops one skill's guidance on a loadSkill rejection, and still sends the turn with the other skills' guidance intact", async () => {
+      loadSkill.mockImplementation(async (name: string) => {
+        if (name === "broken") throw new Error("deleted from disk");
+        return { name, description: "d", body: `${name} body` };
+      });
+      sendChat.mockImplementation(async () => null);
+
+      await askAgent("q", { skills: ["broken", "ok-skill"] });
+
+      expect(sendChat.mock.calls[0][1]).toBe("Apply these skills:\n\nok-skill body\n\nq");
+      const run = getAgentRun();
+      expect(run.busy).toBe(false);
+      expect(run.turns.at(-1)?.role).not.toBe("error");
+    });
   });
 });

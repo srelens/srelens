@@ -153,6 +153,17 @@ describe("the composer", () => {
     expect(await screen.findByText(/workload/i)).toBeTruthy();
   });
 
+  it("refuses a context-only prompt when no cluster is in context, rather than firing a call the backend will refuse (G1)", async () => {
+    listAgents.mockResolvedValue([CLAUDE]);
+    // The default fixture prompt needs only "context" — an empty `context`
+    // prop must still be treated as unfillable, not as a filled string.
+    render(<Composer context="" />);
+    await userEvent.type(await screen.findByRole("textbox"), "/");
+    await userEvent.click(await screen.findByText("diagnose"));
+    expect(getPrompt).not.toHaveBeenCalled();
+    expect(await screen.findByText(/cluster/i)).toBeTruthy();
+  });
+
   it("surfaces a rejected getPrompt through describeError, never the raw backend string", async () => {
     listAgents.mockResolvedValue([CLAUDE]);
     getPrompt.mockRejectedValue(new Error("boom"));
