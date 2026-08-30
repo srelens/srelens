@@ -27,6 +27,13 @@ const core = vi.hoisted(() => ({
   vaultBiometricStatus: vi.fn(),
   vaultBiometricEnable: vi.fn(),
   vaultBiometricDisable: vi.fn(),
+  llmGetSettings: vi.fn(),
+  llmSetSettings: vi.fn(),
+  llmSetKey: vi.fn(),
+  llmClearKey: vi.fn(),
+  llmKeyStatus: vi.fn(),
+  llmListModels: vi.fn(),
+  listAgents: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -98,6 +105,18 @@ describe("Settings", () => {
     core.auditTail.mockResolvedValue([]);
     core.vaultLock.mockResolvedValue(undefined);
     core.vaultBiometricStatus.mockResolvedValue(SENSOR_OFF);
+    core.llmGetSettings.mockResolvedValue({
+      defaultProvider: "anthropic",
+      models: {},
+      baseUrls: {},
+      maxTokens: 4096,
+    });
+    core.llmSetSettings.mockResolvedValue(undefined);
+    core.llmSetKey.mockResolvedValue(undefined);
+    core.llmClearKey.mockResolvedValue(undefined);
+    core.llmKeyStatus.mockResolvedValue([]);
+    core.llmListModels.mockResolvedValue([]);
+    core.listAgents.mockResolvedValue([]);
   });
 
   it("titles itself the way the design does, and takes no header action", () => {
