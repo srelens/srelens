@@ -289,6 +289,11 @@ export function toggleNextDesignTheme(): void {
 export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   { route: "/applog", name: "Application log" },
   { route: "/notes", name: "Release notes" },
+  // The full view of the one agent run this window holds — the transcript,
+  // the composer, and the 312px rail. The console dock at the bottom of the
+  // window is a second, compact renderer over the SAME run, not a screen of
+  // its own.
+  { route: "/agent", name: "Agent" },
   { route: "/resources", name: "Workloads" },
   // Not one screen: every `/k/<slug>` route, around 34 built-in kinds plus
   // every custom resource the cluster has, all sharing one screen keyed off

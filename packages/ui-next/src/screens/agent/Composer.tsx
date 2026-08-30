@@ -9,16 +9,20 @@ import {
   type PromptSummary,
   type SkillMeta,
 } from "@srelens/core";
-import { Button, Popover, TextInput, cx } from "@srelens/ui-kit";
+import { Button, Popover, TextInput } from "@srelens/ui-kit";
 import { askAgent, chooseAgent, stopAgentRun, useAgentRun } from "../../lib/agentRun";
 
 /**
- * The one composer — mounted by both the console dock (`compact`) and the
- * full `/agent` screen, per the spec's "one store, one submit path" (see
- * `Transcript`'s own doc for the sibling half of that). It owns the input,
- * the agent picker, the `/` menu of prompts and skills, and Send/Stop; the
- * conversation itself (`turns`, `gates`, `busy`, `generation`) stays in
- * `useAgentRun`, so neither host keeps its own copy.
+ * The one composer — mounted by the full `/agent` screen alone. The console
+ * dock never mounts this: §F's dock has no picker, no Stop and no prompt
+ * menu, so `ConsoleDock` supplies its own single-line prompt instead, and
+ * `askAgent` is called straight from `shell/Console.tsx`. This is still the
+ * spec's "one store, one submit path" (see `Transcript`'s own doc for the
+ * sibling half of that) — the ONE submit path just happens to run through
+ * this component's own `submit`, not through a second copy of it. It owns the
+ * input, the agent picker, the `/` menu of prompts and skills, and Send/Stop;
+ * the conversation itself (`turns`, `gates`, `busy`, `generation`) stays in
+ * `useAgentRun`.
  *
  * **Every kind srelens can ever drive, named without `listAgents()`.** A
  * fresh install reports an EMPTY list, not four entries marked unavailable —
@@ -166,7 +170,7 @@ function unfillableArgs(p: PromptSummary, context: string): string[] {
     .map((a) => a.name);
 }
 
-export function Composer({ compact, context }: { compact?: boolean; context: string }) {
+export function Composer({ context }: { context: string }) {
   const { busy, agentKind, turns } = useAgentRun();
   const [input, setInput] = useState("");
   // Three states, not two: `null` is "the read hasn't landed yet", `[]` is
@@ -294,7 +298,7 @@ export function Composer({ compact, context }: { compact?: boolean; context: str
   if (busy && offered.length === 0) {
     return (
       <div className="flex min-w-0 items-center justify-between gap-2">
-        <p className={cx("min-w-0 break-words text-sm text-muted", compact && "text-xs")}>
+        <p className="min-w-0 break-words text-sm text-muted">
           {agentsLoaded
             ? `No agent is available. srelens can drive ${AGENT_KIND_LABELS.join(", ")} — install one to get started.`
             : "Loading agents…"}
@@ -309,7 +313,7 @@ export function Composer({ compact, context }: { compact?: boolean; context: str
   // The read hasn't landed yet — say nothing about "no agent" until it has
   // (Ruling N), rather than asserting an absence this hasn't checked for.
   if (!agentsLoaded) {
-    return <p className={cx("min-w-0 break-words text-sm text-muted", compact && "text-xs")}>Loading agents…</p>;
+    return <p className="min-w-0 break-words text-sm text-muted">Loading agents…</p>;
   }
 
   // With no agent available at all, say what srelens can drive and offer no
@@ -317,7 +321,7 @@ export function Composer({ compact, context }: { compact?: boolean; context: str
   // worse than its absence.
   if (offered.length === 0) {
     return (
-      <p className={cx("min-w-0 break-words text-sm text-muted", compact && "text-xs")}>
+      <p className="min-w-0 break-words text-sm text-muted">
         No agent is available. srelens can drive {AGENT_KIND_LABELS.join(", ")} — install one to get
         started.
       </p>

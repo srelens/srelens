@@ -273,18 +273,4 @@ describe("the composer", () => {
     await userEvent.click(screen.getByRole("button", { name: /stop/i }));
     expect(stopAgentRun).toHaveBeenCalledTimes(1);
   });
-
-  it("renders compact, shrinking the no-agent copy", async () => {
-    listAgents.mockResolvedValue([]);
-    render(<Composer context="" compact />);
-    const msg = await screen.findByText(/no agent/i);
-    expect(msg.className).toContain("text-xs");
-  });
-
-  it("does not shrink the no-agent copy outside compact", async () => {
-    listAgents.mockResolvedValue([]);
-    render(<Composer context="" />);
-    const msg = await screen.findByText(/no agent/i);
-    expect(msg.className).not.toContain("text-xs");
-  });
 });
