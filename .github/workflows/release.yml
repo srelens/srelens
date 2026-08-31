@@ -217,9 +217,11 @@ jobs:
             build-essential \
             webkit2gtk-driver \
             xvfb
+      # No `version:` — `pnpm/action-setup` reads `packageManager` from
+      # package.json. One source of truth: a second one here is how local
+      # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
+      # overrides from the lockfile on every local install.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 9
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -480,9 +482,11 @@ jobs:
           echo "${LINUXDEPLOY_SHA256}  $HOME/.cache/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c -
           chmod +x ~/.cache/tauri/linuxdeploy-x86_64.AppImage
 
+      # No `version:` — `pnpm/action-setup` reads `packageManager` from
+      # package.json. One source of truth: a second one here is how local
+      # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
+      # overrides from the lockfile on every local install.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 9
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
