@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
+import { Alert, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
 import { useConsole } from "../console";
-import { askAgent, clearAgentRun, useAgentRun } from "../lib/agentRun";
+import { askAgent, clearAgentRun, dismissAgentError, useAgentRun } from "../lib/agentRun";
 import {
   commandsFor,
   matchCommands,
@@ -111,7 +111,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   const sealed = useWorkspaceSealed();
   const { open, setOpen, scope, registerSubmit } = useConsole();
   const [value, setValue] = useState("");
-  const { turns, gates, busy } = useAgentRun();
+  const { turns, gates, busy, error } = useAgentRun();
   const contexts = useContexts();
   const activeCtx = useActiveContext();
   const { tabs, activeId, workspace, workspaces } = useTabs();
@@ -245,6 +245,20 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
     // (`dockLive` below) — a second one nested inside it would announce
     // inconsistently and often twice (I7).
     children = <Transcript compact live={false} turns={turns} gates={gates} />;
+  }
+
+  // Run-level, above whichever of the three modes is showing. The store held
+  // this in `error` and nothing drew it, so an `ask()` chip pressed mid-turn
+  // was refused in silence — which is what the refusal was supposed to stop.
+  if (error !== undefined) {
+    children = (
+      <div className="flex min-w-0 flex-col gap-2">
+        <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError()}>
+          <p className="m-0">{error}</p>
+        </Alert>
+        {children}
+      </div>
+    );
   }
 
   // The ONE ARIA log region for the dock, on `ConsoleDock`'s own body — `true`

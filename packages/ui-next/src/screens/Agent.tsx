@@ -1,6 +1,6 @@
-import { Button, Eyebrow, Screen, SideRail } from "@srelens/ui-kit";
+import { Alert, Button, Eyebrow, Screen, SideRail } from "@srelens/ui-kit";
 import { useActiveContext } from "../lib/clusters";
-import { clearAgentRun, useAgentRun, type Turn } from "../lib/agentRun";
+import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
 import { Composer } from "./agent/Composer";
 import { Transcript } from "./agent/Transcript";
@@ -56,7 +56,7 @@ function callCount(turns: readonly Turn[]): number {
  * screen is `Composer`'s only caller, and it renders with nothing shrunk.
  */
 export function Agent(_props: { route: string }) {
-  const { turns, gates } = useAgentRun();
+  const { turns, gates, error } = useAgentRun();
   const activeCtx = useActiveContext();
   const context = activeCtx?.name ?? "";
   const started = startedLabel(turns);
@@ -87,6 +87,16 @@ export function Agent(_props: { route: string }) {
         }
       >
         <div className="flex min-h-0 flex-1 min-w-0 flex-col gap-3 p-3">
+          {/* Run-level, not turn-level: a submission refused because a turn is
+              already in flight, or a Stop that did not land. The store held
+              this in `error` and NOTHING drew it, so a chip the reader pressed
+              simply did nothing — the exact silence the refusal was meant to
+              break. */}
+          {error !== undefined && (
+            <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError()}>
+              <p className="m-0">{error}</p>
+            </Alert>
+          )}
           <div className="scroll min-h-0 min-w-0 flex-1">
             <Transcript turns={turns} gates={gates} />
           </div>

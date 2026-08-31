@@ -219,4 +219,40 @@ describe("AgentPane", () => {
     expect(await screen.findByText(/could not open codex's install page/i)).toBeTruthy();
     expect(screen.getByText(/no opener available/)).toBeTruthy();
   });
+
+  /**
+   * P2 (#392 review round 4). The controls stay editable while
+   * `llmSetSettings` is in flight, and its completion set `saved` to true
+   * unconditionally — overwriting the `setSaved(false)` that an intervening
+   * edit had performed. The reader was told their newer draft was persisted
+   * when what landed was the older snapshot, which invites navigating away
+   * and losing it.
+   */
+  it("does not report a save as done when the draft moved on while it was in flight", async () => {
+    let finishSave!: () => void;
+    llmSetSettings.mockImplementation(() => new Promise<void>((resolve) => { finishSave = () => resolve(); }));
+    llmKeyStatus.mockResolvedValue(["anthropic"]);
+    render(<AgentPane />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /save settings/i }));
+    // The reader picks a different default provider while the request is out.
+    const radios = screen.getAllByRole("radio");
+    const other = radios.find((r) => !(r as HTMLInputElement).checked)!;
+    await userEvent.click(other);
+
+    await act(async () => {
+      finishSave();
+    });
+
+    // The older snapshot landed; what is on screen is not what was saved.
+    expect(screen.queryByText(/^saved\.$/i)).toBeNull();
+  });
+
+  it("reports a save as done when the draft is still the one that went to disk", async () => {
+    llmKeyStatus.mockResolvedValue(["anthropic"]);
+    render(<AgentPane />);
+    await userEvent.click(await screen.findByRole("button", { name: /save settings/i }));
+    // Not a latch on the other side either: an untouched draft still confirms.
+    expect(await screen.findByText(/^saved\.$/i)).toBeTruthy();
+  });
 });

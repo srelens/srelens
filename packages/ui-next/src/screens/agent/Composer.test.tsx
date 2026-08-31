@@ -309,13 +309,43 @@ describe("the composer", () => {
     listAgents.mockResolvedValue([CLAUDE]);
     useAgentRun.mockReturnValue(runState({ busy: true }));
     render(<Composer context="" />);
-    // Wait for the full composer to settle in (the agent picker only exists
+    // Wait for the full composer to settle in (the agent name only renders
     // there) before asserting about Stop — `agents` starts unresolved, and a
     // "Stop" also renders, transiently, in the loading/no-agent branch below.
-    await screen.findByRole("button", { name: /claude/i });
+    // By TEXT, not by the picker's button role: while busy the picker is not a
+    // button at all, which is the subject of the test below.
+    await screen.findByText("Claude");
     expect(screen.queryByRole("button", { name: /^send$/i })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: /stop/i }));
     expect(stopAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * P1 (#392 review round 4), and a regression this branch introduced itself.
+   * Round 2 made `chooseAgent` drop `session`/`resume` so one CLI's
+   * conversation id could not be handed to another — but left the picker live
+   * during a turn. Switching mid-turn then stranded the running CLI:
+   * `stopAgentRun` had no session to hand `cancelChat`, and the turn's own
+   * completion wrote its resume token back under the newly chosen agent.
+   */
+  it("does not offer the agent picker while a turn is in flight", async () => {
+    listAgents.mockResolvedValue([CLAUDE, { ...CLAUDE, kind: "codex", label: "Codex" }]);
+    useAgentRun.mockReturnValue(runState({ busy: true }));
+    render(<Composer context="" />);
+    await screen.findByText("Claude");
+    // The name is still shown — the reader should see which agent is running —
+    // but there is nothing to press. `Popover` puts its `label` on the PANEL,
+    // so the trigger's accessible name is its content: the agent's label.
+    expect(screen.queryByRole("button", { name: /claude/i })).toBeNull();
+    expect(screen.getByTitle(/before switching agent/i)).toBeTruthy();
+  });
+
+  it("offers it again once the turn has settled", async () => {
+    listAgents.mockResolvedValue([CLAUDE, { ...CLAUDE, kind: "codex", label: "Codex" }]);
+    useAgentRun.mockReturnValue(runState({ busy: false }));
+    render(<Composer context="" />);
+    // Not a latch: the picker comes back when the run is idle.
+    expect(await screen.findByRole("button", { name: /claude/i })).toBeTruthy();
   });
 
   it("keeps Stop available if the agent list empties out mid-turn (P3)", async () => {

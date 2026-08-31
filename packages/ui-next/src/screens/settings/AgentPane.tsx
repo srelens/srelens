@@ -76,6 +76,25 @@ function modelFetchTitle(label: string): string {
   return `Could not fetch models from ${label}`;
 }
 
+/** Two settings drafts, compared by the fields this pane actually edits — a
+ *  save reports success only when what is on screen is still what went to
+ *  disk. */
+function sameSettings(a: LlmSettings, b: LlmSettings): boolean {
+  if (a === b) return true;
+  return (
+    a.defaultProvider === b.defaultProvider &&
+    a.maxTokens === b.maxTokens &&
+    sameStringMap(a.models, b.models) &&
+    sameStringMap(a.baseUrls, b.baseUrls)
+  );
+}
+
+function sameStringMap(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => a[k] === b[k]);
+}
+
 export function AgentPane() {
   const [settingsRead, setSettingsRead] = useState<Read<LlmSettings>>(LOADING);
   const [keyStatusRead, setKeyStatusRead] =
@@ -235,9 +254,20 @@ export function AgentPane() {
   async function saveSettings() {
     setBusy("settings");
     setSaveError(null);
+    // The snapshot that actually goes to disk. The controls stay editable
+    // while this is in flight, so the reader can change a model or a base URL
+    // meanwhile — and that edit calls `setSaved(false)`. Reporting success
+    // unconditionally here overwrote it, telling the reader their NEWER draft
+    // was persisted when what landed was this older one, and inviting them to
+    // navigate away and lose it.
+    const submitted = settings;
     try {
-      await llmSetSettings(settings);
-      setSaved(true);
+      await llmSetSettings(submitted);
+      // Only if the draft on screen is still the one that was saved.
+      setSettings((current) => {
+        setSaved(sameSettings(current, submitted));
+        return current;
+      });
     } catch (e) {
       setSaveError(e);
     } finally {

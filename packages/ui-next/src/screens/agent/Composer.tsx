@@ -135,12 +135,27 @@ function AgentPicker({
   agents,
   selectedKind,
   onSelect,
+  disabled,
 }: {
   agents: AgentInfo[];
   selectedKind: string;
   onSelect: (kind: string) => void;
+  /** While a turn is in flight — switching would strand the running CLI (see
+   *  `chooseAgent`). Disabled rather than silently refused, so the reader can
+   *  see why the control is not available. */
+  disabled?: boolean;
 }) {
   const current = agents.find((a) => a.kind === selectedKind);
+  if (disabled) {
+    return (
+      <span
+        className="min-w-0 truncate text-xs text-faint"
+        title="Stop the question in flight before switching agent"
+      >
+        {current?.label ?? "Agent"}
+      </span>
+    );
+  }
   return (
     <Popover label="Choose agent" trigger={<span className="truncate">{current?.label ?? "Agent"}</span>}>
       {(close) => (
@@ -438,6 +453,7 @@ export function Composer({ context }: { context: string }) {
           agents={offered}
           selectedKind={selectedKind}
           onSelect={(kind) => chooseAgent(kind)}
+          disabled={busy}
         />
         <div className="flex-1" />
         {busy ? (

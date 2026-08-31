@@ -31,12 +31,21 @@ vi.mock("@srelens/core", async (orig) => ({
   getPrompt,
 }));
 
-const { useAgentRun, askAgent, stopAgentRun, chooseAgent, clearAgentRun, setSkillActive } = vi.hoisted(() => ({
+const {
+  useAgentRun,
+  askAgent,
+  stopAgentRun,
+  chooseAgent,
+  clearAgentRun,
+  dismissAgentError,
+  setSkillActive,
+} = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
   stopAgentRun: vi.fn(),
   chooseAgent: vi.fn(),
   clearAgentRun: vi.fn(),
+  dismissAgentError: vi.fn(),
   setSkillActive: vi.fn(),
 }));
 vi.mock("../lib/agentRun", () => ({
@@ -45,6 +54,7 @@ vi.mock("../lib/agentRun", () => ({
   stopAgentRun,
   chooseAgent,
   clearAgentRun,
+  dismissAgentError,
   setSkillActive,
 }));
 
@@ -69,7 +79,13 @@ const CTX: ClusterContext = {
 };
 
 function runState(
-  overrides: { turns?: unknown[]; gates?: unknown[]; busy?: boolean; activeSkills?: string[] } = {},
+  overrides: {
+    turns?: unknown[];
+    gates?: unknown[];
+    busy?: boolean;
+    activeSkills?: string[];
+    error?: string;
+  } = {},
 ) {
   return {
     turns: [],
@@ -207,5 +223,27 @@ describe("the agent screen", () => {
     expect(
       await screen.findByText("Continue this run from the console at the bottom of the window"),
     ).toBeTruthy();
+  });
+
+  /**
+   * P2 (#392 review round 4). The store carried a run-level failure in
+   * `error` — a submission refused because a turn was already in flight, a
+   * `cancelChat` that did not land — and NOTHING rendered it. So an `ask()`
+   * chip pressed mid-turn was refused in silence, which is the exact
+   * behaviour the refusal was added to prevent.
+   */
+  it("shows a run-level failure rather than leaving the store holding it", () => {
+    useAgentRun.mockReturnValue(
+      runState({ error: "srelens is still answering the last question." }),
+    );
+    render(<Agent route="/agent" />);
+    expect(screen.getByText(/still answering the last question/i)).toBeTruthy();
+  });
+
+  it("lets the reader put that failure away", async () => {
+    useAgentRun.mockReturnValue(runState({ error: "srelens is still answering." }));
+    render(<Agent route="/agent" />);
+    await userEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+    expect(dismissAgentError).toHaveBeenCalledTimes(1);
   });
 });

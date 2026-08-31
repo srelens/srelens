@@ -598,6 +598,21 @@ export function clearAgentRun(): void {
  */
 export function chooseAgent(kind: string): void {
   if (kind === run.agentKind) return;
+  // Not while a turn is in flight. Dropping `session` here would leave
+  // `stopAgentRun` with nothing to hand `cancelChat` — the running CLI becomes
+  // uncancellable — and the turn's own completion would then write its
+  // `resume` token back under the newly chosen agent, which is the very
+  // mixing this function exists to prevent. The picker is disabled while busy
+  // for the same reason; this is the invariant behind that, held where every
+  // caller passes rather than in the one component that happens to render a
+  // picker today.
+  if (run.busy) {
+    commit({
+      ...run,
+      error: "srelens is still answering. Stop the question in flight before switching agent.",
+    });
+    return;
+  }
   session = null;
   resume = null;
   commit({ ...run, agentKind: kind });
@@ -627,6 +642,19 @@ export function noteGate(record: GateRecord): void {
   const idx = run.gates.findIndex((g) => g.id === record.id);
   const gates = idx === -1 ? [...run.gates, record] : run.gates.map((g, i) => (i === idx ? record : g));
   commit({ ...run, gates });
+}
+
+/**
+ * Put away a run-level failure the reader has read.
+ *
+ * `error` is the store's one channel for something that happened to the RUN
+ * rather than to a turn — a refused submission, a `cancelChat` that did not
+ * land — and it is rendered by both views. Without a way to dismiss it, the
+ * sentence would sit there until the next question happened to clear it.
+ */
+export function dismissAgentError(): void {
+  if (run.error === undefined) return;
+  commit({ ...run, error: undefined });
 }
 
 /** Reset the module-level store between tests. */
