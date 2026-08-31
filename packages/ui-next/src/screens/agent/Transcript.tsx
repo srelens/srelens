@@ -30,12 +30,18 @@ const GATE_TONE: Record<GateRecord["outcome"], Tone> = {
   pending: "muted",
   approved: "ok",
   denied: "sev",
+  // Not `sev`: nothing went wrong, and not `ok` either — nobody here decided.
+  settled: "muted",
 };
 
 const GATE_WORD: Record<GateRecord["outcome"], string> = {
   pending: "Pending",
   approved: "Applied",
   denied: "Denied",
+  // Deliberately does not say HOW. `mcp://confirm-resolved` carries an id and
+  // nothing else, so "Timed out" or "Denied elsewhere" would both be srelens
+  // guessing at a fact it was never told.
+  settled: "No longer waiting",
 };
 
 /** A one-line summary of a call/gate's args, or `""` for `null`/`{}` — the

@@ -170,6 +170,69 @@ describe("the run store", () => {
     expect(getAgentRun().busy).toBe(false);
   });
 
+  // P1 (#392 review): `clearAgentRun` preserved `run.generation`, so every
+  // post-await guard in `askAgent` still read a discarded turn as current.
+  describe("New question, with a turn still in flight", () => {
+    it("does not send a question the reader threw away before its CLI had spawned", async () => {
+      let resolveStartChat!: (v: string) => void;
+      startChat.mockImplementation(() => new Promise<string>((resolve) => { resolveStartChat = resolve; }));
+
+      const asked = askAgent("q");
+      expect(getAgentRun().busy).toBe(true);
+      clearAgentRun();
+
+      resolveStartChat("sess-1");
+      await asked;
+
+      // The discarded turn must not reassign the session the clear nulled,
+      // and must not go on to ask its question.
+      expect(sendChat).not.toHaveBeenCalled();
+      expect(getAgentRun().turns).toEqual([]);
+    });
+
+    it("does not let a discarded turn's resume token survive the clear", async () => {
+      let resolveSend!: (v: string | null) => void;
+      sendChat.mockImplementationOnce(() => new Promise<string | null>((resolve) => { resolveSend = resolve; }));
+
+      const asked = askAgent("q1");
+      await untilSendChatCalledTimes(1);
+      clearAgentRun();
+      resolveSend("stale-token");
+      await asked;
+
+      // The next question starts a conversation, rather than resuming the one
+      // the reader cleared. Pinned on the resume slot alone: coupling this to
+      // all eight arguments would make it fail for reasons that have nothing
+      // to do with the token, which is the whole subject of the test.
+      sendChat.mockImplementationOnce(async () => null);
+      await askAgent("q2");
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("q2");
+      // `null` is the store's "no conversation to resume" — the point is that
+      // the discarded turn's "stale-token" is not sitting here.
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+    });
+
+    it("cancels the in-flight turn with the generation it was sent with, not the bumped one", async () => {
+      sendChat.mockImplementationOnce(() => new Promise<string | null>(() => {}));
+      void askAgent("q");
+      await untilSendChatCalledTimes(1);
+      const sent = getAgentRun().generation;
+
+      clearAgentRun();
+
+      expect(cancelChat).toHaveBeenCalledWith("sess-1", sent);
+      // And the run has moved on, so the abandoned turn's own guards all fail.
+      expect(getAgentRun().generation).toBe(sent + 1);
+    });
+
+    it("leaves the generation alone when there was nothing in flight to abandon", async () => {
+      const before = getAgentRun().generation;
+      clearAgentRun();
+      expect(getAgentRun().generation).toBe(before);
+      expect(cancelChat).not.toHaveBeenCalled();
+    });
+  });
+
   // I3: `cancelChat`'s arguments had zero coverage anywhere in the package —
   // every existing test only ever `mockReset`/`mockResolvedValue`d it. The
   // reviewer's own mutation, `run.generation` → `run.generation - 1`, passed

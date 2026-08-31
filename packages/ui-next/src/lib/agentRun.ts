@@ -52,7 +52,19 @@ export type GateRecord = {
   id: string;
   tool: string;
   args: unknown;
-  outcome: "pending" | "approved" | "denied";
+  /**
+   * `settled` is the state srelens has when the BACKEND says a request stopped
+   * waiting and srelens is not the one who answered it — a timeout, an answer
+   * given on another surface, or the MCP server going away.
+   *
+   * It exists because the other three cannot say that honestly. `pending` is a
+   * claim the request is still the reader's to answer, which stops being true
+   * the moment `mcp://confirm-resolved` arrives. `denied` would put the
+   * reader's name on a refusal they did not make. And srelens genuinely does
+   * not learn HOW it settled — `mcp://confirm-resolved` carries an id and
+   * nothing else — so the state must not imply which.
+   */
+  outcome: "pending" | "approved" | "denied" | "settled";
   /**
    * When this gate was resolved, `Date.now()`-shaped — absent while it is
    * still `pending`. Stamped by `AgentConsent` at the moment `outcome`
@@ -361,11 +373,20 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
   }
 
   try {
-    if (!session) session = await startChat();
-    // Cold start: `stopAgentRun` was called before this had a session to hand
-    // `cancelChat`, and recorded the generation it was asked to stop instead.
-    // Honor it now rather than sending a question nobody wants answered.
+    const started = session ?? (await startChat());
+    // Checked BEFORE `session` is assigned, which is the half that matters.
+    // A turn abandoned while `startChat` was still spawning — stopped, or its
+    // run cleared — must not reassign the `session` that abandonment nulled on
+    // purpose, because reassigning it here is exactly how a discarded question
+    // used to go on and reach `sendChat`.
+    //
+    // Deliberately NOT `run.generation !== myGeneration`. That is true of an
+    // ordinary superseded turn too — the reader asked twice in quick
+    // succession — and both of those questions were asked on purpose. Only an
+    // explicit stop or clear records a generation here, and only those two
+    // mean "nobody wants this answered".
     if (stoppedGeneration === myGeneration) return;
+    session = started;
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
     // An agent that is `available` but `gated` must not be offered — mirrors
@@ -470,12 +491,33 @@ export function stopAgentRun(): void {
  *  is not "still active", and this is the one place that is true regardless
  *  of which component (if any) is mounted to have noticed the run end. */
 export function clearAgentRun(): void {
+  // Cancel with the generation the in-flight turn was SENT with, before the
+  // bump below moves it — the backend matches a Stop against that.
   if (run.busy && session) void cancelChat(session, run.generation).catch(() => {});
   session = null;
   resume = null;
+  // The generation is what makes the clear actually stick. `askAgent`'s
+  // post-await guards are all `run.generation === myGeneration`, so leaving it
+  // alone left a discarded turn still looking current: a pending `startChat()`
+  // would resolve, reassign the `session` this just nulled, and send the
+  // question the reader had thrown away; a running `sendChat()` would
+  // repopulate `resume` after this cleared it. Bumping it fails every one of
+  // those guards at once.
+  //
+  // Also recorded as a stop, for the window where the discarded turn has no
+  // session yet and so was never handed to `cancelChat` at all.
+  if (run.busy) stoppedGeneration = run.generation;
   // A no-op — clearing a run that is already idle and empty — is left to
   // `commit`'s own guard rather than special-cased here.
-  commit({ ...run, turns: [], gates: [], busy: false, error: undefined, activeSkills: [] });
+  commit({
+    ...run,
+    turns: [],
+    gates: [],
+    busy: false,
+    error: undefined,
+    activeSkills: [],
+    generation: run.busy ? run.generation + 1 : run.generation,
+  });
 }
 
 /** Pick which agent CLI the next question is sent to. */

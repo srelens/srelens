@@ -293,6 +293,19 @@ export function AgentConsent() {
         if (id === null) return;
         resolvedMeanwhile?.add(id);
         setQueue((q) => q.filter((r) => r.id !== id));
+        // Taking it off screen is not the whole job: a gate this run already
+        // owns is still drawn in the transcript, and `pending` there is a claim
+        // that the request is the reader's to answer. Once the backend says it
+        // stopped waiting, that claim is false — however it settled.
+        //
+        // Only a gate still `pending` is touched. The backend announces EVERY
+        // resolution, including the reader's own answer, so clobbering here
+        // would overwrite an `approved` with a vaguer word. Whichever of the
+        // two lands second, the decided outcome is the one that survives.
+        const owned = getAgentRun().gates.find((g) => g.id === id);
+        if (owned && owned.outcome === "pending") {
+          noteGate({ ...owned, outcome: "settled", at: Date.now() });
+        }
       });
       if (!hearingResolutions) return;
       const hearingRequests = await listen("mcp://confirm-request", (payload) => {

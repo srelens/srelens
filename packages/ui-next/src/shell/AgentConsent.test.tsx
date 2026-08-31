@@ -860,6 +860,59 @@ describe("AgentConsent", () => {
     });
 
     /**
+     * P2 (#392 review). A gate recorded `pending` said the request was still
+     * the reader's to answer. That stops being true the moment the backend
+     * announces it settled — a timeout, an answer given on another surface, or
+     * the MCP server going away — and `mcp://confirm-resolved` only took it
+     * off screen, leaving the transcript claiming pending forever.
+     *
+     * `settled` says what srelens actually knows: it stopped waiting, and not
+     * by the reader's hand here. It deliberately does not say WHICH, because
+     * the resolution event carries an id and nothing else.
+     */
+    it("settles a pending gate when the backend says the request resolved elsewhere", async () => {
+      await mount();
+      startTurn();
+      ask("r8", "k8s_scale", { replicas: 3 });
+      await screen.findByRole("dialog");
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r8")?.outcome).toBe("pending"));
+
+      act(() => emit(RESOLVED, { id: "r8" }));
+
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r8")?.outcome).toBe("settled"));
+      // Still a record — the gate WAS raised, and the transcript should say so.
+      expect(getAgentRun().gates.find((g) => g.id === "r8")?.at).toEqual(expect.any(Number));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("does not overwrite the reader's own answer with the resolution that follows it", async () => {
+      // The backend announces EVERY resolution, the reader's own included, so
+      // an unguarded settle would replace "approved" with a vaguer word a
+      // moment after they approved it.
+      await mount();
+      startTurn();
+      ask("r9", "k8s_deletePod", {});
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved"));
+
+      act(() => emit(RESOLVED, { id: "r9" }));
+
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r9", true));
+      expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved");
+    });
+
+    it("records nothing for a resolution of a request this run never owned", async () => {
+      // The idle case: no gate was recorded, so there is nothing to settle,
+      // and a resolution must not conjure a row.
+      await mount();
+      ask("r10", "k8s_drainNode", {});
+      await screen.findByRole("dialog");
+      act(() => emit(RESOLVED, { id: "r10" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(getAgentRun().gates.find((g) => g.id === "r10")).toBeUndefined();
+    });
+
+    /**
      * The other half of the cover case, and the one the brief did not settle.
      *
      * A request that WAS shown, and then the cover went up: the reader was

@@ -132,6 +132,19 @@ describe("a run's transcript", () => {
     expect(screen.getByText("Applied")).toBeTruthy();
   });
 
+  // P2 (#392 review): the fourth outcome. A gate the BACKEND says stopped
+  // waiting, where srelens is not the one who answered it.
+  it("says a gate is no longer waiting, without claiming how it ended", () => {
+    const at = new Date(2024, 0, 1, 14, 6).getTime();
+    render(
+      <Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.scale", args: {}, outcome: "settled", at }]} />,
+    );
+    expect(screen.getByText("No longer waiting 14:06")).toBeTruthy();
+    // `mcp://confirm-resolved` carries an id and nothing else, so any of these
+    // would be srelens reporting a fact it was never told.
+    expect(screen.queryByText(/timed out|expired|denied|applied/i)).toBeNull();
+  });
+
   it("adds the resolution time once one is stamped", () => {
     const at = new Date(2024, 0, 1, 14, 6).getTime();
     render(
