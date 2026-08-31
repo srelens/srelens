@@ -4,7 +4,7 @@ members = ["crates/agent", "crates/capability", "crates/mcp", "crates/kube", "cr
 
 [workspace.package]
 edition = "2021"
-version = "0.7.2"
+version = "0.8.0"
 license = "MIT"
 
 # Fast-feedback profile for the CI WebDriver smoke job (issue #30): dev
