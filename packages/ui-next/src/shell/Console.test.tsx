@@ -157,6 +157,39 @@ describe("Console", () => {
     expect(tabsStore.currentWorkspace().activeCluster).toBe("prod-eu-id");
   });
 
+  // P1a (#392 review): `setActiveCluster` refuses an id outside
+  // `workspace.clusters` and returns the workspace untouched, but the command
+  // went on to `openTab` regardless — relabelling a tab with a cluster that
+  // never became active, and leaving every action under it running against
+  // the previous cluster.
+  it("offers no Cluster command for a context this workspace does not hold", async () => {
+    const user = userEvent.setup();
+    const inWorkspace = ctx("prod-eu-id", "prod-eu");
+    const outside = ctx("prod-us-id", "prod-us");
+    // The kubeconfig has both; the workspace holds only the first.
+    setContexts([inWorkspace, outside]);
+    tabsStore.setState(defaultState([inWorkspace]));
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/switch to prod");
+    expect(await screen.findByText("Switch to prod-eu")).toBeTruthy();
+    expect(screen.queryByText("Switch to prod-us")).toBeNull();
+  });
+
+  it("leaves the active cluster where it was when the only match is outside the workspace", async () => {
+    const user = userEvent.setup();
+    const inWorkspace = ctx("prod-eu-id", "prod-eu");
+    const outside = ctx("staging-id", "staging");
+    setContexts([inWorkspace, outside]);
+    tabsStore.setState(defaultState([inWorkspace]));
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/switch to staging{Enter}");
+    // No command matched, so §F's rule applies and the text is asked as a
+    // question instead — what must NOT happen is a tab relabelled "staging"
+    // over a workspace still pointed at prod-eu.
+    expect(tabsStore.currentWorkspace().activeCluster).toBe("prod-eu-id");
+    expect(tabsStore.currentWorkspace().tabs.some((t) => t.sub === "staging")).toBe(false);
+  });
+
   it("clicking a command row runs it too, not only Enter", async () => {
     const user = userEvent.setup();
     const onToggleTheme = vi.fn();

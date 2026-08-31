@@ -114,7 +114,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   const { turns, gates, busy } = useAgentRun();
   const contexts = useContexts();
   const activeCtx = useActiveContext();
-  const { tabs, activeId, workspaces } = useTabs();
+  const { tabs, activeId, workspace, workspaces } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
   const context = activeCtx?.name ?? "";
 
@@ -122,7 +122,21 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
     () => ({
       route,
       context,
-      clusters: contexts.map((c) => ({ id: c.stableId, name: c.name })),
+      // Only the clusters THIS workspace holds. `setActiveCluster` refuses an
+      // id outside `workspace.clusters` and returns the workspace untouched
+      // (`tabsStore.ts:426`), but the command went on to `openTab` regardless —
+      // so picking a kubeconfig context the workspace does not include
+      // relabelled a tab with that cluster's name while the active cluster
+      // never moved, and every action taken under that tab then ran against
+      // the previous cluster. A tab that names one cluster and acts on another
+      // is the #380 class of defect, seven findings deep.
+      //
+      // Filtered here rather than refused in the command: a command that
+      // cannot do what its label says should not be offered at all, which is
+      // the same rule §F's absent `Action` group already follows.
+      clusters: contexts
+        .filter((c) => workspace.clusters.includes(c.stableId))
+        .map((c) => ({ id: c.stableId, name: c.name })),
       workspaces,
       openTab,
       // `setActiveCluster` itself, unwrapped: its own signature already takes
@@ -162,7 +176,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
         openTab(r.as === "shell" ? "/terminals" : "/forwards", { clusterName: r.context });
       },
     }),
-    [route, context, contexts, workspaces, onToggleTheme],
+    [route, context, contexts, workspace, workspaces, onToggleTheme],
   );
 
   const commands = useMemo(() => commandsFor(deps), [deps]);

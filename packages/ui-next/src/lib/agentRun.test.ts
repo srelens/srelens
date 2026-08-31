@@ -170,6 +170,46 @@ describe("the run store", () => {
     expect(getAgentRun().busy).toBe(false);
   });
 
+  // P2 (#392 review): `resume` is the PREVIOUS CLI's own conversation id.
+  describe("switching agent CLIs", () => {
+    it("does not hand one CLI's resume token to another", async () => {
+      sendChat.mockResolvedValue("claude-conversation-id");
+      await askAgent("q1");
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+
+      chooseAgent("cursor");
+      listAgents.mockResolvedValue([
+        { kind: "cursor", label: "Cursor", available: true, gated: false, path: "/cursor" },
+      ]);
+      await askAgent("q2");
+
+      // Cursor is asked to start something, not to resume a conversation it
+      // has never heard of.
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+      expect(sendChat.mock.calls.at(-1)?.[5]).toBe("cursor");
+    });
+
+    it("keeps the conversation when the chosen kind has not actually changed", async () => {
+      sendChat.mockResolvedValue("claude-conversation-id");
+      await askAgent("q1");
+
+      // `Composer`'s reconciliation effect calls this with whatever it can
+      // offer; a no-op call must not end the run the reader is in.
+      chooseAgent("claude");
+      await askAgent("q2");
+
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBe("claude-conversation-id");
+    });
+
+    it("keeps the transcript across the switch — those questions were asked", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("q1");
+      const before = getAgentRun().turns.length;
+      chooseAgent("cursor");
+      expect(getAgentRun().turns).toHaveLength(before);
+    });
+  });
+
   // P1 (#392 review): `clearAgentRun` preserved `run.generation`, so every
   // post-await guard in `askAgent` still read a discarded turn as current.
   describe("New question, with a turn still in flight", () => {
@@ -279,41 +319,56 @@ describe("the run store", () => {
     expect(run.turns.at(-1)?.text).toBe(describeError(new Error("kaboom")).detail);
   });
 
-  it("a superseded turn's own busy/resume result never overwrites the current one", async () => {
+  /**
+   * This test used to assert the opposite — that two overlapping `askAgent`
+   * calls BOTH reach `sendChat`, and only the stale one's result is dropped.
+   * The bot review on #392 showed that behaviour is not merely untidy but
+   * unsupported: the backend keys child processes by session in a `HashMap`
+   * and `insert`s (`assistant.rs:727`), so a second send on one session
+   * replaces the first child handle and drops it without `kill_and_reap`,
+   * which that file's own doc says leaves a zombie. The first CLI is then
+   * untracked and uncancellable, because `chat_cancel` removes by session and
+   * finds only the newer child.
+   *
+   * So the store refuses instead. The generation guards still matter — a
+   * clear or a stop abandons a turn whose result can still land — and the
+   * "New question, with a turn still in flight" block above is what covers
+   * them now.
+   */
+  it("refuses a second question while one is still being answered, and says so", async () => {
+    sendChat.mockImplementationOnce(() => new Promise<string | null>(() => {}));
+
+    void askAgent("q1");
+    await untilSendChatCalledTimes(1);
+    expect(getAgentRun().busy).toBe(true);
+
+    await askAgent("q2");
+
+    // Not sent — one child per session, and the first is still using it.
+    expect(sendChat).toHaveBeenCalledTimes(1);
+    expect(getAgentRun().error).toMatch(/still answering/i);
+    // And it did not land as a turn either: the reader's transcript must not
+    // show a question srelens never asked.
+    expect(getAgentRun().turns.filter((t) => t.text === "q2")).toEqual([]);
+  });
+
+  it("takes the next question once the turn in flight has finished", async () => {
     let resolveFirst!: (v: string | null) => void;
-    let resolveSecond!: (v: string | null) => void;
     sendChat
       .mockImplementationOnce(() => new Promise<string | null>((resolve) => { resolveFirst = resolve; }))
-      .mockImplementationOnce(() => new Promise<string | null>((resolve) => { resolveSecond = resolve; }))
       .mockImplementationOnce(async () => null);
 
     const first = askAgent("q1");
-    const second = askAgent("q2");
-    await untilSendChatCalledTimes(2);
-
-    // The stale turn settles first, carrying a resume token that must not
-    // stick — the second question is the one the reader is now waiting on.
-    resolveFirst("stale-token");
+    await untilSendChatCalledTimes(1);
+    resolveFirst("live-token");
     await first;
-    expect(getAgentRun().busy).toBe(true); // the LIVE turn hasn't finished
-
-    resolveSecond("live-token");
-    await second;
     expect(getAgentRun().busy).toBe(false);
 
-    // A third question resumes from the live conversation, not the stale one
-    // the first turn tried to leave behind.
-    await askAgent("q3");
-    expect(sendChat).toHaveBeenLastCalledWith(
-      "sess-1",
-      "q3",
-      "/c",
-      expect.any(Function),
-      undefined,
-      "claude",
-      3,
-      "live-token",
-    );
+    // The refusal is about the turn in flight, not a latch that stays shut —
+    // and the second question resumes the conversation the first established.
+    await askAgent("q2");
+    expect(sendChat).toHaveBeenCalledTimes(2);
+    expect(sendChat.mock.calls.at(-1)?.[7]).toBe("live-token");
   });
 
   // I4: `agentKind` defaults to "claude" and `Composer` is the ONLY code that

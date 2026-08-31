@@ -309,6 +309,28 @@ async function loadSkillsGuidance(names: string[]): Promise<string> {
  * picks the conversation back up.
  */
 export async function askAgent(question: string, opts?: { images?: string[]; skills?: string[] }): Promise<void> {
+  // ONE turn at a time, refused here rather than at each door.
+  //
+  // The dock's input and the composer both disable themselves while busy, but
+  // the six `ask()` chips across the app (`Logs`, `Events`, `Helm`,
+  // `Overview`, `Terminals`, `DetailActions`) reach `registerSubmit`'s handler
+  // and do not. A second turn on the same session is not merely untidy: the
+  // backend keys its child processes by session in a `HashMap` and `insert`s
+  // (`assistant.rs:727`), so the second send REPLACES the first child handle
+  // and drops it without `kill_and_reap` — which that file's own doc
+  // (`:285-287`) says leaves a zombie in the process table. The first CLI is
+  // then untracked and uncancellable: `chat_cancel` removes by session and
+  // finds only the newer child.
+  //
+  // Said out loud rather than silently swallowed. A chip that looks live and
+  // does nothing is the defect this branch keeps finding in other shapes.
+  if (run.busy) {
+    commit({
+      ...run,
+      error: "srelens is still answering the last question. Stop it, or wait for it to finish, before asking another.",
+    });
+    return;
+  }
   const images = opts?.images;
   const skills = opts?.skills ?? run.activeSkills;
   const userTurn: Turn = { id: ++turnSeq, role: "user", text: question, calls: [], images, at: Date.now() };
@@ -520,8 +542,25 @@ export function clearAgentRun(): void {
   });
 }
 
-/** Pick which agent CLI the next question is sent to. */
+/**
+ * Pick which agent CLI the next question is sent to.
+ *
+ * **Drops the CLI conversation with it.** `session` and `resume` are the
+ * PREVIOUS agent's, and they do not transfer: `resume` is that CLI's own
+ * conversation id, so handing a Claude session id to Cursor's `--resume` asks
+ * it to continue something it has never heard of, and switching away and back
+ * would resume the older conversation as though the turns in between never
+ * happened. The transcript stays — it is srelens's own record, and the reader
+ * asked those questions — but the next question opens a fresh CLI session.
+ *
+ * Only on an actual change. `Composer`'s reconciliation effect calls this with
+ * whatever it can offer, and a no-op call must not quietly end the
+ * conversation the reader is in the middle of.
+ */
 export function chooseAgent(kind: string): void {
+  if (kind === run.agentKind) return;
+  session = null;
+  resume = null;
   commit({ ...run, agentKind: kind });
 }
 
