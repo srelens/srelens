@@ -119,6 +119,19 @@ let session: string | null = null;
  *  follow-up turn keeps its context. A REJECTED `sendChat` says nothing about
  *  this and leaves it exactly as it was. */
 let resume: string | null = null;
+/**
+ * A generation `stopAgentRun` was asked to stop before its `askAgent` had
+ * even reached `sendChat` — `session` is created lazily inside `askAgent`,
+ * AFTER `busy` and `generation` are already committed, so a Stop that
+ * arrives in that window finds no session to hand `cancelChat`. Recorded
+ * here instead, and honored by `askAgent` itself once its own `startChat()`
+ * resolves. `null` when nothing is waiting on this; set to the run's current
+ * generation by `stopAgentRun`'s early-session-less branch, and cleared the
+ * moment the next question starts (a later generation can never equal an
+ * older stopped one, but a stale value sitting here after its turn is long
+ * gone is not a fact this module wants to be carrying around).
+ */
+let stoppedGeneration: number | null = null;
 /** Ids are the store's own, not the backend's. */
 let turnSeq = 0;
 
@@ -298,6 +311,9 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
     generation: myGeneration,
     error: undefined,
   });
+  // A stop recorded against an OLDER generation belongs to a turn already
+  // gone; this one hasn't been asked to stop by anyone yet.
+  stoppedGeneration = null;
 
   // Keyed by the backend's own call id, and scoped to this one question: two
   // calls from two different questions never share an id, so there is
@@ -345,16 +361,50 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
 
   try {
     if (!session) session = await startChat();
+    // Cold start: `stopAgentRun` was called before this had a session to hand
+    // `cancelChat`, and recorded the generation it was asked to stop instead.
+    // Honor it now rather than sending a question nobody wants answered.
+    if (stoppedGeneration === myGeneration) return;
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
-    const agentPath = agents.find((a) => a.kind === agentKind)?.path ?? "";
+    // An agent that is `available` but `gated` must not be offered — mirrors
+    // `Composer`'s own filter (Codex and Cursor are installed-but-gated
+    // today). Composer reconciles the PICKER against this same set, but the
+    // dock never mounts Composer at all (§F), so `agentKind` reaching here
+    // can still name a kind nothing in `offered` matches.
+    const offered = agents.filter((a) => a.available && !a.gated);
+    let resolvedKind = agentKind;
+    let agentPath = offered.find((a) => a.kind === agentKind)?.path ?? "";
+    if (!agentPath) {
+      if (offered.length === 0) {
+        // No agent this run could possibly reach — fail the turn rather than
+        // handing `sendChat` an empty path it can only fail to spawn. §F's
+        // States section: the no-agent case "does not offer a send that
+        // cannot work".
+        markTurnError(
+          agentTurnId,
+          new Error(
+            "No agent is available to ask. Install Claude, Codex or Cursor, or configure srelens's own agent in Settings, then try again.",
+          ),
+        );
+        return;
+      }
+      // `agentKind` names nothing installed — fall back to the first agent
+      // this run can actually reach, and record the choice via the same
+      // field `chooseAgent` writes, so the picker (wherever one is mounted)
+      // agrees with what actually ran rather than still pointing at a kind
+      // that never sent anything.
+      resolvedKind = offered[0].kind;
+      agentPath = offered[0].path ?? "";
+      if (run.generation === myGeneration) commit({ ...run, agentKind: resolvedKind });
+    }
     const result = await sendChat(
       session,
       `${guidance}${question}`,
       agentPath,
       onEvent,
       images,
-      agentKind,
+      resolvedKind,
       myGeneration,
       resume,
     );
@@ -372,9 +422,23 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
 /** Stop the turn in flight, if there is one. A Stop that reaches the backend
  *  after that turn already finished, or before its `sendChat` even landed, is
  *  the backend's own business — see `cancelChat`'s doc — and this only ever
- *  asks for the generation the run itself is on right now. */
+ *  asks for the generation the run itself is on right now.
+ *
+ *  **A turn that hasn't reached `sendChat` yet has no session to hand
+ *  `cancelChat`.** `askAgent` commits `busy` and `generation` before it
+ *  creates one (cold start: `startChat()` is still spawning the CLI), so a
+ *  Stop pressed in that window used to see `!session`, return, and let the
+ *  question go out anyway. Recorded as `stoppedGeneration` instead, and
+ *  `askAgent` itself honors it once its own `startChat()` resolves — this
+ *  takes the run out of `busy` right away so the surface reflects the stop
+ *  immediately rather than waiting on that resolution. */
 export function stopAgentRun(): void {
-  if (!run.busy || !session) return;
+  if (!run.busy) return;
+  if (!session) {
+    stoppedGeneration = run.generation;
+    commit({ ...run, busy: false });
+    return;
+  }
   const activeSession = session;
   const generation = run.generation;
   void cancelChat(activeSession, generation).catch((err: unknown) => {
@@ -444,6 +508,7 @@ export function resetAgentRun(): void {
   run = { turns: [], gates: [], busy: false, generation: 0, agentKind: "claude", activeSkills: [] };
   session = null;
   resume = null;
+  stoppedGeneration = null;
   turnSeq = 0;
   listeners.clear();
 }

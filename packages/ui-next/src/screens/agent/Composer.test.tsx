@@ -104,6 +104,48 @@ describe("the composer", () => {
     expect(await screen.findByText(/no agent/i)).toBeTruthy();
   });
 
+  // I6: `.catch(() => setAgents([]))` rendered the identical "No agent is
+  // available … install one to get started" a genuinely empty install
+  // shows — exactly the absence Ruling N introduced three-state to stop
+  // asserting.
+  it("says the agent CLI read failed, rather than claiming none are installed, when listAgents rejects", async () => {
+    listAgents.mockRejectedValue(new Error("no such command: agent_list"));
+    render(<Composer context="" />);
+    expect(await screen.findByText(/could not be checked/i)).toBeTruthy();
+    expect(await screen.findByText(/agent_list/)).toBeTruthy();
+    expect(screen.queryByText(/no agent is available/i)).toBeNull();
+  });
+
+  it("says the agent CLI read failed even while a turn is running, rather than the empty-install sentence", async () => {
+    useAgentRun.mockReturnValue(runState({ busy: true }));
+    listAgents.mockRejectedValue(new Error("no such command: agent_list"));
+    render(<Composer context="" />);
+    expect(await screen.findByText(/could not be checked/i)).toBeTruthy();
+    expect(screen.queryByText(/no agent is available/i)).toBeNull();
+    // Stop must still survive whatever the agent read is doing (P3).
+    expect(screen.getByRole("button", { name: /stop/i })).toBeTruthy();
+  });
+
+  it("says the slash menu's read failed, rather than opening onto no matches, when listPrompts rejects", async () => {
+    listAgents.mockResolvedValue([CLAUDE]);
+    listPrompts.mockRejectedValue(new Error("no such command: prompt_list"));
+    render(<Composer context="prod" />);
+    await userEvent.type(await screen.findByRole("textbox"), "/");
+    expect(await screen.findByText(/could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText(/prompt_list/)).toBeTruthy();
+    expect(screen.queryByText(/no matches/i)).toBeNull();
+  });
+
+  it("says the slash menu's read failed, rather than opening onto no matches, when listSkills rejects", async () => {
+    listAgents.mockResolvedValue([CLAUDE]);
+    listSkills.mockRejectedValue(new Error("no such command: skill_list"));
+    render(<Composer context="prod" />);
+    await userEvent.type(await screen.findByRole("textbox"), "/");
+    expect(await screen.findByText(/could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText(/skill_list/)).toBeTruthy();
+    expect(screen.queryByText(/no matches/i)).toBeNull();
+  });
+
   it("offers prompts and skills under the slash menu, each in its own group", async () => {
     listAgents.mockResolvedValue([CLAUDE]);
     render(<Composer context="prod" />);

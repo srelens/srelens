@@ -16,16 +16,31 @@ function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/** `started 14:04`, off the first turn's own timestamp — the one figure in
- *  §5's `started <time> · <n> calls · <duration>` head that the store
- *  actually observed (`Turn.at`, stamped by `askAgent` itself). The call
- *  count and duration beside it in the mock are #386's business, not this
- *  one's: neither is stored anywhere, so unlike the time they stay out.
- *  Absent for an empty run — there is no first turn to have started at. */
+/** `started 14:04`, off the first turn's own timestamp — one of the two
+ *  figures in §5's `started <time> · <n> calls · <duration>` head that the
+ *  store actually observed (`Turn.at`, stamped by `askAgent` itself). Absent
+ *  for an empty run — there is no first turn to have started at. */
 function startedLabel(turns: readonly Turn[]): string | undefined {
   if (turns.length === 0) return undefined;
   const d = new Date(turns[0].at);
   return `started ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * `<n> calls`, off `Turn.calls[]` across every turn in the run — the OTHER
+ * figure the store actually observes. #386's exclusion is scoped to
+ * `RunsRail`'s `Recent runs` list (`SessionMeta` genuinely carries no
+ * counts); THIS pane describes the live run pane 1 is heading, and the store
+ * counts every tool call an agent has made in it. Dropping this alongside
+ * duration was over-applying #386 to a figure it does not cover — the one
+ * genuinely unknowable figure here is `duration` (a conversation has no
+ * single well-defined one), which stays out.
+ *
+ * `0` renders nothing: a run with no tool calls yet is not the same fact as
+ * "zero calls" worth reading out, so an absent reading renders no reading.
+ */
+function callCount(turns: readonly Turn[]): number {
+  return turns.flatMap((t) => t.calls).length;
 }
 
 /**
@@ -48,6 +63,8 @@ export function Agent(_props: { route: string }) {
   const activeCtx = useActiveContext();
   const context = activeCtx?.name ?? "";
   const started = startedLabel(turns);
+  const calls = callCount(turns);
+  const head = started && calls > 0 ? `${started} · ${calls} call${calls === 1 ? "" : "s"}` : started;
 
   return (
     <Screen
@@ -65,9 +82,9 @@ export function Agent(_props: { route: string }) {
         width={AGENT_RAIL_WIDTH}
         rail={<RunsRail />}
         mainHead={
-          started ? (
+          head ? (
             <span className="min-w-0 truncate normal-case tracking-normal text-[0.75rem] text-ink">
-              {started}
+              {head}
             </span>
           ) : undefined
         }

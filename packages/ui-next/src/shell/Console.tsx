@@ -226,8 +226,22 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       />
     );
   } else {
-    children = <Transcript compact turns={turns} gates={gates} />;
+    // `live={false}`: `ConsoleDock`'s own body already declares its own ARIA
+    // log region, polite or off, around whichever children it is given
+    // (`dockLive` below) — a second one nested inside it would announce
+    // inconsistently and often twice (I7).
+    children = <Transcript compact live={false} turns={turns} gates={gates} />;
   }
+
+  // The ONE ARIA log region for the dock, on `ConsoleDock`'s own body — `true`
+  // only for the thread, which is the console's ordinary content and the one
+  // mode `ConsoleDock`'s own doc means by "announce what arrives in the
+  // output" (`ConsoleDock.tsx:46-50`). `false` for the palette and the
+  // suggestions list: both re-render their entire body on every keystroke
+  // that changes the query, and a polite region would read the whole matched
+  // list out again on every character (I7's scenario, `/re` re-announcing
+  // three times).
+  const dockLive = !commandMode && turns.length > 0;
 
   return (
     <ConsoleDock
@@ -246,6 +260,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       placeholder={scope ? `Ask about ${scope}` : "Ask about this cluster"}
       shortcutHint={hint("console", apple)}
       onClear={() => clearAgentRun()}
+      live={dockLive}
     >
       {children}
     </ConsoleDock>

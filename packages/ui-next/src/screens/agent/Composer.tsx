@@ -9,8 +9,9 @@ import {
   type PromptSummary,
   type SkillMeta,
 } from "@srelens/core";
-import { Button, Popover, TextInput } from "@srelens/ui-kit";
+import { Alert, Button, Popover, RawError, TextInput } from "@srelens/ui-kit";
 import { askAgent, chooseAgent, setSkillActive, stopAgentRun, useAgentRun } from "../../lib/agentRun";
+import { LOADING, type Read } from "../../lib/read";
 
 /**
  * The one composer — mounted by the full `/agent` screen alone. The console
@@ -43,17 +44,27 @@ const AGENT_KIND_LABELS = ["Claude", "Codex", "Cursor", "srelens"];
 function SlashMenu({
   prompts,
   skills,
+  error,
   onPickPrompt,
   onPickSkill,
 }: {
   prompts: PromptSummary[];
   skills: SkillMeta[];
+  /** A rejected `listPrompts`/`listSkills`, if either failed — see I6. Shown
+   *  in place of the list rather than silently opening onto "No matches.",
+   *  which would tell the reader nothing was saved when in fact nothing was
+   *  ever successfully asked. */
+  error?: unknown;
   onPickPrompt: (p: PromptSummary) => void;
   onPickSkill: (s: SkillMeta) => void;
 }) {
   return (
     <div className="absolute bottom-full left-0 z-50 mb-1 max-h-64 w-80 min-w-0 overflow-y-auto rounded-card border border-rule bg-raised p-1 shadow-lg">
-      {prompts.length === 0 && skills.length === 0 ? (
+      {error != null ? (
+        <Alert tone="sev" title="Prompts and skills could not be loaded">
+          <RawError text={String(error)} />
+        </Alert>
+      ) : prompts.length === 0 && skills.length === 0 ? (
         <p className="px-2 py-1.5 text-xs text-muted">No matches.</p>
       ) : (
         <>
@@ -173,37 +184,51 @@ function unfillableArgs(p: PromptSummary, context: string): string[] {
 export function Composer({ context }: { context: string }) {
   const { busy, agentKind, activeSkills } = useAgentRun();
   const [input, setInput] = useState("");
-  // Three states, not two: `null` is "the read hasn't landed yet", `[]` is
-  // "it landed and there is nothing installed" — a boolean can't tell those
-  // apart, and collapsing them is exactly what put "No agent is available"
-  // on screen for a tick on every mount, agent or no agent (Ruling N).
-  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
-  const [prompts, setPrompts] = useState<PromptSummary[]>([]);
-  const [skills, setSkills] = useState<SkillMeta[]>([]);
+  // Three states, not two: `loading` is "the read hasn't landed yet",
+  // `ready` with an empty value is "it landed and there is nothing
+  // installed" — a boolean, or a bare array default, can't tell those apart,
+  // and collapsing them is exactly what put "No agent is available" on
+  // screen for a tick on every mount, agent or no agent (Ruling N). `error`
+  // is the THIRD state that used to collapse onto `ready`-and-empty: a
+  // rejected `listAgents` rendered the identical "No agent is available …
+  // install one to get started" a genuinely empty install shows — the exact
+  // absence Ruling N introduced three-state to stop asserting (I6). Same
+  // shape, same reason, for `listPrompts`/`listSkills`: a failed read used to
+  // leave `/` opening onto nothing, with no way to tell "nothing saved" from
+  // "couldn't check".
+  const [agents, setAgents] = useState<Read<AgentInfo[]>>(LOADING);
+  const [prompts, setPrompts] = useState<Read<PromptSummary[]>>(LOADING);
+  const [skills, setSkills] = useState<Read<SkillMeta[]>>(LOADING);
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [promptError, setPromptError] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     listAgents()
-      .then(setAgents)
-      .catch(() => setAgents([]));
+      .then((v) => setAgents({ kind: "ready", value: v }))
+      .catch((e) => setAgents({ kind: "error", error: e }));
   }, []);
   useEffect(() => {
     listPrompts()
-      .then(setPrompts)
-      .catch(() => setPrompts([]));
+      .then((v) => setPrompts({ kind: "ready", value: v }))
+      .catch((e) => setPrompts({ kind: "error", error: e }));
   }, []);
   useEffect(() => {
     listSkills()
-      .then(setSkills)
-      .catch(() => setSkills([]));
+      .then((v) => setSkills({ kind: "ready", value: v }))
+      .catch((e) => setSkills({ kind: "error", error: e }));
   }, []);
 
   // An agent that is `available` but `gated` must not be offered — Codex and
   // Cursor are installed-but-gated today, and offering one would put the
   // reader in a conversation that cannot start.
-  const offered = agents === null ? [] : agents.filter((a) => a.available && !a.gated);
-  const agentsLoaded = agents !== null;
+  const offered = agents.kind === "ready" ? agents.value.filter((a) => a.available && !a.gated) : [];
+  const agentsLoaded = agents.kind === "ready";
+  const promptsList = prompts.kind === "ready" ? prompts.value : [];
+  const skillsList = skills.kind === "ready" ? skills.value : [];
+  // Either failing is reported the same way — see `SlashMenu`'s `error` prop
+  // — so which one's error string wins when both fail is not a choice that
+  // needs to be a good one, only a deterministic one.
+  const slashReadError = prompts.kind === "error" ? prompts.error : skills.kind === "error" ? skills.error : null;
 
   // The store's `agentKind` can name a kind that just went missing from
   // `offered` (nothing loaded yet, or the last-picked kind un-gated to
@@ -217,10 +242,13 @@ export function Composer({ context }: { context: string }) {
   }, [agents]);
 
   const slashMatch = /^\/(\S*)$/.exec(input);
-  const menuOpen = slashMatch !== null && !menuDismissed && (prompts.length > 0 || skills.length > 0);
+  // Opens on an error too — a failed read used to leave `/` opening onto
+  // nothing, with no way to tell "nothing saved" from "couldn't check" (I6).
+  const menuOpen =
+    slashMatch !== null && !menuDismissed && (promptsList.length > 0 || skillsList.length > 0 || slashReadError !== null);
   const query = (slashMatch?.[1] ?? "").toLowerCase();
-  const filteredPrompts = query ? prompts.filter((p) => p.name.toLowerCase().includes(query)) : prompts;
-  const filteredSkills = query ? skills.filter((s) => s.name.toLowerCase().includes(query)) : skills;
+  const filteredPrompts = query ? promptsList.filter((p) => p.name.toLowerCase().includes(query)) : promptsList;
+  const filteredSkills = query ? skillsList.filter((s) => s.name.toLowerCase().includes(query)) : skillsList;
 
   function handleChange(value: string) {
     setInput(value);
@@ -284,11 +312,17 @@ export function Composer({ context }: { context: string }) {
   if (busy && offered.length === 0) {
     return (
       <div className="flex min-w-0 items-center justify-between gap-2">
-        <p className="min-w-0 break-words text-sm text-muted">
-          {agentsLoaded
-            ? `No agent is available. srelens can drive ${AGENT_KIND_LABELS.join(", ")} — install one to get started.`
-            : "Loading agents…"}
-        </p>
+        {agents.kind === "error" ? (
+          <Alert tone="sev" title="Installed agent CLIs could not be checked" className="min-w-0 flex-1">
+            <RawError text={String(agents.error)} />
+          </Alert>
+        ) : (
+          <p className="min-w-0 flex-1 break-words text-sm text-muted">
+            {agentsLoaded
+              ? `No agent is available. srelens can drive ${AGENT_KIND_LABELS.join(", ")} — install one to get started.`
+              : "Loading agents…"}
+          </p>
+        )}
         <Button type="button" variant="secondary" size="sm" onClick={() => stopAgentRun()}>
           Stop
         </Button>
@@ -298,8 +332,20 @@ export function Composer({ context }: { context: string }) {
 
   // The read hasn't landed yet — say nothing about "no agent" until it has
   // (Ruling N), rather than asserting an absence this hasn't checked for.
-  if (!agentsLoaded) {
+  if (agents.kind === "loading") {
     return <p className="min-w-0 break-words text-sm text-muted">Loading agents…</p>;
+  }
+
+  // A REJECTED read is not "nothing installed" — see I6. Rendering the same
+  // "No agent is available … install one to get started" a genuinely empty
+  // install shows would assert an absence this composer never actually
+  // checked for.
+  if (agents.kind === "error") {
+    return (
+      <Alert tone="sev" title="Installed agent CLIs could not be checked">
+        <RawError text={String(agents.error)} />
+      </Alert>
+    );
   }
 
   // With no agent available at all, say what srelens can drive and offer no
@@ -344,6 +390,7 @@ export function Composer({ context }: { context: string }) {
           <SlashMenu
             prompts={filteredPrompts}
             skills={filteredSkills}
+            error={slashReadError}
             onPickPrompt={(p) => void pickPrompt(p)}
             onPickSkill={pickSkill}
           />

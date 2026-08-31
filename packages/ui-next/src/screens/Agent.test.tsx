@@ -134,19 +134,72 @@ describe("the agent screen", () => {
     expect(getPrompt).toHaveBeenCalledWith("diagnose", { context: "prod-eu" });
   });
 
-  it("heads the transcript with when the run started, off the first turn's own timestamp", async () => {
+  it("heads the transcript with when the run started, off the FIRST turn's own timestamp", async () => {
+    // A fixture of one turn cannot tell "the first turn's `at`" apart from
+    // "the last turn's `at`" — they're the same value. Two turns, with the
+    // later one second, is what makes `turns[0].at` → `turns.at(-1).at` an
+    // actual mutation rather than a no-op.
     const at = new Date(2026, 0, 1, 14, 4).getTime();
+    const later = new Date(2026, 0, 1, 15, 30).getTime();
     useAgentRun.mockReturnValue(
-      runState({ turns: [{ id: 1, role: "user", text: "checkout-api is throwing 5xx", calls: [], at }] }),
+      runState({
+        turns: [
+          { id: 1, role: "user", text: "checkout-api is throwing 5xx", calls: [], at },
+          { id: 2, role: "agent", text: "Looking into it", calls: [], at: later },
+        ],
+      }),
     );
     render(<Agent route="/agent" />);
     expect(await screen.findByText("started 14:04")).toBeTruthy();
+    expect(screen.queryByText(/15:30/)).toBeNull();
   });
 
   it("draws no started time for a run with no turns yet", async () => {
     render(<Agent route="/agent" />);
     await screen.findByRole("textbox", { name: /ask the agent/i });
     expect(screen.queryByText(/^started /)).toBeNull();
+  });
+
+  // I5: #386's exclusion is scoped to `RunsRail`'s `Recent runs` list
+  // (`SessionMeta` genuinely has no counts) — this pane describes the LIVE
+  // run, and the store counts every tool call an agent has made in it
+  // (`Turn.calls[]`). Dropping the count alongside duration was applying
+  // #386 to a figure it does not cover.
+  it("heads the pane with the calls the store has actually observed, across every turn", async () => {
+    useAgentRun.mockReturnValue(
+      runState({
+        turns: [
+          {
+            id: 1,
+            role: "agent",
+            text: "a",
+            at: 1,
+            calls: [
+              { id: "c1", tool: "k8s.listPods", args: {}, status: "ok" },
+              { id: "c2", tool: "k8s.scale", args: {}, status: "ok" },
+            ],
+          },
+          {
+            id: 2,
+            role: "agent",
+            text: "b",
+            at: 2,
+            calls: [{ id: "c3", tool: "k8s.getPod", args: {}, status: "ok" }],
+          },
+        ],
+      }),
+    );
+    render(<Agent route="/agent" />);
+    expect(await screen.findByText(/3 calls/)).toBeTruthy();
+  });
+
+  it("shows no call count for a run with turns but no tool calls yet — an absent reading renders no reading", async () => {
+    useAgentRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "checkout-api is throwing 5xx", calls: [], at: 1 }] }),
+    );
+    render(<Agent route="/agent" />);
+    await screen.findByText(/^started /);
+    expect(screen.queryByText(/call/i)).toBeNull();
   });
 
   it("tells the reader this screen and the console dock share one run", async () => {

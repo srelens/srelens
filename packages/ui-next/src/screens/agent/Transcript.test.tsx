@@ -16,6 +16,21 @@ const turn = (over: Partial<Turn> = {}): Turn => ({
 // `Turn`, so every render below supplies its own — empty unless a test is
 // specifically about one).
 describe("a run's transcript", () => {
+  // I7: `ui-kit`'s `ConsoleDock` already wraps its children in one
+  // `role="log"` live region — this component nesting a second one inside it
+  // announces inconsistently and often twice. `live` defaults true, which is
+  // right for `/agent`, where this is the screen's only region.
+  it("declares its own live region by default", () => {
+    render(<Transcript turns={[turn()]} gates={[]} />);
+    const region = screen.getByRole("log");
+    expect(region.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("declares no live region of its own when told it is nested inside one", () => {
+    render(<Transcript turns={[turn()]} gates={[]} live={false} />);
+    expect(screen.queryByRole("log")).toBeNull();
+  });
+
   it("draws a tool call's duration only once it has one", () => {
     render(
       <Transcript

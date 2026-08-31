@@ -15,6 +15,7 @@ import {
   type ProviderKind,
 } from "@srelens/core";
 import { Alert, Badge, Button, Panel, RawError, Select, TextInput } from "@srelens/ui-kit";
+import { LOADING, type Read } from "../../lib/read";
 
 /**
  * §23's Settings pane for the agent's own credentials: an API key per LLM
@@ -52,13 +53,6 @@ import { Alert, Badge, Button, Panel, RawError, Select, TextInput } from "@srele
  * save rather than left holding what was just sent. Nothing in this pane
  * reconstructs or previews the stored value.
  */
-
-/** A fact this pane reads once at mount: still loading, refused, or landed.
- * Kept generic so the three reads below don't each reinvent it, and so none
- * of them can collapse "unknown" onto the same value as "known empty". */
-type Read<T> = { kind: "loading" } | { kind: "error"; error: unknown } | { kind: "ready"; value: T };
-
-const LOADING: Read<never> = { kind: "loading" };
 
 const DEFAULT_SETTINGS: LlmSettings = {
   defaultProvider: "anthropic",

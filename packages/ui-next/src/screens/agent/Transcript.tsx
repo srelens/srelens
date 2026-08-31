@@ -308,13 +308,27 @@ export function Transcript({
   turns,
   gates,
   compact,
+  live = true,
 }: {
   turns: readonly Turn[];
   gates: readonly GateRecord[];
   compact?: boolean;
+  /**
+   * Whether THIS component declares its own `role="log"` live region.
+   * Defaults true — right for `/agent`, where this is the screen's only live
+   * region (`screens/Agent.tsx`). `shell/Console.tsx` sets it false when
+   * mounting this compact, because `ui-kit`'s `ConsoleDock` ALREADY wraps
+   * `children` in `role="log" aria-live={live ? "polite" : "off"}`
+   * (`ConsoleDock.tsx:187-193`) — a second, nested `role="log"` announces
+   * inconsistently and often twice (I7).
+   */
+  live?: boolean;
 }) {
   return (
-    <div role="log" aria-live="polite" className="flex min-w-0 flex-col gap-3">
+    <div
+      {...(live ? { role: "log" as const, "aria-live": "polite" as const } : {})}
+      className="flex min-w-0 flex-col gap-3"
+    >
       {turns.map((turn) => (
         <div key={turn.id} className="min-w-0">
           {turn.role === "user" ? (

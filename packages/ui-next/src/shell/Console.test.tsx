@@ -152,6 +152,52 @@ describe("Console", () => {
   });
 });
 
+/**
+ * I7: `ConsoleDock`'s own body already declares one `role="log"` live region
+ * around whatever it is given as children (`ConsoleDock.tsx:187-193`).
+ * `Transcript` used to declare a SECOND, nested one unconditionally — two
+ * `role="log"` regions announce inconsistently and often twice, and the
+ * kit's own doc on the `live` prop names exactly the palette/suggestions
+ * scenario this fixes: a screen-reader user typing `/re` would have every
+ * keystroke's re-rendered `CommandRows` read out inside a polite region,
+ * three times over for one matched list.
+ */
+describe("Console — one live region, not two nested (I7)", () => {
+  it("declares exactly one role=\"log\" element for the thread, not one nested inside the other", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "hi", calls: [], at: 0 }] }),
+    );
+    setup();
+    await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
+    expect(screen.getAllByRole("log")).toHaveLength(1);
+  });
+
+  it("keeps the dock's live region on for the ordinary transcript thread", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "hi", calls: [], at: 0 }] }),
+    );
+    setup();
+    await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
+    expect(screen.getByRole("log").getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("turns the dock's live region off for suggestions, so a keystroke that changes the list is not read out", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
+    expect(screen.getByRole("log").getAttribute("aria-live")).toBe("off");
+  });
+
+  it("turns the dock's live region off for the command palette, so typing / does not re-announce the matched list", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/");
+    expect(screen.getByRole("log").getAttribute("aria-live")).toBe("off");
+  });
+});
+
 
 /**
  * I2's own point: `agentCommands.test.ts` proves `commandsFor` builds the

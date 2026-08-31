@@ -149,6 +149,45 @@ describe("the run store", () => {
     expect(run.activeSkills).toEqual([]);
   });
 
+  // I2: `session` is created lazily inside `askAgent`, AFTER `busy` and
+  // `generation` are already committed — so a Stop pressed on a cold start,
+  // before `startChat()` has even resolved, used to see `!session`, return,
+  // and let the question go out anyway once the CLI finished spawning.
+  it("a Stop pressed before the first sendChat drops the question rather than sending it anyway", async () => {
+    let resolveStartChat!: (v: string) => void;
+    startChat.mockImplementation(() => new Promise<string>((resolve) => { resolveStartChat = resolve; }));
+
+    const asked = askAgent("q");
+    expect(getAgentRun().busy).toBe(true);
+    stopAgentRun();
+    // The stop takes effect immediately, before the CLI has even started.
+    expect(getAgentRun().busy).toBe(false);
+
+    resolveStartChat("sess-1");
+    await asked;
+
+    expect(sendChat).not.toHaveBeenCalled();
+    expect(getAgentRun().busy).toBe(false);
+  });
+
+  // I3: `cancelChat`'s arguments had zero coverage anywhere in the package —
+  // every existing test only ever `mockReset`/`mockResolvedValue`d it. The
+  // reviewer's own mutation, `run.generation` → `run.generation - 1`, passed
+  // every store and Composer test there is.
+  it("stopAgentRun asks cancelChat to stop the session and generation the run is actually on", async () => {
+    let sawStop = false;
+    sendChat.mockImplementation(async () => {
+      stopAgentRun();
+      sawStop = true;
+      return null;
+    });
+
+    await askAgent("q");
+
+    expect(sawStop).toBe(true);
+    expect(cancelChat).toHaveBeenCalledWith("sess-1", 1);
+  });
+
   it("stopAgentRun turns a failed cancel into a top-level error, described rather than raw", async () => {
     cancelChat.mockRejectedValueOnce(new Error("boom"));
     sendChat.mockImplementation(async () => {
@@ -212,6 +251,61 @@ describe("the run store", () => {
       3,
       "live-token",
     );
+  });
+
+  // I4: `agentKind` defaults to "claude" and `Composer` is the ONLY code that
+  // reconciles it to something installed — but the dock never mounts
+  // `Composer` (§F), so a reader who has only Codex installed (or configured
+  // only the native srelens agent) and never opens `/agent` used to have
+  // `askAgent` hand `sendChat` an empty path (`agents.find(...) ?? ""`),
+  // which fails to spawn on every question until `/agent` is opened once.
+  describe("agentKind reconciliation (askAgent resolves its own agent)", () => {
+    it("falls back to the first available agent when agentKind names nothing installed, and records the choice", async () => {
+      listAgents.mockResolvedValue([
+        { kind: "codex", label: "Codex", available: true, path: "/codex", version: "1", installUrl: "", gated: false },
+      ]);
+      sendChat.mockImplementation(async () => null);
+
+      await askAgent("q"); // store still defaults agentKind to "claude"
+
+      expect(sendChat).toHaveBeenCalledWith(
+        "sess-1",
+        "q",
+        "/codex",
+        expect.any(Function),
+        undefined,
+        "codex",
+        1,
+        null,
+      );
+      // The picker agrees with what actually ran.
+      expect(getAgentRun().agentKind).toBe("codex");
+    });
+
+    it("fails the turn, without calling sendChat at all, when no agent is available", async () => {
+      listAgents.mockResolvedValue([]);
+
+      await askAgent("q");
+
+      expect(sendChat).not.toHaveBeenCalled();
+      const run = getAgentRun();
+      expect(run.busy).toBe(false);
+      expect(run.turns.at(-1)?.role).toBe("error");
+      expect(run.turns.at(-1)?.text).toMatch(/no agent is available/i);
+    });
+
+    it("does not offer a gated agent, even if it is the one agentKind already names", async () => {
+      listAgents.mockResolvedValue([
+        { kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: true },
+        { kind: "codex", label: "Codex", available: true, path: "/codex", version: "1", installUrl: "", gated: false },
+      ]);
+      sendChat.mockImplementation(async () => null);
+
+      await askAgent("q");
+
+      expect(sendChat.mock.calls[0][2]).toBe("/codex");
+      expect(getAgentRun().agentKind).toBe("codex");
+    });
   });
 
   // G2: `opts.skills`'s transmitted-vs-recorded split, and its per-skill

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { listSessions, listSkills, relativeTime, type SessionMeta, type SkillMeta } from "@srelens/core";
-import { Section, Switch } from "@srelens/ui-kit";
+import { Alert, RawError, Section, Switch } from "@srelens/ui-kit";
 import { setSkillActive, useAgentRun } from "../../lib/agentRun";
+import { LOADING, type Read } from "../../lib/read";
 
 /** §5's rail width, and this screen's alone — see `SideRail`'s note on why the
  *  width is a number per screen rather than a scale. */
@@ -35,8 +36,14 @@ export const AGENT_RAIL_WIDTH = 312;
  * about.
  */
 export function RunsRail() {
-  const [sessions, setSessions] = useState<SessionMeta[] | null>(null);
-  const [skills, setSkills] = useState<SkillMeta[] | null>(null);
+  // A rejected read is neither "loading" nor "read, and empty" — see
+  // `lib/read.ts`. `.catch(() => setSessions([]))` used to say "No recent
+  // runs yet." for a `listSessions` that never actually answered, and the
+  // same for `listSkills`'s "No skills saved yet.": both are confident false
+  // statements standing in for a failure this rail never told the reader
+  // about (I6).
+  const [sessions, setSessions] = useState<Read<SessionMeta[]>>(LOADING);
+  const [skills, setSkills] = useState<Read<SkillMeta[]>>(LOADING);
   // The one set the composer's own `/` menu writes to as well — read here,
   // never copied into local state, so the two controls cannot disagree about
   // which skills are active for this run.
@@ -44,13 +51,13 @@ export function RunsRail() {
 
   useEffect(() => {
     listSessions()
-      .then(setSessions)
-      .catch(() => setSessions([]));
+      .then((v) => setSessions({ kind: "ready", value: v }))
+      .catch((e) => setSessions({ kind: "error", error: e }));
   }, []);
   useEffect(() => {
     listSkills()
-      .then(setSkills)
-      .catch(() => setSkills([]));
+      .then((v) => setSkills({ kind: "ready", value: v }))
+      .catch((e) => setSkills({ kind: "error", error: e }));
   }, []);
 
   const now = Date.now();
@@ -58,11 +65,15 @@ export function RunsRail() {
   return (
     <>
       <Section title="Recent runs" smallCaps>
-        {sessions === null ? null : sessions.length === 0 ? (
+        {sessions.kind === "loading" ? null : sessions.kind === "error" ? (
+          <Alert tone="sev" title="Recent runs could not be checked">
+            <RawError text={String(sessions.error)} />
+          </Alert>
+        ) : sessions.value.length === 0 ? (
           <p className="min-w-0 break-words text-xs text-muted">No recent runs yet.</p>
         ) : (
           <div className="flex min-w-0 flex-col gap-2">
-            {sessions.map((s) => (
+            {sessions.value.map((s) => (
               <div key={s.id} className="flex min-w-0 flex-col gap-0.5">
                 <span className="min-w-0 truncate break-words text-sm">{s.title}</span>
                 <span className="min-w-0 truncate text-xs text-muted">{relativeTime(s.updatedAt, now)}</span>
@@ -72,11 +83,15 @@ export function RunsRail() {
         )}
       </Section>
       <Section title="Skills" smallCaps>
-        {skills === null ? null : skills.length === 0 ? (
+        {skills.kind === "loading" ? null : skills.kind === "error" ? (
+          <Alert tone="sev" title="Saved skills could not be checked">
+            <RawError text={String(skills.error)} />
+          </Alert>
+        ) : skills.value.length === 0 ? (
           <p className="min-w-0 break-words text-xs text-muted">No skills saved yet.</p>
         ) : (
           <div className="flex min-w-0 flex-col gap-3">
-            {skills.map((s) => (
+            {skills.value.map((s) => (
               <div key={s.name} className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
                   <p className="min-w-0 truncate break-words text-sm font-medium">{s.name}</p>
