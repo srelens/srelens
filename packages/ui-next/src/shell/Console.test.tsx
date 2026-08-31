@@ -136,6 +136,27 @@ describe("Console", () => {
     expect(askAgent).not.toHaveBeenCalled();
   });
 
+  // M14: `matched[0]` at the Enter handler had no fixture with more than one
+  // match — mutating it to `matched[matched.length - 1]` passed every test in
+  // this file, because "/theme" above matches exactly one command. Two
+  // clusters whose names share a substring produce two "Switch to …" Cluster
+  // commands in a KNOWN emission order (`clusterCommands` maps `deps.clusters`
+  // in order), so the one Enter actually runs is observable in real store
+  // state, not merely in which row happened to render on top.
+  it("runs the FIRST matched command on Enter when the query matches several, not the last", async () => {
+    const user = userEvent.setup();
+    const contexts = [ctx("prod-eu-id", "prod-eu"), ctx("prod-us-id", "prod-us")];
+    setContexts(contexts);
+    tabsStore.setState(defaultState(contexts));
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/switch to prod{Enter}");
+    // The first match is "Switch to prod-eu" (prod-eu-id is `clusters[0]`);
+    // the LAST match is "Switch to prod-us". Only the first leaves the active
+    // cluster at prod-eu-id — the mutation this test exists to catch would
+    // leave it at prod-us-id instead.
+    expect(tabsStore.currentWorkspace().activeCluster).toBe("prod-eu-id");
+  });
+
   it("clicking a command row runs it too, not only Enter", async () => {
     const user = userEvent.setup();
     const onToggleTheme = vi.fn();

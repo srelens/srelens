@@ -18,10 +18,11 @@ import {
  * same conversation rather than two copies of it.
  *
  * Shaped after `helmOps.ts` and `sessions.ts`: module-level state, a listener
- * set, `emit()` copying it before iterating so a listener that unsubscribes
- * mid-notification does not upset the loop, and a snapshot that keeps its
- * reference until something in it actually changed, so `useSyncExternalStore`
- * has a stable value to compare.
+ * set, `emit()` iterating it directly — the same house style every sibling
+ * store here uses (`helmOps.ts`, `sessions.ts`, `peekWidth.ts`,
+ * `sectionFolds.ts`), none of which copies the set first either — and a
+ * snapshot that keeps its reference until something in it actually changed,
+ * so `useSyncExternalStore` has a stable value to compare.
  *
  * **Gates live here, not on `Turn`.** A gate arrives from an app-wide
  * listener (`AgentConsent`), not from the chat stream this store reads, so

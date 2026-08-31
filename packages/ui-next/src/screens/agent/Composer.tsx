@@ -79,7 +79,7 @@ function SlashMenu({
                   onClick={() => onPickPrompt(p)}
                 >
                   <span className="min-w-0 truncate font-mono text-xs font-medium">{p.name}</span>
-                  <span className="min-w-0 w-full truncate break-words text-xs text-muted">{p.description}</span>
+                  <span className="min-w-0 w-full truncate text-xs text-muted">{p.description}</span>
                 </button>
               ))}
             </div>
@@ -95,7 +95,7 @@ function SlashMenu({
                   onClick={() => onPickSkill(s)}
                 >
                   <span className="min-w-0 truncate text-xs font-medium">{s.name}</span>
-                  <span className="min-w-0 w-full truncate break-words text-xs text-muted">{s.description}</span>
+                  <span className="min-w-0 w-full truncate text-xs text-muted">{s.description}</span>
                 </button>
               ))}
             </div>
@@ -218,9 +218,13 @@ export function Composer({ context }: { context: string }) {
       .catch((e) => setSkills({ kind: "error", error: e }));
   }, []);
 
-  // An agent that is `available` but `gated` must not be offered — Codex and
-  // Cursor are installed-but-gated today, and offering one would put the
-  // reader in a conversation that cannot start.
+  // An agent that is `available` but `gated` must not be offered — offering
+  // one would put the reader in a conversation that cannot start. `gated` is
+  // currently always `false` for every kind (`chat.ts`'s own doc on
+  // `AgentInfo.gated`), so this filter has nothing to exercise it today; it
+  // is here for the future agent whose sandbox story isn't solved yet, so
+  // that kind arrives already excluded rather than needing this call site
+  // remembered.
   const offered = agents.kind === "ready" ? agents.value.filter((a) => a.available && !a.gated) : [];
   const agentsLoaded = agents.kind === "ready";
   const promptsList = prompts.kind === "ready" ? prompts.value : [];
@@ -371,7 +375,7 @@ export function Composer({ context }: { context: string }) {
               key={name}
               className="inline-flex max-w-[10rem] min-w-0 items-center gap-1 rounded-tile border border-accent-line bg-accent-wash px-2 py-1 text-xs text-accent"
             >
-              <span className="min-w-0 truncate break-words">{name}</span>
+              <span className="min-w-0 truncate">{name}</span>
               <button
                 type="button"
                 aria-label={`Remove skill ${name}`}

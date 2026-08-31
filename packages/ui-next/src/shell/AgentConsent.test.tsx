@@ -798,18 +798,25 @@ describe("AgentConsent", () => {
       expect(core.respondToConfirm).not.toHaveBeenCalled();
       // Pending means pending: no resolution time on a gate nobody resolved.
       expect(getAgentRun().gates.find((g) => g.id === "r1")?.at).toBeUndefined();
+      // M10: `Transcript.tsx` renders `summarizeArgs(gate.args)` — a gate
+      // recorded with `args: undefined` would leave the reader
+      // `k8s_scale · Applied 14:06` with no replica count.
+      expect(getAgentRun().gates.find((g) => g.id === "r1")?.args).toEqual({ replicas: 3 });
     });
 
     it("records the outcome in the run without owning the answer", async () => {
       await mount();
       startTurn();
-      ask("r1", "k8s_scale", {});
+      ask("r1", "k8s_scale", { replicas: 7 });
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r1")?.outcome).toBe("approved"));
       // One row, not two: `noteGate` merges by id, so the pending record is
       // replaced rather than left sitting above its own answer.
       expect(getAgentRun().gates.filter((g) => g.id === "r1")).toHaveLength(1);
       expect(getAgentRun().gates.find((g) => g.id === "r1")?.at).toEqual(expect.any(Number));
+      // M10 (the resolution side of the same risk): the resolved record must
+      // still carry the args the reader was actually shown.
+      expect(getAgentRun().gates.find((g) => g.id === "r1")?.args).toEqual({ replicas: 7 });
     });
 
     it("records a denial as a denial", async () => {

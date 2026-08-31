@@ -35,7 +35,7 @@ function SuggestionList({ items, onAsk }: { items: readonly string[]; onAsk: (qu
         <button
           key={question}
           type="button"
-          className="min-w-0 truncate break-words rounded-tile px-2 py-1.5 text-left text-sm hover:bg-sunk"
+          className="min-w-0 truncate rounded-tile px-2 py-1.5 text-left text-sm hover:bg-sunk"
           onClick={() => onAsk(question)}
         >
           {question}
@@ -64,7 +64,7 @@ function CommandRows({ commands, onRun }: { commands: readonly Command[]; onRun:
                 className="flex min-w-0 items-center justify-between gap-2 rounded-tile px-2 py-1.5 text-left text-sm hover:bg-sunk"
                 onClick={() => onRun(c)}
               >
-                <span className={cx("min-w-0 truncate break-words", c.danger && "text-sev")}>{c.label}</span>
+                <span className={cx("min-w-0 truncate", c.danger && "text-sev")}>{c.label}</span>
                 <span className="min-w-0 shrink-0 truncate text-xs text-faint">{c.hint}</span>
               </button>
             ))}

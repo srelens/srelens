@@ -1,6 +1,7 @@
 import { Button, Eyebrow, Screen, SideRail } from "@srelens/ui-kit";
 import { useActiveContext } from "../lib/clusters";
 import { clearAgentRun, useAgentRun, type Turn } from "../lib/agentRun";
+import { pad2 } from "../lib/numbers";
 import { Composer } from "./agent/Composer";
 import { Transcript } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
@@ -11,10 +12,6 @@ import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
  *  alongside the figures #386/#387 exclude would have been over-applying that
  *  rule to a sentence it never touched. */
 const CONTINUE_FROM_CONSOLE = "Continue this run from the console at the bottom of the window";
-
-function pad2(n: number): string {
-  return String(n).padStart(2, "0");
-}
 
 /** `started 14:04`, off the first turn's own timestamp — one of the two
  *  figures in §5's `started <time> · <n> calls · <duration>` head that the

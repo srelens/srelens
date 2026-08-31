@@ -267,13 +267,19 @@ export function AgentPane() {
                             type="button"
                             aria-expanded={isOpen}
                             onClick={() => setExpanded(isOpen ? null : p.kind)}
-                            className="flex flex-1 items-center justify-between gap-3 text-left"
+                            className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
                           >
-                            <span className="flex items-center gap-2 text-[0.8125rem] font-medium">
+                            <span className="flex shrink-0 items-center gap-2 text-[0.8125rem] font-medium">
                               {p.label}
                               {isDefault && <Badge tone="accent">default</Badge>}
                             </span>
-                            <span className="text-[0.75rem] text-muted">
+                            {/* M13 (controller finding): `model` is a string the
+                                reader types free-hand below ("Model id (or fetch
+                                the list)") — this is the branch's only file with
+                                no shrink discipline (0 `min-w-0`, 0 `truncate`
+                                across 12 flex rows), and a long id here has
+                                nowhere to go but sideways in a fixed-width pane. */}
+                            <span className="min-w-0 truncate text-[0.75rem] text-muted">
                               {!hasKey
                                 ? "no key"
                                 : model
@@ -407,22 +413,24 @@ export function AgentPane() {
             {agentsRead.value.map((a) => (
               <div
                 key={a.kind}
-                className="flex items-center justify-between gap-3 border-b border-rule px-3 py-2 last:border-b-0"
+                className="flex min-w-0 items-center justify-between gap-3 border-b border-rule px-3 py-2 last:border-b-0"
               >
-                <span className="text-[0.8125rem] font-medium">{a.label}</span>
+                <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{a.label}</span>
                 {a.available ? (
-                  <Badge tone="ok">{a.version ?? "installed"}</Badge>
+                  <span className="min-w-0 shrink-0 truncate">
+                    <Badge tone="ok">{a.version ?? "installed"}</Badge>
+                  </span>
                 ) : a.installUrl ? (
                   <a
                     href={a.installUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[0.75rem] text-muted underline"
+                    className="min-w-0 shrink-0 truncate text-[0.75rem] text-muted underline"
                   >
                     not installed — install {a.label}
                   </a>
                 ) : (
-                  <span className="text-[0.75rem] text-muted">not installed</span>
+                  <span className="min-w-0 shrink-0 truncate text-[0.75rem] text-muted">not installed</span>
                 )}
               </div>
             ))}

@@ -1,6 +1,7 @@
 import { parseAssistantMarkdown, type MdBlock, type NoteSpan } from "@srelens/core";
 import { AgentMark, Badge, cx, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
+import { pad2 } from "../../lib/numbers";
 
 /**
  * The one renderer for a run's turns — mounted by both the console dock
@@ -69,13 +70,6 @@ function ToolCallRow({ call }: { call: ToolCallRecord }) {
       {call.ms !== undefined && <span className="ml-auto shrink-0 text-faint">{Math.round(call.ms)}ms</span>}
     </div>
   );
-}
-
-/** Zero-padded `HH:MM`, local time — the same shape the spec's own mock
- * illustrates (`Applied 14:06`). Hand-rolled rather than `toLocaleTimeString`
- * so the badge reads the same regardless of the host's ICU data or locale. */
-function pad2(n: number): string {
-  return String(n).padStart(2, "0");
 }
 
 /** `Applied 14:06`, or bare `Applied` while nothing has stamped a time yet

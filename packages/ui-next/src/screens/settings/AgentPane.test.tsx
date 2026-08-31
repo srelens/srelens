@@ -145,6 +145,26 @@ describe("AgentPane", () => {
     expect(llmSetSettings).toHaveBeenCalledWith(expect.objectContaining({ defaultProvider: "openAi" }));
   });
 
+  // M9: `settingsRead.kind === "error"` and `keyStatusRead.kind === "error"`
+  // had no test anywhere — making the `llmKeyStatus` catch a no-op (so a
+  // rejection is silently swallowed rather than recorded) passed every test
+  // in this file.
+  it("says provider settings could not be loaded, rather than drawing the provider rows, when llmGetSettings rejects", async () => {
+    llmGetSettings.mockRejectedValue(new Error("no such command: llm_get_settings"));
+    render(<AgentPane />);
+    expect(await screen.findByText(/provider settings could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText(/llm_get_settings/)).toBeTruthy();
+    expect(screen.queryByTestId("provider-row-anthropic")).toBeNull();
+  });
+
+  it("says which providers have a key could not be checked, rather than drawing the provider rows, when llmKeyStatus rejects", async () => {
+    llmKeyStatus.mockRejectedValue(new Error("no such command: llm_key_status"));
+    render(<AgentPane />);
+    expect(await screen.findByText(/which providers have a key could not be checked/i)).toBeTruthy();
+    expect(await screen.findByText(/llm_key_status/)).toBeTruthy();
+    expect(screen.queryByTestId("provider-row-anthropic")).toBeNull();
+  });
+
   it("clears the entered key from its field once saved, rather than leaving it there", async () => {
     render(<AgentPane />);
     await screen.findByText(/key set/i);

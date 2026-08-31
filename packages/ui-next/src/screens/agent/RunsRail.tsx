@@ -75,7 +75,7 @@ export function RunsRail() {
           <div className="flex min-w-0 flex-col gap-2">
             {sessions.value.map((s) => (
               <div key={s.id} className="flex min-w-0 flex-col gap-0.5">
-                <span className="min-w-0 truncate break-words text-sm">{s.title}</span>
+                <span className="min-w-0 truncate text-sm">{s.title}</span>
                 <span className="min-w-0 truncate text-xs text-muted">{relativeTime(s.updatedAt, now)}</span>
               </div>
             ))}
@@ -94,7 +94,7 @@ export function RunsRail() {
             {skills.value.map((s) => (
               <div key={s.name} className="flex min-w-0 items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="min-w-0 truncate break-words text-sm font-medium">{s.name}</p>
+                  <p className="min-w-0 truncate text-sm font-medium">{s.name}</p>
                   <p className="min-w-0 break-words text-xs text-muted">{s.description}</p>
                 </div>
                 <Switch
