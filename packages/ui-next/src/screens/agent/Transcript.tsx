@@ -282,6 +282,16 @@ function AgentTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
             ))}
           </div>
         )}
+        {/* A warning the stream raised and then carried on past — an
+            unsupported attachment, an image it could not decode. Shown
+            because the reader's attachment did not arrive, and NOT allowed to
+            turn the answer below it red: an answer that came back is a real
+            answer. */}
+        {turn.notes?.map((note, i) => (
+          <p key={i} className="min-w-0 break-words text-xs text-sev">
+            {note}
+          </p>
+        ))}
         <Answer text={turn.text} />
       </div>
     </div>

@@ -85,6 +85,21 @@ export type Turn = {
   calls: ToolCallRecord[];
   thoughts?: string;
   images?: string[];
+  /**
+   * Non-terminal `error` events from the stream — the backend emits some and
+   * then carries on: "image attachments are only supported with the Codex
+   * agent" falls straight through (`assistant.rs:541-546`), and a failed
+   * image decode or write `continue`s the loop (`:555-580`). Recorded here
+   * rather than being allowed to overwrite the turn, because the answer that
+   * follows one of these is a real answer.
+   *
+   * Whether the turn is an ERROR is decided once, when the stream is over: no
+   * text and a note means the note is all there was; text means the note is a
+   * warning alongside a real reply. Deciding it on arrival is what made a
+   * successful, markdown-formatted answer render red with its tool-call rows
+   * dropped.
+   */
+  notes?: string[];
   at: number;
 };
 
@@ -196,6 +211,7 @@ function sameTurn(a: Turn, b: Turn): boolean {
       a.text === b.text &&
       a.thoughts === b.thoughts &&
       a.at === b.at &&
+      sameStrings(a.notes, b.notes) &&
       sameStrings(a.images, b.images) &&
       sameList(a.calls, b.calls, sameCall))
   );
@@ -389,7 +405,9 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
         // is the call that actually owns the turn's lifetime.
         return;
       case "error":
-        markTurnError(agentTurnId, e.message);
+        // Not a verdict on the turn — see `Turn.notes`. The stream may well
+        // go on to answer the question.
+        updateTurn(agentTurnId, (t) => ({ ...t, notes: [...(t.notes ?? []), describeError(e.message).detail] }));
         return;
     }
   }
@@ -411,6 +429,13 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
     session = started;
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
+    // The FIRST fix here guarded only the `startChat` window and was too
+    // narrow: `loadSkillsGuidance` and `listAgents` are two more awaits, and a
+    // clear landing in THAT window left this turn walking on to dispatch. It
+    // also read the mutable global `session` at the call below, so the
+    // discarded question either went out with `null` or — once the reader had
+    // asked again — went out under the NEW question's session. Hence `started`,
+    // captured above, and the recheck immediately before dispatch.
     // An agent that is `available` but `gated` must not be offered — mirrors
     // `Composer`'s own filter. Nothing is gated today: core documents `gated`
     // as "currently always `false` for every kind" (`chat.ts:25-29`) and
@@ -447,8 +472,11 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
       agentPath = offered[0].path ?? "";
       if (run.generation === myGeneration) commit({ ...run, agentKind: resolvedKind });
     }
+    // Last thing before the question actually leaves. Every await above is a
+    // window in which the reader can abandon this turn.
+    if (stoppedGeneration === myGeneration) return;
     const result = await sendChat(
-      session,
+      started,
       `${guidance}${question}`,
       agentPath,
       onEvent,
@@ -464,7 +492,18 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
     // A REJECTION says nothing about `resume` — it is left exactly as it was.
     markTurnError(agentTurnId, err);
   } finally {
-    if (run.generation === myGeneration) commit({ ...run, busy: false });
+    if (run.generation === myGeneration) {
+      // The stream is over: now a note can be judged. Nothing said and a note
+      // recorded means the note was the whole story, so the turn IS its
+      // error. Text alongside it means the answer arrived and the note is a
+      // warning the reader should still see.
+      updateTurn(agentTurnId, (t) =>
+        t.role === "agent" && t.text === "" && (t.notes?.length ?? 0) > 0
+          ? { ...t, role: "error", text: t.notes!.join("\n"), notes: undefined }
+          : t,
+      );
+      commit({ ...run, busy: false });
+    }
   }
 }
 

@@ -7,6 +7,7 @@ import {
   llmListModels,
   llmSetKey,
   llmSetSettings,
+  openExternal,
   PROVIDERS,
   providerSlug,
   type AgentInfo,
@@ -14,7 +15,15 @@ import {
   type ModelInfo,
   type ProviderKind,
 } from "@srelens/core";
-import { Alert, Badge, Button, Panel, RawError, Select, TextInput } from "@srelens/ui-kit";
+import {
+  Alert,
+  Badge,
+  Button,
+  Panel,
+  RawError,
+  Select,
+  TextInput,
+} from "@srelens/ui-kit";
 import { LOADING, type Read } from "../../lib/read";
 
 /**
@@ -69,20 +78,33 @@ function modelFetchTitle(label: string): string {
 
 export function AgentPane() {
   const [settingsRead, setSettingsRead] = useState<Read<LlmSettings>>(LOADING);
-  const [keyStatusRead, setKeyStatusRead] = useState<Read<ProviderKind[]>>(LOADING);
+  const [keyStatusRead, setKeyStatusRead] =
+    useState<Read<ProviderKind[]>>(LOADING);
   const [agentsRead, setAgentsRead] = useState<Read<AgentInfo[]>>(LOADING);
 
   const [settings, setSettings] = useState<LlmSettings>(DEFAULT_SETTINGS);
   // Which provider row is open — one at a time, starting on the default once
   // settings load, since that's the one the agent actually uses.
   const [expanded, setExpanded] = useState<ProviderKind | null>(null);
-  const [keyDrafts, setKeyDrafts] = useState<Partial<Record<ProviderKind, string>>>({});
-  const [models, setModels] = useState<Partial<Record<ProviderKind, ModelInfo[]>>>({});
-  const [modelFetchError, setModelFetchError] = useState<Partial<Record<ProviderKind, unknown>>>({});
-  const [keyActionError, setKeyActionError] = useState<Partial<Record<ProviderKind, unknown>>>({});
+  const [keyDrafts, setKeyDrafts] = useState<
+    Partial<Record<ProviderKind, string>>
+  >({});
+  const [models, setModels] = useState<
+    Partial<Record<ProviderKind, ModelInfo[]>>
+  >({});
+  const [modelFetchError, setModelFetchError] = useState<
+    Partial<Record<ProviderKind, unknown>>
+  >({});
+  const [keyActionError, setKeyActionError] = useState<
+    Partial<Record<ProviderKind, unknown>>
+  >({});
   const [busy, setBusy] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [saved, setSaved] = useState(false);
+  /** Per-CLI, so one refused open does not silence the other links. */
+  const [installError, setInstallError] = useState<
+    Partial<Record<string, unknown>>
+  >({});
 
   useEffect(() => {
     let cancelled = false;
@@ -128,7 +150,11 @@ export function AgentPane() {
       .then((v) => {
         // The native agent has its own section above (provider keys); this
         // list is the external CLIs it can hand a turn to instead.
-        if (!cancelled) setAgentsRead({ kind: "ready", value: v.filter((a) => a.kind !== "srelens") });
+        if (!cancelled)
+          setAgentsRead({
+            kind: "ready",
+            value: v.filter((a) => a.kind !== "srelens"),
+          });
       })
       .catch((e) => {
         if (!cancelled) setAgentsRead({ kind: "error", error: e });
@@ -146,11 +172,17 @@ export function AgentPane() {
   }
 
   function setModel(provider: ProviderKind, model: string) {
-    editSettings((s) => ({ ...s, models: { ...s.models, [providerSlug(provider)]: model } }));
+    editSettings((s) => ({
+      ...s,
+      models: { ...s.models, [providerSlug(provider)]: model },
+    }));
   }
 
   function setBaseUrl(provider: ProviderKind, url: string) {
-    editSettings((s) => ({ ...s, baseUrls: { ...s.baseUrls, [providerSlug(provider)]: url } }));
+    editSettings((s) => ({
+      ...s,
+      baseUrls: { ...s.baseUrls, [providerSlug(provider)]: url },
+    }));
   }
 
   async function saveKey(provider: ProviderKind) {
@@ -188,7 +220,10 @@ export function AgentPane() {
     setBusy(`models:${provider}`);
     setModelFetchError((m) => ({ ...m, [provider]: null }));
     try {
-      const list = await llmListModels(provider, settings.baseUrls[providerSlug(provider)]);
+      const list = await llmListModels(
+        provider,
+        settings.baseUrls[providerSlug(provider)],
+      );
       setModels((m) => ({ ...m, [provider]: list }));
     } catch (e) {
       setModelFetchError((m) => ({ ...m, [provider]: e }));
@@ -212,7 +247,8 @@ export function AgentPane() {
 
   // See the file comment: neither the provider rows nor a claim about any of
   // them is drawn until BOTH reads that feed them have actually landed.
-  const stillLoadingProviders = settingsRead.kind === "loading" || keyStatusRead.kind === "loading";
+  const stillLoadingProviders =
+    settingsRead.kind === "loading" || keyStatusRead.kind === "loading";
   const keyed = keyStatusRead.kind === "ready" ? keyStatusRead.value : null;
 
   return (
@@ -222,176 +258,226 @@ export function AgentPane() {
         description="srelens's own agent talks directly to a provider with your API key. The key is written to the OS keychain and never read back — only whether one is set is shown here."
       >
         {stillLoadingProviders ? (
-          <p className="text-[0.75rem] text-muted">Checking configured providers…</p>
+          <p className="text-[0.75rem] text-muted">
+            Checking configured providers…
+          </p>
         ) : (
           <>
             {settingsRead.kind === "error" && (
               <Alert tone="sev" title="Provider settings could not be loaded">
-                The default provider and per-provider models can&apos;t be shown until this loads.
+                The default provider and per-provider models can&apos;t be shown
+                until this loads.
                 <RawError text={String(settingsRead.error)} className="mt-1" />
               </Alert>
             )}
             {keyStatusRead.kind === "error" && (
-              <Alert tone="sev" title="Which providers have a key could not be checked">
-                Nothing here changed the keychain; this pane just couldn&apos;t read its status.
+              <Alert
+                tone="sev"
+                title="Which providers have a key could not be checked"
+              >
+                Nothing here changed the keychain; this pane just couldn&apos;t
+                read its status.
                 <RawError text={String(keyStatusRead.error)} className="mt-1" />
               </Alert>
             )}
-            {settingsRead.kind === "ready" && keyStatusRead.kind === "ready" && (
-              <>
-                <div className="rounded-md border border-rule">
-                  {PROVIDERS.map((p) => {
-                    const slug = providerSlug(p.kind);
-                    const hasKey = keyed?.includes(p.kind) ?? false;
-                    const list = models[p.kind] ?? [];
-                    const model = settings.models[slug] ?? "";
-                    const isDefault = settings.defaultProvider === p.kind;
-                    const isOpen = expanded === p.kind;
-                    const fetchErr = modelFetchError[p.kind];
-                    const keyErr = keyActionError[p.kind];
-                    return (
-                      <div
-                        key={p.kind}
-                        data-testid={`provider-row-${p.kind}`}
-                        className="border-b border-rule last:border-b-0"
-                      >
-                        <div className="flex items-center gap-3 px-3 py-2">
-                          <input
-                            type="radio"
-                            name="default-provider"
-                            checked={isDefault}
-                            onChange={() => editSettings((s) => ({ ...s, defaultProvider: p.kind }))}
-                            aria-label={`Use ${p.label} as the default provider`}
-                          />
-                          <button
-                            type="button"
-                            aria-expanded={isOpen}
-                            onClick={() => setExpanded(isOpen ? null : p.kind)}
-                            className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
-                          >
-                            <span className="flex shrink-0 items-center gap-2 text-[0.8125rem] font-medium">
-                              {p.label}
-                              {isDefault && <Badge tone="accent">default</Badge>}
-                            </span>
-                            {/* M13 (controller finding): `model` is a string the
+            {settingsRead.kind === "ready" &&
+              keyStatusRead.kind === "ready" && (
+                <>
+                  <div className="rounded-md border border-rule">
+                    {PROVIDERS.map((p) => {
+                      const slug = providerSlug(p.kind);
+                      const hasKey = keyed?.includes(p.kind) ?? false;
+                      const list = models[p.kind] ?? [];
+                      const model = settings.models[slug] ?? "";
+                      const isDefault = settings.defaultProvider === p.kind;
+                      const isOpen = expanded === p.kind;
+                      const fetchErr = modelFetchError[p.kind];
+                      const keyErr = keyActionError[p.kind];
+                      return (
+                        <div
+                          key={p.kind}
+                          data-testid={`provider-row-${p.kind}`}
+                          className="border-b border-rule last:border-b-0"
+                        >
+                          <div className="flex items-center gap-3 px-3 py-2">
+                            <input
+                              type="radio"
+                              name="default-provider"
+                              checked={isDefault}
+                              onChange={() =>
+                                editSettings((s) => ({
+                                  ...s,
+                                  defaultProvider: p.kind,
+                                }))
+                              }
+                              aria-label={`Use ${p.label} as the default provider`}
+                            />
+                            <button
+                              type="button"
+                              aria-expanded={isOpen}
+                              onClick={() =>
+                                setExpanded(isOpen ? null : p.kind)
+                              }
+                              className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+                            >
+                              <span className="flex shrink-0 items-center gap-2 text-[0.8125rem] font-medium">
+                                {p.label}
+                                {isDefault && (
+                                  <Badge tone="accent">default</Badge>
+                                )}
+                              </span>
+                              {/* M13 (controller finding): `model` is a string the
                                 reader types free-hand below ("Model id (or fetch
                                 the list)") — this is the branch's only file with
                                 no shrink discipline (0 `min-w-0`, 0 `truncate`
                                 across 12 flex rows), and a long id here has
                                 nowhere to go but sideways in a fixed-width pane. */}
-                            <span className="min-w-0 truncate text-[0.75rem] text-muted">
-                              {!hasKey
-                                ? "no key"
-                                : model
-                                  ? `key set · ${model}`
-                                  : "key set — choose a model"}
-                            </span>
-                          </button>
-                        </div>
+                              <span className="min-w-0 truncate text-[0.75rem] text-muted">
+                                {!hasKey
+                                  ? "no key"
+                                  : model
+                                    ? `key set · ${model}`
+                                    : "key set — choose a model"}
+                              </span>
+                            </button>
+                          </div>
 
-                        {isOpen && (
-                          <div className="flex flex-col gap-2 border-t border-rule bg-canvas-sunken px-3 py-3">
-                            {p.needsBaseUrl && (
-                              <label className="flex flex-col gap-1 text-[0.75rem]">
-                                <span className="text-muted">Base URL</span>
-                                <TextInput
-                                  value={settings.baseUrls[slug] ?? ""}
-                                  onValueChange={(v) => setBaseUrl(p.kind, v)}
-                                  placeholder="https://openrouter.ai/api/v1"
-                                  aria-label={`${p.label} base URL`}
-                                />
-                              </label>
-                            )}
+                          {isOpen && (
+                            <div className="flex flex-col gap-2 border-t border-rule bg-canvas-sunken px-3 py-3">
+                              {p.needsBaseUrl && (
+                                <label className="flex flex-col gap-1 text-[0.75rem]">
+                                  <span className="text-muted">Base URL</span>
+                                  <TextInput
+                                    value={settings.baseUrls[slug] ?? ""}
+                                    onValueChange={(v) => setBaseUrl(p.kind, v)}
+                                    placeholder="https://openrouter.ai/api/v1"
+                                    aria-label={`${p.label} base URL`}
+                                  />
+                                </label>
+                              )}
 
-                            <div className="flex items-end gap-2">
-                              <label className="flex flex-1 flex-col gap-1 text-[0.75rem]">
-                                <span className="text-muted">API key</span>
-                                <TextInput
-                                  type="password"
-                                  value={keyDrafts[p.kind] ?? ""}
-                                  onValueChange={(v) => setKeyDrafts((d) => ({ ...d, [p.kind]: v }))}
-                                  placeholder={hasKey ? "Enter a new key to replace it" : "Paste API key"}
-                                  aria-label={`${p.label} API key`}
-                                />
-                              </label>
-                              <Button
-                                size="sm"
-                                disabled={!keyDrafts[p.kind]?.trim() || busy === `key:${p.kind}`}
-                                onClick={() => void saveKey(p.kind)}
-                              >
-                                Save key
-                              </Button>
-                              {hasKey && (
+                              <div className="flex items-end gap-2">
+                                <label className="flex flex-1 flex-col gap-1 text-[0.75rem]">
+                                  <span className="text-muted">API key</span>
+                                  <TextInput
+                                    type="password"
+                                    value={keyDrafts[p.kind] ?? ""}
+                                    onValueChange={(v) =>
+                                      setKeyDrafts((d) => ({
+                                        ...d,
+                                        [p.kind]: v,
+                                      }))
+                                    }
+                                    placeholder={
+                                      hasKey
+                                        ? "Enter a new key to replace it"
+                                        : "Paste API key"
+                                    }
+                                    aria-label={`${p.label} API key`}
+                                  />
+                                </label>
+                                <Button
+                                  size="sm"
+                                  disabled={
+                                    !keyDrafts[p.kind]?.trim() ||
+                                    busy === `key:${p.kind}`
+                                  }
+                                  onClick={() => void saveKey(p.kind)}
+                                >
+                                  Save key
+                                </Button>
+                                {hasKey && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={busy === `key:${p.kind}`}
+                                    onClick={() => void clearKey(p.kind)}
+                                  >
+                                    Remove key
+                                  </Button>
+                                )}
+                              </div>
+                              {keyErr != null && (
+                                <Alert
+                                  tone="sev"
+                                  title={`${p.label}'s key could not be updated`}
+                                >
+                                  <RawError text={String(keyErr)} />
+                                </Alert>
+                              )}
+
+                              <div className="flex items-end gap-2">
+                                <label className="flex flex-1 flex-col gap-1 text-[0.75rem]">
+                                  <span className="text-muted">Model</span>
+                                  {list.length > 0 ? (
+                                    <Select
+                                      value={model}
+                                      onValueChange={(v) => setModel(p.kind, v)}
+                                      options={list.map((m) => ({
+                                        value: m.id,
+                                        label: m.displayName,
+                                      }))}
+                                      placeholder="Choose a model…"
+                                      aria-label={`${p.label} model`}
+                                    />
+                                  ) : (
+                                    <TextInput
+                                      value={model}
+                                      onValueChange={(v) => setModel(p.kind, v)}
+                                      placeholder="Model id (or fetch the list)"
+                                      aria-label={`${p.label} model id`}
+                                    />
+                                  )}
+                                </label>
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  disabled={busy === `key:${p.kind}`}
-                                  onClick={() => void clearKey(p.kind)}
+                                  disabled={
+                                    !hasKey || busy === `models:${p.kind}`
+                                  }
+                                  onClick={() => void fetchModels(p.kind)}
                                 >
-                                  Remove key
+                                  Fetch models
                                 </Button>
+                              </div>
+                              {fetchErr != null && (
+                                <Alert
+                                  tone="sev"
+                                  title={modelFetchTitle(p.label)}
+                                >
+                                  <RawError text={String(fetchErr)} />
+                                </Alert>
                               )}
                             </div>
-                            {keyErr != null && (
-                              <Alert tone="sev" title={`${p.label}'s key could not be updated`}>
-                                <RawError text={String(keyErr)} />
-                              </Alert>
-                            )}
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
 
-                            <div className="flex items-end gap-2">
-                              <label className="flex flex-1 flex-col gap-1 text-[0.75rem]">
-                                <span className="text-muted">Model</span>
-                                {list.length > 0 ? (
-                                  <Select
-                                    value={model}
-                                    onValueChange={(v) => setModel(p.kind, v)}
-                                    options={list.map((m) => ({ value: m.id, label: m.displayName }))}
-                                    placeholder="Choose a model…"
-                                    aria-label={`${p.label} model`}
-                                  />
-                                ) : (
-                                  <TextInput
-                                    value={model}
-                                    onValueChange={(v) => setModel(p.kind, v)}
-                                    placeholder="Model id (or fetch the list)"
-                                    aria-label={`${p.label} model id`}
-                                  />
-                                )}
-                              </label>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled={!hasKey || busy === `models:${p.kind}`}
-                                onClick={() => void fetchModels(p.kind)}
-                              >
-                                Fetch models
-                              </Button>
-                            </div>
-                            {fetchErr != null && (
-                              <Alert tone="sev" title={modelFetchTitle(p.label)}>
-                                <RawError text={String(fetchErr)} />
-                              </Alert>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="mt-3 flex items-center gap-2">
-                  <Button size="sm" disabled={busy === "settings"} onClick={() => void saveSettings()}>
-                    Save settings
-                  </Button>
-                  {saved && <span className="text-[0.75rem] text-muted">Saved.</span>}
-                </div>
-                {saveError != null && (
-                  <Alert tone="sev" title="Provider settings could not be saved" className="mt-2">
-                    <RawError text={String(saveError)} />
-                  </Alert>
-                )}
-              </>
-            )}
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={busy === "settings"}
+                      onClick={() => void saveSettings()}
+                    >
+                      Save settings
+                    </Button>
+                    {saved && (
+                      <span className="text-[0.75rem] text-muted">Saved.</span>
+                    )}
+                  </div>
+                  {saveError != null && (
+                    <Alert
+                      tone="sev"
+                      title="Provider settings could not be saved"
+                      className="mt-2"
+                    >
+                      <RawError text={String(saveError)} />
+                    </Alert>
+                  )}
+                </>
+              )}
           </>
         )}
       </Panel>
@@ -401,7 +487,9 @@ export function AgentPane() {
         description="External coding-agent CLIs srelens can drive over MCP. Only the ones found on PATH are selectable in chat."
       >
         {agentsRead.kind === "loading" && (
-          <p className="text-[0.75rem] text-muted">Checking installed agent CLIs…</p>
+          <p className="text-[0.75rem] text-muted">
+            Checking installed agent CLIs…
+          </p>
         )}
         {agentsRead.kind === "error" && (
           <Alert tone="sev" title="Installed agent CLIs could not be checked">
@@ -413,24 +501,60 @@ export function AgentPane() {
             {agentsRead.value.map((a) => (
               <div
                 key={a.kind}
-                className="flex min-w-0 items-center justify-between gap-3 border-b border-rule px-3 py-2 last:border-b-0"
+                className="border-b border-rule last:border-b-0"
               >
-                <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{a.label}</span>
-                {a.available ? (
-                  <span className="min-w-0 shrink-0 truncate">
-                    <Badge tone="ok">{a.version ?? "installed"}</Badge>
+                <div className="flex min-w-0 items-center justify-between gap-3 px-3 py-2">
+                  <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">
+                    {a.label}
                   </span>
-                ) : a.installUrl ? (
-                  <a
-                    href={a.installUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="min-w-0 shrink-0 truncate text-[0.75rem] text-muted underline"
-                  >
-                    not installed — install {a.label}
-                  </a>
-                ) : (
-                  <span className="min-w-0 shrink-0 truncate text-[0.75rem] text-muted">not installed</span>
+                  {a.available ? (
+                    // `shrink-0` and no `truncate`: a version badge is short and
+                    // should keep its width. The two together are inert — a
+                    // `shrink-0` item never shrinks, so `truncate` can never
+                    // ellipsize — and a guard that cannot fire reads like one
+                    // that can.
+                    <span className="shrink-0">
+                      <Badge tone="ok">{a.version ?? "installed"}</Badge>
+                    </span>
+                  ) : a.installUrl ? (
+                    // `openExternal`, never an `<a target="_blank">`: that is a
+                    // silent no-op inside the Tauri WebView (#348), and this is
+                    // the ONLY control an unavailable CLI offers — so on the
+                    // primary desktop surface the one actionable thing in this
+                    // row did nothing at all. `screens/Forwards.tsx` sets the
+                    // precedent and says the same in its own comment.
+                    //
+                    // Shrinkable here, unlike the badge: this sentence carries a
+                    // CLI's name and is the long one in the row.
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const url = a.installUrl;
+                        if (!url) return;
+                        setInstallError((e) => ({ ...e, [a.kind]: undefined }));
+                        void openExternal(url).catch((err: unknown) =>
+                          setInstallError((e) => ({ ...e, [a.kind]: err })),
+                        );
+                      }}
+                      className="min-w-0 truncate text-[0.75rem] text-muted underline"
+                    >
+                      not installed — install {a.label}
+                    </button>
+                  ) : (
+                    <span className="min-w-0 truncate text-[0.75rem] text-muted">
+                      not installed
+                    </span>
+                  )}
+                </div>
+                {installError[a.kind] !== undefined && (
+                  <div className="px-3 pb-2">
+                    <Alert
+                      tone="sev"
+                      title={`Could not open ${a.label}'s install page`}
+                    >
+                      <RawError text={String(installError[a.kind])} />
+                    </Alert>
+                  </div>
                 )}
               </div>
             ))}

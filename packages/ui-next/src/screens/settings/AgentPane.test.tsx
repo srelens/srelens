@@ -10,6 +10,7 @@ const core = vi.hoisted(() => ({
   llmKeyStatus: vi.fn(),
   llmListModels: vi.fn(),
   listAgents: vi.fn(),
+  openExternal: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -18,8 +19,16 @@ vi.mock("@srelens/core", async (orig) => ({
 
 import { AgentPane } from "./AgentPane";
 
-const { llmGetSettings, llmSetSettings, llmSetKey, llmClearKey, llmKeyStatus, llmListModels, listAgents } =
-  core;
+const {
+  llmGetSettings,
+  llmSetSettings,
+  llmSetKey,
+  llmClearKey,
+  llmKeyStatus,
+  llmListModels,
+  listAgents,
+  openExternal,
+} = core;
 
 /** A settings record with a chosen model, so a provider row can read "key set
  * · <model>" rather than the bare "key set" state. */
@@ -37,6 +46,7 @@ describe("AgentPane", () => {
     llmSetSettings.mockResolvedValue(undefined);
     llmSetKey.mockResolvedValue(undefined);
     llmClearKey.mockResolvedValue(undefined);
+    openExternal.mockResolvedValue(undefined);
     // A key already on "anthropic" by default, so the row that starts
     // expanded (the default provider) has a clickable Fetch models button.
     llmKeyStatus.mockResolvedValue(["anthropic"]);
@@ -177,5 +187,36 @@ describe("AgentPane", () => {
     // The field is cleared afterwards, not left holding what was just sent.
     await waitFor(() => expect(field.value).toBe(""));
     expect(document.body.textContent).not.toMatch(/freshly-typed-secret/);
+  });
+
+  /**
+   * P2 (#392 review round 3): the install link was an `<a target="_blank">`,
+   * which is a silent no-op inside the Tauri WebView (#348) — and it is the
+   * ONLY control an unavailable CLI offers, so on the desktop the one
+   * actionable thing in that row did nothing. `screens/Forwards.tsx` had
+   * already learned this and says so in its own comment.
+   */
+  it("opens an install page through the desktop opener, not a dead target=_blank link", async () => {
+    listAgents.mockResolvedValue([
+      { kind: "codex", label: "Codex", available: false, path: null, version: null, installUrl: "https://x", gated: false },
+    ]);
+    render(<AgentPane />);
+    const control = await screen.findByRole("button", { name: /install Codex/i });
+    // A button, not a link: an anchor here cannot open anything on the
+    // primary surface.
+    expect(control.tagName).toBe("BUTTON");
+    await userEvent.click(control);
+    expect(openExternal).toHaveBeenCalledWith("https://x");
+  });
+
+  it("says so when the install page could not be opened, rather than looking like it worked", async () => {
+    listAgents.mockResolvedValue([
+      { kind: "codex", label: "Codex", available: false, path: null, version: null, installUrl: "https://x", gated: false },
+    ]);
+    openExternal.mockRejectedValue(new Error("no opener available"));
+    render(<AgentPane />);
+    await userEvent.click(await screen.findByRole("button", { name: /install Codex/i }));
+    expect(await screen.findByText(/could not open codex's install page/i)).toBeTruthy();
+    expect(screen.getByText(/no opener available/)).toBeTruthy();
   });
 });

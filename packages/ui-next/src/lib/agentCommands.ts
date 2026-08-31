@@ -159,9 +159,20 @@ function resourceCommands(deps: CommandDeps): Command[] {
     commands.push({
       id: "restart",
       group: "Action",
-      label: `Restart ${kind}/${name}`,
-      hint: "rollout restart",
-      danger: true,
+      // Names the NAVIGATION, not the act. `openAction` lands the reader on
+      // the resource's own tab, where `DetailActions`/`useRowMenu` own the
+      // confirm; nothing carries the specific intent across a tab open. A row
+      // labelled `Restart deploy/checkout-api` that restarts nothing and
+      // raises no confirm is a promise the command cannot keep — the same
+      // reason Task 6 relabelled `shell` and `forward` (see the module doc).
+      // The resource's name stays, because `detailRoute` bakes the identity
+      // into the URL and that half the navigation does keep.
+      label: `Open ${kind}/${name} to restart it`,
+      hint: "rollout restart lives on the resource",
+      // No `danger`. `danger?: true` is a present-means-dangerous flag, and
+      // this navigates: the confirm it lands on is where the danger is.
+      // Colouring a navigation red trains the reader to discount the colour
+      // where it does mean something.
       run: () => deps.openAction({ kind, namespace: ns, name, context, action: "restart" }),
     });
   }
@@ -169,9 +180,8 @@ function resourceCommands(deps: CommandDeps): Command[] {
     commands.push({
       id: "scale",
       group: "Action",
-      label: `Scale ${kind}/${name}`,
-      hint: "adjust replica count",
-      danger: true,
+      label: `Open ${kind}/${name} to scale it`,
+      hint: "replica count lives on the resource",
       run: () => deps.openAction({ kind, namespace: ns, name, context, action: "scale" }),
     });
   }

@@ -24,6 +24,13 @@ vi.mock("@srelens/core", async (orig) => ({
  *  give up after a generous number of ticks — used to let two overlapping
  *  `askAgent` calls each reach their own `sendChat` before the test drives
  *  either one's resolution, without guessing an exact tick count. */
+/** Let queued microtasks run until `listAgents` has been called — i.e. the
+ *  turn is inside the preparation window, past `startChat` and short of
+ *  `sendChat`, which is the window round 3's P1 was about. */
+async function untilListAgentsCalled(): Promise<void> {
+  for (let i = 0; i < 50 && listAgents.mock.calls.length === 0; i++) await Promise.resolve();
+}
+
 async function untilSendChatCalledTimes(n: number): Promise<void> {
   for (let i = 0; i < 50 && sendChat.mock.calls.length < n; i++) {
     await Promise.resolve();
@@ -168,6 +175,71 @@ describe("the run store", () => {
 
     expect(sendChat).not.toHaveBeenCalled();
     expect(getAgentRun().busy).toBe(false);
+  });
+
+  // P1 round 3 (#392): the first fix guarded only the `startChat` window.
+  // `loadSkillsGuidance` and `listAgents` are two more awaits before dispatch.
+  it("does not dispatch a turn the reader discarded while its agent list was loading", async () => {
+    let resolveAgents!: (v: unknown) => void;
+    listAgents.mockImplementation(() => new Promise((resolve) => { resolveAgents = resolve; }));
+
+    const asked = askAgent("q");
+    // Past `startChat`, inside the preparation window the old guard missed.
+    await untilListAgentsCalled();
+    clearAgentRun();
+    resolveAgents([{ kind: "claude", label: "Claude", available: true, gated: false, path: "/c" }]);
+    await asked;
+
+    expect(sendChat).not.toHaveBeenCalled();
+  });
+
+  it("dispatches against the session it started, not whatever the global holds by then", async () => {
+    // The other half: without capturing, `sendChat` read the mutable global —
+    // so a discarded turn went out with `null`, or under a later question's
+    // session entirely.
+    let resolveAgents!: (v: unknown) => void;
+    listAgents.mockImplementation(() => new Promise((resolve) => { resolveAgents = resolve; }));
+    const asked = askAgent("q");
+    await untilListAgentsCalled();
+    resolveAgents([{ kind: "claude", label: "Claude", available: true, gated: false, path: "/c" }]);
+    await asked;
+    expect(sendChat.mock.calls.at(-1)?.[0]).toBe("sess-1");
+  });
+
+  // P2 round 3 (#392): some `error` events are not terminal — the backend
+  // emits them and carries on.
+  describe("a non-terminal error event", () => {
+    it("does not turn a successful answer into an error turn", async () => {
+      sendChat.mockImplementationOnce(async (_s, _t, _p, onEvent) => {
+        onEvent({ type: "error", message: "image attachments are only supported with the Codex agent" });
+        onEvent({ type: "textDelta", text: "## Findings\n\nThe rollout is healthy." });
+        return null;
+      });
+
+      await askAgent("look at this", { images: ["data:image/png;base64,AAA"] });
+
+      const turn = getAgentRun().turns.at(-1)!;
+      // Still the agent's answer — markdown and tool rows intact, not red.
+      expect(turn.role).toBe("agent");
+      expect(turn.text).toContain("The rollout is healthy.");
+      // And the warning is not swallowed: the attachment really did not arrive.
+      expect(turn.notes?.some((n) => /image attachments/i.test(n))).toBe(true);
+    });
+
+    it("is the whole story when nothing else arrived, and then the turn IS the error", async () => {
+      sendChat.mockImplementationOnce(async (_s, _t, _p, onEvent) => {
+        onEvent({ type: "error", message: "could not decode attached image 0: bad padding" });
+        return null;
+      });
+
+      await askAgent("look at this");
+
+      const turn = getAgentRun().turns.at(-1)!;
+      expect(turn.role).toBe("error");
+      expect(turn.text).toMatch(/bad padding/);
+      // Folded into the turn rather than left duplicated beside it.
+      expect(turn.notes).toBeUndefined();
+    });
   });
 
   // P2 (#392 review): `resume` is the PREVIOUS CLI's own conversation id.

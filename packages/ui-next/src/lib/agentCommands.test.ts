@@ -72,10 +72,27 @@ describe("the / palette", () => {
     );
   });
 
-  it("marks the destructive ones so the list can show it", () => {
+  /**
+   * This test used to assert `restart` and `scale` are marked `danger`. They
+   * are not, and should not be: `openAction` NAVIGATES to the resource, where
+   * the confirm lives. Nothing destructive happens from the palette, so a red
+   * row would be teaching the reader to discount the colour where it does
+   * mean something — and the label that promised the act has been changed for
+   * the same reason (see the module doc's Task 6 precedent).
+   */
+  it("labels an Action command as the navigation it actually performs, and does not dress it as destructive", () => {
     const all = commandsFor({ ...base, route: "/k/Deployment/checkout/api" });
-    expect(all.find((c) => c.id === "restart")?.danger).toBe(true);
-    expect(all.find((c) => c.id === "scale")?.danger).toBe(true);
+    const restart = all.find((c) => c.id === "restart");
+    const scale = all.find((c) => c.id === "scale");
+    // Says "open … to restart it", not "Restart …": nothing is restarted here.
+    expect(restart?.label).toMatch(/^Open Deployment\/api to restart it$/);
+    expect(scale?.label).toMatch(/^Open Deployment\/api to scale it$/);
+    expect(restart?.label).not.toMatch(/^Restart/);
+    expect(scale?.label).not.toMatch(/^Scale/);
+    // Not flagged at all — `danger?: true` means "this acts", and these
+    // navigate.
+    expect(restart?.danger).toBeUndefined();
+    expect(scale?.danger).toBeUndefined();
     expect(all.find((c) => c.id === "logs")?.danger).toBeUndefined();
   });
 
