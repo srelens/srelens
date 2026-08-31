@@ -192,7 +192,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
-    void askAgent(raw);
+    void askAgent(raw, { context });
     setValue("");
     setOpen(true);
   }
@@ -234,7 +234,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       <SuggestionList
         items={suggestionsFor(route)}
         onAsk={(question) => {
-          void askAgent(question);
+          void askAgent(question, { context });
           setValue("");
         }}
       />

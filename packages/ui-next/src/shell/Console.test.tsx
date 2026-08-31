@@ -73,8 +73,22 @@ describe("Console", () => {
     setup();
     const input = screen.getByRole("textbox", { name: "Console prompt" }) as HTMLInputElement;
     await user.type(input, "why{Enter}");
-    expect(askAgent).toHaveBeenCalledWith("why");
+    // The cluster travels with the question: every MCP tool call takes an
+    // explicit context, and an agent given none has to guess one.
+    expect(askAgent).toHaveBeenCalledWith("why", expect.objectContaining({ context: expect.any(String) }));
     expect(input.value).toBe("");
+  });
+
+  it("pins the cluster on screen to the question, by name", async () => {
+    const user = userEvent.setup();
+    const prod = ctx("prod-eu-id", "prod-eu");
+    setContexts([prod]);
+    tabsStore.setState(defaultState([prod]));
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "what is unhealthy{Enter}");
+    // By name — an `expect.any(String)` here would pass on the empty context
+    // this dock sends when no cluster is active, which is the bug.
+    expect(askAgent).toHaveBeenCalledWith("what is unhealthy", expect.objectContaining({ context: "prod-eu" }));
   });
 
   it("opens and forwards a question asked from anywhere else", async () => {
@@ -84,7 +98,7 @@ describe("Console", () => {
     expect(screen.queryByRole("log")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
     expect(screen.getByRole("log", { name: "Console output" })).toBeDefined();
-    expect(askAgent).toHaveBeenCalledWith("x");
+    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ context: expect.any(String) }));
   });
 
   it("prints the console accelerator for the platform", () => {
@@ -110,7 +124,10 @@ describe("Console", () => {
     setup();
     await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
     await user.click(await screen.findByText("Summarise the last 500 lines"));
-    expect(askAgent).toHaveBeenCalledWith("Summarise the last 500 lines");
+    expect(askAgent).toHaveBeenCalledWith(
+      "Summarise the last 500 lines",
+      expect.objectContaining({ context: expect.any(String) }),
+    );
   });
 
   it("turns into the command palette when the query starts with a slash", async () => {

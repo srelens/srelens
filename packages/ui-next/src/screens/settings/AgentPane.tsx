@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   listAgents,
   llmClearKey,
@@ -89,7 +89,10 @@ function sameSettings(a: LlmSettings, b: LlmSettings): boolean {
   );
 }
 
-function sameStringMap(a: Record<string, string>, b: Record<string, string>): boolean {
+function sameStringMap(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   return ka.length === kb.length && ka.every((k) => a[k] === b[k]);
@@ -117,7 +120,27 @@ export function AgentPane() {
   const [keyActionError, setKeyActionError] = useState<
     Partial<Record<ProviderKind, unknown>>
   >({});
-  const [busy, setBusy] = useState<string | null>(null);
+  /**
+   * The operations in flight, by their own key — NOT one overwritable token.
+   *
+   * A single `busy` string let a second key operation overwrite the first's
+   * value, and then whichever request finished first cleared it while the
+   * other was still running: both providers' buttons came back live mid-flight
+   * and a double submit was one click away.
+   */
+  const [busyOps, setBusyOps] = useState<ReadonlySet<string>>(() => new Set());
+  const keyStatusSeq = useRef(0);
+  const busy = (op: string) => busyOps.has(op);
+  /** Any key operation at all — key actions are disabled across providers
+   *  while one is running, since they all write the same store. */
+  const anyKeyOpRunning = [...busyOps].some((op) => op.startsWith("key:"));
+  const startOp = (op: string) => setBusyOps((s) => new Set(s).add(op));
+  const endOp = (op: string) =>
+    setBusyOps((s) => {
+      const next = new Set(s);
+      next.delete(op);
+      return next;
+    });
   const [saveError, setSaveError] = useState<unknown>(null);
   const [saved, setSaved] = useState(false);
   /** Per-CLI, so one refused open does not silence the other links. */
@@ -143,10 +166,27 @@ export function AgentPane() {
     };
   }, []);
 
+  /**
+   * Re-read which providers hold a key.
+   *
+   * Sequenced, because two key operations can be in flight and their reads can
+   * come back out of order — the older list would then overwrite the newer one
+   * and the pane would show a key it no longer has, or miss one it does. The
+   * counter is a ref rather than state: it must be read and written
+   * synchronously within one call, and a re-render is neither needed nor
+   * wanted for it.
+   */
   function refreshKeyStatus() {
+    const mine = ++keyStatusSeq.current;
     return llmKeyStatus()
-      .then((v) => setKeyStatusRead({ kind: "ready", value: v }))
-      .catch((e) => setKeyStatusRead({ kind: "error", error: e }));
+      .then((v) => {
+        if (mine === keyStatusSeq.current)
+          setKeyStatusRead({ kind: "ready", value: v });
+      })
+      .catch((e) => {
+        if (mine === keyStatusSeq.current)
+          setKeyStatusRead({ kind: "error", error: e });
+      });
   }
 
   useEffect(() => {
@@ -207,7 +247,7 @@ export function AgentPane() {
   async function saveKey(provider: ProviderKind) {
     const draft = keyDrafts[provider]?.trim();
     if (!draft) return;
-    setBusy(`key:${provider}`);
+    startOp(`key:${provider}`);
     setKeyActionError((m) => ({ ...m, [provider]: null }));
     try {
       await llmSetKey(provider, draft);
@@ -218,12 +258,12 @@ export function AgentPane() {
     } catch (e) {
       setKeyActionError((m) => ({ ...m, [provider]: e }));
     } finally {
-      setBusy(null);
+      endOp(`key:${provider}`);
     }
   }
 
   async function clearKey(provider: ProviderKind) {
-    setBusy(`key:${provider}`);
+    startOp(`key:${provider}`);
     setKeyActionError((m) => ({ ...m, [provider]: null }));
     try {
       await llmClearKey(provider);
@@ -231,12 +271,12 @@ export function AgentPane() {
     } catch (e) {
       setKeyActionError((m) => ({ ...m, [provider]: e }));
     } finally {
-      setBusy(null);
+      endOp(`key:${provider}`);
     }
   }
 
   async function fetchModels(provider: ProviderKind) {
-    setBusy(`models:${provider}`);
+    startOp(`models:${provider}`);
     setModelFetchError((m) => ({ ...m, [provider]: null }));
     try {
       const list = await llmListModels(
@@ -247,12 +287,12 @@ export function AgentPane() {
     } catch (e) {
       setModelFetchError((m) => ({ ...m, [provider]: e }));
     } finally {
-      setBusy(null);
+      endOp(`models:${provider}`);
     }
   }
 
   async function saveSettings() {
-    setBusy("settings");
+    startOp("settings");
     setSaveError(null);
     // The snapshot that actually goes to disk. The controls stay editable
     // while this is in flight, so the reader can change a model or a base URL
@@ -271,7 +311,7 @@ export function AgentPane() {
     } catch (e) {
       setSaveError(e);
     } finally {
-      setBusy(null);
+      endOp("settings");
     }
   }
 
@@ -410,7 +450,7 @@ export function AgentPane() {
                                   size="sm"
                                   disabled={
                                     !keyDrafts[p.kind]?.trim() ||
-                                    busy === `key:${p.kind}`
+                                    anyKeyOpRunning
                                   }
                                   onClick={() => void saveKey(p.kind)}
                                 >
@@ -420,7 +460,7 @@ export function AgentPane() {
                                   <Button
                                     variant="ghost"
                                     size="sm"
-                                    disabled={busy === `key:${p.kind}`}
+                                    disabled={anyKeyOpRunning}
                                     onClick={() => void clearKey(p.kind)}
                                   >
                                     Remove key
@@ -462,9 +502,7 @@ export function AgentPane() {
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  disabled={
-                                    !hasKey || busy === `models:${p.kind}`
-                                  }
+                                  disabled={!hasKey || busy(`models:${p.kind}`)}
                                   onClick={() => void fetchModels(p.kind)}
                                 >
                                   Fetch models
@@ -488,7 +526,7 @@ export function AgentPane() {
                   <div className="mt-3 flex items-center gap-2">
                     <Button
                       size="sm"
-                      disabled={busy === "settings"}
+                      disabled={busy("settings")}
                       onClick={() => void saveSettings()}
                     >
                       Save settings

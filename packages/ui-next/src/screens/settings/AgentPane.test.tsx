@@ -255,4 +255,41 @@ describe("AgentPane", () => {
     // Not a latch on the other side either: an untouched draft still confirms.
     expect(await screen.findByText(/^saved\.$/i)).toBeTruthy();
   });
+
+  /**
+   * P2 (#392 review round 5). `busy` was one overwritable string, so a second
+   * key operation replaced the first's token and whichever request finished
+   * first cleared it while the other was still running — both providers'
+   * buttons came back live mid-flight and a double submit was one click away.
+   */
+  it("holds every provider's key actions while one key operation is in flight", async () => {
+    let finishClear!: () => void;
+    llmClearKey.mockImplementation(() => new Promise<void>((resolve) => { finishClear = () => resolve(); }));
+    // Two providers with keys, so both have a Remove to be wrongly offered.
+    // `openAi`, not `openai` — `PROVIDERS` (core/llm.ts) is camelCase, and a
+    // fixture with the wrong kind gives that row no key, so it renders no
+    // Remove button and the test cannot see the defect it is about.
+    llmKeyStatus.mockResolvedValue(["anthropic", "openAi"]);
+    render(<AgentPane />);
+
+    // The default provider's row is open already; start removing its key.
+    await userEvent.click(await screen.findByRole("button", { name: /remove key/i }));
+
+    // Switch to the other provider — `expanded` holds one at a time, so this
+    // is the reviewer's exact scenario.
+    // "OpenAI" and "OpenAI-compatible" both match a loose pattern; this is
+    // the plain one, whose row says it holds a key.
+    const openai = screen
+      .getAllByRole("button")
+      .find((b) => /^OpenAI(?!-)/.test(b.textContent ?? ""))!;
+    await userEvent.click(openai);
+
+    // Its key actions must not be live: both write the same store, and the
+    // first operation has not finished.
+    expect((screen.getByRole("button", { name: /remove key/i }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      finishClear();
+    });
+  });
 });

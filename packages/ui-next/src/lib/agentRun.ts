@@ -300,6 +300,26 @@ async function loadSkillsGuidance(names: string[]): Promise<string> {
 }
 
 /**
+ * One line telling the agent which cluster it is being asked about.
+ *
+ * Classic sends this (`AssistantConversation.tsx`'s `contextPreface`) and the
+ * new design did not, which left a question like "what is unhealthy right
+ * now?" with nothing naming the cluster on screen. Every MCP tool call takes
+ * an explicit context, so an agent given none has to guess one — and guessing
+ * a cluster is the failure this migration has already spent seven findings
+ * preventing on its own surfaces.
+ *
+ * Sent, never recorded — the same transmitted-vs-recorded split
+ * {@link loadSkillsGuidance} follows, so the transcript keeps showing the
+ * reader's own words.
+ */
+function contextPreface(context: string): string {
+  const named = context.trim();
+  if (named === "") return "";
+  return `Current context: cluster ${named}.\n\n`;
+}
+
+/**
  * Ask the current agent one question, under whichever skills' guidance are
  * active for this run — the store's own business, per this module's
  * transmitted-vs-recorded split (see `loadSkillsGuidance`): this fetches and
@@ -324,7 +344,21 @@ async function loadSkillsGuidance(names: string[]): Promise<string> {
  * question; every question after reuses it and carries `resume` so the CLI
  * picks the conversation back up.
  */
-export async function askAgent(question: string, opts?: { images?: string[]; skills?: string[] }): Promise<void> {
+export async function askAgent(
+  question: string,
+  opts?: {
+    images?: string[];
+    skills?: string[];
+    /**
+     * The cluster this question is about, pinned by the CALLER at the gesture
+     * rather than read here. Both submit paths already hold it — the dock from
+     * the active context, the composer from its own prop — and reading it in
+     * this module at dispatch time would reintroduce exactly the
+     * read-it-later defect the cluster-identity rule exists to stop.
+     */
+    context?: string;
+  },
+): Promise<void> {
   // ONE turn at a time, refused here rather than at each door.
   //
   // The dock's input and the composer both disable themselves while busy, but
@@ -427,6 +461,7 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
     // mean "nobody wants this answered".
     if (stoppedGeneration === myGeneration) return;
     session = started;
+    const preface = contextPreface(opts?.context ?? "");
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
     // The FIRST fix here guarded only the `startChat` window and was too
@@ -477,7 +512,7 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
     if (stoppedGeneration === myGeneration) return;
     const result = await sendChat(
       started,
-      `${guidance}${question}`,
+      `${preface}${guidance}${question}`,
       agentPath,
       onEvent,
       images,

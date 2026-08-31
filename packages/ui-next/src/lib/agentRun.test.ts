@@ -242,6 +242,43 @@ describe("the run store", () => {
     });
   });
 
+  // P1 round 5 (#392): classic prepends a context preface; the new design
+  // sent nothing, so a question like "what is unhealthy right now?" gave the
+  // agent no way to name the cluster on screen — and every MCP tool call
+  // takes an explicit context, so it would have to guess one.
+  describe("the cluster a question is about", () => {
+    it("names the cluster to the agent, without putting it in the reader's transcript", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("what is unhealthy right now?", { context: "prod-eu" });
+
+      // Sent.
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe(
+        "Current context: cluster prod-eu.\n\nwhat is unhealthy right now?",
+      );
+      // Not recorded — the transcript keeps the reader's own words, the same
+      // split the skills guidance follows.
+      expect(getAgentRun().turns.find((t) => t.role === "user")?.text).toBe("what is unhealthy right now?");
+    });
+
+    it("sends no preface at all when there is no cluster to name", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("hello", { context: "   " });
+      // Not an empty "Current context: cluster ." line — a preface naming
+      // nothing is worse than none.
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("hello");
+    });
+
+    it("puts the cluster ahead of the skills guidance, not inside it", async () => {
+      sendChat.mockResolvedValue(null);
+      loadSkill.mockResolvedValue({ name: "oom", body: "oom body" });
+      setSkillActive("oom", true);
+      await askAgent("why", { context: "prod-eu" });
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe(
+        "Current context: cluster prod-eu.\n\nApply these skills:\n\noom body\n\nwhy",
+      );
+    });
+  });
+
   // P2 (#392 review): `resume` is the PREVIOUS CLI's own conversation id.
   describe("switching agent CLIs", () => {
     it("does not hand one CLI's resume token to another", async () => {

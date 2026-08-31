@@ -269,13 +269,20 @@ describe("the composer", () => {
     expect(setSkillActive).toHaveBeenCalledWith("Rollout forensics", false);
   });
 
-  it("sends only the question — the active skills askAgent applies are the store's own default, not an opt this composer passes", async () => {
+  it("passes no skills of its own — those are the store's default — but does pin the cluster", async () => {
     listAgents.mockResolvedValue([CLAUDE]);
     useAgentRun.mockReturnValue(runState({ activeSkills: ["Rollout forensics"] }));
-    render(<Composer context="" />);
+    render(<Composer context="prod-eu" />);
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "check this{Enter}");
-    expect(askAgent).toHaveBeenCalledWith("check this");
+    const [question, opts] = askAgent.mock.calls.at(-1)!;
+    expect(question).toBe("check this");
+    // Still the point of this test: `skills` is NOT an opt this composer
+    // passes, so the store's own active set is what applies.
+    expect(opts).not.toHaveProperty("skills");
+    // And the cluster IS pinned at the gesture — the agent needs to know
+    // which one it is being asked about.
+    expect(opts?.context).toBe("prod-eu");
   });
 
   it("submits on Enter when the slash menu is closed, and clears the input", async () => {
@@ -283,7 +290,7 @@ describe("the composer", () => {
     render(<Composer context="" />);
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "hello{Enter}");
-    expect(askAgent).toHaveBeenCalledWith("hello");
+    expect(askAgent).toHaveBeenCalledWith("hello", expect.objectContaining({ context: "" }));
     expect((box as HTMLInputElement).value).toBe("");
   });
 
@@ -301,7 +308,7 @@ describe("the composer", () => {
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "  hi there  ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
-    expect(askAgent).toHaveBeenCalledWith("hi there");
+    expect(askAgent).toHaveBeenCalledWith("hi there", expect.objectContaining({ context: "" }));
     expect((box as HTMLInputElement).value).toBe("");
   });
 
