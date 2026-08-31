@@ -64,7 +64,10 @@ const bus = vi.hoisted(() => {
 
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
-  respondToConfirm: vi.fn(async () => {}),
+  // Typed rather than bare `vi.fn()`: `mock.calls` on an untyped mock is a
+  // zero-length tuple, so a test that reads an argument back cannot compile,
+  // and `toHaveBeenCalledWith` checks nothing about its arguments either.
+  respondToConfirm: vi.fn<(id: string, approved: boolean) => Promise<void>>(async () => {}),
   pendingConfirms: vi.fn<() => Promise<ConfirmRequest[]>>(async () => []),
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
   on: vi.fn(),
@@ -105,6 +108,7 @@ vi.mock("@srelens/core", async (orig) => ({
 import type { ConfirmRequest } from "@srelens/core";
 import { AgentConsent } from "./AgentConsent";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
+import { getAgentRun, resetAgentRun } from "../lib/agentRun";
 
 const REQUEST = "mcp://confirm-request";
 const RESOLVED = "mcp://confirm-resolved";
@@ -169,6 +173,9 @@ beforeEach(() => {
   // Nothing here renders the gate itself; the store is what this component
   // reads, and a raise in one test must not still be up in the next.
   resetLock();
+  // Same reason, one store over: a gate recorded in one test must not still
+  // be sitting in the run for the next.
+  resetAgentRun();
   // And an OPEN vault, said out loud rather than left to the store's default.
   // A fresh store has read no vault at all, and "no read has landed" counts as
   // covered where a vault exists — so without this every test in this file
@@ -725,4 +732,108 @@ describe("AgentConsent", () => {
       expect(container.textContent).toBe("");
     });
   });
+
+  // ---- What the run's transcript is told ------------------------------------
+
+  /**
+   * The transcript DRAWS a gate; it does not answer one. This component stays
+   * the only subscriber to `mcp://confirm-request` and the only caller of
+   * `respondToConfirm`, and the tests below are about the record it leaves
+   * behind for the transcript to render — never about a second way to reply.
+   *
+   * Classic listened twice, and showed a modal and an inline card for one
+   * request, each with its own buttons. Answering one left the other stale,
+   * which is the whole reason `mcp://confirm-resolved` had to exist.
+   */
+  describe("the record it leaves in the run", () => {
+    it("still answers exactly once, with the transcript only recording it", async () => {
+      await mount();
+      ask("r1", "k8s_scale", { name: "api" });
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r1", true));
+      expect(core.respondToConfirm.mock.calls.filter(([id]) => id === "r1")).toHaveLength(1);
+    });
+
+    it("puts the request in the run as pending, before anyone has answered it", async () => {
+      await mount();
+      ask("r1", "k8s_scale", { replicas: 3 });
+      await screen.findByRole("dialog");
+      // Recorded at presentation — this is what the transcript draws as
+      // pending, and it must exist while the answer is still the reader's to
+      // give.
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r1")?.outcome).toBe("pending"));
+      expect(core.respondToConfirm).not.toHaveBeenCalled();
+      // Pending means pending: no resolution time on a gate nobody resolved.
+      expect(getAgentRun().gates.find((g) => g.id === "r1")?.at).toBeUndefined();
+    });
+
+    it("records the outcome in the run without owning the answer", async () => {
+      await mount();
+      ask("r1", "k8s_scale", {});
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r1")?.outcome).toBe("approved"));
+      // One row, not two: `noteGate` merges by id, so the pending record is
+      // replaced rather than left sitting above its own answer.
+      expect(getAgentRun().gates.filter((g) => g.id === "r1")).toHaveLength(1);
+      expect(getAgentRun().gates.find((g) => g.id === "r1")?.at).toEqual(expect.any(Number));
+    });
+
+    it("records a denial as a denial", async () => {
+      // `outcome` carries three states and a denial is not the absence of an
+      // approval. Without this, a field that only ever writes "approved"
+      // passes the test above forever.
+      await mount();
+      ask("r2", "k8s_deletePod", {});
+      await userEvent.click(await screen.findByRole("button", { name: /deny/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r2")?.outcome).toBe("denied"));
+    });
+
+    it("leaves the run alone when an answer did not land", async () => {
+      // The click did not take effect, so the gate is still the reader's to
+      // give. A record saying "approved" here would report a decision the
+      // backend never accepted — and this component already keeps the prompt
+      // up for exactly that reason.
+      await mount();
+      core.respondToConfirm.mockRejectedValueOnce(new Error("already settled"));
+      ask("r4", "k8s_rolloutRestart", {});
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await screen.findByRole("alert");
+      expect(getAgentRun().gates.find((g) => g.id === "r4")?.outcome).toBe("pending");
+      expect(getAgentRun().gates.find((g) => g.id === "r4")?.at).toBeUndefined();
+    });
+
+    it("does not put a gate in the run for a request the cover refused unseen", async () => {
+      // A request raised over a sealed window is refused without ever being
+      // put to the reader. A record of it in the transcript would draw a
+      // decision nobody was asked to make. This component gained a P1 once
+      // already by answering over a sealed vault; this is the next change to
+      // touch it.
+      await mount();
+      act(() => lockWorkspace());
+      ask("r3", "k8s_drainNode");
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r3", false));
+      expect(getAgentRun().gates.find((g) => g.id === "r3")).toBeUndefined();
+    });
+
+    /**
+     * The other half of the cover case, and the one the brief did not settle.
+     *
+     * A request that WAS shown, and then the cover went up: the reader was
+     * genuinely asked, and genuinely never answered. `pending` is the honest
+     * record of that. Writing `denied` would put the reader's name on a
+     * refusal the cover made, which is the same defect as recording an unseen
+     * request — one level subtler. See the ruling in the ledger.
+     */
+    it("leaves a gate the reader saw but never answered as pending", async () => {
+      await mount();
+      ask("r5", "k8s_deletePod", {});
+      await screen.findByRole("dialog");
+      await act(async () => {
+        lockWorkspace();
+      });
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r5", false));
+      expect(getAgentRun().gates.find((g) => g.id === "r5")?.outcome).toBe("pending");
+    });
+  });
+
 });

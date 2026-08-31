@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { isTauri, pendingConfirms, respondToConfirm, subscribe, type ConfirmRequest } from "@srelens/core";
+import { noteGate } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
@@ -361,6 +362,21 @@ export function AgentConsent() {
     }
   }, [covered, queue]);
 
+  // The transcript's record of a gate begins when the reader is actually SHOWN
+  // it — `!covered && current` is exactly the condition under which this
+  // component renders the prompt, so the record and the question appear
+  // together.
+  //
+  // Not on arrival. The refusals this component makes on its own — a covered
+  // window, a request the backend settled elsewhere, a snapshot entry it cannot
+  // answer — are not decisions, and a record of one would draw a decision in
+  // the transcript that nobody was ever asked to make. The reader would read
+  // their own name on a call they never saw.
+  useEffect(() => {
+    if (covered || !current) return;
+    noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" });
+  }, [covered, current]);
+
   async function answer(approved: boolean): Promise<void> {
     if (!current) return;
     const { id } = current;
@@ -371,6 +387,18 @@ export function AgentConsent() {
     setFailed(null);
     try {
       await respondToConfirm(id, approved);
+      // Stamped only once the answer has LANDED, and from the same `current`
+      // the reader was shown. A rejection below means the click did not take
+      // effect, so the gate is still genuinely pending and the record stays
+      // that way — the transcript must not report a decision the backend never
+      // accepted.
+      noteGate({
+        id,
+        tool: current.tool,
+        args: current.args,
+        outcome: approved ? "approved" : "denied",
+        at: Date.now(),
+      });
       // Only a landed answer takes the question away. By id, not by position —
       // see the file comment.
       setQueue((q) => q.filter((r) => r.id !== id));
