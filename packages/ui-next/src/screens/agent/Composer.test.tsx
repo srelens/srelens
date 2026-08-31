@@ -131,9 +131,14 @@ describe("the composer", () => {
     listPrompts.mockRejectedValue(new Error("no such command: prompt_list"));
     render(<Composer context="prod" />);
     await userEvent.type(await screen.findByRole("textbox"), "/");
-    expect(await screen.findByText(/could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText(/prompts could not be loaded/i)).toBeTruthy();
     expect(await screen.findByText(/prompt_list/)).toBeTruthy();
     expect(screen.queryByText(/no matches/i)).toBeNull();
+    // The read that LANDED is still on offer. Reporting one failure by
+    // replacing the whole menu made the skill that was successfully read
+    // unpickable — a second defect wearing the first one's fix as a costume.
+    expect(screen.getByRole("button", { name: /Rollout forensics/ })).toBeTruthy();
+    expect(screen.queryByText(/saved skills could not be loaded/i)).toBeNull();
   });
 
   it("says the slash menu's read failed, rather than opening onto no matches, when listSkills rejects", async () => {
@@ -141,8 +146,24 @@ describe("the composer", () => {
     listSkills.mockRejectedValue(new Error("no such command: skill_list"));
     render(<Composer context="prod" />);
     await userEvent.type(await screen.findByRole("textbox"), "/");
-    expect(await screen.findByText(/could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText(/saved skills could not be loaded/i)).toBeTruthy();
     expect(await screen.findByText(/skill_list/)).toBeTruthy();
+    expect(screen.queryByText(/no matches/i)).toBeNull();
+    // The other direction of the same rule.
+    expect(screen.getByRole("button", { name: /diagnose/ })).toBeTruthy();
+    expect(screen.queryByText(/prompts could not be loaded/i)).toBeNull();
+  });
+
+  it("reports both reads when both fail, and says No matches for neither", async () => {
+    listAgents.mockResolvedValue([CLAUDE]);
+    listPrompts.mockRejectedValue(new Error("no such command: prompt_list"));
+    listSkills.mockRejectedValue(new Error("no such command: skill_list"));
+    render(<Composer context="prod" />);
+    await userEvent.type(await screen.findByRole("textbox"), "/");
+    // Two independent reads, two independent failures — not one collapsed
+    // sentence that leaves the reader guessing which half is missing.
+    expect(await screen.findByText(/prompts could not be loaded/i)).toBeTruthy();
+    expect(await screen.findByText(/saved skills could not be loaded/i)).toBeTruthy();
     expect(screen.queryByText(/no matches/i)).toBeNull();
   });
 

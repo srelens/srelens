@@ -44,27 +44,44 @@ const AGENT_KIND_LABELS = ["Claude", "Codex", "Cursor", "srelens"];
 function SlashMenu({
   prompts,
   skills,
-  error,
+  promptsError,
+  skillsError,
   onPickPrompt,
   onPickSkill,
 }: {
   prompts: PromptSummary[];
   skills: SkillMeta[];
-  /** A rejected `listPrompts`/`listSkills`, if either failed — see I6. Shown
-   *  in place of the list rather than silently opening onto "No matches.",
-   *  which would tell the reader nothing was saved when in fact nothing was
-   *  ever successfully asked. */
-  error?: unknown;
+  /**
+   * The two reads fail INDEPENDENTLY, and each is reported over its own half
+   * of the menu — `RunsRail`'s two Sections are the same shape.
+   *
+   * One error slot for both was the first attempt at I6 and it traded one
+   * defect for another: `listPrompts` rejecting while `listSkills` returned
+   * three saved skills replaced the whole menu with the failure, so those
+   * three became unpickable from the composer. Telling the reader nothing was
+   * saved when nothing was asked is the defect I6 exists to fix; hiding what
+   * WAS successfully read is a second one, not a fix.
+   */
+  promptsError?: unknown;
+  skillsError?: unknown;
   onPickPrompt: (p: PromptSummary) => void;
   onPickSkill: (s: SkillMeta) => void;
 }) {
   return (
     <div className="absolute bottom-full left-0 z-50 mb-1 max-h-64 w-80 min-w-0 overflow-y-auto rounded-card border border-rule bg-raised p-1 shadow-lg">
-      {error != null ? (
-        <Alert tone="sev" title="Prompts and skills could not be loaded">
-          <RawError text={String(error)} />
+      {promptsError != null && (
+        <Alert tone="sev" title="Prompts could not be loaded">
+          <RawError text={String(promptsError)} />
         </Alert>
-      ) : prompts.length === 0 && skills.length === 0 ? (
+      )}
+      {skillsError != null && (
+        <Alert tone="sev" title="Saved skills could not be loaded">
+          <RawError text={String(skillsError)} />
+        </Alert>
+      )}
+      {/* "No matches." only when both reads LANDED and both were empty. With
+          either one failed, the failure above is what says why. */}
+      {promptsError == null && skillsError == null && prompts.length === 0 && skills.length === 0 ? (
         <p className="px-2 py-1.5 text-xs text-muted">No matches.</p>
       ) : (
         <>
@@ -229,10 +246,10 @@ export function Composer({ context }: { context: string }) {
   const agentsLoaded = agents.kind === "ready";
   const promptsList = prompts.kind === "ready" ? prompts.value : [];
   const skillsList = skills.kind === "ready" ? skills.value : [];
-  // Either failing is reported the same way — see `SlashMenu`'s `error` prop
-  // — so which one's error string wins when both fail is not a choice that
-  // needs to be a good one, only a deterministic one.
-  const slashReadError = prompts.kind === "error" ? prompts.error : skills.kind === "error" ? skills.error : null;
+  // Kept apart, not collapsed onto one slot: each is reported over its own
+  // half of the menu, so a failed read never hides the one that landed.
+  const promptsError = prompts.kind === "error" ? prompts.error : null;
+  const skillsError = skills.kind === "error" ? skills.error : null;
 
   // The store's `agentKind` can name a kind that just went missing from
   // `offered` (nothing loaded yet, or the last-picked kind un-gated to
@@ -249,7 +266,9 @@ export function Composer({ context }: { context: string }) {
   // Opens on an error too — a failed read used to leave `/` opening onto
   // nothing, with no way to tell "nothing saved" from "couldn't check" (I6).
   const menuOpen =
-    slashMatch !== null && !menuDismissed && (promptsList.length > 0 || skillsList.length > 0 || slashReadError !== null);
+    slashMatch !== null &&
+    !menuDismissed &&
+    (promptsList.length > 0 || skillsList.length > 0 || promptsError !== null || skillsError !== null);
   const query = (slashMatch?.[1] ?? "").toLowerCase();
   const filteredPrompts = query ? promptsList.filter((p) => p.name.toLowerCase().includes(query)) : promptsList;
   const filteredSkills = query ? skillsList.filter((s) => s.name.toLowerCase().includes(query)) : skillsList;
@@ -394,7 +413,8 @@ export function Composer({ context }: { context: string }) {
           <SlashMenu
             prompts={filteredPrompts}
             skills={filteredSkills}
-            error={slashReadError}
+            promptsError={promptsError}
+            skillsError={skillsError}
             onPickPrompt={(p) => void pickPrompt(p)}
             onPickSkill={pickSkill}
           />

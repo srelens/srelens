@@ -369,10 +369,15 @@ export async function askAgent(question: string, opts?: { images?: string[]; ski
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
     // An agent that is `available` but `gated` must not be offered — mirrors
-    // `Composer`'s own filter (Codex and Cursor are installed-but-gated
-    // today). Composer reconciles the PICKER against this same set, but the
-    // dock never mounts Composer at all (§F), so `agentKind` reaching here
-    // can still name a kind nothing in `offered` matches.
+    // `Composer`'s own filter. Nothing is gated today: core documents `gated`
+    // as "currently always `false` for every kind" (`chat.ts:25-29`) and
+    // `is_gated` returns `false` unconditionally (`assistant.rs:28-30`), so
+    // this half of the filter is a guard against a future gating, not a
+    // branch anything currently reaches.
+    //
+    // Composer reconciles the PICKER against this same set, but the dock never
+    // mounts Composer at all (§F), so `agentKind` reaching here can still name
+    // a kind nothing in `offered` matches.
     const offered = agents.filter((a) => a.available && !a.gated);
     let resolvedKind = agentKind;
     let agentPath = offered.find((a) => a.kind === agentKind)?.path ?? "";
