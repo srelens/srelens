@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { isTauri, pendingConfirms, respondToConfirm, subscribe, type ConfirmRequest } from "@srelens/core";
-import { noteGate } from "../lib/agentRun";
+import { getAgentRun, noteGate } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
@@ -372,8 +372,26 @@ export function AgentConsent() {
   // answer — are not decisions, and a record of one would draw a decision in
   // the transcript that nobody was ever asked to make. The reader would read
   // their own name on a call they never saw.
+  //
+  // **Ownership is decided ONCE, here, at presentation.** `ConfirmRequest` is
+  // `{ id, tool, args }` — it carries no client identity, so this component
+  // cannot know whose call raised it. The confirm channel is app-wide by
+  // design: an external MCP client (the loopback HTTP server, bearer-token
+  // authenticated) raises the exact same `mcp://confirm-request` srelens's own
+  // agent does. The honest predicate is "does THIS store have a turn actually
+  // in flight right now" — that is the only moment srelens's own agent could
+  // be the caller. A confirm presented while the store is idle is recorded as
+  // nothing: it is still shown and still answered below, just not attributed
+  // to a conversation it may have no part in.
+  //
+  // Known limit, stated rather than hidden: a confirm raised by ANOTHER
+  // client WHILE srelens's own agent happens to be mid-turn is still
+  // misattributed — this predicate cannot tell the two apart without client
+  // identity in the payload, which `ConfirmRequest` does not carry. Fixing
+  // that needs a payload change on the backend side; filed separately.
   useEffect(() => {
     if (covered || !current) return;
+    if (!getAgentRun().busy) return;
     noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" });
   }, [covered, current]);
 
@@ -392,13 +410,24 @@ export function AgentConsent() {
       // effect, so the gate is still genuinely pending and the record stays
       // that way — the transcript must not report a decision the backend never
       // accepted.
-      noteGate({
-        id,
-        tool: current.tool,
-        args: current.args,
-        outcome: approved ? "approved" : "denied",
-        at: Date.now(),
-      });
+      //
+      // Updates ONLY a record that already exists. Ownership was decided once,
+      // at presentation (see the effect above) — not re-tested here, on
+      // purpose: a run can finish (or start) between presentation and the
+      // reader's click, and re-testing `busy` at THIS moment would leave a
+      // gate this component did own stuck `pending` forever (the run finished
+      // first) or invent one for a call it never owned (a run started after
+      // presentation but before the click). Looking the id up is the only
+      // check that agrees with the presentation-time decision either way.
+      if (getAgentRun().gates.some((g) => g.id === id)) {
+        noteGate({
+          id,
+          tool: current.tool,
+          args: current.args,
+          outcome: approved ? "approved" : "denied",
+          at: Date.now(),
+        });
+      }
       // Only a landed answer takes the question away. By id, not by position —
       // see the file comment.
       setQueue((q) => q.filter((r) => r.id !== id));

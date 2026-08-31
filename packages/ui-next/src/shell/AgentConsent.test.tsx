@@ -73,6 +73,16 @@ const core = vi.hoisted(() => ({
   on: vi.fn(),
   subscribe: vi.fn(),
   vaultStatus: vi.fn(),
+  // For the "a turn is in flight" tests below (C1): `askAgent` is the store's
+  // own way to get `busy` true, and these are the three backend calls it
+  // makes on the way to `sendChat`. Not exercising streaming itself — only
+  // getting, and holding, the store in a busy state — so `sendChat` is made
+  // to hang rather than resolve.
+  startChat: vi.fn<() => Promise<string>>(async () => "sess-1"),
+  sendChat: vi.fn(),
+  listAgents: vi.fn(async () => [
+    { kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false },
+  ]),
 }));
 
 vi.mock("@srelens/core", async (orig) => ({
@@ -82,6 +92,9 @@ vi.mock("@srelens/core", async (orig) => ({
   pendingConfirms: core.pendingConfirms,
   notify: core.notify,
   vaultStatus: core.vaultStatus,
+  startChat: core.startChat,
+  sendChat: core.sendChat,
+  listAgents: core.listAgents,
   // Resolves once the registration has landed — the real one's contract.
   subscribe: (channel: string, handler: (payload: unknown) => void) => {
     core.subscribe(channel, handler);
@@ -108,7 +121,7 @@ vi.mock("@srelens/core", async (orig) => ({
 import type { ConfirmRequest } from "@srelens/core";
 import { AgentConsent } from "./AgentConsent";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
-import { getAgentRun, resetAgentRun } from "../lib/agentRun";
+import { askAgent, getAgentRun, resetAgentRun } from "../lib/agentRun";
 
 const REQUEST = "mcp://confirm-request";
 const RESOLVED = "mcp://confirm-resolved";
@@ -161,6 +174,20 @@ function broadcast(channel: string, payload: unknown): boolean {
 const ask = (id: string, tool: string, args: Record<string, unknown> = {}) =>
   emit(REQUEST, { id, tool, args });
 
+/**
+ * Put the run store into `busy` — the only state `AgentConsent` can use to
+ * decide a confirm is srelens's own agent's doing (C1). `askAgent` commits
+ * `busy: true` synchronously, before its first `await`, so this is true the
+ * instant the call is made — no need to await anything here. `sendChat` is
+ * left hanging (never resolves) so the run STAYS busy for the rest of the
+ * test; `resetAgentRun()` in the next `beforeEach` is what cleans it up, not
+ * anything this helper does.
+ */
+function startTurn(): void {
+  core.sendChat.mockImplementation(() => new Promise(() => {}));
+  void askAgent("investigate checkout-api");
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   bus.handlers.clear();
@@ -170,11 +197,15 @@ beforeEach(() => {
   core.respondToConfirm.mockResolvedValue(undefined);
   // Nothing was waiting when this mounted, unless a test says otherwise.
   core.pendingConfirms.mockResolvedValue([]);
+  core.startChat.mockResolvedValue("sess-1");
+  core.listAgents.mockResolvedValue([
+    { kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false },
+  ]);
   // Nothing here renders the gate itself; the store is what this component
   // reads, and a raise in one test must not still be up in the next.
   resetLock();
-  // Same reason, one store over: a gate recorded in one test must not still
-  // be sitting in the run for the next.
+  // Same reason, one store over: a gate recorded in one test — or a turn left
+  // busy by `startTurn()` — must not still be sitting in the run for the next.
   resetAgentRun();
   // And an OPEN vault, said out loud rather than left to the store's default.
   // A fresh store has read no vault at all, and "no read has landed" counts as
@@ -748,14 +779,16 @@ describe("AgentConsent", () => {
   describe("the record it leaves in the run", () => {
     it("still answers exactly once, with the transcript only recording it", async () => {
       await mount();
+      startTurn();
       ask("r1", "k8s_scale", { name: "api" });
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r1", true));
       expect(core.respondToConfirm.mock.calls.filter(([id]) => id === "r1")).toHaveLength(1);
     });
 
-    it("puts the request in the run as pending, before anyone has answered it", async () => {
+    it("puts the request in the run as pending, before anyone has answered it, while srelens's own agent has a turn in flight", async () => {
       await mount();
+      startTurn();
       ask("r1", "k8s_scale", { replicas: 3 });
       await screen.findByRole("dialog");
       // Recorded at presentation — this is what the transcript draws as
@@ -769,6 +802,7 @@ describe("AgentConsent", () => {
 
     it("records the outcome in the run without owning the answer", async () => {
       await mount();
+      startTurn();
       ask("r1", "k8s_scale", {});
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r1")?.outcome).toBe("approved"));
@@ -783,6 +817,7 @@ describe("AgentConsent", () => {
       // approval. Without this, a field that only ever writes "approved"
       // passes the test above forever.
       await mount();
+      startTurn();
       ask("r2", "k8s_deletePod", {});
       await userEvent.click(await screen.findByRole("button", { name: /deny/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r2")?.outcome).toBe("denied"));
@@ -794,6 +829,7 @@ describe("AgentConsent", () => {
       // backend never accepted — and this component already keeps the prompt
       // up for exactly that reason.
       await mount();
+      startTurn();
       core.respondToConfirm.mockRejectedValueOnce(new Error("already settled"));
       ask("r4", "k8s_rolloutRestart", {});
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
@@ -809,6 +845,7 @@ describe("AgentConsent", () => {
       // already by answering over a sealed vault; this is the next change to
       // touch it.
       await mount();
+      startTurn();
       act(() => lockWorkspace());
       ask("r3", "k8s_drainNode");
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r3", false));
@@ -826,6 +863,7 @@ describe("AgentConsent", () => {
      */
     it("leaves a gate the reader saw but never answered as pending", async () => {
       await mount();
+      startTurn();
       ask("r5", "k8s_deletePod", {});
       await screen.findByRole("dialog");
       await act(async () => {
@@ -833,6 +871,68 @@ describe("AgentConsent", () => {
       });
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r5", false));
       expect(getAgentRun().gates.find((g) => g.id === "r5")?.outcome).toBe("pending");
+    });
+
+    // ---- Ownership at presentation (C1) ---------------------------------
+    //
+    // `ConfirmRequest` carries no client identity. The confirm channel is
+    // app-wide by design — an external MCP client (the loopback HTTP server)
+    // raises the exact same event srelens's own agent does — so the only
+    // honest signal this component has is whether the run store has a turn
+    // actually in flight AT PRESENTATION. Every test above now runs with
+    // `startTurn()` so it is testing the busy case on purpose, not by
+    // accident; the two tests below are the idle case those tests deliberately
+    // exclude.
+
+    it("does not record a gate for a confirm raised while no srelens turn is in flight, but still presents and answers it", async () => {
+      // No `startTurn()`: the store is idle, as it is for a confirm an
+      // external MCP client raised — the scenario this fix exists for.
+      await mount();
+      ask("ext1", "k8s_scale", { replicas: 2 });
+      await screen.findByRole("dialog");
+      expect(getAgentRun().gates.find((g) => g.id === "ext1")).toBeUndefined();
+      await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("ext1", true));
+    });
+
+    it("does not create a gate on the way out, for an answer whose request was never recorded", async () => {
+      // Same idle setup, but the assertion is about what `answer()` does
+      // AFTER a landed response — it must look the id up rather than writing
+      // one unconditionally, or an unowned confirm would grow a gate the
+      // instant it was answered even though presentation recorded none.
+      await mount();
+      ask("ext2", "k8s_scale", { replicas: 5 });
+      await userEvent.click(await screen.findByRole("button", { name: /deny/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("ext2", false));
+      expect(getAgentRun().gates.find((g) => g.id === "ext2")).toBeUndefined();
+    });
+
+    /**
+     * The mutation the brief calls out by name: re-testing `busy` in
+     * `answer()` instead of looking up the record already made at
+     * presentation. A run that finishes mid-gate (srelens's own agent's
+     * `sendChat` settles while the reader is still looking at the dialog) must
+     * still stamp the outcome on the record presentation made — re-testing
+     * `busy` here would find the store idle again and skip the stamp, leaving
+     * an owned gate stuck `pending` forever.
+     */
+    it("still stamps the outcome when the run finishes while the gate is still on screen", async () => {
+      await mount();
+      let resolveSendChat!: (v: string | null) => void;
+      core.sendChat.mockImplementation(
+        () => new Promise<string | null>((resolve) => { resolveSendChat = resolve; }),
+      );
+      void askAgent("investigate checkout-api");
+      ask("r6", "k8s_scale", { replicas: 4 });
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r6")?.outcome).toBe("pending"));
+
+      // The run finishes — `busy` goes back to false — before the reader answers.
+      resolveSendChat(null);
+      await waitFor(() => expect(getAgentRun().busy).toBe(false));
+
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r6")?.outcome).toBe("approved"));
+      expect(getAgentRun().gates.find((g) => g.id === "r6")?.at).toEqual(expect.any(Number));
     });
   });
 

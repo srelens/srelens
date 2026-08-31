@@ -389,6 +389,13 @@ export function stopAgentRun(): void {
  *  stop, best-effort — its own answer, if one still lands, is stale and the
  *  generation check in `askAgent` drops it.
  *
+ *  Drops `gates` too. A gate is a row in THIS conversation's transcript, not
+ *  a fact independent of it — `Transcript` renders whatever is in `gates`
+ *  whenever it is non-empty, with no check that a gate's turn is still among
+ *  `turns`. Keeping them past a clear left every gate the reader had ever
+ *  answered still drawn under the next, unrelated run, for as long as the
+ *  window stayed open.
+ *
  *  Drops `activeSkills` too — a skill picked for a run that no longer exists
  *  is not "still active", and this is the one place that is true regardless
  *  of which component (if any) is mounted to have noticed the run end. */
@@ -398,7 +405,7 @@ export function clearAgentRun(): void {
   resume = null;
   // A no-op — clearing a run that is already idle and empty — is left to
   // `commit`'s own guard rather than special-cased here.
-  commit({ ...run, turns: [], busy: false, error: undefined, activeSkills: [] });
+  commit({ ...run, turns: [], gates: [], busy: false, error: undefined, activeSkills: [] });
 }
 
 /** Pick which agent CLI the next question is sent to. */

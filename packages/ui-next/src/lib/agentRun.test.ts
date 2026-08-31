@@ -122,7 +122,13 @@ describe("the run store", () => {
     expect(after.turns).toBe(before.turns);
   });
 
-  it("clears the conversation but keeps its gates and the chosen agent", async () => {
+  // C1: a gate is a row in THIS conversation's transcript, not a fact that
+  // outlives it — `Transcript` draws `gates` whenever it is non-empty, with
+  // no check that a gate's turn is still among `turns`. The version of this
+  // test that shipped was named for the defect it was pinning: it asserted
+  // `gates` survives a clear, which is exactly the bug (approve a mutation,
+  // start a fresh conversation, and the old gate is still drawn under it).
+  it("clears the conversation and its gates, but keeps the chosen agent", async () => {
     sendChat.mockImplementation(async () => null);
     await askAgent("q");
     noteGate({ id: "g1", tool: "k8s.scale", args: {}, outcome: "pending" });
@@ -134,10 +140,12 @@ describe("the run store", () => {
     const run = getAgentRun();
     expect(run.turns).toEqual([]);
     expect(run.busy).toBe(false);
-    expect(run.gates).toHaveLength(1);
+    // Gates belong to the conversation that raised them, not to the window.
+    expect(run.gates).toEqual([]);
+    // The chosen agent genuinely does survive a clear — only `gates` changes.
     expect(run.agentKind).toBe("codex");
-    // Unlike the gates and the chosen agent, a skill picked for the run that
-    // just ended is not "still active" for whatever run comes next.
+    // Unlike the chosen agent, a skill picked for the run that just ended is
+    // not "still active" for whatever run comes next.
     expect(run.activeSkills).toEqual([]);
   });
 
