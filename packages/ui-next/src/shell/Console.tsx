@@ -123,6 +123,10 @@ export function Console({ fullView }: { fullView?: boolean }) {
     setDraft: setValue,
     images,
     setImages,
+    // With the draft, not here: a read still in flight outlives this
+    // component when a tab switch remounts the dock elsewhere.
+    reading,
+    setReading,
   } = useConsole();
   /**
    * Screenshots waiting to go with the next question, as data URIs so they can
@@ -134,8 +138,6 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const [attachError, setAttachError] = useState<unknown>(null);
   /** A question refused because srelens has no cluster to ask about. */
   const [noCluster, setNoCluster] = useState(false);
-  /** How many pasted or picked images are still being read. */
-  const [reading, setReading] = useState(0);
   /**
    * Which agent the next question goes to — read here because the picker lives
    * in the composer's footer now, beside `+`.

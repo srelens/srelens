@@ -46,6 +46,20 @@ export interface ConsoleValue {
   setDraft: (draft: string) => void;
   images: string[];
   setImages: (next: string[] | ((held: string[]) => string[])) => void;
+  /**
+   * How many pasted or picked images are still being read.
+   *
+   * With the draft, and for the same reason. `FileReader` is asynchronous and
+   * Enter is not, so a submission has to wait for a read that belongs to it —
+   * and while this counter was component state it reset to zero on the remount
+   * a tab switch causes, while the read still in flight went on to append to
+   * the provider's `images`. The replacement composer then allowed Enter, sent
+   * the question without the screenshot, and the read attached it to the NEXT
+   * question: exactly the defect the counter exists to prevent, reappearing
+   * across the remount.
+   */
+  reading: number;
+  setReading: (next: number | ((n: number) => number)) => void;
 }
 
 const ConsoleContext = createContext<ConsoleValue | null>(null);
@@ -84,6 +98,7 @@ export function ConsoleProvider({
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<string[]>([]);
+  const [reading, setReading] = useState(0);
   const [scope, setScope] = useState(initialScope);
   const submit = useRef<Submit | null>(null);
   // Held rather than timed. Anything asked while nothing is listening waits
@@ -123,8 +138,10 @@ export function ConsoleProvider({
       setDraft,
       images,
       setImages,
+      reading,
+      setReading,
     }),
-    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images],
+    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images, reading],
   );
 
   return <ConsoleContext.Provider value={value}>{children}</ConsoleContext.Provider>;

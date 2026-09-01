@@ -626,6 +626,72 @@ describe("Console", () => {
     expect(placeholder).not.toContain("staging-eu");
   });
 
+  /**
+   * Codex P2, round 7: with the draft in the provider but the pending-read
+   * count in component state, a tab switch mid-read reset the count to zero
+   * while the read still in flight went on to append to the provider's
+   * `images` — so the replacement composer allowed Enter, sent the question
+   * without the screenshot, and the read attached it to the NEXT one.
+   */
+  it("still waits for a read that was started before the dock moved", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    let release: ((uri: string) => void) | undefined;
+    readImageFile.mockImplementationOnce(() => new Promise<string>((res) => (release = res)));
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+
+    function Host({ full }: { full: boolean }) {
+      return (
+        <ConsoleProvider onToggleTheme={() => {}}>
+          <Elsewhere />
+          {!full && (
+            <div data-mount="window">
+              <Console />
+            </div>
+          )}
+          {full && (
+            <section data-mount="agent">
+              <Console fullView />
+            </section>
+          )}
+        </ConsoleProvider>
+      );
+    }
+    const view = render(<Host full={false} />);
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    askAgent.mockClear();
+    fireEvent.paste(screen.getByRole("textbox", { name: "Console prompt" }), {
+      clipboardData: { files: [shot()], types: ["Files"] },
+    });
+    await vi.waitFor(() => {
+      expect(release).toBeDefined();
+    });
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "what is wrong here");
+
+    // The reader switches tabs while the read is still going.
+    view.rerender(<Host full />);
+    expect(await screen.findByText(/reading an image/i)).toBeTruthy();
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Console prompt" }), { key: "Enter" });
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    // Still held: the read belongs to this question.
+    expect(askAgent).not.toHaveBeenCalled();
+
+    release?.("data:image/png;base64,AAA");
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/reading an image/i)).toBeNull();
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Console prompt" }), { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(askAgent).toHaveBeenCalledWith(
+        "what is wrong here",
+        expect.objectContaining({ images: ["data:image/png;base64,AAA"] }),
+      );
+    });
+  });
+
   it("prints the console accelerator for the platform", () => {
     setup();
     expect(screen.getByText("⌘K")).toBeDefined();

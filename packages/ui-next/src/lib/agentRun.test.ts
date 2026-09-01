@@ -618,6 +618,34 @@ describe("the run store", () => {
       expect(getAgentRun().turns.length).toBeGreaterThan(0);
     });
 
+    /**
+     * Codex P2, round 7: nothing bumps the generation when a turn simply
+     * FINISHES, so the generation guard alone let a `cancelChat` rejecting
+     * after the answer arrived put "That question was not sent" above a
+     * question that visibly completed.
+     */
+    it("says nothing when a Stop loses the race with the answer it was stopping", async () => {
+      let reject: ((e: unknown) => void) | undefined;
+      cancelChat.mockImplementationOnce(() => new Promise<void>((_, rej) => (reject = rej)));
+      // The answer lands while the cancel is still outstanding.
+      sendChat.mockImplementation(async () => {
+        stopAgentRun();
+        return null;
+      });
+
+      await askAgent("why is it restarting");
+      await vi.waitFor(() => {
+        expect(reject).toBeDefined();
+      });
+      // The turn is over and its generation never moved.
+      expect(getAgentRun().busy).toBe(false);
+
+      reject?.(new Error("no such turn"));
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+
+      expect(getAgentRun().error).toBeUndefined();
+    });
+
     it("does not blame a new question for the previous Stop's failure", async () => {
       let reject: ((e: unknown) => void) | undefined;
       cancelChat.mockImplementationOnce(() => new Promise<void>((_, rej) => (reject = rej)));

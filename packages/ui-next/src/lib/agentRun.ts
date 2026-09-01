@@ -1149,13 +1149,22 @@ export function stopAgentRun(): void {
   const activeSession = state.session;
   const generation = state.run.generation;
   void cancelChat(activeSession, generation).catch((err: unknown) => {
-    // Only if this is still the turn that was cancelled. A rejection landing
-    // after the reader cleared the run or asked something else spread
-    // whatever `run` was current at rejection time, so a NEW conversation was
-    // told "That question was not sent" for a Stop belonging to the one
-    // before it — and a clear could appear to fail after it had already
-    // succeeded.
-    if (state.run.generation !== generation) return;
+    /*
+      Only if this is still the turn that was cancelled, AND it is still in
+      flight.
+
+      The generation half catches a rejection landing after the reader cleared
+      the run or asked something else: that spread whatever `run` was current,
+      so a NEW conversation was told "That question was not sent" for a Stop
+      belonging to the one before it.
+
+      The busy half catches normal completion, which the generation cannot:
+      nothing bumps it when a turn simply finishes, so a `cancelChat` rejecting
+      after the answer arrived put "That question was not sent" above a question
+      that visibly finished. A Stop that lost a race with the answer it was
+      trying to stop has nothing to report.
+    */
+    if (state.run.generation !== generation || !state.run.busy) return;
     commitTo(key, { ...state.run, error: describeError(err).detail });
   });
 }
