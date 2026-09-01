@@ -75,7 +75,10 @@ export function AppLog(_props: { route: string }) {
     try {
       await revealAppLog();
     } catch (e) {
-      notify.error("Couldn't reveal the application log", describeError(e).detail);
+      notify.error(
+        "Couldn't reveal the application log",
+        describeError(e, { domain: "local" }).detail,
+      );
     }
   }
 
@@ -157,6 +160,7 @@ export function AppLog(_props: { route: string }) {
         <FailureState
           title="Could not read the application log"
           error={log.error}
+          domain="local"
           onRetry={log.reload}
         />
       )}
