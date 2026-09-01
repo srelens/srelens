@@ -802,6 +802,104 @@ describe("Console", () => {
     expect(await screen.findByText(/could not be read/i)).toBeTruthy();
   });
 
+  /**
+   * Codex P1 on #392, merged unfixed: a screen's Ask control reaches `ask()`,
+   * which reached the COMPOSER's submit path — so a canned question carried
+   * whatever the reader had attached and wiped what they had typed.
+   */
+  it("does not consume the composer when a screen asks its own question", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    setup();
+    // Open the dock and get a draft and an attachment into it.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+    await screen.findByAltText("Attachment 1");
+    await user.type(box, "half a question");
+    askAgent.mockClear();
+
+    // A screen's own Ask control fires its canned question.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+    await vi.waitFor(() => {
+      expect(askAgent).toHaveBeenCalled();
+    });
+    // It went WITHOUT the reader's screenshot.
+    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ images: undefined }));
+    // And their draft and attachment are untouched.
+    expect((box as HTMLTextAreaElement).value).toBe("half a question");
+    expect(screen.getByAltText("Attachment 1")).toBeTruthy();
+  });
+
+  it("does not drop a screen's question while the composer is reading an image", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    let release: ((uri: string) => void) | undefined;
+    readImageFile.mockImplementationOnce(() => new Promise<string>((res) => (release = res)));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    fireEvent.paste(screen.getByRole("textbox", { name: "Console prompt" }), {
+      clipboardData: { files: [shot()], types: ["Files"] },
+    });
+    await vi.waitFor(() => {
+      expect(release).toBeDefined();
+    });
+    askAgent.mockClear();
+
+    // The composer's `reading` gate is about the composer's own question.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    await vi.waitFor(() => {
+      expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ images: undefined }));
+    });
+    release?.("data:image/png;base64,AAA");
+  });
+
+  /**
+   * Codex P2 on #392, merged unfixed: the chip belonged to the composition, and
+   * a successful submission cleared only the text and the images — so it sat
+   * over every later blank question with no way to dismiss it.
+   */
+  it("clears an attachment failure with the question it belonged to", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    readImageFile.mockRejectedValueOnce(new Error("not an image"));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+    expect(await screen.findByText(/could not be read/i)).toBeTruthy();
+
+    await user.type(box, "ask it anyway");
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/could not be read/i)).toBeNull();
+    });
+  });
+
+  it("keeps the attachment failure when the store refuses the question", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    readImageFile.mockRejectedValueOnce(new Error("not an image"));
+    askAgent.mockResolvedValueOnce(true).mockResolvedValue(false);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+    await screen.findByText(/could not be read/i);
+
+    await user.type(box, "ask it anyway");
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    // Refused: the question comes back, and so does the reason it had no
+    // screenshot on it.
+    await vi.waitFor(() => {
+      expect((box as HTMLTextAreaElement).value).toBe("ask it anyway");
+    });
+    expect(screen.getByText(/could not be read/i)).toBeTruthy();
+  });
+
   it("prints the console accelerator for the platform", () => {
     setup();
     expect(screen.getByText("⌘K")).toBeDefined();

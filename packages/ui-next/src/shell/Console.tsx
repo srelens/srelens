@@ -130,6 +130,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
     setReading,
     attachError,
     setAttachError,
+    restoreAttachError,
     noCluster,
     setNoCluster,
   } = useConsole();
@@ -332,6 +333,56 @@ export function Console({ fullView }: { fullView?: boolean }) {
 
   const commands = useMemo(() => commandsFor(deps), [deps]);
 
+  /**
+   * Whether a question can be sent at all, and the reason drawn where the
+   * reader is if it cannot. Shared by both paths below, because neither a
+   * browser nor a missing cluster cares who asked.
+   */
+  function sendable(raw: string): boolean {
+    /*
+      In a browser this component renders `null` further down — nothing served
+      by `srelens server` can answer a question, since `api_command.rs` has no
+      `chat_*` arm. That guard is BELOW the effect that registers the handler,
+      so a screen-level Ask button (`Overview.tsx`'s, for one) still reached
+      `askAgent`, whose `chat_start` came back unsupported, and the dock that
+      would have shown the failure was not on screen to show it.
+
+      So a question asked in web mode does the one useful thing available: it
+      opens `/agent`, which carries the explanation of why the agent needs the
+      desktop app.
+    */
+    if (!isTauri()) {
+      openTab("/agent", { clusterName: context || undefined });
+      return false;
+    }
+    // Every MCP tool call takes an explicit context, so a question sent with no
+    // cluster lets the agent pick one — and the run is keyed under an empty
+    // cluster, so it vanishes from the dock the moment a context resolves.
+    if (askCluster === "") {
+      setNoCluster(true);
+      return false;
+    }
+    setNoCluster(false);
+    return true;
+  }
+
+  /**
+   * A canned question from a screen's own Ask control, arriving through
+   * `ask()`.
+   *
+   * It does NOT touch the composer. Routing these through `onSubmit` meant a
+   * screen action snapshotted whatever the reader had attached and cleared
+   * whatever they had typed: press Overview's Summarise with a screenshot
+   * pasted and a half-written question, and the screenshot went with the canned
+   * question while the half-written one was wiped. Worse, an image still being
+   * read dropped the screen action entirely, because the composer's own
+   * `reading` gate applied to a question that had nothing to do with it.
+   */
+  function askFromScreen(question: string) {
+    if (!sendable(question)) return;
+    void send(question, "screen");
+  }
+
   function onSubmit(raw: string) {
     if (raw.startsWith("/")) {
       const matched = matchCommands(commands, raw.slice(1));
@@ -343,36 +394,10 @@ export function Console({ fullView }: { fullView?: boolean }) {
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
-    /*
-      In a browser this component renders `null` further down — nothing served
-      by `srelens server` can answer a question, since `api_command.rs` has no
-      `chat_*` arm. That guard is BELOW the effect that registers this handler,
-      so a screen-level Ask button (`Overview.tsx`'s, for one) still reached
-      `askAgent`, whose `chat_start` came back unsupported, and the dock that
-      would have shown the failure was not on screen to show it.
-
-      So a question asked in web mode does the one useful thing available: it
-      opens `/agent`, which carries the explanation of why the agent needs the
-      desktop app. Handled here rather than by skipping the registration — an
-      Ask button that silently does nothing is the same dead end by a quieter
-      route.
-    */
-    if (!isTauri()) {
-      openTab("/agent", { clusterName: context || undefined });
-      return;
-    }
-    // #7: every MCP tool call takes an explicit context, so a question sent
-    // with no cluster lets the agent pick one — and the run is keyed under an
-    // empty cluster, so it vanishes from the dock the moment a context does
-    // resolve. Refused where the reader can see it, rather than sent and left
-    // to fail somewhere they cannot.
-    if (askCluster === "") {
-      setNoCluster(true);
-      return;
-    }
-    setNoCluster(false);
+    if (!sendable(raw)) return;
     // An image still being read belongs to THIS question. Sending now would
-    // send the question without it and attach it to the next one.
+    // send the question without it and attach it to the next one. Only the
+    // composer waits: a screen's canned question owns none of this.
     if (reading > 0) return;
     /*
       In the full view the dock shows whichever conversation is SELECTED, and
@@ -385,11 +410,16 @@ export function Console({ fullView }: { fullView?: boolean }) {
       follow-up goes back to it. A run restored from a file written before that
       was recorded has none, and falls back to this route — the old behaviour.
     */
-    void submit(raw);
+    void send(raw, "composer");
   }
 
   /**
-   * Sends, and puts the draft back if the store REFUSES the question.
+   * Sends a question, and puts the composition back if the store REFUSES it.
+   *
+   * `from` says whether this question owns the composition. The composer's own
+   * submission does: it carries the draft's attachments and clears them. A
+   * screen's Ask control does not, so a canned question neither takes the
+   * reader's screenshot nor wipes their half-written question.
    *
    * Cleared first, restored on refusal — rather than cleared after `askAgent`
    * resolves. That promise settles when the ANSWER settles, which can be
@@ -398,13 +428,27 @@ export function Console({ fullView }: { fullView?: boolean }) {
    * contrast, happens before `askAgent` awaits anything at all, so the restore
    * lands in the same microtask and is never seen.
    *
-   * The restore is conditional both ways: if the reader has typed since, their
-   * text stands. Nothing here overwrites something newer.
+   * The restore is conditional every way: if the reader has typed, attached or
+   * failed to attach something since, theirs stands. Nothing here overwrites
+   * something newer.
    */
-  async function submit(raw: string) {
-    const sent = images;
-    setValue("");
-    setImages([]);
+  async function send(raw: string, from: "composer" | "screen") {
+    // WHO asked, not what state happens to hold. Inferring it from the draft
+    // read the reader's half-written question as evidence that the canned one
+    // owned it, and cleared it anyway.
+    const consumes = from === "composer";
+    const sent = consumes ? images : [];
+    const sentError = consumes ? attachError : null;
+    if (consumes) {
+      setValue("");
+      setImages([]);
+      // WITH the draft. An attachment failure explains why this question has no
+      // screenshot on it, so it belongs to the question being sent — left
+      // behind, the chip sat over every later blank question and over the dock
+      // in whichever tab it was next mounted in, with no way to dismiss it but
+      // attempting another attachment.
+      setAttachError(null);
+    }
     setOpen(true);
     const accepted = await askAgent(raw, {
       // The KEY, not a route to re-derive one from. `runKey` is what this dock
@@ -419,7 +463,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
       route: shown?.route ?? route,
       images: sent.length > 0 ? sent : undefined,
     });
-    if (accepted) return;
+    if (accepted || !consumes) return;
     // Refused — `askAgent` turns a question away while ANOTHER run's turn is in
     // flight, and this dock is not busy, so the reader can submit and be
     // refused. Discarding the question then left them retyping something they
@@ -430,6 +474,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
     // have typed or attached since is newer than this and stands.
     setValue((v) => (v === "" ? raw : v));
     setImages((held) => (held.length === 0 ? sent : held));
+    restoreAttachError(sentError);
   }
 
   // A ref, not `[registerSubmit]` alone closing over a stale `onSubmit`: a
@@ -437,9 +482,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // effect last ran, and it must reach the CURRENT `commands`/`route`, not
   // whichever ones were in scope when the dock first mounted. The same
   // pattern `Window.tsx`'s own `runRef` uses for its accelerator handler.
-  const onSubmitRef = useRef(onSubmit);
-  onSubmitRef.current = onSubmit;
-  useEffect(() => registerSubmit((q) => onSubmitRef.current(q)), [registerSubmit]);
+  // The SCREEN path, not the composer's. `ask()` delivers a canned question
+  // from a screen's own control, which must not consume what the reader is
+  // composing here.
+  const askRef = useRef(askFromScreen);
+  askRef.current = askFromScreen;
+  useEffect(() => registerSubmit((q) => askRef.current(q)), [registerSubmit]);
 
 
   // After every hook above, never before: the guard decides what renders,

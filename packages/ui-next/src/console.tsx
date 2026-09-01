@@ -80,6 +80,16 @@ export interface ConsoleValue {
    */
   attachError: unknown;
   setAttachError: (e: unknown) => void;
+  /**
+   * Puts a consumed attachment failure back, but only if nothing has happened
+   * since.
+   *
+   * A method rather than an updater on `setAttachError`, because the state is
+   * `unknown` and `unknown | ((held: unknown) => unknown)` collapses back to
+   * `unknown` — there is no way to type the updater form. The rule lives here
+   * instead, where it can read the current value.
+   */
+  restoreAttachError: (e: unknown) => void;
   noCluster: boolean;
   setNoCluster: (v: boolean) => void;
 }
@@ -122,6 +132,9 @@ export function ConsoleProvider({
   const [images, setImages] = useState<string[]>([]);
   const [reading, setReading] = useState(0);
   const [attachError, setAttachError] = useState<unknown>(null);
+  const restoreAttachError = useCallback((e: unknown) => {
+    setAttachError((held: unknown) => (held === null ? e : held));
+  }, []);
   const [noCluster, setNoCluster] = useState(false);
   const [scope, setScope] = useState(initialScope);
   const submit = useRef<Submit | null>(null);
@@ -166,10 +179,11 @@ export function ConsoleProvider({
       setReading,
       attachError,
       setAttachError,
+      restoreAttachError,
       noCluster,
       setNoCluster,
     }),
-    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images, reading, attachError, noCluster],
+    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images, reading, attachError, restoreAttachError, noCluster],
   );
 
   return <ConsoleContext.Provider value={value}>{children}</ConsoleContext.Provider>;
