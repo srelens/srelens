@@ -1,4 +1,5 @@
 import { Alert, Button, Eyebrow, Screen, SideRail } from "@srelens/ui-kit";
+import { isTauri } from "@srelens/core";
 import { useActiveContext } from "../lib/clusters";
 import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
@@ -62,6 +63,35 @@ export function Agent(_props: { route: string }) {
   const started = startedLabel(turns);
   const calls = callCount(turns);
   const head = started && calls > 0 ? `${started} · ${calls} call${calls === 1 ? "" : "s"}` : started;
+
+  // The one place a web reader is TOLD, rather than left to discover it from a
+  // failed send. `askAgent` starts with `chat_start`, and the web command
+  // dispatcher (`crates/server/src/api_command.rs`) has no `chat_*` or
+  // `agent_list` arm — every question 404s. So this screen says so instead of
+  // drawing a composer that cannot work, and the dock hides itself for the
+  // same reason.
+  //
+  // A paragraph, not an `Alert`: nothing has failed, and the whole point is
+  // that nothing is asked to. Same treatment, and same reasoning, as the MCP
+  // server's own section in Settings.
+  if (!isTauri()) {
+    return (
+      <Screen title="Agent" eyebrow={context || undefined}>
+        <div className="max-w-prose p-3">
+          <p data-testid="agent-desktop-only" className="text-[0.8125rem] leading-relaxed text-muted">
+            The agent runs in the srelens desktop app. It drives Claude, Codex, Cursor or srelens's
+            own agent as local processes and answers through srelens's MCP tools — all of which are
+            desktop commands, so there is nothing here for a question to reach.
+          </p>
+          <p className="mt-2 text-[0.75rem] leading-relaxed text-faint">
+            Everything else on this cluster works in the browser: the resource screens, logs,
+            events, Helm and port-forwards are all served by <code className="code">srelens
+            server</code>.
+          </p>
+        </div>
+      </Screen>
+    );
+  }
 
   return (
     <Screen

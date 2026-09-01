@@ -7,15 +7,26 @@ import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
-import { lockWorkspace, resetLock } from "./LockGate";
+import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 import type { ClusterContext } from "@srelens/core";
 
-const { useAgentRun, askAgent, clearAgentRun } = vi.hoisted(() => ({
+const { useAgentRun, askAgent, clearAgentRun, dismissAgentError } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
   clearAgentRun: vi.fn(),
+  dismissAgentError: vi.fn(),
 }));
-vi.mock("../lib/agentRun", () => ({ useAgentRun, askAgent, clearAgentRun }));
+vi.mock("../lib/agentRun", () => ({ useAgentRun, askAgent, clearAgentRun, dismissAgentError }));
+
+// The dock is desktop-only: nothing in a browser can answer a question, since
+// `api_command.rs` has no `chat_*` arm. jsdom is not Tauri, so without this
+// every test below would be asserting about a dock that correctly renders
+// nothing. The web case has its own test.
+const { isTauri } = vi.hoisted(() => ({ isTauri: vi.fn(() => true) }));
+vi.mock("@srelens/core", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core")>()),
+  isTauri,
+}));
 
 /** The store's shape, defaulted to idle-and-empty — every test overrides only
  *  the fields it cares about, the same convention `Composer.test.tsx` uses
@@ -62,6 +73,12 @@ beforeEach(() => {
   // the store is module-level, not reset between tests on its own.
   tabsStore.setState(defaultState([]));
   resetLock();
+  isTauri.mockReturnValue(true);
+  // Saying `isTauri` is true means a vault EXISTS, and a fresh lock store has
+  // read no mode — which counts as covered, so `sealed` would hide the dock
+  // for a reason that has nothing to do with the test. Same beforeEach line,
+  // and same reason, as `AgentConsent.test.tsx`.
+  __setKnownVaultMode("unlocked");
   resetContexts();
   useAgentRun.mockReset().mockReturnValue(runState());
   askAgent.mockReset();
@@ -247,6 +264,21 @@ describe("Console", () => {
     await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/theme");
     await user.click(await screen.findByText("Toggle theme"));
     expect(onToggleTheme).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * P1 (#392 review round 7): every dock question begins with `chat_start`,
+   * and the web command dispatcher (`crates/server/src/api_command.rs`) has no
+   * `chat_*` or `agent_list` arm — it answers `404 unknown command`. A prompt
+   * fixed to the bottom of every tab that can only fail is worse than no
+   * prompt. `/agent` carries the explanation, which is where a reader looking
+   * for the agent goes.
+   */
+  it("draws no dock at all in the browser, where no question could be answered", () => {
+    isTauri.mockReturnValue(false);
+    const { container } = setup();
+    expect(screen.queryByRole("textbox", { name: "Console prompt" })).toBeNull();
+    expect(container.querySelector("[data-slot]")).toBeNull();
   });
 
   it("does not accept a question while the workspace is covered", () => {

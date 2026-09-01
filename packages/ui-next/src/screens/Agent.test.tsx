@@ -15,7 +15,12 @@ import * as tabs from "../lib/tabsStore";
  * that the screen hands `Composer` the REAL active context rather than a
  * hardcoded blank.
  */
-const { listAgents, listPrompts, listSkills, listSessions, getPrompt } = vi.hoisted(() => ({
+// The screen is desktop-only past the web branch: `askAgent` starts with
+// `chat_start`, and the web command dispatcher has no `chat_*` arm. jsdom is
+// not Tauri, so `isTauri` is forced true here or every test below would be
+// asserting about the web explanation. That branch has its own test.
+const { listAgents, listPrompts, listSkills, listSessions, getPrompt, isTauri } = vi.hoisted(() => ({
+  isTauri: vi.fn(() => true),
   listAgents: vi.fn(),
   listPrompts: vi.fn(),
   listSkills: vi.fn(),
@@ -29,6 +34,7 @@ vi.mock("@srelens/core", async (orig) => ({
   listSkills,
   listSessions,
   getPrompt,
+  isTauri,
 }));
 
 const {
@@ -99,6 +105,7 @@ function runState(
 }
 
 beforeEach(() => {
+  isTauri.mockReturnValue(true);
   vi.clearAllMocks();
   listAgents.mockResolvedValue([CLAUDE]);
   listPrompts.mockResolvedValue([]);
@@ -245,5 +252,28 @@ describe("the agent screen", () => {
     render(<Agent route="/agent" />);
     await userEvent.click(screen.getByRole("button", { name: /dismiss/i }));
     expect(dismissAgentError).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * P1 (#392 review round 7). In the browser every question 404s —
+   * `api_command.rs` has no `chat_*` or `agent_list` arm — so this screen is
+   * where a reader is TOLD, rather than left to discover it from a failed
+   * send. The dock hides itself for the same reason; this is the surface that
+   * carries the explanation.
+   */
+  it("says the agent is a desktop feature instead of drawing a composer that cannot work", () => {
+    isTauri.mockReturnValue(false);
+    render(<Agent route="/agent" />);
+    expect(screen.getByTestId("agent-desktop-only").textContent).toMatch(/runs in the srelens desktop app/i);
+    // No composer, because there is nothing for it to reach.
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // And not dressed as a failure: nothing has failed, nothing was asked.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("still says what DOES work in the browser, rather than only what does not", () => {
+    isTauri.mockReturnValue(false);
+    render(<Agent route="/agent" />);
+    expect(screen.getByText(/srelens server/)).toBeTruthy();
   });
 });

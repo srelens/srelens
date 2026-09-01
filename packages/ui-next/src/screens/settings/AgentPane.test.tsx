@@ -292,4 +292,43 @@ describe("AgentPane", () => {
       finishClear();
     });
   });
+
+  /**
+   * P2 (#392 review round 7). The field stays editable while `llmSetKey` is in
+   * flight, and completion cleared it unconditionally — so a reader who pasted
+   * a replacement key meanwhile had it silently erased, losing a credential
+   * that cannot be read back from anywhere.
+   */
+  it("does not erase a replacement key pasted while the previous save was in flight", async () => {
+    let finishSave!: () => void;
+    llmSetKey.mockImplementation(() => new Promise<void>((resolve) => { finishSave = () => resolve(); }));
+    llmKeyStatus.mockResolvedValue(["anthropic"]);
+    render(<AgentPane />);
+
+    const field = (await screen.findByLabelText(/anthropic api key/i)) as HTMLInputElement;
+    await userEvent.type(field, "first-key");
+    await userEvent.click(screen.getByRole("button", { name: /save key/i }));
+    // Pasted while the save is still out.
+    await userEvent.clear(field);
+    await userEvent.type(field, "second-key");
+
+    await act(async () => {
+      finishSave();
+    });
+
+    // The newer value survives; only the one that was actually sent would be
+    // cleared. (The test names no credential — these are fixtures.)
+    expect(field.value).toBe("second-key");
+  });
+
+  it("clears the field once the key it actually sent has landed", async () => {
+    llmKeyStatus.mockResolvedValue([]);
+    render(<AgentPane />);
+    const field = (await screen.findByLabelText(/anthropic api key/i)) as HTMLInputElement;
+    await userEvent.type(field, "only-key");
+    await userEvent.click(screen.getByRole("button", { name: /save key/i }));
+    // Not a latch the other way: an untouched field is still emptied, so the
+    // pane never sits holding what was just sent.
+    await waitFor(() => expect(field.value).toBe(""));
+  });
 });

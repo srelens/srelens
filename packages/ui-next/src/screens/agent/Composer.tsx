@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   describeError,
   getPrompt,
@@ -232,6 +232,10 @@ export function Composer({ context }: { context: string }) {
   const [prompts, setPrompts] = useState<Read<PromptSummary[]>>(LOADING);
   const [skills, setSkills] = useState<Read<SkillMeta[]>>(LOADING);
   const [menuDismissed, setMenuDismissed] = useState(false);
+  /** Which prompt pick is current — a load that resolves after a later pick
+   *  must not apply. A ref, not state: read and written synchronously inside
+   *  one handler, and a re-render for it would be noise. */
+  const pickSeq = useRef(0);
   const [promptError, setPromptError] = useState<string | undefined>(undefined);
 
   useEffect(() => {
@@ -311,9 +315,19 @@ export function Composer({ context }: { context: string }) {
       setMenuDismissed(true);
       return;
     }
+    // Pinned at the gesture: which pick this is, and what the input held when
+    // it was made. Both are read back after the await.
+    const mine = ++pickSeq.current;
+    const atPick = input;
     try {
       const text = await getPrompt(p.name, { context });
-      setInput(text);
+      // Applied only if the reader has not typed since picking the prompt, and
+      // only if no LATER prompt has been picked. The input stays editable while
+      // this is in flight and the menu can start a second load, so an
+      // unconditional write let stale prompt text replace a newer draft — or
+      // two loads resolving out of order leave the earlier prompt on screen.
+      if (pickSeq.current !== mine) return;
+      setInput((current) => (current === atPick ? text : current));
       setMenuDismissed(true);
       setPromptError(undefined);
     } catch (e) {

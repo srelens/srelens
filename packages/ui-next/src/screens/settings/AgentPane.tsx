@@ -253,7 +253,12 @@ export function AgentPane() {
       await llmSetKey(provider, draft);
       // Cleared, not kept: the field never holds what was just sent, and
       // nothing here reconstructs the stored value to show in its place.
-      setKeyDrafts((d) => ({ ...d, [provider]: "" }));
+      //
+      // But only if it STILL holds what was sent. The field stays editable
+      // while this is in flight, so a reader who pastes a replacement key
+      // meanwhile would have had it silently erased by this line — losing a
+      // credential they cannot read back from anywhere.
+      setKeyDrafts((d) => (d[provider] === draft ? { ...d, [provider]: "" } : d));
       await refreshKeyStatus();
     } catch (e) {
       setKeyActionError((m) => ({ ...m, [provider]: e }));

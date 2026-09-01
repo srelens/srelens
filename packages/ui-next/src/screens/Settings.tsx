@@ -184,17 +184,23 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         // (`AgentPane`), the server it is reached through, and what it has
         // done. The last two are desktop-only — see {@link SECTIONS} for why,
         // and why this section is still drawn on the web without them.
-        // `AgentPane` is not one of the two: `llmGetSettings`, `llmSetKey` and
-        // the rest (`packages/core/src/lib/llm.ts`) all go through
-        // `invokeCommand`, the transport that has a web half, not a bare
-        // `invoke` from `@tauri-apps/api/core` — the same reason `AgentAccess`
-        // stays below.
+        // `AgentPane` IS one of them, and the comment here used to say
+        // otherwise. The reasoning was that `llmGetSettings`, `llmSetKey` and
+        // the rest go through `invokeCommand`, "the transport that has a web
+        // half" — which is true and beside the point. A transport is not a
+        // handler: `webTransport` dutifully POSTs to
+        // `/api/command/llm_get_settings`, and `api_command.rs`'s match has no
+        // `llm_*` arm, so the server answers `404 unknown command`. The pane
+        // opened on four failed reads and no control that could work.
+        //
+        // `AgentAccess` genuinely does stay: it calls `gatedCapabilityIds` and
+        // `isTauri` and no backend command at all.
         return (
           <div className="flex flex-col gap-4">
             <AgentAccess />
-            <AgentPane />
             {desktop ? (
               <>
+                <AgentPane />
                 <McpServer />
                 <AuditPane />
               </>
@@ -207,9 +213,10 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
                 data-testid="no-agent-server"
                 className="text-[0.75rem] leading-relaxed text-muted"
               >
-                The MCP server and its audit trail live in the srelens desktop app. Starting the
-                loopback server and reading the audit log are both desktop commands, so there is
-                nothing here for them to act on.
+                The agent, the MCP server and its audit trail live in the srelens desktop app.
+                Provider keys, model lists, the agent CLIs, starting the loopback server and
+                reading the audit log are all desktop commands, so there is nothing here for them
+                to act on.
               </p>
             )}
           </div>

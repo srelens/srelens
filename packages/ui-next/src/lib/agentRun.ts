@@ -519,6 +519,17 @@ export async function askAgent(
       // that never sent anything.
       resolvedKind = offered[0].kind;
       agentPath = offered[0].path ?? "";
+      // The other agent's conversation does not transfer. `chooseAgent` drops
+      // `resume` when the READER switches; this is the same switch made
+      // automatically — the previous agent left `PATH`, say — and it was
+      // leaving a Claude conversation id to be handed to Codex's `--resume`.
+      // Closing the manual door and leaving the automatic one open is not
+      // closing it.
+      //
+      // `session` is kept, unlike in `chooseAgent`: it is srelens's own id for
+      // the turn about to be sent, no child process exists under it yet, and
+      // dropping it here would strand the send this branch is preparing.
+      resume = null;
       if (run.generation === myGeneration) commit({ ...run, agentKind: resolvedKind });
     }
     // Last thing before the question actually leaves. Every await above is a

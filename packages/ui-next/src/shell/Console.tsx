@@ -11,6 +11,7 @@ import {
 } from "../lib/agentCommands";
 import { suggestionsFor } from "../lib/agentSuggestions";
 import { askContextFor } from "../lib/askContext";
+import { isTauri } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -216,6 +217,14 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   // not which hooks run, so the hook order stays identical whether the
   // workspace is covered or not.
   if (sealed) return null;
+  // Nothing in a browser can answer a question. `askAgent`'s first backend call
+  // is `chat_start`, and `api_command.rs`'s match has no `chat_*` or
+  // `agent_list` arm, so every question would 404. A permanently dead prompt
+  // fixed to the bottom of every tab is worse than no prompt: the reader is
+  // told to ask and then told it failed. `/agent` is where the explanation
+  // goes — a reader looking for the agent goes there, and it says so on
+  // arrival, which is the same choice Settings makes for the MCP server.
+  if (!isTauri()) return null;
 
   const commandMode = value.startsWith("/");
   const exchanges = turns.filter((t) => t.role === "user").length;

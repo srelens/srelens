@@ -367,4 +367,67 @@ describe("the composer", () => {
     await userEvent.click(screen.getByRole("button", { name: /stop/i }));
     expect(stopAgentRun).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * P2 (#392 review round 7). The input stays editable while `getPrompt` is in
+   * flight, and the menu can start a second load — so an unconditional
+   * `setInput(text)` let stale prompt text replace a newer draft, or two loads
+   * resolving out of order leave the earlier prompt on screen.
+   */
+  it("does not replace a draft the reader typed after picking a prompt", async () => {
+    let finishPrompt!: (text: string) => void;
+    getPrompt.mockImplementation(() => new Promise<string>((resolve) => { finishPrompt = resolve; }));
+    listAgents.mockResolvedValue([CLAUDE]);
+    render(<Composer context="prod-eu" />);
+
+    const box = (await screen.findByRole("textbox")) as HTMLInputElement;
+    await userEvent.type(box, "/diagnose");
+    await userEvent.click(await screen.findByRole("button", { name: /diagnose/i }));
+    // The reader carries on typing while the prompt is still loading.
+    await userEvent.clear(box);
+    await userEvent.type(box, "my own question");
+
+    await act(async () => {
+      finishPrompt("PROMPT BODY");
+    });
+
+    expect(box.value).toBe("my own question");
+  });
+
+  it("applies the prompt when the reader has not touched the draft", async () => {
+    getPrompt.mockResolvedValue("PROMPT BODY");
+    listAgents.mockResolvedValue([CLAUDE]);
+    render(<Composer context="prod-eu" />);
+    const box = (await screen.findByRole("textbox")) as HTMLInputElement;
+    await userEvent.type(box, "/diagnose");
+    await userEvent.click(await screen.findByRole("button", { name: /diagnose/i }));
+    // Not a latch: the ordinary path still fills the input.
+    await waitFor(() => expect(box.value).toBe("PROMPT BODY"));
+  });
+
+  it("keeps the LAST prompt picked when two loads resolve out of order", async () => {
+    const resolvers: Array<(t: string) => void> = [];
+    getPrompt.mockImplementation(() => new Promise<string>((resolve) => { resolvers.push(resolve); }));
+    listAgents.mockResolvedValue([CLAUDE]);
+    listPrompts.mockResolvedValue([
+      { name: "diagnose", description: "d", arguments: [] },
+      { name: "triage", description: "t", arguments: [] },
+    ]);
+    render(<Composer context="prod-eu" />);
+    const box = (await screen.findByRole("textbox")) as HTMLInputElement;
+
+    await userEvent.type(box, "/");
+    await userEvent.click(await screen.findByRole("button", { name: /diagnose/i }));
+    await userEvent.clear(box);
+    await userEvent.type(box, "/");
+    await userEvent.click(await screen.findByRole("button", { name: /triage/i }));
+
+    await act(async () => {
+      resolvers[1]?.("TRIAGE BODY");
+      resolvers[0]?.("DIAGNOSE BODY");
+    });
+
+    // The earlier load lands last and must not win.
+    expect(box.value).not.toBe("DIAGNOSE BODY");
+  });
 });

@@ -317,6 +317,34 @@ describe("the run store", () => {
     });
   });
 
+  // P2 round 7 (#392): `chooseAgent` closed the MANUAL switch. `askAgent`'s
+  // own fallback makes the same switch automatically — the previous agent left
+  // PATH — and was still handing the old agent's conversation id to the new
+  // one.
+  it("does not hand the old agent's resume token to the one it falls back to", async () => {
+    sendChat.mockResolvedValue("claude-conversation-id");
+    await askAgent("q1");
+    expect(sendChat.mock.calls.at(-1)?.[5]).toBe("claude");
+
+    // Claude is gone; only Codex remains. `agentKind` still says "claude".
+    listAgents.mockResolvedValue([
+      { kind: "codex", label: "Codex", available: true, gated: false, path: "/codex" },
+    ]);
+    await askAgent("q2");
+
+    expect(sendChat.mock.calls.at(-1)?.[5]).toBe("codex");
+    // Codex is asked to start, not to resume a Claude conversation.
+    expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+  });
+
+  it("keeps the conversation when the fallback lands on the same kind", async () => {
+    sendChat.mockResolvedValue("claude-conversation-id");
+    await askAgent("q1");
+    // Claude still installed: no switch, so nothing to invalidate.
+    await askAgent("q2");
+    expect(sendChat.mock.calls.at(-1)?.[7]).toBe("claude-conversation-id");
+  });
+
   // P2 (#392 review): `resume` is the PREVIOUS CLI's own conversation id.
   describe("switching agent CLIs", () => {
     it("does not hand one CLI's resume token to another", async () => {
