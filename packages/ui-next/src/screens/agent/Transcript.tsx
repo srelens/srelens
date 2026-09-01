@@ -326,8 +326,11 @@ function UserTurn({ turn }: { turn: Turn }) {
           </div>
         )}
         <p className="whitespace-pre-wrap break-words">{turn.text}</p>
-        {/* Right-aligned with the question it belongs to. */}
-        <TurnClock at={turn.at} className="mt-0.5 block text-right" />
+        {/* Right-aligned with the question it belongs to — and absent when the
+            time was never recorded (a conversation restored from classic,
+            whose stored messages carry none). A borrowed stamp under every
+            turn would be srelens claiming a time it was never told. */}
+        {turn.atRecorded !== false && <TurnClock at={turn.at} className="mt-0.5 block text-right" />}
       </div>
     </div>
   );
@@ -381,7 +384,7 @@ function AgentTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
         {/* Under the answer, not beside the mark: the mock puts it at the end
             of what was said. Only once there IS something said — a turn still
             streaming has no finish to stamp. */}
-        {turn.text !== "" && <TurnClock at={turn.at} />}
+        {turn.text !== "" && turn.atRecorded !== false && <TurnClock at={turn.at} />}
       </div>
     </div>
   );
@@ -435,6 +438,21 @@ function exchangeText(exchange: readonly Turn[]): string {
   if (said.length === 0) return "";
   const asked = exchange.find((t) => t.role === "user");
   return [asked?.text, ...said.map((t) => t.text)].filter(Boolean).join("\n\n");
+}
+
+/**
+ * The whole conversation as plain text, for the clipboard.
+ *
+ * Built from the same {@link exchangeText} each exchange's own control uses,
+ * so what a reader gets from the header is exactly the exchanges concatenated
+ * — not a second, subtly different rendering of the same chat. Exchanges with
+ * nothing said yet drop out, the way the per-exchange control is withheld.
+ */
+export function transcriptText(turns: readonly Turn[]): string {
+  return exchanges(turns)
+    .map(exchangeText)
+    .filter((t) => t !== "")
+    .join("\n\n---\n\n");
 }
 
 export function Transcript({

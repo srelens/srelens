@@ -190,7 +190,7 @@ describe("the agent screen's rail", () => {
     // after the first pass.
     expect(container.querySelectorAll('[data-band]')).toHaveLength(3);
 
-    const row = await screen.findByRole("button", { name: /a question/ });
+    const row = await screen.findByRole("button", { name: /A question/ });
     // Divided by a rule, not spaced apart and rounded.
     expect(row.className).toContain("border-b");
     expect(row.className).not.toContain("rounded");

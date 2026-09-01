@@ -18,6 +18,7 @@ import {
 } from "@srelens/core";
 import { runKeyFor, runLabelFor, type AskContext } from "./askContext";
 import { newId } from "./tabs";
+import { titleFromQuestion } from "./runTitle";
 import { stripDataUri } from "./pastedImages";
 
 /**
@@ -110,6 +111,16 @@ export type Turn = {
    */
   notes?: string[];
   at: number;
+  /**
+   * False when `at` is the CONVERSATION's timestamp rather than this turn's.
+   *
+   * Classic's stored messages carry no time of their own (`StoredMessage` is
+   * id/role/text/toolCalls/images/thoughts), so a conversation restored from
+   * one knows when it was last touched and not when each turn happened. The
+   * clock is withheld rather than printing the same borrowed stamp under every
+   * turn, which would be srelens claiming a time it was never told.
+   */
+  atRecorded?: boolean;
 };
 
 /** The whole conversation this window is holding. */
@@ -500,7 +511,10 @@ export function getRunSummaries(): RunSummary[] {
     // rows used the subject ("cluster", "Pod/mongodb-0") while saved rows used
     // the question, so one conversation listed twice read as two unrelated
     // things, and a subject like "cluster" said nothing on its own.
-    label: s.run.turns.find((t) => t.role === "user")?.text ?? s.label,
+    // Derived from the question rather than the raw text: the raw one
+    // truncated mid-word in the rail and carried whatever opener the reader
+    // typed.
+    label: titleFromQuestion(s.run.turns.find((t) => t.role === "user")?.text ?? "") || s.label,
     // The subject travels alongside, since it is what the run is ABOUT and the
     // question alone does not always say.
     subject: s.label,
@@ -1246,6 +1260,92 @@ function isSavedRun(value: unknown): value is SavedRun {
   return v.v === 1 && typeof v.key === "string" && typeof v.label === "string" && Array.isArray(v.turns);
 }
 
+/** One of classic's stored tool calls (`StoredToolCall`), checked before it is
+ *  drawn: a call with no capability name renders a blank row in the
+ *  transcript, which reads as a call srelens made and cannot name. */
+type ClassicCall = { id: string; tool: string; args: unknown; status: ToolStatus | null };
+
+function isClassicCall(value: unknown): value is ClassicCall {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as { id?: unknown; tool?: unknown; status?: unknown };
+  return (
+    typeof v.id === "string" &&
+    typeof v.tool === "string" &&
+    v.tool !== "" &&
+    (v.status === null ||
+      v.status === undefined ||
+      v.status === "ok" ||
+      v.status === "error" ||
+      v.status === "denied")
+  );
+}
+
+/**
+ * One of classic's stored messages, as `chatHistory.ts` documents it —
+ * `StoredMessage`, structurally checked rather than trusted.
+ *
+ * The predicate claims ONLY what it verifies. `StoredMessage.id` is real on
+ * disk but never read here (a restored turn takes a fresh `turnSeq`), so
+ * asserting a `number` this function never looked at would be a claim the
+ * check does not back.
+ */
+type ClassicMessage = {
+  role: "user" | "assistant" | "error";
+  text: string;
+  toolCalls?: unknown[];
+  images?: string[];
+  thoughts?: string;
+};
+
+function isStoredMessage(value: unknown): value is ClassicMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as { role?: unknown; text?: unknown; images?: unknown; thoughts?: unknown };
+  return (
+    typeof v.text === "string" &&
+    (v.role === "user" || v.role === "assistant" || v.role === "error") &&
+    (v.images === undefined || (Array.isArray(v.images) && v.images.every((i) => typeof i === "string"))) &&
+    (v.thoughts === undefined || typeof v.thoughts === "string")
+  );
+}
+
+/**
+ * A conversation classic saved, read into this design's turns.
+ *
+ * These are the reader's own conversations — the ones the rail has been listing
+ * as `saved · 14d ago` all along — and opening one showed NOTHING, because
+ * `openSavedRun` looked only for this build's own envelope. The comment there
+ * said classic's transcript was "not ours to interpret", which was wrong: the
+ * shape is documented in `chatHistory.ts` and maps onto a `Turn` almost
+ * exactly.
+ *
+ * What does not map is TIME. `StoredMessage` carries none, so every turn takes
+ * the conversation's `createdAt` and is marked `atRecorded: false` — see
+ * {@link Turn.atRecorded}. `createdAt` rather than `updatedAt` because the run
+ * head reads the FIRST turn's stamp as `started <time>`, and the conversation
+ * genuinely did start then; `updatedAt` would print the last touch as the
+ * start. What is genuinely lost is per-call duration, which classic never
+ * stored either.
+ */
+function turnsFromClassic(messages: readonly unknown[], at: number): Turn[] {
+  return messages.filter(isStoredMessage).map((m) => ({
+    id: ++turnSeq,
+    role: m.role === "assistant" ? ("agent" as const) : m.role,
+    text: m.text,
+    calls: (Array.isArray(m.toolCalls) ? m.toolCalls : []).filter(isClassicCall).map((c) => ({
+      id: c.id,
+      tool: c.tool,
+      args: c.args,
+      status: c.status ?? null,
+      // Classic stored no duration, and an absent reading renders no reading.
+      ms: undefined,
+    })),
+    thoughts: m.thoughts,
+    images: m.images,
+    at,
+    atRecorded: false,
+  }));
+}
+
 /** Sessions on disk that are not (yet) loaded into `runs` — the rail lists
  *  them so a reader's history survives a restart, and one is hydrated only
  *  when they open it. */
@@ -1278,7 +1378,9 @@ function persistRun(key: string): void {
     // What a reader recognises in a list: the question they asked. The subject
     // is already the rail's label, and repeating it here would make every
     // session in the picker read the same.
-    title: asked.text.slice(0, 120),
+    // The same derivation the rail uses, so a conversation reads the same
+    // whether it is live or restored from disk. `slice(0, 120)` cut mid-word.
+    title: titleFromQuestion(asked.text) || asked.text.slice(0, 120),
     createdAt: state.run.turns[0]?.at ?? state.at,
     updatedAt: state.at,
     contexts: [],
@@ -1329,6 +1431,11 @@ export async function openSavedRun(id: string): Promise<void> {
   runs.set(key, state);
   if (envelope) {
     state.run = { ...state.run, turns: envelope.turns, gates: envelope.gates ?? [] };
+  } else {
+    // No envelope of ours: classic wrote this one. Its transcript is readable
+    // and it is the reader's own conversation, so it opens rather than opening
+    // empty.
+    state.run = { ...state.run, turns: turnsFromClassic(session.messages, session.createdAt), gates: [] };
   }
   activeKey = key;
   // Off the not-yet-loaded list: it is a live run now, and showing it twice

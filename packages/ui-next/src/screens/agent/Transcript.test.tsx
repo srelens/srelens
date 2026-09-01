@@ -32,6 +32,44 @@ describe("a run's transcript", () => {
     expect(screen.queryByRole("log")).toBeNull();
   });
 
+  /**
+   * A conversation restored from classic borrows the SESSION's timestamp for
+   * every turn, because `StoredMessage` carries none of its own. Printing it
+   * under each turn would be srelens stating a time it was never told — and
+   * the same stamp three times over, which reads as a fact rather than as the
+   * gap it is.
+   */
+  it("prints no clock for a turn whose time was never recorded", () => {
+    const at = new Date(2026, 7, 17, 15, 53, 4).getTime();
+    render(
+      <Transcript
+        turns={[
+          turn({ id: 1, role: "user", text: "check my cluster", at, atRecorded: false }),
+          turn({ id: 2, role: "agent", text: "three nodes are unready", at, atRecorded: false }),
+        ]}
+        gates={[]}
+      />,
+    );
+    expect(screen.getByText("check my cluster")).toBeTruthy();
+    expect(screen.queryByText("15:53:04")).toBeNull();
+  });
+
+  it("prints the clock for a turn whose time srelens observed", () => {
+    const at = new Date(2026, 7, 17, 15, 53, 4).getTime();
+    render(
+      <Transcript
+        turns={[
+          turn({ id: 1, role: "user", text: "check my cluster", at }),
+          turn({ id: 2, role: "agent", text: "three nodes are unready", at }),
+        ]}
+        gates={[]}
+      />,
+    );
+    // Both halves of the exchange carry it — the pair above is what makes the
+    // withholding test meaningful rather than a test of an empty render.
+    expect(screen.getAllByText("15:53:04").length).toBe(2);
+  });
+
   it("draws a tool call's duration only once it has one", () => {
     render(
       <Transcript

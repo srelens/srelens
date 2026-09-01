@@ -1,10 +1,10 @@
-import { Alert, Button, Screen, SideRail } from "@srelens/ui-kit";
+import { Alert, Button, CopyButton, Screen, SideRail } from "@srelens/ui-kit";
 import { isTauri } from "@srelens/core";
 import { Console } from "../shell/Console";
 import { useActiveContext } from "../lib/clusters";
 import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
-import { Transcript } from "./agent/Transcript";
+import { Transcript, transcriptText } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
 
 /** §5's own sentence, verbatim — the one line that says the dock and this
@@ -75,6 +75,10 @@ export function Agent(_props: { route: string }) {
   const started = startedLabel(turns);
   const calls = callCount(turns);
   const head = started && calls > 0 ? `${started} · ${calls} call${calls === 1 ? "" : "s"}` : started;
+  // The whole conversation, for the clipboard. Per-exchange copy is beside
+  // each answer; this is the one for taking the lot into a ticket. Empty until
+  // something has been said, so the control is not offered over nothing.
+  const chatText = transcriptText(turns);
 
   // The one place a web reader is TOLD, rather than left to discover it from a
   // failed send. `askAgent` starts with `chat_start`, and the web command
@@ -121,9 +125,19 @@ export function Agent(_props: { route: string }) {
         width={AGENT_RAIL_WIDTH}
         rail={<RunsRail />}
         mainHead={
-          head ? (
-            <span className="min-w-0 truncate normal-case tracking-normal text-[0.75rem] text-ink">
-              {head}
+          // Right-hand end of the head: `started 12:39 · 12 calls` is a
+          // FIGURE about the run, and figures sit right in this design —
+          // beside the control that acts on the same run.
+          head || chatText !== "" ? (
+            <span className="flex w-full min-w-0 items-center justify-end gap-2">
+              {head && (
+                <span className="min-w-0 truncate normal-case tracking-normal text-[0.75rem] text-ink">
+                  {head}
+                </span>
+              )}
+              {chatText !== "" && (
+                <CopyButton text={chatText} label="Copy the whole conversation" iconOnly />
+              )}
             </span>
           ) : undefined
         }

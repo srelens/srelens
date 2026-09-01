@@ -365,4 +365,42 @@ describe("the agent screen", () => {
     // conversation would be a wall of text the reader has moved past.
     expect(screen.queryByText(/real agent CLI running on this machine/i)).toBeNull();
   });
+
+  describe("the run head", () => {
+    const withTurns = () =>
+      useAgentRun.mockReturnValue(
+        runState({
+          turns: [
+            { id: 1, role: "user", text: "why is it restarting", calls: [], at: Date.now() },
+            { id: 2, role: "agent", text: "the pool shrank", calls: [], at: Date.now() },
+          ],
+        }),
+      );
+
+    it("sits the run's figures at the right-hand end", async () => {
+      withTurns();
+      renderAgent();
+      const head = await screen.findByText(/^started /);
+      // A figure about the run, beside the control that acts on the same run.
+      expect(head.closest(".justify-end")).not.toBeNull();
+    });
+
+    it("copies the whole conversation from the head", async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      withTurns();
+      renderAgent();
+
+      await userEvent.click(await screen.findByRole("button", { name: /copy the whole conversation/i }));
+      // The same text the per-exchange control produces, so the two cannot
+      // disagree about what the conversation says.
+      expect(writeText).toHaveBeenCalledWith("why is it restarting\n\nthe pool shrank");
+    });
+
+    it("offers no copy over a conversation with nothing in it", async () => {
+      renderAgent();
+      await screen.findByRole("complementary", { name: "Agent" });
+      expect(screen.queryByRole("button", { name: /copy the whole conversation/i })).toBeNull();
+    });
+  });
 });

@@ -922,8 +922,10 @@ describe("the run store", () => {
       const envelope = saved.messages[0] as { v: number; key: string; turns: { text: string }[] };
       expect(envelope.v).toBe(1);
       expect(envelope.turns.map((t) => t.text)).toContain("why is it restarting?");
-      // The title is the question, which is what a reader recognises in a list.
-      expect(saved.title).toContain("why is it restarting?");
+      // The title is the question TIDIED — same derivation the rail uses, so a
+      // conversation reads the same live or restored. Raised first letter,
+      // opener dropped, cut at a word boundary.
+      expect(saved.title).toBe("Why is it restarting?");
     });
 
     it("saves again once the answer has landed", async () => {
@@ -994,6 +996,105 @@ describe("the run store", () => {
       expect(getActiveRunKey()).toBe("prod-eu|Pod|ns|mongodb-0");
       // And no longer listed as merely on disk.
       expect(getRunSummaries().filter((r) => r.savedId === "s1")).toEqual([]);
+    });
+
+    /**
+     * "Shows empty for old ones." Those sessions were written by CLASSIC, in
+     * its own `StoredMessage` shape, and `openSavedRun` looked only for this
+     * build's envelope — so the reader's own conversations opened blank.
+     */
+    it("reads a conversation classic saved, rather than opening it empty", async () => {
+      listSessions.mockResolvedValue([{ id: "old", title: "check cluster health", createdAt: 1, updatedAt: 5 }]);
+      loadSession.mockResolvedValue({
+        id: "old",
+        title: "check cluster health",
+        createdAt: 1,
+        updatedAt: 5,
+        contexts: ["prod-eu"],
+        skills: [],
+        cliSessionId: null,
+        agentKind: "claude",
+        // Classic's shape: `assistant`, not `agent`, and tool calls embedded.
+        messages: [
+          { id: 1, role: "user", text: "check cluster health" },
+          {
+            id: 2,
+            role: "assistant",
+            text: "Three nodes are under memory pressure.",
+            toolCalls: [{ id: "c1", tool: "k8s.listNodes", args: {}, status: "ok" }],
+            thoughts: "looking at allocatable",
+          },
+        ],
+      });
+
+      await restoreRuns();
+      await openSavedRun("old");
+
+      const turns = getAgentRun().turns;
+      expect(turns.map((t) => t.text)).toEqual([
+        "check cluster health",
+        "Three nodes are under memory pressure.",
+      ]);
+      // `assistant` is this design's `agent`.
+      expect(turns[1].role).toBe("agent");
+      expect(turns[1].calls[0]?.tool).toBe("k8s.listNodes");
+      expect(turns[1].thoughts).toBe("looking at allocatable");
+    });
+
+    it("does not claim a time classic never stored", async () => {
+      listSessions.mockResolvedValue([{ id: "old", title: "t", createdAt: 1, updatedAt: 5 }]);
+      loadSession.mockResolvedValue({
+        id: "old", title: "t", createdAt: 1, updatedAt: 5, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ id: 1, role: "user", text: "q" }],
+      });
+      await restoreRuns();
+      await openSavedRun("old");
+      // `StoredMessage` carries no timestamp, so the turn is marked as having
+      // none and the transcript withholds its clock — rather than printing the
+      // session's own stamp under every turn as if it were theirs.
+      expect(getAgentRun().turns[0].atRecorded).toBe(false);
+      // `createdAt`, not `updatedAt`: `/agent`'s head reads the first turn's
+      // stamp as `started <time>`, and 5 is when this conversation was last
+      // touched — printing it as the start would be false.
+      expect(getAgentRun().turns[0].at).toBe(1);
+    });
+
+    it("ignores an entry in a shape it does not recognise, without losing the rest", async () => {
+      listSessions.mockResolvedValue([{ id: "old", title: "t", createdAt: 1, updatedAt: 5 }]);
+      loadSession.mockResolvedValue({
+        id: "old", title: "t", createdAt: 1, updatedAt: 5, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ nonsense: true }, { id: 1, role: "user", text: "the real one" }],
+      });
+      await restoreRuns();
+      await openSavedRun("old");
+      expect(getAgentRun().turns.map((t) => t.text)).toEqual(["the real one"]);
+    });
+
+    it("drops a stored tool call it cannot name, keeping the ones it can", async () => {
+      listSessions.mockResolvedValue([{ id: "old", title: "t", createdAt: 1, updatedAt: 5 }]);
+      loadSession.mockResolvedValue({
+        id: "old", title: "t", createdAt: 1, updatedAt: 5, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [
+          {
+            id: 1,
+            role: "assistant",
+            text: "done",
+            toolCalls: [
+              { id: "a", tool: "", status: "ok" },
+              { id: "b" },
+              { id: "c", tool: "k8s.listPods", args: {}, status: "ok" },
+            ],
+          },
+        ],
+      });
+      await restoreRuns();
+      await openSavedRun("old");
+      // A row with no capability name reads as a call srelens made and cannot
+      // name — worse than not drawing it.
+      expect(getAgentRun().turns[0].calls.map((c) => c.tool)).toEqual(["k8s.listPods"]);
     });
 
     it("resumes the CLI conversation a reopened run came with", async () => {
