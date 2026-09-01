@@ -313,4 +313,18 @@ describe("ConsoleDock clearing", () => {
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
     expect(onOpenChange).not.toHaveBeenCalled();
   });
+
+  it("offers the full-view control only when a caller can act on it", async () => {
+    // A kit component: a dock with no fuller view has nothing to offer here,
+    // so the control is absent rather than present-and-dead.
+    setup();
+    expect(screen.queryByRole("button", { name: /full view/i })).toBeNull();
+  });
+
+  it("calls onExpand when the full-view control is used", async () => {
+    const onExpand = vi.fn();
+    setup({ onExpand });
+    await userEvent.click(screen.getByRole("button", { name: /full view/i }));
+    expect(onExpand).toHaveBeenCalledTimes(1);
+  });
 });

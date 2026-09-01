@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
 import { useConsole } from "../console";
-import { askAgent, clearAgentRun, dismissAgentError, useRun } from "../lib/agentRun";
+import { askAgent, clearAgentRun, dismissAgentError, selectRun, useRun } from "../lib/agentRun";
 import {
   commandsFor,
   matchCommands,
@@ -322,6 +322,18 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       placeholder={scope ? `Ask about ${scope}` : "Ask about this cluster"}
       shortcutHint={hint("console", apple)}
       onClear={() => clearAgentRun(runKey)}
+      // The dock and `/agent` are two views of ONE conversation, and until now
+      // there was no way between them: a reader had to know the left nav has an
+      // Agent entry under Investigate. Reported as "how to go to full mode".
+      //
+      // Selects this dock's own run first, so the screen opens on the
+      // conversation the reader was just looking at rather than on whichever
+      // was asked into last. That is the one thing that could be surprising
+      // here, and it is the reason this is not simply `openTab("/agent")`.
+      onExpand={() => {
+        selectRun(runKey);
+        openTab("/agent", { clusterName: context || undefined });
+      }}
       live={dockLive}
     >
       {children}

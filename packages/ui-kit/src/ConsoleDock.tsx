@@ -1,4 +1,10 @@
-import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { EmptyState } from "./EmptyState";
 import { Eyebrow } from "./Eyebrow";
 import { Spinner } from "./Spinner";
@@ -11,7 +17,8 @@ import { toneColor, toneWash } from "./tone";
  * both, because a user on either keyboard may be driving either machine.
  */
 const MOD =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "")
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad/.test(navigator.platform ?? "")
     ? "⌘K"
     : "Ctrl K";
 
@@ -35,6 +42,15 @@ export interface ConsoleDockProps {
   busy?: boolean;
   /** Shows the Clear control; the caller does the clearing. */
   onClear?: () => void;
+  /**
+   * Shows the "open full view" control; the caller does the navigating.
+   *
+   * The dock is a compact view of a conversation that also has a full screen,
+   * and there was no way between them — a reader had to know the left nav had
+   * an Agent entry. Optional, because `ConsoleDock` is a kit component and a
+   * dock with no fuller view has nothing to offer here.
+   */
+  onExpand?: () => void;
   /** The output — a transcript, a command list, suggestions. */
   children?: ReactNode;
   /** What to say when there is no output yet. */
@@ -90,6 +106,7 @@ export function ConsoleDock({
   placeholder,
   busy = false,
   onClear,
+  onExpand,
   children,
   emptyLabel = "Nothing yet",
   label = "Console",
@@ -162,26 +179,43 @@ export function ConsoleDock({
               {filled(context) && (
                 <span
                   className="path truncate rounded px-1 py-px"
-                  style={{ background: toneWash("accent"), color: toneColor("accent") }}
+                  style={{
+                    background: toneWash("accent"),
+                    color: toneColor("accent"),
+                  }}
                 >
                   {context}
                 </span>
               )}
-              {filled(status) && <Eyebrow className="text-[0.5625rem]">{status}</Eyebrow>}
+              {filled(status) && (
+                <Eyebrow className="text-[0.5625rem]">{status}</Eyebrow>
+              )}
             </div>
-            {onClear && (
-              <button
-                type="button"
-                className="icon-btn shrink-0"
-                aria-label={`Clear ${label.toLowerCase()}`}
-                onClick={onClear}
-              >
-                {/* The class rather than `Eyebrow`, which renders a div: a
+            <div className="flex shrink-0 items-center gap-1">
+              {onExpand && (
+                <button
+                  type="button"
+                  className="icon-btn shrink-0"
+                  aria-label={`Open ${label.toLowerCase()} in the full view`}
+                  onClick={onExpand}
+                >
+                  <span className="eyebrow text-[0.5625rem]">full view</span>
+                </button>
+              )}
+              {onClear && (
+                <button
+                  type="button"
+                  className="icon-btn shrink-0"
+                  aria-label={`Clear ${label.toLowerCase()}`}
+                  onClick={onClear}
+                >
+                  {/* The class rather than `Eyebrow`, which renders a div: a
                     button holds phrasing content, and a block inside one is
                     markup no browser is obliged to lay out sensibly. */}
-                <span className="eyebrow text-[0.5625rem]">clear</span>
-              </button>
-            )}
+                  <span className="eyebrow text-[0.5625rem]">clear</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <div
@@ -201,7 +235,11 @@ export function ConsoleDock({
         <button
           type="button"
           className="agent-mark !h-[19px] !w-[19px] !rounded-[5px]"
-          aria-label={open ? `Collapse ${label.toLowerCase()}` : `Expand ${label.toLowerCase()}`}
+          aria-label={
+            open
+              ? `Collapse ${label.toLowerCase()}`
+              : `Expand ${label.toLowerCase()}`
+          }
           aria-expanded={open}
           // Only while the panel exists: an `aria-controls` pointing at nothing
           // is a promise to assistive technology that cannot be kept.
@@ -210,7 +248,13 @@ export function ConsoleDock({
         >
           {/* Inline rather than an icon-set import: the kit takes no dependency
               on lucide, and these are the only glyphs it needs. */}
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
             <path
               d={open ? "m6 9 6 6 6-6" : "m6 15 6-6 6 6"}
               stroke="currentColor"
@@ -238,21 +282,36 @@ export function ConsoleDock({
 
         {busy ? (
           <span className="flex shrink-0 items-center gap-1.5">
-            <Spinner label="Working" className="size-3" style={{ color: toneColor("accent") }} />
+            <Spinner
+              label="Working"
+              className="size-3"
+              style={{ color: toneColor("accent") }}
+            />
             <Eyebrow className="text-[0.5625rem]">working</Eyebrow>
           </span>
         ) : (
           <>
-            {filled(shortcutHint) && <span className="kbd shrink-0">{shortcutHint}</span>}
+            {filled(shortcutHint) && (
+              <span className="kbd shrink-0">{shortcutHint}</span>
+            )}
             <button
               type="button"
               className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md transition-opacity disabled:opacity-25"
-              style={{ background: toneColor("accent"), color: "var(--accent-ink)" }}
+              style={{
+                background: toneColor("accent"),
+                color: "var(--accent-ink)",
+              }}
               aria-label="Send"
               disabled={!ready}
               onClick={submit}
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
                 <path
                   d="M12 19V5m0 0-7 7m7-7 7 7"
                   stroke="currentColor"

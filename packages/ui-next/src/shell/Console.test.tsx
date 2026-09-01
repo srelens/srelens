@@ -10,7 +10,8 @@ import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 import type { ClusterContext } from "@srelens/core";
 
-const { useAgentRun, useRun, askAgent, clearAgentRun, dismissAgentError } = vi.hoisted(() => ({
+const { useAgentRun, useRun, askAgent, clearAgentRun, dismissAgentError, selectRun } = vi.hoisted(() => ({
+  selectRun: vi.fn(),
   useAgentRun: vi.fn(),
   // The dock reads its OWN route's run, not the active one — so this is the
   // hook under test here, and tests that care about which key it was handed
@@ -26,6 +27,7 @@ vi.mock("../lib/agentRun", () => ({
   askAgent,
   clearAgentRun,
   dismissAgentError,
+  selectRun,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -94,6 +96,7 @@ beforeEach(() => {
   useRun.mockReset().mockReturnValue(runState());
   askAgent.mockReset();
   clearAgentRun.mockReset();
+  selectRun.mockReset();
 });
 
 describe("Console", () => {
@@ -143,6 +146,30 @@ describe("Console", () => {
 
     expect(onList).not.toBe(onPod);
     expect(onList).toContain("statefulsets");
+  });
+
+  /**
+   * "How to go to full mode, tab view" — there was no way from the dock to
+   * `/agent` at all; a reader had to know the left nav has an Agent entry
+   * under Investigate.
+   */
+  it("offers a way into the full view, and opens it on the dock's own conversation", async () => {
+    const user = userEvent.setup();
+    const prod = ctx("prod-eu-id", "prod-eu");
+    setContexts([prod]);
+    tabsStore.setState(defaultState([prod]));
+    tabsStore.openTab(logsRoute("Pod", "ns", "ai-editor"), { clusterName: "prod-eu" });
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+    await user.click(screen.getByRole("button", { name: /full view/i }));
+
+    // The /agent tab is open...
+    const routes = tabsStore.currentWorkspace().tabs.map((t) => t.route);
+    expect(routes).toContain("/agent");
+    // ...and it shows the subject the dock was on, not whichever conversation
+    // happened to be active.
+    expect(selectRun).toHaveBeenCalledWith(expect.stringContaining("ai-editor"));
   });
 
   it("clears its OWN conversation, not whichever is active", async () => {

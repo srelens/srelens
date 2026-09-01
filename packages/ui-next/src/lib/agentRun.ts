@@ -483,7 +483,14 @@ export function getActiveRunKey(): string | null {
 
 /** Show a different conversation — the rail's switch. */
 export function selectRun(key: string): void {
-  if (!runs.has(key) || activeKey === key) return;
+  if (activeKey === key) return;
+  // A key with no run yet is ACCEPTED, deliberately. The dock's "full view"
+  // control selects its own subject before navigating, and the reader may not
+  // have asked about that subject yet — refusing here would open `/agent` on
+  // whichever unrelated conversation happened to be active, which is worse
+  // than opening it empty on the right subject. `getAgentRun` reads an
+  // unknown key as the empty run, and the rail does not list it, because a
+  // run still comes into being by asking.
   activeKey = key;
   emit();
 }
