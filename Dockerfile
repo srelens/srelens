@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:26-slim@sha256:4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e703e5fe503 AS frontend
+FROM node:26-slim@sha256:c0753125a3789977aefe869cbebccf70e3cfd7ea84ca48547458f02e4f1d7146 AS frontend
 # pnpm via npm, not corepack: Node 26 ships without corepack (it was unbundled
 # upstream), so `corepack enable` is a command-not-found in this image. The
 # pinned major is what pnpm-lock.yaml was written by.
