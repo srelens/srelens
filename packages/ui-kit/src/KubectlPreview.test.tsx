@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { KubectlPreview } from "./KubectlPreview";
+
+function stubClipboard(writeText: (text: string) => Promise<void>) {
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+}
 
 /** The classic component's tests, carried over. (#318) */
 describe("KubectlPreview", () => {
@@ -16,20 +20,24 @@ describe("KubectlPreview", () => {
     expect(screen.queryByText("Equivalent kubectl:")).toBeNull();
   });
 
-  it("omits the copy button when no onCopy handler is given", () => {
+  it("offers to copy every command without asking each caller to wire the clipboard", () => {
     render(<KubectlPreview command="kubectl get pods web-0 --context prod" />);
-    expect(screen.queryByRole("button", { name: "Copy kubectl command" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy kubectl command" })).toBeDefined();
   });
 
-  it("fires onCopy when the copy button is clicked", () => {
-    const onCopy = vi.fn();
-    render(<KubectlPreview command="kubectl get pods web-0 --context prod" onCopy={onCopy} />);
-    fireEvent.click(screen.getByRole("button", { name: "Copy kubectl command" }));
-    expect(onCopy).toHaveBeenCalledTimes(1);
+  it("copies the command and confirms with a check and a polite announcement", async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    const { container } = render(<KubectlPreview command="kubectl get pods web-0 --context prod" />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy kubectl command" })));
+    expect(writeText).toHaveBeenCalledWith("kubectl get pods web-0 --context prod");
+    expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
+    expect(container.querySelector(".copy-command-check")).not.toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("Copied to clipboard");
   });
 
   it("names the copy control for a pointer as well as a screen reader", () => {
-    render(<KubectlPreview command="kubectl delete pod web-0" onCopy={() => {}} />);
+    render(<KubectlPreview command="kubectl delete pod web-0" />);
     const button = screen.getByRole("button", { name: "Copy kubectl command" });
     expect(button.getAttribute("title")).toBe("Copy kubectl command");
   });
@@ -38,7 +46,7 @@ describe("KubectlPreview", () => {
     // The button already carries the name; an unlabelled graphic announced
     // beside it would be read twice.
     const { container } = render(
-      <KubectlPreview command="kubectl delete pod web-0" onCopy={() => {}} />,
+      <KubectlPreview command="kubectl delete pod web-0" />,
     );
     const glyph = container.querySelector("svg");
     expect(glyph).not.toBeNull();
@@ -49,7 +57,7 @@ describe("KubectlPreview", () => {
     // This preview lives inside confirm dialogs, which are forms; a bare
     // button submits the one it is standing in, confirming the action the
     // user was only reading about. (#318)
-    render(<KubectlPreview command="kubectl delete pod web-0" onCopy={() => {}} />);
+    render(<KubectlPreview command="kubectl delete pod web-0" />);
     expect(screen.getByRole("button", { name: "Copy kubectl command" }).getAttribute("type")).toBe(
       "button",
     );

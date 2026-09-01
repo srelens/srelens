@@ -19,7 +19,6 @@ const core = vi.hoisted(() => ({
   podCount: vi.fn(),
   cordonNode: vi.fn(),
   drainNode: vi.fn(),
-  copyKubectlCommand: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -568,6 +567,24 @@ describe("Overview — the nodes table", () => {
 });
 
 describe("Overview — the node actions", () => {
+  it("keeps the copy action open long enough to confirm it without a toast host", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "More actions" }));
+    await userEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+
+    expect(writeText).toHaveBeenCalledWith("kubectl get nodes n1 --context prod-eu -o yaml");
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeDefined();
+    expect(screen.getByRole("dialog")).toBeDefined();
+    expect(screen.getByRole("status").textContent).toBe("Copied to clipboard");
+  });
+
   it("does not drain a node until the drain is confirmed", async () => {
     open();
     await waitFor(() => expect(rowFor("n1")).toBeTruthy());

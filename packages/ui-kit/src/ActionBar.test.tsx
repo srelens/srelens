@@ -155,6 +155,16 @@ describe("ActionBar", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
 
+    it("can keep a feedback-bearing action visible after it runs", async () => {
+      setup({
+        max: 1,
+        actions: [action("Logs"), action("Copy", { closeOnSelect: false })],
+      });
+      await openMenu();
+      await userEvent.click(screen.getByRole("button", { name: "Copy" }));
+      expect(screen.getByRole("dialog")).toBeDefined();
+    });
+
     it("offers no menu when everything fits", () => {
       setup({ max: 4 });
       expect(screen.queryByRole("button", { name: "More actions" })).toBeNull();

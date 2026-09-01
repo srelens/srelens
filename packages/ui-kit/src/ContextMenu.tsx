@@ -19,6 +19,8 @@ export type ContextMenuItem =
       hint?: string;
       /** Tints the row with the danger colour, over a label that already says so. */
       danger?: boolean;
+      /** Keep the menu open while transient feedback replaces this row's label. */
+      closeOnPick?: boolean;
       onPick: () => void;
     };
 
@@ -118,7 +120,10 @@ export function ContextMenu({ items, children, label, onOpenChange }: ContextMen
                 // what the item does nor what a speech-input user would say to
                 // reach it. (#320)
                 aria-label={item.label}
-                onSelect={item.onPick}
+                onSelect={(event) => {
+                  if (item.closeOnPick === false) event.preventDefault();
+                  item.onPick();
+                }}
               >
                 {/* Always taken, filled or not: the design lines the labels up
                     in a column, and an icon present on only some items shoves

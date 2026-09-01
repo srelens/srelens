@@ -19,6 +19,8 @@ export interface ActionBarAction {
    * a blocked action with no explanation is worse than no action at all.
    */
   disabledReason?: string;
+  /** Keep an overflow row open while its transient result replaces the label. */
+  closeOnSelect?: boolean;
   onSelect: () => void;
 }
 
@@ -176,7 +178,7 @@ export function ActionBar({
                       // Left open on purpose: a menu that shuts looks like the
                       // action was taken.
                       if (blocked) return;
-                      close();
+                      if (a.closeOnSelect !== false) close();
                       a.onSelect();
                     }}
                   >

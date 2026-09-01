@@ -2,12 +2,10 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   ageFromTimestamp,
   browsable,
-  copyKubectlCommand,
   forwardAddress,
   getForwards,
   isForwardEnded,
   kindToForwardTarget,
-  notify,
   openExternal,
   plural,
   rehydrateForwards,
@@ -19,11 +17,13 @@ import {
 import {
   Badge,
   Button,
+  ClipboardCopyStatus,
   EmptyState,
   IconButton,
   Screen,
   StatusPill,
   Table,
+  useClipboardCopy,
   type Column,
   type StatusKind,
 } from "@srelens/ui-kit";
@@ -195,6 +195,7 @@ export function Forwards(_props: { route: string }) {
    * recent, and a second banner over a table is a row of the table gone.
    */
   const [failure, setFailure] = useState<{ title: string; error: unknown } | null>(null);
+  const clipboard = useClipboardCopy();
 
   const rows = useMemo<ForwardRow[]>(
     () =>
@@ -347,17 +348,6 @@ export function Forwards(_props: { route: string }) {
     }
   }
 
-  async function copyAddress(row: ForwardRow) {
-    try {
-      await navigator.clipboard.writeText(row.address);
-      notify.success("Copied the forward's address");
-    } catch {
-      // No clipboard on a non-secure origin, and nothing to recover: the
-      // address is rendered in full in the row's own Local cell and can be
-      // selected. Saying "Copied" when nothing was copied is the only real harm.
-    }
-  }
-
   const columns: Column<ForwardRow>[] = [
     // `void`, the way every other handler on this screen discards its
     // promise: the failure is already the banner's business.
@@ -374,41 +364,71 @@ export function Forwards(_props: { route: string }) {
       filterable: false,
       align: "end",
       minWidth: 128,
-      render: (row) => (
-        <div className="flex items-center justify-end gap-0.5">
-          <IconButton
-            icon={Icons.terminal}
-            // Named per row: four rows all offering "Copy" name nothing at all.
-            // The name carries the TARGET, which the row already shows — never
-            // the command or the address, which it must not hide in a title.
-            label={`Copy kubectl command for ${row.target}`}
-            onClick={() => void copyKubectlCommand(row.command)}
-          />
-          <IconButton
-            icon={Icons.copy}
-            label={`Copy address for ${row.target}`}
-            onClick={() => void copyAddress(row)}
-          />
-          {/* A tunnel that died has nothing left to stop, and a Stop that
-              stops nothing is the kind of control this migration keeps
-              deleting. Not `danger` either: dismissing news is not a
-              destructive act, and the row is already red where it counts. */}
-          {row.dead ? (
+      render: (row) => {
+        const commandKey = `forward-command/${row.id}`;
+        const addressKey = `forward-address/${row.id}`;
+        const commandStatus = clipboard.statusFor(commandKey);
+        const addressStatus = clipboard.statusFor(addressKey);
+        return (
+          <div className="flex items-center justify-end gap-0.5">
             <IconButton
-              icon={Icons.close}
-              label={`Dismiss ${row.target}`}
-              onClick={() => void dismiss(row)}
+              icon={
+                commandStatus === "copied"
+                  ? Icons.check
+                  : commandStatus === "failed"
+                    ? Icons.warn
+                    : Icons.terminal
+              }
+              // Named per row: four rows all offering "Copy" name nothing at all.
+              // The name carries the TARGET, which the row already shows — never
+              // the command or the address, which it must not hide in a title.
+              label={
+                commandStatus === "copied"
+                  ? `Copied kubectl command for ${row.target}`
+                  : commandStatus === "failed"
+                    ? `Copy failed for ${row.target}`
+                    : `Copy kubectl command for ${row.target}`
+              }
+              onClick={() => void clipboard.write(commandKey, row.command)}
             />
-          ) : (
             <IconButton
-              icon={Icons.close}
-              danger
-              label={`Stop forwarding ${row.target}`}
-              onClick={() => void stop(row)}
+              icon={
+                addressStatus === "copied"
+                  ? Icons.check
+                  : addressStatus === "failed"
+                    ? Icons.warn
+                    : Icons.copy
+              }
+              label={
+                addressStatus === "copied"
+                  ? `Copied address for ${row.target}`
+                  : addressStatus === "failed"
+                    ? `Copy address failed for ${row.target}`
+                    : `Copy address for ${row.target}`
+              }
+              onClick={() => void clipboard.write(addressKey, row.address)}
             />
-          )}
-        </div>
-      ),
+            {/* A tunnel that died has nothing left to stop, and a Stop that
+                stops nothing is the kind of control this migration keeps
+                deleting. Not `danger` either: dismissing news is not a
+                destructive act, and the row is already red where it counts. */}
+            {row.dead ? (
+              <IconButton
+                icon={Icons.close}
+                label={`Dismiss ${row.target}`}
+                onClick={() => void dismiss(row)}
+              />
+            ) : (
+              <IconButton
+                icon={Icons.close}
+                danger
+                label={`Stop forwarding ${row.target}`}
+                onClick={() => void stop(row)}
+              />
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -439,6 +459,7 @@ export function Forwards(_props: { route: string }) {
           <FailureAlert tone="sev" title={failure.title} error={failure.error} />
         </div>
       )}
+      <ClipboardCopyStatus feedback={clipboard.feedback} />
       {rows.length === 0 ? (
         <EmptyState
           title="No port forwards"

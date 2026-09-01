@@ -1,38 +1,16 @@
-import { useEffect, useState } from "react";
 import { Button } from "./Button";
+import {
+  ClipboardCopyStatus,
+  CopyFailureGlyph,
+  CopySuccessGlyph,
+  useClipboardCopy,
+} from "./clipboardCopy";
 import { cx } from "./cx";
-
-/** How long the button stays flipped after a copy, from the design's §12. */
-const COPIED_MS = 1400;
 
 export interface CopyCommandProps {
   /** The command, shown in full and copied verbatim. */
   command: string;
   className?: string;
-}
-
-/* Inline rather than an icon-set import: the kit takes no dependency on
-   lucide, and this is the only glyph it needs — the same reason
-   `KubectlPreview` inlines its own. */
-function CheckGlyph() {
-  return (
-    <svg
-      className="copy-command-check"
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      <path
-        d="m5 13 4 4 10-10"
-        stroke="currentColor"
-        strokeWidth="3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
 }
 
 /**
@@ -79,32 +57,18 @@ function CheckGlyph() {
  * over the top of it, which would be a second string saying the same thing.
  */
 export function CopyCommand({ command, className }: CopyCommandProps) {
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), COPIED_MS);
-    return () => clearTimeout(timer);
-  }, [copied]);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-    } catch {
-      // No clipboard on a non-secure origin, and nothing to recover: the
-      // command is rendered in full beside the button and can be selected.
-      // Saying "Copied" when nothing was copied would be the only real harm.
-    }
-  }
+  const copy = useClipboardCopy();
+  const status = copy.statusFor(command);
 
   return (
     <div className={cx("copy-command", className)}>
       <code className="code copy-command-text">{command}</code>
-      <Button variant="ghost" size="xs" onClick={() => void copy()}>
-        {copied && <CheckGlyph />}
-        {copied ? "Copied" : "Copy"}
+      <Button variant="ghost" size="xs" onClick={() => void copy.write(command, command)}>
+        {status === "copied" && <CopySuccessGlyph aria-hidden="true" />}
+        {status === "failed" && <CopyFailureGlyph aria-hidden="true" />}
+        {status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : "Copy"}
       </Button>
+      <ClipboardCopyStatus feedback={copy.feedback} />
     </div>
   );
 }

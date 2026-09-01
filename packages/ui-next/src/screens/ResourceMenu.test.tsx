@@ -62,6 +62,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
 }));
 
 import { useRowMenu, type UseRowMenuArgs } from "./ResourceMenu";
+import { toKubectl } from "@srelens/core";
 import type { ContextMenuItem } from "@srelens/ui-kit";
 import type { ListRow } from "../lib/kinds/types";
 import * as store from "../lib/tabsStore";
@@ -118,6 +119,10 @@ const NODE_ARGS: UseRowMenuArgs = { context: "prod", kind: "Node", actions: {} }
 beforeEach(() => {
   vi.clearAllMocks();
   store.setState(defaultState([]));
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    configurable: true,
+  });
 });
 
 describe("useRowMenu", () => {
@@ -139,6 +144,44 @@ describe("useRowMenu", () => {
     // the one family that needs to: see the `actions.delete === false` test
     // below.
     expect(cmLabels).toEqual(expect.arrayContaining(["Open in new tab", "Edit", "Copy as kubectl", "Delete"]));
+  });
+
+  it("confirms a kubectl copy in place and announces it without a toast host", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+
+    expect(writeText).toHaveBeenCalledWith(
+      toKubectl({
+        action: "get",
+        kind: "Pod",
+        name: "web-0",
+        namespace: "kube-system",
+        context: "prod",
+        output: "yaml",
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeDefined();
+    expect(screen.getByRole("status").textContent).toBe("Copied to clipboard");
+  });
+
+  it("shows and announces a refused kubectl copy without claiming success", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+      configurable: true,
+    });
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+
+    expect(await screen.findByRole("button", { name: "Copy failed" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Copied" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("Could not copy to clipboard");
   });
 
   // Whole-branch review (FIX 3): a custom resource's `k8sKind` is the CRD's

@@ -197,8 +197,9 @@ const cells = (row: HTMLElement) =>
 const cell = (row: HTMLElement, i: number) => row.querySelectorAll("td")[i] as HTMLElement;
 
 /** jsdom ships no clipboard at all, so there is nothing to spy on. */
-function stubClipboard() {
-  const writeText = vi.fn().mockResolvedValue(undefined);
+function stubClipboard(
+  writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined),
+) {
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   return writeText;
 }
@@ -509,6 +510,12 @@ describe("Forwards — the row's actions", () => {
     // And the command really is the port-forward one, so the assertion above
     // is not two identical mistakes agreeing.
     expect(writeText.mock.calls[0][0]).toContain("port-forward svc/checkout-api 8080:8080");
+    expect(
+      await within(rowFor("svc/checkout-api")).findByRole("button", {
+        name: /copied kubectl command/i,
+      }),
+    ).toBeDefined();
+    expect(screen.getByRole("status").textContent).toBe("Copied to clipboard");
   });
 
   it("copies the loopback address on the desktop", async () => {
@@ -547,6 +554,24 @@ describe("Forwards — the row's actions", () => {
       within(rowFor("svc/checkout-api")).getByRole("button", { name: /copy address/i }),
     );
     expect(writeText).toHaveBeenCalledWith(shown);
+  });
+
+  it("shows and announces a rejected address copy without claiming it succeeded", async () => {
+    stubClipboard(
+      vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new Error("permission denied")),
+    );
+    open();
+    await userEvent.click(
+      within(rowFor("svc/checkout-api")).getByRole("button", { name: /copy address/i }),
+    );
+
+    expect(
+      await within(rowFor("svc/checkout-api")).findByRole("button", {
+        name: /copy address failed/i,
+      }),
+    ).toBeDefined();
+    expect(screen.queryByRole("button", { name: /copied address/i })).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe("Could not copy to clipboard");
   });
 
   it("stops the forward the button is standing in, by id", async () => {
