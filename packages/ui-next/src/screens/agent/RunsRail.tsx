@@ -137,8 +137,13 @@ export function RunsRail() {
                   r.key === activeKey && "bg-sunk",
                 )}
               >
+                {/* The question first — it is what a reader recognises. The
+                    SUBJECT sits under it, because a question alone does not
+                    always say what it was about. Both rows read the same way
+                    whether the conversation is live or on disk. */}
                 <span className="min-w-0 truncate text-sm">{r.label}</span>
                 <span className="min-w-0 truncate text-xs text-muted">
+                  {r.subject !== undefined && `${r.subject} · `}
                   {r.busy
                     ? "answering…"
                     : r.savedId !== undefined

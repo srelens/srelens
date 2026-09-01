@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { describeError } from "@srelens/core";
+import { runKeyFor } from "./askContext";
 import {
   askAgent,
   chooseAgent,
@@ -794,8 +795,10 @@ describe("the run store", () => {
       const summaries = getRunSummaries();
       expect(summaries).toHaveLength(2);
       // Each holds only its own question.
-      const list = summaries.find((r) => r.label === "statefulsets")!;
-      const pod = summaries.find((r) => r.label === "Pod/ai-editor")!;
+      // Rows are labelled by the QUESTION now, with the subject beside it —
+      // one naming scheme for live and saved rows alike.
+      const list = summaries.find((r) => r.subject === "statefulsets")!;
+      const pod = summaries.find((r) => r.subject === "Pod/ai-editor")!;
       expect(getRun(list.key).turns.map((t) => t.text)).toContain("which replica set spiked?");
       expect(getRun(list.key).turns.map((t) => t.text)).not.toContain("summarise this stream");
       expect(getRun(pod.key).turns.map((t) => t.text)).toContain("summarise this stream");
@@ -916,6 +919,23 @@ describe("the run store", () => {
       expect(last.cliSessionId).toBe("cli-conversation-id");
     });
 
+    it("lists a conversation once, not twice, when it is both live and on disk", async () => {
+      // A run asked in this window is written immediately, so the next
+      // `listSessions` sees it. Without deduping by file id it appeared twice
+      // — once live, once as its own saved copy, under two different names.
+      sendChat.mockResolvedValue(null);
+      await askAgent("what is mongodb using?", POD);
+      const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+
+      listSessions.mockResolvedValue([
+        { id, title: "what is mongodb using?", createdAt: 1, updatedAt: 2 },
+      ]);
+      await restoreRuns();
+
+      expect(getRunSummaries()).toHaveLength(1);
+      expect(getRunSummaries()[0].savedId).toBeUndefined();
+    });
+
     it("writes nothing for a run nobody asked anything in", async () => {
       sendChat.mockResolvedValue(null);
       // Selecting a subject is not a conversation.
@@ -1020,6 +1040,45 @@ describe("the run store", () => {
       await askAgent("second", POD);
       const second = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
       expect(second).not.toBe(first);
+    });
+  });
+
+  /**
+   * The refusal said "srelens is still answering the last question" and stayed
+   * there after the answer had visibly arrived — a current-sounding message
+   * about a condition that was over.
+   */
+  describe("a refusal stops being shown when what it was about is over", () => {
+    const A = { about: { cluster: "prod-eu" }, route: "/k/statefulsets" };
+    const B = { about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "p" }, route: "/k/Pod/ns/p" };
+
+    it("clears the refusal once the turn it named has finished", async () => {
+      let finish!: (v: string | null) => void;
+      sendChat.mockImplementationOnce(() => new Promise<string | null>((r) => { finish = r; }));
+      void askAgent("long one", A);
+      await untilSendChatCalledTimes(1);
+
+      await askAgent("second", B);
+      expect(getAgentRun().error).toMatch(/still answering/i);
+
+      sendChat.mockResolvedValue(null);
+      finish(null);
+      await vi.waitFor(() => {
+        expect(getRun(runKeyFor(B.about, B.route)).error).toBeUndefined();
+      });
+    });
+
+    it("does NOT clear a real failure the same way", async () => {
+      // A `cancelChat` that did not land is a different thing: it says
+      // something went wrong, and it is still true after the turn ends.
+      sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+      void askAgent("q", A);
+      await untilSendChatCalledTimes(1);
+      cancelChat.mockRejectedValueOnce(new Error("cancel refused"));
+      stopAgentRun();
+      await vi.waitFor(() => expect(getAgentRun().error).toBeDefined());
+      const failure = getAgentRun().error;
+      expect(failure).not.toMatch(/still answering/i);
     });
   });
 });

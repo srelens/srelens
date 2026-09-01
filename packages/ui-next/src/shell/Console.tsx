@@ -7,6 +7,7 @@ import {
   dismissAgentError,
   selectRun,
   stopAgentRun,
+  useActiveRunKey,
   useRun,
 } from "../lib/agentRun";
 import {
@@ -148,7 +149,21 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
    * A key with no run yet reads as the empty run, which is right — the reader
    * has navigated somewhere they have not asked about.
    */
-  const runKey = useMemo(() => runKeyFor(about, route), [about, route]);
+  /**
+   * `/agent` is not a subject — it is the FULL VIEW of whichever conversation
+   * is selected — so there the dock shows the active run rather than one keyed
+   * by its own route.
+   *
+   * Without this the two surfaces on that screen were on different
+   * conversations: the transcript showed the subject the reader had asked
+   * about, while the dock, keyed on `/agent`, showed an empty run and offered
+   * "Start here" suggestions underneath a full answer. Reported from use.
+   */
+  const activeKey = useActiveRunKey();
+  const runKey = useMemo(
+    () => (route === "/agent" ? activeKey : runKeyFor(about, route)),
+    [route, activeKey, about],
+  );
   const { turns, gates, busy, error } = useRun(runKey);
 
   const deps = useMemo<CommandDeps>(
@@ -225,7 +240,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
-    void askAgent(raw, { about });
+    void askAgent(raw, { about, route });
     setValue("");
     setOpen(true);
   }
@@ -274,12 +289,15 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
           }}
         />
       );
-  } else if (turns.length === 0) {
+  } else if (turns.length === 0 && !busy) {
+    // Suggestions are for a conversation that has not started. Not while one
+    // is answering either: "Start here" under a question already in flight
+    // invites a second that would only be refused.
     children = (
       <SuggestionList
         items={suggestionsFor(route)}
         onAsk={(question) => {
-          void askAgent(question, { about });
+          void askAgent(question, { about, route });
           setValue("");
         }}
       />

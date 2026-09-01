@@ -208,6 +208,17 @@ type RunState = {
    * file.
    */
   saving: Promise<void>;
+  /**
+   * True when this run's `error` is only the "still answering" refusal — a
+   * message about a condition somewhere ELSE, which stops being true the
+   * moment that turn finishes.
+   *
+   * It used to sit there afterwards: the reader saw "srelens is still
+   * answering the last question" above an answer that had visibly completed.
+   * A failed `cancelChat` is a different thing and must NOT be cleared this
+   * way, which is why this is a flag rather than a string comparison.
+   */
+  refusalOnly: boolean;
   /** When it was last asked into — for DISPLAY ("3 minutes ago"). */
   at: number;
   /**
@@ -329,6 +340,7 @@ function runFor(key: string, label: string): RunState {
     stoppedGeneration: null,
     id: newRunId(),
     saving: Promise.resolve(),
+    refusalOnly: false,
     label,
     at: Date.now(),
     order: ++touchSeq,
@@ -469,6 +481,10 @@ export type RunSummary = {
   /** For display. Ordering uses {@link RunState.order}, which cannot tie. */
   at: number;
   order: number;
+  /** What the conversation is ABOUT, when that is known — the subject key's
+   *  own label. Absent for a row still on disk, whose envelope has not been
+   *  read yet. */
+  subject?: string;
   turns: number;
   busy: boolean;
   /** Set when this row is a conversation on disk that is not loaded yet — the
@@ -479,7 +495,14 @@ export type RunSummary = {
 export function getRunSummaries(): RunSummary[] {
   const live: RunSummary[] = [...runs.entries()].map(([key, s]) => ({
     key,
-    label: s.label,
+    // The QUESTION, like the saved rows — one naming scheme, not two. Live
+    // rows used the subject ("cluster", "Pod/mongodb-0") while saved rows used
+    // the question, so one conversation listed twice read as two unrelated
+    // things, and a subject like "cluster" said nothing on its own.
+    label: s.run.turns.find((t) => t.role === "user")?.text ?? s.label,
+    // The subject travels alongside, since it is what the run is ABOUT and the
+    // question alone does not always say.
+    subject: s.label,
     at: s.at,
     order: s.order,
     turns: s.run.turns.filter((t) => t.role === "user").length,
@@ -489,17 +512,25 @@ export function getRunSummaries(): RunSummary[] {
   // Conversations on disk that this window has not opened yet. Listed so a
   // restart does not look like a fresh install, and marked with `savedId` so
   // the rail knows a click has to LOAD one rather than just switch to it.
-  const onDisk: RunSummary[] = saved.map((m) => ({
-    key: `saved|${m.id}`,
-    label: m.title,
-    at: m.updatedAt,
-    // Behind every live run: those are this session's, and the reader was just
-    // in them. Negative, so no live run ever sorts below a saved one.
-    order: -1,
-    turns: 0,
-    busy: false,
-    savedId: m.id,
-  }));
+  //
+  // Deduped against the live runs BY FILE ID. A run asked in this window is
+  // written to disk immediately, so the next `listSessions` sees it — and
+  // without this it appeared twice: once as the live conversation and once as
+  // its own saved copy, under two different names. Reported from use.
+  const liveIds = new Set([...runs.values()].map((s) => s.id));
+  const onDisk: RunSummary[] = saved
+    .filter((m) => !liveIds.has(m.id))
+    .map((m) => ({
+      key: `saved|${m.id}`,
+      label: m.title,
+      at: m.updatedAt,
+      // Behind every live run: those are this session's, and the reader was
+      // just in them. Negative, so no live run ever sorts below a saved one.
+      order: -1,
+      turns: 0,
+      busy: false,
+      savedId: m.id,
+    }));
   return [...live.sort((a, b) => b.order - a.order), ...onDisk.sort((a, b) => b.at - a.at)];
 }
 
@@ -526,8 +557,15 @@ export function getActiveRunKey(): string | null {
   return activeKey;
 }
 
+/** The same, subscribed — the dock needs to re-render when the rail switches
+ *  conversations, since on `/agent` it follows the active one. */
+export function useActiveRunKey(): string | null {
+  return useSyncExternalStore(subscribeAgentRun, getActiveRunKey, getActiveRunKey);
+}
+
 /** Show a different conversation — the rail's switch. */
-export function selectRun(key: string): void {
+export function selectRun(key: string | null): void {
+  if (key === null) return;
   if (activeKey === key) return;
   // A key with no run yet is ACCEPTED, deliberately. The dock's "full view"
   // control selects its own subject before navigating, and the reader may not
@@ -704,6 +742,7 @@ export async function askAgent(
   if (busyElsewhere) {
     const state = runFor(key, runLabelFor(about, route));
     activeKey = key;
+    state.refusalOnly = true;
     commitTo(key, {
       ...state.run,
       error:
@@ -896,6 +935,15 @@ export async function askAgent(
           : t,
       );
       commitTo(key, { ...state.run, busy: false });
+      // The condition every refusal was about — a turn in flight — is over, so
+      // the sentences saying so stop being true. Cleared here rather than left
+      // for the reader to dismiss: a stale message about a current problem is
+      // the class of defect this branch exists to remove.
+      for (const [k, st] of runs) {
+        if (!st.refusalOnly) continue;
+        st.refusalOnly = false;
+        commitTo(k, { ...st.run, error: undefined });
+      }
       // Every turn, not only the last: a window closed mid-conversation must
       // not lose the answers already given, and "save on exit" has no hook to
       // hang on in a Tauri window the reader can kill.
@@ -955,7 +1003,7 @@ export function stopAgentRun(): void {
  *  Drops `activeSkills` too — a skill picked for a run that no longer exists
  *  is not "still active", and this is the one place that is true regardless
  *  of which component (if any) is mounted to have noticed the run end. */
-export function clearAgentRun(target?: string): void {
+export function clearAgentRun(target?: string | null): void {
   // A gesture about ONE conversation — the caller's own, since the dock and
   // `/agent` can be showing different runs. Defaults to the active run for
   // `/agent`'s header control; the dock passes its own route's key.
@@ -1055,6 +1103,7 @@ export function chooseAgent(kind: string): void {
   const busy = [...runs.entries()].find(([, st]) => st.run.busy);
   if (busy) {
     const [busyKey, busyState] = busy;
+    busyState.refusalOnly = true;
     commitTo(busyKey, {
       ...busyState.run,
       error: "srelens is still answering. Stop the question in flight before switching agent.",
@@ -1149,11 +1198,12 @@ export function noteGateIn(key: string, record: GateRecord): void {
  * land — and it is rendered by both views. Without a way to dismiss it, the
  * sentence would sit there until the next question happened to clear it.
  */
-export function dismissAgentError(target?: string): void {
+export function dismissAgentError(target?: string | null): void {
   const key = target ?? activeKey;
   if (key === null) return;
   const state = runs.get(key);
   if (!state || state.run.error === undefined) return;
+  state.refusalOnly = false;
   commitTo(key, { ...state.run, error: undefined });
 }
 
@@ -1266,6 +1316,7 @@ export async function openSavedRun(id: string): Promise<void> {
     stoppedGeneration: null,
     id: session.id,
     saving: Promise.resolve(),
+    refusalOnly: false,
     label: envelope?.label ?? meta?.title ?? "saved",
     at: session.updatedAt,
     order: ++touchSeq,

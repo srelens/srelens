@@ -18,9 +18,13 @@ const {
   dismissAgentError,
   selectRun,
   stopAgentRun,
+  useActiveRunKey,
 } = vi.hoisted(() => ({
   selectRun: vi.fn(),
   stopAgentRun: vi.fn(),
+  // Typed, or `vi.fn(() => null)` infers `() => null` and a test cannot hand
+  // it a real key.
+  useActiveRunKey: vi.fn<() => string | null>(() => null),
   useAgentRun: vi.fn(),
   // The dock reads its OWN route's run, not the active one — so this is the
   // hook under test here, and tests that care about which key it was handed
@@ -38,6 +42,7 @@ vi.mock("../lib/agentRun", () => ({
   dismissAgentError,
   selectRun,
   stopAgentRun,
+  useActiveRunKey,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -108,6 +113,7 @@ beforeEach(() => {
   clearAgentRun.mockReset();
   selectRun.mockReset();
   stopAgentRun.mockReset();
+  useActiveRunKey.mockReset().mockReturnValue(null);
 });
 
 describe("Console", () => {
@@ -552,5 +558,44 @@ describe("Console — header details", () => {
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
     await user.click(screen.getByRole("button", { name: "Stop" }));
     expect(stopAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * `/agent` is the FULL VIEW of whichever conversation is selected, not a
+   * subject of its own. The dock there was keyed on `/agent`, so the two
+   * surfaces on that screen sat on different runs: a full transcript above,
+   * and "Start here" suggestions in the dock beneath it.
+   */
+  it("shows the active conversation on /agent, not one keyed by that route", () => {
+    useActiveRunKey.mockReturnValue("prod-eu|Pod|ns|mongodb-0");
+    tabsStore.setState(defaultState([]));
+    tabsStore.openTab("/agent", {});
+    setup();
+    expect(useRun).toHaveBeenCalledWith("prod-eu|Pod|ns|mongodb-0");
+    // Never the route-derived key, which is what made the dock a second,
+    // empty conversation on that screen.
+    expect(useRun).not.toHaveBeenCalledWith(expect.stringContaining("/agent"));
+  });
+
+  it("offers no Start here suggestions once the conversation has questions in it", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "asked already", calls: [], at: 1 }] }),
+    );
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.queryByText(/start here/i)).toBeNull();
+  });
+
+  it("offers none while a question is being answered either", async () => {
+    const user = userEvent.setup();
+    // No turns yet AND busy: suggesting a second question that would only be
+    // refused is worse than showing nothing.
+    useRun.mockReturnValue(runState({ busy: true }));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.queryByText(/start here/i)).toBeNull();
+    // And the bar says what is happening.
+    expect(screen.getByText(/working/i)).toBeTruthy();
   });
 });
