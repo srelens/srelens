@@ -1580,6 +1580,46 @@ describe("the run store", () => {
       expect(sendChat.mock.calls.at(-1)?.[2]).toBe("/codex");
     });
 
+    /**
+     * Codex P2, round 6: `getRunSummaries` hides a persisted file only while
+     * its id belongs to a live run, so rotating the live id on clear while
+     * `saved` still held the old one made the conversation the reader just
+     * cleared reappear immediately as a saved row.
+     */
+    it("does not list a cleared conversation as one still on disk", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("something to clear", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      // The file this window wrote is now on the index, as it is after a
+      // restart or any other `listSessions`.
+      const id = getRunSummaries()[0]?.key;
+      expect(id).toBeDefined();
+      listSessions.mockResolvedValue([
+        { id: (await saveSession.mock.calls.at(-1)?.[0])?.id ?? "", title: "t", createdAt: 1, updatedAt: 2 },
+      ]);
+      await restoreRuns();
+
+      clearAgentRun();
+
+      // Gone, not moved to the saved list under its dead id.
+      expect(getRunSummaries()).toEqual([]);
+    });
+
+    it("does not list a forgotten conversation as one still on disk either", async () => {
+      // The same class as the clear above, at the other site that deletes a
+      // file. Fixed together rather than at the one that was reported.
+      sendChat.mockResolvedValue(null);
+      await askAgent("something to forget", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      const key = getActiveRunKey() ?? "";
+      listSessions.mockResolvedValue([
+        { id: (await saveSession.mock.calls.at(-1)?.[0])?.id ?? "", title: "t", createdAt: 1, updatedAt: 2 },
+      ]);
+      await restoreRuns();
+
+      forgetRun(key);
+
+      expect(getRunSummaries()).toEqual([]);
+    });
+
     it("resumes the CLI conversation a reopened run came with", async () => {
       listSessions.mockResolvedValue([{ id: "s1", title: "t", createdAt: 1, updatedAt: 2 }]);
       loadSession.mockResolvedValue({

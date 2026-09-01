@@ -2,7 +2,14 @@ import { Alert, Button, CopyButton, Screen, SideRail, usePortalShowing } from "@
 import { isTauri } from "@srelens/core";
 import { Console } from "../shell/Console";
 import { useActiveContext } from "../lib/clusters";
-import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
+import {
+  clearAgentRun,
+  dismissAgentError,
+  useAgentRun,
+  useActiveRunKey,
+  useRunSubject,
+  type Turn,
+} from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
 import { titleFromQuestion } from "../lib/runTitle";
 import { Transcript, transcriptText } from "./agent/Transcript";
@@ -75,6 +82,9 @@ export function Agent(_props: { route: string }) {
   const context = activeCtx?.name ?? "";
   // Whether this tab is the one on screen — see the dock's own note below.
   const showing = usePortalShowing();
+  const activeKey = useActiveRunKey();
+  const subject = useRunSubject(activeKey);
+  const runCluster = subject?.about.cluster ?? context;
   const started = startedLabel(turns);
   const calls = callCount(turns);
   const head = started && calls > 0 ? `${started} · ${calls} call${calls === 1 ? "" : "s"}` : started;
@@ -119,7 +129,12 @@ export function Agent(_props: { route: string }) {
   return (
     <Screen
       title="Agent"
-      eyebrow={context || undefined}
+      // The SELECTED conversation's cluster, not the active workspace's. A run
+      // started on cluster A survives a switch to B and can still be opened
+      // here; naming B above a transcript that will be continued on A is the
+      // #380 class of defect. Falls back to the active cluster when nothing is
+      // selected, which is the ordinary case.
+      eyebrow={runCluster || undefined}
       fill
       actions={
         <Button type="button" size="sm" onClick={() => clearAgentRun()}>

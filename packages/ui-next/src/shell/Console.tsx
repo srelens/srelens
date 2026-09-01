@@ -6,7 +6,7 @@ import {
   clearAgentRun,
   dismissAgentError,
   chooseAgent,
-  getRunSubject,
+  useRunSubject,
   selectRun,
   stopAgentRun,
   useActiveRunKey,
@@ -21,6 +21,7 @@ import {
 } from "../lib/agentCommands";
 import { AgentPicker } from "../screens/agent/AgentPicker";
 import { LOADING, type Read } from "../lib/read";
+import { contextLabelFor } from "../lib/agentSuggestions";
 import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
@@ -244,6 +245,24 @@ export function Console({ fullView }: { fullView?: boolean }) {
     [route, activeKey, about],
   );
   const { turns, gates, busy, error, agentKind } = useRun(runKey);
+  /*
+    What the conversation on screen is ABOUT — only in the full view, where the
+    dock shows whichever run is selected rather than the one for its own route.
+
+    Load-bearing for more than the submit path. A run started on cluster A
+    survives a workspace switch to cluster B and can still be selected here, so
+    the eyebrow, the placeholder and the no-cluster check all have to name the
+    cluster the next question will ACTUALLY reach. They read the active cluster,
+    which said B while the question went to A — a surface naming one cluster and
+    acting on another is the #380 class of defect, seven findings deep.
+  */
+  const shown = useRunSubject(isFullView ? runKey : null);
+
+  // The cluster the next question reaches, and the label that says so. A
+  // selected conversation outranks the active workspace, because it is what
+  // `askAgent` will be given.
+  const askCluster = shown?.about.cluster ?? context;
+  const askScope = shown ? contextLabelFor(shown.route, shown.about.cluster) : scope;
 
   const deps = useMemo<CommandDeps>(
     () => ({
@@ -342,7 +361,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
     // empty cluster, so it vanishes from the dock the moment a context does
     // resolve. Refused where the reader can see it, rather than sent and left
     // to fail somewhere they cannot.
-    if (context === "") {
+    if (askCluster === "") {
       setNoCluster(true);
       return;
     }
@@ -361,8 +380,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
       follow-up goes back to it. A run restored from a file written before that
       was recorded has none, and falls back to this route — the old behaviour.
     */
-    const selected = isFullView ? getRunSubject(runKey) : undefined;
-    void askAgent(raw, {
+    void submit(raw);
+  }
+
+  /** Sends, and clears the draft only if the store TOOK the question. */
+  async function submit(raw: string) {
+    const accepted = await askAgent(raw, {
       // The KEY, not a route to re-derive one from. `runKey` is what this dock
       // is showing, and in the full view it cannot always be reconstructed: a
       // conversation opened beside a live one about the same subject is
@@ -371,13 +394,20 @@ export function Console({ fullView }: { fullView?: boolean }) {
       ...(isFullView && runKey !== null ? { key: runKey } : {}),
       // The subject still supplies the preface, so a follow-up carries the
       // resource the conversation is about rather than the cluster alone.
-      about: selected?.about ?? about,
-      route: selected?.route ?? route,
+      about: shown?.about ?? about,
+      route: shown?.route ?? route,
       images: images.length > 0 ? images : undefined,
     });
+    setOpen(true);
+    // Only once it was taken. `askAgent` refuses a question while ANOTHER
+    // run's turn is in flight, and this dock is not busy — its own run is
+    // idle — so the reader can submit and be refused. Clearing regardless
+    // discarded the typed question and any screenshot with it, while the
+    // alert said it had not been sent: they were left retyping something they
+    // could see a moment earlier.
+    if (!accepted) return;
     setImages([]);
     setValue("");
-    setOpen(true);
   }
 
   // A ref, not `[registerSubmit]` alone closing over a stale `onSubmit`: a
@@ -490,9 +520,9 @@ export function Console({ fullView }: { fullView?: boolean }) {
       // Empty rather than absent is a bordered chip with nothing in it, and
       // the console is unscoped until `Window`'s own effect (`contextLabelFor`)
       // has scoped it to the active route and cluster.
-      context={scope || undefined}
+      context={askScope || undefined}
       status={exchanges > 0 ? `${exchanges} exchange${exchanges === 1 ? "" : "s"}` : undefined}
-      placeholder={scope ? `Ask about ${scope}` : "Ask about this cluster"}
+      placeholder={askScope ? `Ask about ${askScope}` : "Ask about this cluster"}
       shortcutHint={hint("console", apple)}
       onClear={() => clearAgentRun(runKey)}
       // The dock and `/agent` are two views of ONE conversation, and until now

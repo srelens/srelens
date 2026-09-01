@@ -55,6 +55,7 @@ const {
   openSavedRun,
   useActiveRunKey,
   useRun,
+  useRunSubject,
 } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
@@ -72,6 +73,8 @@ const {
   // dock's own store reads too.
   useActiveRunKey: vi.fn<() => string | null>(() => null),
   useRun: vi.fn(),
+  // The selected conversation's own subject — the screen names ITS cluster.
+  useRunSubject: vi.fn(() => undefined),
 }));
 vi.mock("../lib/agentRun", () => ({
   useAgentRun,
@@ -88,6 +91,7 @@ vi.mock("../lib/agentRun", () => ({
   openSavedRun,
   useActiveRunKey,
   useRun,
+  useRunSubject,
 }));
 
 const CLAUDE: AgentInfo = {

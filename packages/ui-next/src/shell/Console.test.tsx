@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { ConsoleProvider, useConsole } from "../console";
@@ -21,11 +21,11 @@ const {
   stopAgentRun,
   useActiveRunKey,
   chooseAgent,
-  getRunSubject,
+  useRunSubject,
 } = vi.hoisted(() => ({
   // What the conversation in the full view is ABOUT — the dock asks the store
   // rather than deriving it from `/agent`, which is not a subject.
-  getRunSubject: vi.fn<() => { about: unknown; route: string } | undefined>(() => undefined),
+  useRunSubject: vi.fn<() => { about: unknown; route: string } | undefined>(() => undefined),
   chooseAgent: vi.fn(),
   selectRun: vi.fn(),
   stopAgentRun: vi.fn(),
@@ -51,7 +51,7 @@ vi.mock("../lib/agentRun", () => ({
   stopAgentRun,
   useActiveRunKey,
   chooseAgent,
-  getRunSubject,
+  useRunSubject,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -166,8 +166,14 @@ beforeEach(() => {
   setContexts([HARNESS_CTX]);
   useAgentRun.mockReset().mockReturnValue(runState());
   useRun.mockReset().mockReturnValue(runState());
+  // Nothing selected by default. Left un-reset, a test that pins a selected
+  // conversation's cluster leaks it into every later placeholder assertion.
+  useRunSubject.mockReset().mockReturnValue(undefined);
   readImageFile.mockReset().mockResolvedValue("data:image/png;base64,AAA");
-  askAgent.mockReset();
+  // `true` = the store TOOK the question, which is what the composer clears its
+  // draft on. A mock returning `undefined` reads as refused, and every
+  // send-then-type test would see the two questions concatenated.
+  askAgent.mockReset().mockResolvedValue(true);
   clearAgentRun.mockReset();
   selectRun.mockReset();
   stopAgentRun.mockReset();
@@ -364,7 +370,7 @@ describe("Console", () => {
       about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "ai-editor" },
       route: "/k/pods/ns/ai-editor",
     };
-    getRunSubject.mockReturnValue(subject);
+    useRunSubject.mockReturnValue(subject);
     useActiveRunKey.mockReturnValue("prod-eu|Pod|ns|ai-editor");
     useRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "why is it restarting", calls: [], at: 1 }] }),
@@ -405,7 +411,7 @@ describe("Console", () => {
    */
   it("names the selected run even when it has no stored subject yet", async () => {
     const user = userEvent.setup();
-    getRunSubject.mockReturnValue(undefined);
+    useRunSubject.mockReturnValue(undefined);
     useActiveRunKey.mockReturnValue("prod-eu|Pod|ns|ai-editor");
     tabsStore.setState(defaultState([HARNESS_CTX]));
     tabsStore.openTab("/agent");
@@ -444,7 +450,7 @@ describe("Console", () => {
     const user = userEvent.setup();
     // A run restored from a file written before the subject was recorded. The
     // old behaviour rather than a crash.
-    getRunSubject.mockReturnValue(undefined);
+    useRunSubject.mockReturnValue(undefined);
     useActiveRunKey.mockReturnValue("prod-eu|/k/pods");
     tabsStore.setState(defaultState([HARNESS_CTX]));
     tabsStore.openTab("/agent");
@@ -549,6 +555,75 @@ describe("Console", () => {
     expect((screen.getByRole("textbox", { name: "Console prompt" }) as HTMLTextAreaElement).value).toBe(
       "half a question",
     );
+  });
+
+  /**
+   * Codex P2, round 6: this dock's own run is idle while ANOTHER run's turn is
+   * in flight, so the reader can submit and `askAgent` refuses. The clears ran
+   * regardless, so the typed question and any screenshot went with it while the
+   * alert said it had not been sent.
+   */
+  it("keeps the draft and the attachments when the store refuses the question", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    askAgent.mockResolvedValue(false);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+    await screen.findByAltText("Attachment 1");
+
+    await user.type(box, "the refused question");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(askAgent).toHaveBeenCalled();
+    });
+    // Flushed PAST the point a clear would have landed. `askAgent` having been
+    // called is not enough: the clear happens after its promise resolves, so
+    // the first draft of this test read the value a microtask too early and
+    // passed with the fix reverted.
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    // Still there to send again once the other run finishes.
+    expect((box as HTMLTextAreaElement).value).toBe("the refused question");
+    expect(screen.getByAltText("Attachment 1")).toBeTruthy();
+  });
+
+  /**
+   * Codex P1, round 6: a run started on cluster A survives a workspace switch
+   * to cluster B, and `Recent runs` lists runs from every cluster — so
+   * selecting it in the full view left the eyebrow, the placeholder and the
+   * no-cluster check naming B while the question went to A. A surface naming
+   * one cluster and acting on another is the #380 class of defect.
+   */
+  it("names the cluster the selected conversation will actually reach", async () => {
+    const user = userEvent.setup();
+    useRunSubject.mockReturnValue({
+      about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "ai-editor" },
+      route: "/k/pods/ns/ai-editor",
+    });
+    useActiveRunKey.mockReturnValue("prod-eu|Pod|ns|ai-editor");
+    // The workspace has moved to a DIFFERENT cluster.
+    resetContexts();
+    setContexts([ctx("staging-id", "staging-eu")]);
+    tabsStore.setState(defaultState([ctx("staging-id", "staging-eu")]));
+    tabsStore.openTab("/agent");
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Scoped scope="staging-eu / agent" />
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+    // The conversation's own cluster, not the workspace's.
+    const placeholder =
+      screen.getByRole("textbox", { name: "Console prompt" }).getAttribute("placeholder") ?? "";
+    expect(placeholder).toContain("prod-eu");
+    expect(placeholder).not.toContain("staging-eu");
   });
 
   it("prints the console accelerator for the platform", () => {

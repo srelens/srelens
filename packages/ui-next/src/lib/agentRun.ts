@@ -588,6 +588,19 @@ export function getRunSummaries(): RunSummary[] {
 
 /** The rail's list, subscribed. Rebuilt only when the store emits, so its
  *  identity is stable between changes. */
+/**
+ * What the conversation at `key` is about, as a subscription.
+ *
+ * {@link getRunSubject} is the same read for an event handler. The full view
+ * needs it during RENDER as well — to name the cluster the next question will
+ * actually reach — and a plain module read there would not re-render when the
+ * reader selects a different conversation.
+ */
+export function useRunSubject(key: string | null): { about: AskContext; route: string } | undefined {
+  const read = useCallback(() => getRunSubject(key), [key]);
+  return useSyncExternalStore(subscribeAgentRun, read, read);
+}
+
 export function useRunSummaries(): RunSummary[] {
   return useSyncExternalStore(subscribeAgentRun, cachedSummaries, cachedSummaries);
 }
@@ -805,7 +818,7 @@ export async function askAgent(
      */
     key?: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   // ONE turn at a time, refused here rather than at each door.
   //
   // The dock's input and the composer both disable themselves while busy, but
@@ -851,7 +864,12 @@ export async function askAgent(
           ? "srelens is still answering the last question. Stop it, or wait for it to finish, before asking another."
           : `srelens is still answering a question about ${busyElsewhere.label}. Stop it, or wait for it to finish, before asking another.`,
     });
-    return;
+    // NOT taken. The composer clears its draft on `true` only: it clears
+    // unconditionally otherwise, so a question refused here was discarded
+    // along with any screenshot attached to it while the alert said it had not
+    // been sent — leaving the reader to retype what they could still see a
+    // moment ago.
+    return false;
   }
 
   const state = runFor(key, runLabelFor(about, route));
@@ -949,7 +967,9 @@ export async function askAgent(
     // purpose, because reassigning it here is exactly how a discarded question
     // used to go on and reach `sendChat`.
     //
-    if (abandoned(state, myGeneration)) return;
+    // `true`: the question WAS taken — its turn is in the transcript — it was
+    // merely abandoned before it could be sent.
+    if (abandoned(state, myGeneration)) return true;
     state.session = started;
     const preface = contextPreface(about);
     const guidance = await loadSkillsGuidance(skills);
@@ -987,7 +1007,10 @@ export async function askAgent(
             "No agent is available to ask. Install Claude, Codex or Cursor, or configure srelens's own agent in Settings, then try again.",
           ),
         );
-        return;
+        // Taken, and then failed ON its own turn — which is where the reader
+        // reads about it. The draft is right to clear: the question is on
+        // screen in the transcript, not lost.
+        return true;
       }
       // `agentKind` names nothing installed — fall back to the first agent
       // this run can actually reach, and record the choice via the same
@@ -1011,7 +1034,7 @@ export async function askAgent(
     }
     // Last thing before the question actually leaves. Every await above is a
     // window in which the reader can abandon this turn.
-    if (abandoned(state, myGeneration)) return;
+    if (abandoned(state, myGeneration)) return true;
     const result = await sendChat(
       started,
       `${preface}${guidance}${question}`,
@@ -1092,6 +1115,8 @@ export async function askAgent(
       persistRun(key);
     }
   }
+  // Taken. Every other exit above says so too; only the busy refusal does not.
+  return true;
 }
 
 /** Stop the turn in flight, if there is one. A Stop that reaches the backend
@@ -1196,6 +1221,12 @@ export function clearAgentRun(target?: string | null): void {
   // A fresh id, so the next question in this run writes a new file rather than
   // reusing the one just removed.
   const dead = state.id;
+  // Off the not-yet-loaded list BEFORE the id rotates. `getRunSummaries` hides
+  // a persisted file only while its id belongs to a live run, so rotating the
+  // live id while `saved` still held the old one made the conversation the
+  // reader just cleared reappear immediately as a saved row — openable until
+  // the delete landed, and a load error afterwards.
+  saved = saved.filter((m) => m.id !== dead);
   state.saving = state.saving.then(() => deleteSession(dead)).catch(() => {});
   state.id = newRunId();
 }
@@ -1211,8 +1242,12 @@ export function clearAgentRun(target?: string | null): void {
 export function forgetRun(key: string): void {
   const state = runs.get(key);
   if (!state || state.run.busy) return;
-  // Same ordering as a clear: drain the write, then remove the file.
+  // Same ordering as a clear: drain the write, then remove the file. And the
+  // same removal from the not-yet-loaded list, for the same reason — a run
+  // dropped here while `saved` still held its id came straight back as a saved
+  // row. Fixed as a class rather than at the one site that was reported.
   const dead = state.id;
+  saved = saved.filter((m) => m.id !== dead);
   void state.saving.then(() => deleteSession(dead)).catch(() => {});
   runs.delete(key);
   if (activeKey === key) {
