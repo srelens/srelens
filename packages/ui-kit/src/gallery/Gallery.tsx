@@ -43,6 +43,7 @@ import { MetricTile } from "../MetricTile";
 import { NavIcon } from "../NavIcon";
 import { PairList } from "../PairList";
 import { Panel } from "../Panel";
+import { OptionCheck } from "../OptionCheck";
 import { Popover } from "../Popover";
 import { Progress } from "../Progress";
 import { Radio } from "../Radio";
@@ -1131,6 +1132,23 @@ export function Gallery() {
           Image pull
         </span>
         <Progress value={62} ariaLabelledBy="kit-gallery-pull" />
+      </section>
+
+      <section>
+        <h2>OptionCheck</h2>
+        {/* Both states side by side, because the point of this component is
+            that the OFF one still takes its space — the labels line up, and a
+            check appearing would shove its row sideways. */}
+        <div className="flex flex-col" style={{ width: "200px" }}>
+          <span className="ns-row" data-on="true">
+            <OptionCheck checked />
+            <span className="flex-1 truncate">Chosen</span>
+          </span>
+          <span className="ns-row">
+            <OptionCheck checked={false} />
+            <span className="flex-1 truncate">Not chosen</span>
+          </span>
+        </div>
       </section>
 
       <section>

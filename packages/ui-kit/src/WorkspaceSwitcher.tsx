@@ -1,4 +1,5 @@
 import { cx } from "./cx";
+import { OptionCheck } from "./OptionCheck";
 import { filled } from "./slot";
 import { IconButton, type IconComponent } from "./IconButton";
 import { Popover } from "./Popover";
@@ -123,19 +124,7 @@ export function WorkspaceSwitcher({
                       close();
                     }}
                   >
-                    <svg
-                      width="12"
-                      height="12"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      aria-hidden="true"
-                      // Always rendered: a tick appearing would shove the name
-                      // it belongs to sideways.
-                      className={cx("shrink-0", current ? "opacity-100" : "opacity-0")}
-                      style={{ color: "var(--accent)" }}
-                    >
-                      <path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
+                    <OptionCheck checked={current} />
                     <span className="min-w-0 flex-1 text-left">
                       <span className="block truncate">{workspace.name}</span>
                       <span className="path block truncate text-faint">{summarize(workspace)}</span>

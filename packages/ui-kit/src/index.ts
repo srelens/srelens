@@ -44,6 +44,7 @@ export { MultiSelect, type MultiSelectProps } from "./MultiSelect";
 export { NavIcon, type NavIconProps } from "./NavIcon";
 export { PairList, type PairListProps } from "./PairList";
 export { Panel, type PanelProps } from "./Panel";
+export { OptionCheck } from "./OptionCheck";
 export { Popover, type PopoverProps } from "./Popover";
 export {
   PortalScopeProvider,

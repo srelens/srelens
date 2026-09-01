@@ -1,5 +1,5 @@
 import type { AgentInfo } from "@srelens/core";
-import { Popover } from "@srelens/ui-kit";
+import { OptionCheck, Popover } from "@srelens/ui-kit";
 
 /**
  * The agent picker: a popover over `agents`, ALREADY FILTERED to
@@ -39,6 +39,13 @@ export function AgentPicker({
   return (
     <Popover
       label="Choose agent"
+      // `.popover` floors itself at 240px, which is written for a panel holding
+      // a namespace filter or a search box. Four short agent names in it left
+      // most of the panel empty — reported as "still width is too much". A
+      // utility wins over the component layer (kit.css declares `@layer
+      // utilities` after `@layer components`), and the small floor keeps a
+      // one-name list still reading as a menu.
+      className="min-w-[7.5rem]"
       trigger={
         // `.chip` — the kit's existing small-control shape, bordered and sunk.
         // A bare `<span>` here rendered the agent's name as loose text under
@@ -54,7 +61,16 @@ export function AgentPicker({
       }
     >
       {(close) => (
-        <div role="listbox" className="flex min-w-0 flex-col">
+        // `.ns-row` and `OptionCheck` — the design's own row inside a popover
+        // and its own mark for "this is the one", the pair `WorkspaceSwitcher`
+        // and the kit's `PickerRow` already wear. This list hand-rolled
+        // `hover:bg-sunk` with no mark at all, so it read as a plain white
+        // list that did not belong to the app and never said which agent was
+        // answering. Reported as "use same ones used in the project".
+        //
+        // `padding: 2px` on the panel, as `.ctx-menu` has: rows that reach the
+        // panel's own border have no rounding to show.
+        <div role="listbox" className="flex min-w-0 flex-col p-[2px]">
           {agents.map((a) => {
             const selected = a.kind === selectedKind;
             return (
@@ -62,13 +78,18 @@ export function AgentPicker({
                 key={a.kind}
                 type="button"
                 role="option"
+                // `aria-selected` is the ARIA state for a chosen option, and
+                // `data-on` is what `.ns-row` styles off. Both, because they
+                // answer to different readers.
                 aria-selected={selected}
+                data-on={selected}
                 onClick={() => {
                   onSelect(a.kind);
                   close();
                 }}
-                className="flex min-w-0 items-center gap-2 rounded-tile px-2 py-1.5 text-left text-sm hover:bg-sunk"
+                className="ns-row rounded-[5px]"
               >
+                <OptionCheck checked={selected} />
                 <span className="min-w-0 flex-1 truncate">{a.label}</span>
               </button>
             );
