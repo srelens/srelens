@@ -20,9 +20,30 @@ describe("listNamespaces", () => {
     expect(outcome.namespaces).toEqual(["default", "kube-system"]);
   });
 
+  it("preserves typed namespace summaries for the resource list", async () => {
+    const summaries = [
+      {
+        name: "legacy-billing",
+        phase: "Terminating",
+        labels: { env: "prod", team: "payments" },
+        age: "17m",
+      },
+    ];
+    const invoke = vi.fn().mockResolvedValue({
+      namespaces: ["legacy-billing"],
+      summaries,
+    });
+
+    const outcome = await listNamespaces("prod", invoke);
+
+    expect(outcome.namespaces).toEqual(["legacy-billing"]);
+    expect(outcome.summaries).toEqual(summaries);
+  });
+
   it("normalises errors", async () => {
     const outcome = await listNamespaces("x", () => Promise.reject(new Error("forbidden")));
     expect(outcome.namespaces).toBeUndefined();
+    expect(outcome.summaries).toBeUndefined();
     expect(outcome.error).toContain("forbidden");
   });
 });

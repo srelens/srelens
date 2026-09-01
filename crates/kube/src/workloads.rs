@@ -1,14 +1,15 @@
 //! Workload-listing capabilities backed by kube-rs: `k8s.listNamespaces` and
 //! `k8s.listPods` for a connected context.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -18,9 +19,21 @@ pub struct ListNamespacesIn {
     pub context: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct NamespaceSummary {
+    pub name: String,
+    pub phase: String,
+    pub labels: BTreeMap<String, String>,
+    pub age: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListNamespacesOut {
+    /// Kept for the namespace selector and for compatibility with existing
+    /// consumers of this capability.
     pub namespaces: Vec<String>,
+    /// Rich rows for the Namespaces resource list.
+    pub summaries: Vec<NamespaceSummary>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -67,7 +80,21 @@ fn handler_err(e: impl ToString) -> CapabilityError {
     CapabilityError::Handler(e.to_string())
 }
 
-/// `k8s.listNamespaces` — list namespace names in a connected context.
+pub(crate) fn summarise_namespace(namespace: Namespace) -> NamespaceSummary {
+    let phase = namespace
+        .status
+        .as_ref()
+        .and_then(|status| status.phase.clone())
+        .unwrap_or_else(|| "Unknown".into());
+    NamespaceSummary {
+        name: namespace.metadata.name.clone().unwrap_or_default(),
+        phase,
+        labels: namespace.metadata.labels.clone().unwrap_or_default(),
+        age: crate::humanize_age(namespace.metadata.creation_timestamp.as_ref()),
+    }
+}
+
+/// `k8s.listNamespaces` — list namespace names and summaries in a connected context.
 pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListNamespacesIn, ListNamespacesOut, _, _>(
         "k8s.listNamespaces",
@@ -81,16 +108,27 @@ pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(CapabilityError::Handler)?;
                 let api: Api<Namespace> = Api::all(client);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list namespaces timed out".into()))?
-                    .map_err(handler_err)?;
-                let namespaces = list
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("list namespaces timed out".into()))?
+                        .map_err(handler_err)?;
+                let summaries: Vec<_> = list
                     .items
                     .into_iter()
-                    .filter_map(|ns| ns.metadata.name)
+                    .map(summarise_namespace)
+                    // Preserve the old selector contract: Kubernetes objects
+                    // without a name never became namespace options.
+                    .filter(|summary| !summary.name.is_empty())
                     .collect();
-                Ok(ListNamespacesOut { namespaces })
+                let namespaces = summaries
+                    .iter()
+                    .map(|summary| summary.name.clone())
+                    .collect();
+                Ok(ListNamespacesOut {
+                    namespaces,
+                    summaries,
+                })
             }
         },
     )
@@ -392,9 +430,47 @@ pub fn pods_for_selector_capability(cache: Arc<ClientCache>) -> Capability {
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{
-        ContainerState, ContainerStateRunning, ContainerStateWaiting, ContainerStatus, PodSpec,
-        PodStatus,
+        ContainerState, ContainerStateRunning, ContainerStateWaiting, ContainerStatus,
+        NamespaceStatus, PodSpec, PodStatus,
     };
+
+    #[test]
+    fn summarises_namespace_phase_labels_and_age_without_a_timestamp() {
+        let labels = BTreeMap::from([
+            ("env".to_string(), "prod".to_string()),
+            ("team".to_string(), "sre".to_string()),
+        ]);
+        let namespace = Namespace {
+            metadata: kube::core::ObjectMeta {
+                name: Some("monitoring".into()),
+                labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            status: Some(NamespaceStatus {
+                phase: Some("Active".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            summarise_namespace(namespace),
+            NamespaceSummary {
+                name: "monitoring".into(),
+                phase: "Active".into(),
+                labels,
+                age: "-".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn summarises_an_unsettled_namespace_without_inventing_metadata() {
+        let summary = summarise_namespace(Namespace::default());
+        assert_eq!(summary.name, "");
+        assert_eq!(summary.phase, "Unknown");
+        assert!(summary.labels.is_empty());
+    }
 
     #[test]
     fn capabilities_have_expected_ids() {

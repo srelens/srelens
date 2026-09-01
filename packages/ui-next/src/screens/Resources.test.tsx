@@ -11,6 +11,7 @@ const {
   watchResource,
   listCrds,
   listCustomResource,
+  listNamespaces,
   listNodes,
   nodeMetrics,
   podMetrics,
@@ -21,6 +22,7 @@ const {
   watchResource: vi.fn(),
   listCrds: vi.fn(),
   listCustomResource: vi.fn(),
+  listNamespaces: vi.fn(),
   listNodes: vi.fn(),
   nodeMetrics: vi.fn(),
   podMetrics: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   watchResource: (...a: unknown[]) => watchResource(...a),
   listCrds: (...a: unknown[]) => listCrds(...a),
   listCustomResource: (...a: unknown[]) => listCustomResource(...a),
+  listNamespaces: (...a: unknown[]) => listNamespaces(...a),
   listNodes: (...a: unknown[]) => listNodes(...a),
   nodeMetrics: (...a: unknown[]) => nodeMetrics(...a),
   podMetrics: (...a: unknown[]) => podMetrics(...a),
@@ -210,6 +213,7 @@ beforeEach(() => {
   );
   listCrds.mockResolvedValue({ crds: [] });
   listCustomResource.mockResolvedValue({ items: [] });
+  listNamespaces.mockResolvedValue({ namespaces: [], summaries: [] });
   listNodes.mockResolvedValue({ nodes: [] });
   nodeMetrics.mockResolvedValue({ metrics: [] });
   podMetrics.mockResolvedValue({ metrics: [] });
@@ -523,6 +527,44 @@ describe("Resources", () => {
     // Discovery is what a rail would have to be built from, and a built-in
     // kind must never pay for it.
     expect(listCrds).not.toHaveBeenCalled();
+  });
+
+  it("renders namespace status and labels from the typed namespace loader", async () => {
+    listNamespaces.mockResolvedValue({
+      namespaces: ["default", "payments"],
+      summaries: [
+        {
+          name: "default",
+          phase: "Active",
+          labels: { "kubernetes.io/metadata.name": "default" },
+          age: "12d",
+        },
+        {
+          name: "payments",
+          phase: "Terminating",
+          labels: {
+            "kubernetes.io/metadata.name": "payments",
+            team: "checkout",
+            tier: "backend",
+            zone: "west",
+          },
+          age: "4d",
+        },
+      ],
+    });
+
+    open("/k/namespaces");
+
+    await waitFor(() => expect(rowNames()).toEqual(["default", "payments"]));
+    expect(headers().filter(Boolean)).toEqual(["Name", "Status", "Labels", "Age"]);
+    expect(listNamespaces).toHaveBeenCalledWith("prod-eu");
+
+    const payments = within(screen.getByText("payments").closest("tr")!);
+    expect(payments.getByText("Terminating")).toBeTruthy();
+    expect(payments.getByText("team=checkout")).toBeTruthy();
+    expect(payments.getByText("tier=backend")).toBeTruthy();
+    expect(payments.getByText("+1")).toBeTruthy();
+    expect(payments.queryByText("kubernetes.io/metadata.name=payments")).toBeNull();
   });
 
   it("narrows the list by the filter text", async () => {
