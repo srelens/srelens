@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import {
   cancelChat,
   describeError,
@@ -10,7 +10,7 @@ import {
   type Skill,
   type ToolStatus,
 } from "@srelens/core";
-import type { AskContext } from "./askContext";
+import { runKeyFor, runLabelFor, type AskContext } from "./askContext";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -132,7 +132,70 @@ export type AgentRun = {
   error?: string;
 };
 
-let run: AgentRun = {
+/**
+ * The window's conversations, one per SUBJECT — keyed by {@link runKeyFor}.
+ *
+ * **Why this is a map and not one run.** It was one run: the dock and
+ * `/agent` were two views of a single conversation, on the reasoning that a
+ * question asked from a screen must not vanish from the history it belongs
+ * to. That reasoning still holds INSIDE a run. What it got wrong is that a
+ * reader on a StatefulSets list and a reader on a pod's logs are not asking
+ * about the same thing, and one chat for both meant every question inherited
+ * whatever the last one was about. Reported from use, not from review.
+ *
+ * Empty until the first question: a run is created by asking, never by
+ * navigating, so browsing does not litter the rail with conversations nobody
+ * had.
+ */
+const runs = new Map<string, RunState>();
+
+/** Which run the surfaces show by default — the last one asked into. `null`
+ *  before any question, when there is nothing to show. */
+let activeKey: string | null = null;
+
+/**
+ * A run, plus the CLI bookkeeping that belongs to it rather than to the
+ * window. `session`, `resume` and `stoppedGeneration` were module-level
+ * singletons when there was one conversation; with several they have to be
+ * per-run or one run's Stop cancels another's turn and one CLI's `resume`
+ * token reaches another conversation.
+ */
+type RunState = {
+  run: AgentRun;
+  /** The CLI's own session id for THIS conversation — `null` until its first
+   *  turn, and again whenever `sendChat` says to clear it (see its doc). Also
+   *  what keeps runs from colliding in the backend, which keys its child
+   *  processes by session. */
+  session: string | null;
+  /** The agent CLI's own conversation id, passed back as `resume` so a
+   *  follow-up turn keeps its context. A REJECTED `sendChat` says nothing
+   *  about this and leaves it exactly as it was. */
+  resume: string | null;
+  /**
+   * A generation `stopAgentRun` was asked to stop before its `askAgent` had
+   * even reached `sendChat` — `session` is created lazily inside `askAgent`,
+   * AFTER `busy` and `generation` are already committed, so a Stop arriving
+   * in that window finds no session to hand `cancelChat`. Recorded here and
+   * honoured by `askAgent` once its own `startChat()` resolves.
+   */
+  stoppedGeneration: number | null;
+  /** What the rail calls this run, and what it is about — pinned when the run
+   *  is created, so a later navigation cannot relabel a conversation. */
+  label: string;
+  /** When it was last asked into — for DISPLAY ("3 minutes ago"). */
+  at: number;
+  /**
+   * Monotonic touch counter, for ORDERING.
+   *
+   * Not `at`: two questions asked in the same millisecond tie on wall-clock,
+   * and a tie makes "most recent" undefined — the rail would order two
+   * conversations by whichever happened to be inserted first. Caught by a test
+   * that asked twice without an await between.
+   */
+  order: number;
+};
+
+const EMPTY_RUN: AgentRun = {
   turns: [],
   gates: [],
   busy: false,
@@ -141,13 +204,47 @@ let run: AgentRun = {
   activeSkills: [],
 };
 
-/** The CLI's own session id for this conversation — `null` until the first
- *  turn, and again whenever `sendChat` says to clear it (see its doc). */
-let session: string | null = null;
-/** The agent CLI's own conversation id, passed back as `resume` so a
- *  follow-up turn keeps its context. A REJECTED `sendChat` says nothing about
- *  this and leaves it exactly as it was. */
-let resume: string | null = null;
+/**
+ * Which CLI to drive is a preference about srelens, not a property of one
+ * conversation, so it lives beside the map rather than inside a run — see
+ * ruling AC. Changing it invalidates every run's `resume`, because those
+ * tokens belong to the CLI that issued them.
+ */
+let agentKind = "claude";
+
+/**
+ * Skill names to apply to the next question — window-wide, beside
+ * {@link agentKind} and for the same reason (ruling AD).
+ *
+ * It was per-run, from when there was one run. With runs keyed by subject
+ * that breaks twice: there is no run to write into before the first question,
+ * which is exactly when the rail offers the switch; and the rail sits on
+ * `/agent` showing whichever run the reader selected while the dock may be on
+ * another, so "which run" has no answer at the moment of picking.
+ *
+ * Ruling S's requirement is untouched — ONE set, two writers (the composer's
+ * `/` menu, the rail's switch), one reader (`askAgent`) — so the two controls
+ * still cannot disagree. Only the scope widened.
+ */
+let activeSkills: string[] = [];
+
+/**
+ * What the surfaces read before anyone has asked anything.
+ *
+ * A CONSTANT would not do: `agentKind` and `activeSkills` are window-wide and
+ * a reader can set both before their first question — the picker and the rail's
+ * switch are both live then — so a frozen empty run would show neither. Nor
+ * can it be derived per read: `useSyncExternalStore` compares snapshots by
+ * identity and a fresh object every read re-renders forever. So it is rebuilt
+ * only when one of those globals actually changes, and its identity is stable
+ * in between.
+ */
+let emptyRun: AgentRun = { ...EMPTY_RUN };
+
+function refreshEmptyRun() {
+  const next: AgentRun = { ...EMPTY_RUN, agentKind, activeSkills };
+  if (!sameRun(next, emptyRun)) emptyRun = next;
+}
 /**
  * A generation `stopAgentRun` was asked to stop before its `askAgent` had
  * even reached `sendChat` — `session` is created lazily inside `askAgent`,
@@ -163,6 +260,8 @@ let resume: string | null = null;
 let stoppedGeneration: number | null = null;
 /** Ids are the store's own, not the backend's. */
 let turnSeq = 0;
+/** Monotonic, so recency never ties. See {@link RunState.order}. */
+let touchSeq = 0;
 
 const listeners = new Set<() => void>();
 
@@ -181,10 +280,58 @@ function emit() {
  * call site: a guard `chooseAgent` remembers to add and `updateTurn` forgets
  * is no guard at all, just one that fails silently for tool calls and text.
  */
-function commit(next: AgentRun) {
-  if (sameRun(next, run)) return;
-  run = next;
+/**
+ * The run for a key, created empty if this is its first question.
+ *
+ * Creation is deliberately here and not in a navigation handler: a run
+ * belongs to a conversation, and a conversation starts when someone asks
+ * something. Browsing thirty screens must not leave thirty empty chats in the
+ * rail.
+ */
+function runFor(key: string, label: string): RunState {
+  const existing = runs.get(key);
+  if (existing) return existing;
+  const created: RunState = {
+    run: { ...EMPTY_RUN, agentKind, activeSkills },
+    session: null,
+    resume: null,
+    stoppedGeneration: null,
+    label,
+    at: Date.now(),
+    order: ++touchSeq,
+  };
+  runs.set(key, created);
+  return created;
+}
+
+/** The run the surfaces show — the last one asked into, or an empty stand-in
+ *  before any question, so a reader always has something coherent to render. */
+function activeState(): RunState | null {
+  return activeKey === null ? null : (runs.get(activeKey) ?? null);
+}
+
+/**
+ * Take a rebuilt run for ONE key, only if something in it actually differs.
+ *
+ * Identity is the snapshot's contract and every call site rebuilds its slice
+ * with a fresh object or array — `updateTurn`'s `{ ...t, text: t.text + e.text }`
+ * for a zero-length delta, `noteGate` re-merging a gate whose outcome did not
+ * change — none of which change any value a reader could see. Centralized
+ * here rather than at each call site: a guard `chooseAgent` remembers and
+ * `updateTurn` forgets is no guard at all.
+ */
+function commitTo(key: string, next: AgentRun) {
+  const state = runs.get(key);
+  if (!state) return;
+  if (sameRun(next, state.run)) return;
+  state.run = next;
   emit();
+}
+
+/** Kept for the surfaces that only ever mean "the run on screen". */
+function commit(next: AgentRun) {
+  if (activeKey === null) return;
+  commitTo(activeKey, next);
 }
 
 function sameRun(a: AgentRun, b: AgentRun): boolean {
@@ -252,7 +399,16 @@ export function subscribeAgentRun(listener: () => void): () => void {
  * object on every read.
  */
 export function getAgentRun(): AgentRun {
-  return run;
+  const state = activeState();
+  return state ? state.run : emptyRun;
+}
+
+/** One named run, for a surface that shows a conversation other than the
+ *  active one — the dock following its own route while `/agent` sits on the
+ *  run the rail selected. */
+export function getRun(key: string | null): AgentRun {
+  if (key === null) return emptyRun;
+  return runs.get(key)?.run ?? emptyRun;
 }
 
 /** The store, subscribed. */
@@ -260,22 +416,72 @@ export function useAgentRun(): AgentRun {
   return useSyncExternalStore(subscribeAgentRun, getAgentRun, getAgentRun);
 }
 
-/** Find, and update, the turn with this id — a no-op if the turn is no
- *  longer in the run (cleared, or this write's own turn superseded by a
- *  later one), rather than resurrecting it or emitting a change nothing
- *  actually saw. */
-function updateTurn(id: number, updater: (t: Turn) => Turn) {
-  const idx = run.turns.findIndex((t) => t.id === id);
+/**
+ * One named run, subscribed — what the dock uses, since it shows the run for
+ * the route it is on rather than whichever was last asked into.
+ *
+ * `key` may name a run that does not exist yet (the reader has navigated
+ * somewhere they have never asked about); that reads as the empty run, which
+ * is exactly right — there is no conversation there yet.
+ */
+export function useRun(key: string | null): AgentRun {
+  const read = useCallback(() => getRun(key), [key]);
+  return useSyncExternalStore(subscribeAgentRun, read, read);
+}
+
+/** What the rail lists: every conversation this window holds, newest first. */
+export type RunSummary = {
+  key: string;
+  label: string;
+  /** For display. Ordering uses {@link RunState.order}, which cannot tie. */
+  at: number;
+  order: number;
+  turns: number;
+  busy: boolean;
+};
+
+export function getRunSummaries(): RunSummary[] {
+  return [...runs.entries()]
+    .map(([key, s]) => ({
+      key,
+      label: s.label,
+      at: s.at,
+      order: s.order,
+      turns: s.run.turns.filter((t) => t.role === "user").length,
+      busy: s.run.busy,
+    }))
+    .sort((a, b) => b.order - a.order);
+}
+
+/** Which run the surfaces default to. */
+export function getActiveRunKey(): string | null {
+  return activeKey;
+}
+
+/** Show a different conversation — the rail's switch. */
+export function selectRun(key: string): void {
+  if (!runs.has(key) || activeKey === key) return;
+  activeKey = key;
+  emit();
+}
+
+/** Find, and update, the turn with this id in ONE run — a no-op if the turn
+ *  is no longer there (cleared, or superseded), rather than resurrecting it
+ *  or emitting a change nothing actually saw. */
+function updateTurnIn(key: string, id: number, updater: (t: Turn) => Turn) {
+  const state = runs.get(key);
+  if (!state) return;
+  const idx = state.run.turns.findIndex((t) => t.id === id);
   if (idx === -1) return;
-  const turns = run.turns.slice();
+  const turns = state.run.turns.slice();
   turns[idx] = updater(turns[idx]);
-  commit({ ...run, turns });
+  commitTo(key, { ...state.run, turns });
 }
 
 /** Turn this turn into the error it ended on, said the way a reader can use
  *  it — never the raw backend string. */
-function markTurnError(id: number, reason: unknown) {
-  updateTurn(id, (t) => ({ ...t, role: "error", text: describeError(reason).detail }));
+function markTurnErrorIn(key: string, id: number, reason: unknown) {
+  updateTurnIn(key, id, (t) => ({ ...t, role: "error", text: describeError(reason).detail }));
 }
 
 /**
@@ -381,6 +587,12 @@ export async function askAgent(
      * not a target — see {@link AskContext}.
      */
     about?: AskContext;
+    /**
+     * The route the question was asked from, which together with `about`
+     * decides WHICH conversation it belongs to (see {@link runKeyFor}).
+     * Pinned by the caller for the same reason `about` is.
+     */
+    route?: string;
   },
 ): Promise<void> {
   // ONE turn at a time, refused here rather than at each door.
@@ -398,31 +610,59 @@ export async function askAgent(
   //
   // Said out loud rather than silently swallowed. A chip that looks live and
   // does nothing is the defect this branch keeps finding in other shapes.
-  if (run.busy) {
-    commit({
-      ...run,
-      error: "srelens is still answering the last question. Stop it, or wait for it to finish, before asking another.",
+  const about = opts?.about ?? { cluster: "" };
+  const route = opts?.route ?? "";
+  const key = runKeyFor(about, route);
+
+  // Still ONE turn at a time, and across EVERY run rather than per run — see
+  // ruling AB. Per-run sessions would make the backend safe for concurrency
+  // (`children` is keyed by session, so runs no longer replace each other's
+  // child), but gate attribution is what forbids it: `ConfirmRequest` carries
+  // no caller (#393), so `AgentConsent` decides ownership from "exactly one
+  // run has a turn in flight". Two busy runs and that has nothing to choose
+  // between them, and a gate drawn against the wrong conversation is the
+  // defect the whole gate design exists to prevent.
+  //
+  // Said out loud rather than swallowed, and said in the run the reader is
+  // ASKING from, which is the one they are looking at.
+  const busyElsewhere = [...runs.values()].find((s) => s.run.busy);
+  if (busyElsewhere) {
+    const state = runFor(key, runLabelFor(about, route));
+    activeKey = key;
+    commitTo(key, {
+      ...state.run,
+      error:
+        busyElsewhere.label === state.label
+          ? "srelens is still answering the last question. Stop it, or wait for it to finish, before asking another."
+          : `srelens is still answering a question about ${busyElsewhere.label}. Stop it, or wait for it to finish, before asking another.`,
     });
     return;
   }
+
+  const state = runFor(key, runLabelFor(about, route));
+  activeKey = key;
+  state.at = Date.now();
+  state.order = ++touchSeq;
+
   const images = opts?.images;
-  const skills = opts?.skills ?? run.activeSkills;
+  const skills = opts?.skills ?? activeSkills;
   const userTurn: Turn = { id: ++turnSeq, role: "user", text: question, calls: [], images, at: Date.now() };
   const agentTurnId = ++turnSeq;
   const agentTurn: Turn = { id: agentTurnId, role: "agent", text: "", calls: [], at: Date.now() };
-  const myGeneration = run.generation + 1;
-  const agentKind = run.agentKind;
+  const myGeneration = state.run.generation + 1;
+  const myAgentKind = agentKind;
 
-  commit({
-    ...run,
-    turns: [...run.turns, userTurn, agentTurn],
+  commitTo(key, {
+    ...state.run,
+    turns: [...state.run.turns, userTurn, agentTurn],
     busy: true,
     generation: myGeneration,
+    agentKind: myAgentKind,
     error: undefined,
   });
   // A stop recorded against an OLDER generation belongs to a turn already
   // gone; this one hasn't been asked to stop by anyone yet.
-  stoppedGeneration = null;
+  state.stoppedGeneration = null;
 
   // Keyed by the backend's own call id, and scoped to this one question: two
   // calls from two different questions never share an id, so there is
@@ -432,17 +672,17 @@ export async function askAgent(
   function onEvent(e: AgentEvent) {
     switch (e.type) {
       case "textDelta":
-        updateTurn(agentTurnId, (t) => ({ ...t, text: t.text + e.text }));
+        updateTurnIn(key, agentTurnId, (t) => ({ ...t, text: t.text + e.text }));
         return;
       case "thinking":
-        updateTurn(agentTurnId, (t) => ({ ...t, thoughts: (t.thoughts ?? "") + e.text }));
+        updateTurnIn(key, agentTurnId, (t) => ({ ...t, thoughts: (t.thoughts ?? "") + e.text }));
         return;
       case "toolCallStart":
         // Stamped at the START, not the result — see `ms`'s doc. Measuring
         // from here is the whole point: it is the round trip srelens itself
         // observed, not whatever the tool reports server-side.
         callStarts.set(e.id, performance.now());
-        updateTurn(agentTurnId, (t) => ({
+        updateTurnIn(key, agentTurnId, (t) => ({
           ...t,
           calls: [...t.calls, { id: e.id, tool: e.tool, args: e.args, status: null }],
         }));
@@ -451,7 +691,7 @@ export async function askAgent(
         const startedAt = callStarts.get(e.id);
         callStarts.delete(e.id);
         const ms = startedAt === undefined ? undefined : performance.now() - startedAt;
-        updateTurn(agentTurnId, (t) => ({
+        updateTurnIn(key, agentTurnId, (t) => ({
           ...t,
           calls: t.calls.map((c) => (c.id === e.id ? { ...c, status: e.status, ms } : c)),
         }));
@@ -465,13 +705,16 @@ export async function askAgent(
       case "error":
         // Not a verdict on the turn — see `Turn.notes`. The stream may well
         // go on to answer the question.
-        updateTurn(agentTurnId, (t) => ({ ...t, notes: [...(t.notes ?? []), describeError(e.message).detail] }));
+        updateTurnIn(key, agentTurnId, (t) => ({
+          ...t,
+          notes: [...(t.notes ?? []), describeError(e.message).detail],
+        }));
         return;
     }
   }
 
   try {
-    const started = session ?? (await startChat());
+    const started = state.session ?? (await startChat());
     // Checked BEFORE `session` is assigned, which is the half that matters.
     // A turn abandoned while `startChat` was still spawning — stopped, or its
     // run cleared — must not reassign the `session` that abandonment nulled on
@@ -483,9 +726,9 @@ export async function askAgent(
     // succession — and both of those questions were asked on purpose. Only an
     // explicit stop or clear records a generation here, and only those two
     // mean "nobody wants this answered".
-    if (stoppedGeneration === myGeneration) return;
-    session = started;
-    const preface = contextPreface(opts?.about);
+    if (state.stoppedGeneration === myGeneration) return;
+    state.session = started;
+    const preface = contextPreface(about);
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
     // The FIRST fix here guarded only the `startChat` window and was too
@@ -506,15 +749,16 @@ export async function askAgent(
     // mounts Composer at all (§F), so `agentKind` reaching here can still name
     // a kind nothing in `offered` matches.
     const offered = agents.filter((a) => a.available && !a.gated);
-    let resolvedKind = agentKind;
-    let agentPath = offered.find((a) => a.kind === agentKind)?.path ?? "";
+    let resolvedKind = myAgentKind;
+    let agentPath = offered.find((a) => a.kind === myAgentKind)?.path ?? "";
     if (!agentPath) {
       if (offered.length === 0) {
         // No agent this run could possibly reach — fail the turn rather than
         // handing `sendChat` an empty path it can only fail to spawn. §F's
         // States section: the no-agent case "does not offer a send that
         // cannot work".
-        markTurnError(
+        markTurnErrorIn(
+          key,
           agentTurnId,
           new Error(
             "No agent is available to ask. Install Claude, Codex or Cursor, or configure srelens's own agent in Settings, then try again.",
@@ -539,12 +783,12 @@ export async function askAgent(
       // `session` is kept, unlike in `chooseAgent`: it is srelens's own id for
       // the turn about to be sent, no child process exists under it yet, and
       // dropping it here would strand the send this branch is preparing.
-      resume = null;
-      if (run.generation === myGeneration) commit({ ...run, agentKind: resolvedKind });
+      state.resume = null;
+      if (state.run.generation === myGeneration) commitTo(key, { ...state.run, agentKind: resolvedKind });
     }
     // Last thing before the question actually leaves. Every await above is a
     // window in which the reader can abandon this turn.
-    if (stoppedGeneration === myGeneration) return;
+    if (state.stoppedGeneration === myGeneration) return;
     const result = await sendChat(
       started,
       `${preface}${guidance}${question}`,
@@ -553,26 +797,26 @@ export async function askAgent(
       images,
       resolvedKind,
       myGeneration,
-      resume,
+      state.resume,
     );
-    // A later question already moved the conversation on; this answer no
-    // longer says anything about where the resume token stands.
-    if (run.generation === myGeneration) resume = result;
+    // A later question already moved this conversation on; this answer no
+    // longer says anything about where its resume token stands.
+    if (state.run.generation === myGeneration) state.resume = result;
   } catch (err) {
     // A REJECTION says nothing about `resume` — it is left exactly as it was.
-    markTurnError(agentTurnId, err);
+    markTurnErrorIn(key, agentTurnId, err);
   } finally {
-    if (run.generation === myGeneration) {
+    if (state.run.generation === myGeneration) {
       // The stream is over: now a note can be judged. Nothing said and a note
       // recorded means the note was the whole story, so the turn IS its
       // error. Text alongside it means the answer arrived and the note is a
       // warning the reader should still see.
-      updateTurn(agentTurnId, (t) =>
+      updateTurnIn(key, agentTurnId, (t) =>
         t.role === "agent" && t.text === "" && (t.notes?.length ?? 0) > 0
           ? { ...t, role: "error", text: t.notes!.join("\n"), notes: undefined }
           : t,
       );
-      commit({ ...run, busy: false });
+      commitTo(key, { ...state.run, busy: false });
     }
   }
 }
@@ -591,16 +835,23 @@ export async function askAgent(
  *  takes the run out of `busy` right away so the surface reflects the stop
  *  immediately rather than waiting on that resolution. */
 export function stopAgentRun(): void {
-  if (!run.busy) return;
-  if (!session) {
-    stoppedGeneration = run.generation;
-    commit({ ...run, busy: false });
+  // The BUSY run, not the visible one. A reader can navigate away from a
+  // streaming conversation and press Stop on the surface still showing it;
+  // resolving "which run" by what is on screen would then cancel nothing, or
+  // worse, the wrong thing. Only one run is ever busy (ruling AB), so this is
+  // unambiguous.
+  const entry = [...runs.entries()].find(([, st]) => st.run.busy);
+  if (!entry) return;
+  const [key, state] = entry;
+  if (!state.session) {
+    state.stoppedGeneration = state.run.generation;
+    commitTo(key, { ...state.run, busy: false });
     return;
   }
-  const activeSession = session;
-  const generation = run.generation;
+  const activeSession = state.session;
+  const generation = state.run.generation;
   void cancelChat(activeSession, generation).catch((err: unknown) => {
-    commit({ ...run, error: describeError(err).detail });
+    commitTo(key, { ...state.run, error: describeError(err).detail });
   });
 }
 
@@ -622,33 +873,60 @@ export function stopAgentRun(): void {
  *  is not "still active", and this is the one place that is true regardless
  *  of which component (if any) is mounted to have noticed the run end. */
 export function clearAgentRun(): void {
+  // The run the reader is LOOKING at — "New question" is a gesture about the
+  // conversation on screen, not about whichever happens to be streaming.
+  const state = activeState();
+  if (activeKey === null || !state) return;
+  const key = activeKey;
   // Cancel with the generation the in-flight turn was SENT with, before the
   // bump below moves it — the backend matches a Stop against that.
-  if (run.busy && session) void cancelChat(session, run.generation).catch(() => {});
-  session = null;
-  resume = null;
+  if (state.run.busy && state.session) {
+    void cancelChat(state.session, state.run.generation).catch(() => {});
+  }
+  state.session = null;
+  state.resume = null;
   // The generation is what makes the clear actually stick. `askAgent`'s
-  // post-await guards are all `run.generation === myGeneration`, so leaving it
-  // alone left a discarded turn still looking current: a pending `startChat()`
-  // would resolve, reassign the `session` this just nulled, and send the
-  // question the reader had thrown away; a running `sendChat()` would
+  // post-await guards are all `state.run.generation === myGeneration`, so
+  // leaving it alone left a discarded turn still looking current: a pending
+  // `startChat()` would resolve, reassign the `session` this just nulled, and
+  // send the question the reader had thrown away; a running `sendChat()` would
   // repopulate `resume` after this cleared it. Bumping it fails every one of
   // those guards at once.
   //
   // Also recorded as a stop, for the window where the discarded turn has no
   // session yet and so was never handed to `cancelChat` at all.
-  if (run.busy) stoppedGeneration = run.generation;
+  if (state.run.busy) state.stoppedGeneration = state.run.generation;
   // A no-op — clearing a run that is already idle and empty — is left to
-  // `commit`'s own guard rather than special-cased here.
-  commit({
-    ...run,
+  // `commitTo`'s own guard rather than special-cased here.
+  commitTo(key, {
+    ...state.run,
     turns: [],
     gates: [],
     busy: false,
     error: undefined,
-    activeSkills: [],
-    generation: run.busy ? run.generation + 1 : run.generation,
+    generation: state.run.busy ? state.run.generation + 1 : state.run.generation,
   });
+}
+
+/**
+ * Forget a conversation entirely — the rail's own close, distinct from
+ * `clearAgentRun`, which empties the run the reader is in but keeps it.
+ *
+ * Refused while it is streaming: dropping the state a turn is writing into
+ * would leave its `sendChat` with nowhere to land and its child process
+ * untracked, which is the shape of the round-2 P1.
+ */
+export function forgetRun(key: string): void {
+  const state = runs.get(key);
+  if (!state || state.run.busy) return;
+  runs.delete(key);
+  if (activeKey === key) {
+    // Fall back to the most recent survivor rather than to nothing, so the
+    // surfaces have a conversation to show.
+    const next = getRunSummaries()[0];
+    activeKey = next ? next.key : null;
+  }
+  emit();
 }
 
 /**
@@ -667,7 +945,7 @@ export function clearAgentRun(): void {
  * conversation the reader is in the middle of.
  */
 export function chooseAgent(kind: string): void {
-  if (kind === run.agentKind) return;
+  if (kind === agentKind) return;
   // Not while a turn is in flight. Dropping `session` here would leave
   // `stopAgentRun` with nothing to hand `cancelChat` — the running CLI becomes
   // uncancellable — and the turn's own completion would then write its
@@ -676,16 +954,27 @@ export function chooseAgent(kind: string): void {
   // for the same reason; this is the invariant behind that, held where every
   // caller passes rather than in the one component that happens to render a
   // picker today.
-  if (run.busy) {
-    commit({
-      ...run,
+  const busy = [...runs.entries()].find(([, st]) => st.run.busy);
+  if (busy) {
+    const [busyKey, busyState] = busy;
+    commitTo(busyKey, {
+      ...busyState.run,
       error: "srelens is still answering. Stop the question in flight before switching agent.",
     });
     return;
   }
-  session = null;
-  resume = null;
-  commit({ ...run, agentKind: kind });
+  agentKind = kind;
+  refreshEmptyRun();
+  // EVERY run's CLI conversation, not just the visible one — ruling AC.
+  // `resume` belongs to the CLI that issued it, so leaving the other runs
+  // holding tokens the new agent cannot use is the defect rounds 2 and 7 each
+  // closed once. The transcripts stay: they are srelens's own record.
+  for (const [key, state] of runs) {
+    state.session = null;
+    state.resume = null;
+    commitTo(key, { ...state.run, agentKind: kind });
+  }
+  emit();
 }
 
 /**
@@ -699,19 +988,55 @@ export function chooseAgent(kind: string): void {
  * `on`/`off` change handler.
  */
 export function setSkillActive(name: string, active: boolean): void {
-  const already = run.activeSkills.includes(name);
+  const already = activeSkills.includes(name);
   if (active === already) return;
-  const activeSkills = active ? [...run.activeSkills, name] : run.activeSkills.filter((n) => n !== name);
-  commit({ ...run, activeSkills });
+  activeSkills = active ? [...activeSkills, name] : activeSkills.filter((n) => n !== name);
+  refreshEmptyRun();
+  // Mirrored onto every run so `AgentRun.activeSkills` stays the one thing
+  // readers render, rather than components learning a second accessor.
+  for (const [key, state] of runs) commitTo(key, { ...state.run, activeSkills });
+  emit();
 }
 
 /** Record one MCP confirm request's outcome — merged by id, so a request
  *  moving from `pending` to `approved` or `denied` replaces its entry rather
  *  than sitting beside it. */
 export function noteGate(record: GateRecord): void {
-  const idx = run.gates.findIndex((g) => g.id === record.id);
-  const gates = idx === -1 ? [...run.gates, record] : run.gates.map((g, i) => (i === idx ? record : g));
-  commit({ ...run, gates });
+  // The BUSY run owns the gate, not the visible one. A confirm arrives because
+  // some agent called a tool, and that agent is the one with a turn in flight —
+  // which the reader may well have navigated away from. Attributing by what is
+  // on screen would draw another conversation's mutation into this one, which
+  // is the defect the gate design exists to prevent.
+  //
+  // Exactly one run is ever busy (ruling AB), so this is unambiguous. No busy
+  // run means srelens's own agent did not cause it — an external MCP client
+  // did — and nothing is recorded, which is the #393 case.
+  const entry = [...runs.entries()].find(([, st]) => st.run.busy);
+  if (!entry) return;
+  const [key, state] = entry;
+  const idx = state.run.gates.findIndex((g) => g.id === record.id);
+  const gates =
+    idx === -1 ? [...state.run.gates, record] : state.run.gates.map((g, i) => (i === idx ? record : g));
+  commitTo(key, { ...state.run, gates });
+}
+
+/** Which run holds a gate, so `AgentConsent` can settle the one it recorded
+ *  rather than guessing. `null` when no run owns it. */
+export function runKeyHoldingGate(id: string): string | null {
+  for (const [key, state] of runs) {
+    if (state.run.gates.some((g) => g.id === id)) return key;
+  }
+  return null;
+}
+
+/** Settle a gate in the run that owns it, wherever that is. */
+export function noteGateIn(key: string, record: GateRecord): void {
+  const state = runs.get(key);
+  if (!state) return;
+  const idx = state.run.gates.findIndex((g) => g.id === record.id);
+  if (idx === -1) return;
+  const gates = state.run.gates.map((g, i) => (i === idx ? record : g));
+  commitTo(key, { ...state.run, gates });
 }
 
 /**
@@ -723,16 +1048,19 @@ export function noteGate(record: GateRecord): void {
  * sentence would sit there until the next question happened to clear it.
  */
 export function dismissAgentError(): void {
-  if (run.error === undefined) return;
-  commit({ ...run, error: undefined });
+  const state = activeState();
+  if (activeKey === null || !state || state.run.error === undefined) return;
+  commitTo(activeKey, { ...state.run, error: undefined });
 }
 
 /** Reset the module-level store between tests. */
 export function resetAgentRun(): void {
-  run = { turns: [], gates: [], busy: false, generation: 0, agentKind: "claude", activeSkills: [] };
-  session = null;
-  resume = null;
-  stoppedGeneration = null;
+  runs.clear();
+  activeKey = null;
+  agentKind = "claude";
+  activeSkills = [];
+  touchSeq = 0;
+  emptyRun = { ...EMPTY_RUN };
   turnSeq = 0;
   listeners.clear();
 }

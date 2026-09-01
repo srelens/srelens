@@ -84,3 +84,40 @@ export function askContextFor(route: string, cluster: string, namespaces: string
   // own narrowing is the best statement of scope there is.
   return namespaces.length > 0 ? { cluster, namespaces: [...namespaces] } : { cluster };
 }
+
+/**
+ * The identity of the conversation a question belongs to.
+ *
+ * A run is keyed by its SUBJECT, not by the route and not by the tab. Two
+ * consequences worth stating, because both were deliberate:
+ *
+ * - A pod's logs and that same pod's detail produce the SAME key. Same
+ *   subject, different lens — forking there would split a conversation the
+ *   reader experiences as one.
+ * - The namespace picker is NOT in the key. Narrowing is a filter adjusted
+ *   while thinking, so re-narrowing must not fork the chat. It travels in the
+ *   preface as scope instead (see {@link AskContext.namespaces}).
+ *
+ * The cluster is always in the key: the same pod name in two clusters is two
+ * subjects, which is the whole lesson of this migration's cluster-identity
+ * findings.
+ */
+export function runKeyFor(about: AskContext, route: string): string {
+  const cluster = about.cluster.trim();
+  if (about.kind && about.name) {
+    return `${cluster}|${about.kind}|${about.namespace ?? ""}|${about.name}`;
+  }
+  return `${cluster}|${route}`;
+}
+
+/**
+ * A short human label for a run, for the rail that lists them.
+ *
+ * Says the subject, not the route: `ai-editor` and `statefulsets` are what a
+ * reader recognises, and the cluster is already the rail's own context.
+ */
+export function runLabelFor(about: AskContext, route: string): string {
+  if (about.kind && about.name) return `${about.kind}/${about.name}`;
+  const tail = route.split("/").filter(Boolean).pop() ?? "cluster";
+  return tail;
+}

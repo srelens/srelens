@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { isTauri, pendingConfirms, respondToConfirm, subscribe, type ConfirmRequest } from "@srelens/core";
-import { getAgentRun, noteGate } from "../lib/agentRun";
+import { getRun, noteGate, noteGateIn, runKeyHoldingGate } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
@@ -302,9 +302,12 @@ export function AgentConsent() {
         // resolution, including the reader's own answer, so clobbering here
         // would overwrite an `approved` with a vaguer word. Whichever of the
         // two lands second, the decided outcome is the one that survives.
-        const owned = getAgentRun().gates.find((g) => g.id === id);
-        if (owned && owned.outcome === "pending") {
-          noteGate({ ...owned, outcome: "settled", at: Date.now() });
+        const owner = runKeyHoldingGate(id);
+        if (owner !== null) {
+          const owned = getRun(owner).gates.find((g) => g.id === id);
+          if (owned && owned.outcome === "pending") {
+            noteGateIn(owner, { ...owned, outcome: "settled", at: Date.now() });
+          }
         }
       });
       if (!hearingResolutions) return;
@@ -404,7 +407,10 @@ export function AgentConsent() {
   // that needs a payload change on the backend side; filed separately.
   useEffect(() => {
     if (covered || !current) return;
-    if (!getAgentRun().busy) return;
+    // `noteGate` records into whichever run has a turn in flight, and records
+    // NOTHING when none does. Since runs are keyed by subject, "which
+    // conversation owns this mutation" is the store's question to answer, not
+    // this component's — it only knows a request was shown.
     noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" });
   }, [covered, current]);
 
@@ -432,8 +438,13 @@ export function AgentConsent() {
       // first) or invent one for a call it never owned (a run started after
       // presentation but before the click). Looking the id up is the only
       // check that agrees with the presentation-time decision either way.
-      if (getAgentRun().gates.some((g) => g.id === id)) {
-        noteGate({
+      // By the run that HOLDS the gate, not by whichever is busy: the run
+      // that owned it has very likely finished by the time the reader clicks,
+      // and `noteGate` only ever writes into a busy one. Looking the id up is
+      // what lets a finished conversation still receive its own outcome.
+      const owner = runKeyHoldingGate(id);
+      if (owner !== null) {
+        noteGateIn(owner, {
           id,
           tool: current.tool,
           args: current.args,

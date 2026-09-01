@@ -10,6 +10,11 @@ import {
   setSkillActive,
   stopAgentRun,
   subscribeAgentRun,
+  getRun,
+  getRunSummaries,
+  getActiveRunKey,
+  selectRun,
+  forgetRun,
 } from "./agentRun";
 
 const { startChat, sendChat, listAgents, cancelChat, loadSkill } = vi.hoisted(() => ({
@@ -112,12 +117,26 @@ describe("the run store", () => {
     expect(seen).toHaveBeenCalledTimes(5);
   });
 
-  it("merges a gate by id, so a second outcome for the same request replaces the first", () => {
+  it("merges a gate by id, so a second outcome for the same request replaces the first", async () => {
+    // A gate belongs to the run whose agent called the tool, so there has to
+    // BE one with a turn in flight — with runs keyed by subject, "the store"
+    // is no longer a single conversation that exists by default.
+    sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+    void askAgent("q", { about: { cluster: "prod-eu" }, route: "/overview" });
+    await untilSendChatCalledTimes(1);
+
     noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "pending" });
     noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "approved" });
     const gates = getAgentRun().gates;
     expect(gates).toHaveLength(1);
     expect(gates[0].outcome).toBe("approved");
+  });
+
+  it("records no gate when no run has a turn in flight — an external client's confirm", () => {
+    // The #393 case, now structural rather than a heuristic: with no busy run
+    // there is no conversation to attribute a mutation to.
+    noteGate({ id: "external", tool: "k8s.deletePod", args: {}, outcome: "pending" });
+    expect(getAgentRun().gates).toEqual([]);
   });
 
   it("chooseAgent switches which agent the next question goes to, without touching the conversation", () => {
@@ -151,9 +170,15 @@ describe("the run store", () => {
     expect(run.gates).toEqual([]);
     // The chosen agent genuinely does survive a clear — only `gates` changes.
     expect(run.agentKind).toBe("codex");
-    // Unlike the chosen agent, a skill picked for the run that just ended is
-    // not "still active" for whatever run comes next.
-    expect(run.activeSkills).toEqual([]);
+    // `activeSkills` SURVIVES a clear, and that is a deliberate change
+    // (ruling AD). It used to be per-run and to be dropped here, on the
+    // reasoning that a skill picked for a run that ended is not still active.
+    // With runs keyed by subject that broke: there is no run to hold the set
+    // before the first question, which is exactly when the rail offers the
+    // switch, and the rail can be showing a different run than the dock. So
+    // it is window-wide now, beside `agentKind`, and the reader's pick applies
+    // to whatever they ask next.
+    expect(run.activeSkills).toEqual(["rollout"]);
   });
 
   // I2: `session` is created lazily inside `askAgent`, AFTER `busy` and
@@ -729,6 +754,114 @@ describe("the run store", () => {
       await askAgent("q", { skills: ["oom-triage"] });
 
       expect(sendChat.mock.calls[0][1]).toBe("Apply these skills:\n\noom-triage body\n\nq");
+    });
+  });
+
+  /**
+   * The change the reader asked for after using it: "it opens the same agent
+   * view from everywhere, same chat". A run is keyed by its SUBJECT now, so
+   * asking from a StatefulSets list and from a pod's logs gives two
+   * conversations rather than one that inherits whatever the last question
+   * was about.
+   */
+  describe("one conversation per subject", () => {
+    const LIST = { about: { cluster: "prod-eu", namespaces: ["m01-prod-04-dataservices"] }, route: "/k/statefulsets" };
+    const POD = {
+      about: { cluster: "prod-eu", namespace: "m01-cnips-01-services", kind: "Pod", name: "ai-editor", surface: "logs" as const },
+      route: "/logs/Pod/m01-cnips-01-services/ai-editor",
+    };
+
+    it("keeps two subjects in two conversations", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("which replica set spiked?", LIST);
+      await askAgent("summarise this stream", POD);
+
+      const summaries = getRunSummaries();
+      expect(summaries).toHaveLength(2);
+      // Each holds only its own question.
+      const list = summaries.find((r) => r.label === "statefulsets")!;
+      const pod = summaries.find((r) => r.label === "Pod/ai-editor")!;
+      expect(getRun(list.key).turns.map((t) => t.text)).toContain("which replica set spiked?");
+      expect(getRun(list.key).turns.map((t) => t.text)).not.toContain("summarise this stream");
+      expect(getRun(pod.key).turns.map((t) => t.text)).toContain("summarise this stream");
+    });
+
+    it("continues the same conversation when the subject is the same", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("first", LIST);
+      await askAgent("second", LIST);
+      expect(getRunSummaries()).toHaveLength(1);
+      expect(getRunSummaries()[0].turns).toBe(2);
+    });
+
+    it("treats a pod's logs and that pod's detail as ONE subject", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("from logs", POD);
+      await askAgent("from detail", {
+        about: { cluster: "prod-eu", namespace: "m01-cnips-01-services", kind: "Pod", name: "ai-editor" },
+        route: "/k/Pod/m01-cnips-01-services/ai-editor",
+      });
+      // Same subject, different lens — forking would split a conversation the
+      // reader experiences as one.
+      expect(getRunSummaries()).toHaveLength(1);
+    });
+
+    it("does not fork when the reader only re-narrows the namespace picker", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("first", LIST);
+      await askAgent("second", {
+        about: { cluster: "prod-eu", namespaces: ["m01-prod-05-dataservices"] },
+        route: "/k/statefulsets",
+      });
+      // Narrowing is a filter adjusted while thinking, not a new subject.
+      expect(getRunSummaries()).toHaveLength(1);
+    });
+
+    it("keeps the same subject in two clusters apart", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("here", POD);
+      await askAgent("there", { ...POD, about: { ...POD.about, cluster: "staging" } });
+      expect(getRunSummaries()).toHaveLength(2);
+    });
+
+    it("creates a run by ASKING, never by navigating", () => {
+      // Browsing thirty screens must not leave thirty empty chats in the rail.
+      expect(getRunSummaries()).toEqual([]);
+      expect(getActiveRunKey()).toBeNull();
+    });
+
+    it("refuses a second question while another subject is still answering, and says which", async () => {
+      sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+      void askAgent("long one", POD);
+      await untilSendChatCalledTimes(1);
+
+      await askAgent("another", LIST);
+      // Named, so the reader knows what to go and stop.
+      expect(getAgentRun().error).toMatch(/Pod\/ai-editor/);
+      expect(sendChat).toHaveBeenCalledTimes(1);
+    });
+
+    it("switches which conversation the surfaces show", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("a", LIST);
+      await askAgent("b", POD);
+      const [newest, older] = getRunSummaries();
+      expect(getActiveRunKey()).toBe(newest.key);
+      selectRun(older.key);
+      expect(getActiveRunKey()).toBe(older.key);
+      expect(getAgentRun().turns.map((t) => t.text)).toContain("a");
+    });
+
+    it("forgets a conversation, but never one that is still answering", async () => {
+      sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+      void askAgent("streaming", POD);
+      await untilSendChatCalledTimes(1);
+      const key = getRunSummaries()[0].key;
+
+      forgetRun(key);
+      // Dropping the state a turn is writing into would leave its sendChat
+      // with nowhere to land and its child untracked.
+      expect(getRunSummaries()).toHaveLength(1);
     });
   });
 });
