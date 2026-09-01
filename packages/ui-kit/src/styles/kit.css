@@ -1123,6 +1123,23 @@
   }
   .icon-btn:hover { background: var(--field); color: var(--ink); }
 
+  /* The same chrome as `.icon-btn`, sized by its CONTENT.
+     `.icon-btn` is `width: 24px` — a box for a glyph — and the dock's `clear`
+     and `full view` controls hold words. Text in a 24px box overflows it, so
+     two of them side by side overlapped, which is how this was found: `clear`
+     alone was short enough to look fine until `full view` arrived beside it. */
+  .text-btn {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding-inline: 0.3rem;
+    border-radius: 5px;
+    color: var(--ink-muted);
+    white-space: nowrap;
+    -webkit-app-region: no-drag;
+  }
+  .text-btn:hover { background: var(--field); color: var(--ink); }
+
   .tabstrip {
     display: flex;
     align-items: stretch;

@@ -327,4 +327,62 @@ describe("ConsoleDock clearing", () => {
     await userEvent.click(screen.getByRole("button", { name: /full view/i }));
     expect(onExpand).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * Three defects in this header and its row shipped together, none of them
+   * catchable by the 1,200 tests in this package, because all three were
+   * layout and jsdom has none. What CAN be pinned is pinned here.
+   */
+  it("draws ONE prompt input, from the shared bar rather than a copy of it", () => {
+    setup();
+    // Two implementations of the same row is what the extraction was for: the
+    // dock had it inline, the agent screen grew its own, and for one commit
+    // both existed.
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  });
+
+  it("keeps the collapse control inside the prompt row, not floating over it", () => {
+    setup();
+    const input = screen.getByRole("textbox");
+    const collapse = screen.getByRole("button", { name: /collapse console/i });
+    // Same row: the chevron is the bar's `lead`. Rendered as a sibling of the
+    // row instead, it landed on top of the prompt text.
+    expect(input.parentElement?.contains(collapse)).toBe(true);
+  });
+
+  it("sizes the header's word controls by their content, not as icon boxes", () => {
+    setup({ onExpand: () => {}, onClear: () => {} });
+    const full = screen.getByRole("button", { name: /full view/i });
+    const clear = screen.getByRole("button", { name: /clear console/i });
+    // `.icon-btn` is `width: 24px` — a box for a glyph. These hold words, and
+    // text in a 24px box overflows it, so the two overlapped. jsdom computes
+    // no layout, so the class IS the assertion here; there is nothing else to
+    // look at.
+    for (const b of [full, clear]) {
+      expect(b.className).toContain("text-btn");
+      expect(b.className).not.toContain("icon-btn");
+    }
+  });
+
+  /**
+   * The only Stop in the app. The agent screen's own composer carried one and
+   * that composer is deleted — the dock is the prompt on every screen — so a
+   * turn in flight would have had nothing to stop it.
+   */
+  it("offers no Stop when nothing is in flight", () => {
+    setup({ onStop: () => {} });
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("offers Stop beside the working spinner, and calls it", async () => {
+    const onStop = vi.fn();
+    setup({ busy: true, onStop });
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws no Stop for a host that has none, rather than a dead control", () => {
+    setup({ busy: true });
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
 });

@@ -3,7 +3,6 @@ import { isTauri } from "@srelens/core";
 import { useActiveContext } from "../lib/clusters";
 import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
-import { Composer } from "./agent/Composer";
 import { Transcript } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
 
@@ -13,18 +12,14 @@ import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
  *  alongside the figures #386/#387 exclude would have been over-applying that
  *  rule to a sentence it never touched. */
 /**
- * §5's footer sentence said "Continue this run from the console at the bottom
- * of the window". It named a console this screen no longer shows: the dock
- * used to render here too, which put a second input box under this screen's
- * own — reported as "duplicate text box".
+ * §5's own sentence, verbatim, and true again.
  *
- * So the sentence says what is actually true now: the conversation is the same
- * one the dock carries on every other screen, which is the fact §5 wanted the
- * reader to have. A line naming a control that is not on screen is worse than
- * no line.
+ * It briefly said something else: the dock had been hidden on this screen, so
+ * naming "the console at the bottom of the window" pointed at nothing. The
+ * dock is the bar here now — one prompt component, every screen — so §5's
+ * words are the accurate ones.
  */
-const SAME_RUN_AS_THE_CONSOLE =
-  "The same conversation the console carries on other screens — ask here, or from the console there";
+const CONTINUE_FROM_CONSOLE = "Continue this run from the console at the bottom of the window";
 
 /** `started 14:04`, off the first turn's own timestamp — one of the two
  *  figures in §5's `started <time> · <n> calls · <duration>` head that the
@@ -142,8 +137,7 @@ export function Agent(_props: { route: string }) {
           <div className="scroll min-h-0 min-w-0 flex-1">
             <Transcript turns={turns} gates={gates} />
           </div>
-          <Eyebrow>{SAME_RUN_AS_THE_CONSOLE}</Eyebrow>
-          <Composer context={context} />
+          <Eyebrow>{CONTINUE_FROM_CONSOLE}</Eyebrow>
         </div>
       </SideRail>
     </Screen>

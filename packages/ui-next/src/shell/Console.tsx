@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
 import { useConsole } from "../console";
-import { askAgent, clearAgentRun, dismissAgentError, selectRun, useRun } from "../lib/agentRun";
+import {
+  askAgent,
+  clearAgentRun,
+  dismissAgentError,
+  selectRun,
+  stopAgentRun,
+  useRun,
+} from "../lib/agentRun";
 import {
   commandsFor,
   matchCommands,
@@ -244,17 +251,10 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   // goes — a reader looking for the agent goes there, and it says so on
   // arrival, which is the same choice Settings makes for the MCP server.
   if (!isTauri()) return null;
-  // NOT on `/agent`. That screen is the full view of the same conversation and
-  // mounts its own composer, so the dock there put a SECOND input box on
-  // screen, stacked under the first — reported as "duplicate text box". Two
-  // prompts for one conversation is also how they disagree about what is
-  // typed.
-  //
-  // It costs nothing: the dock exists so a question can be asked from a screen
-  // that is about something else. On the agent's own screen there is nothing
-  // for it to add, and hiding it gives the transcript and the rail the bottom
-  // of the window back.
-  if (route === "/agent") return null;
+  // Renders on `/agent` TOO. That screen has no bar of its own: this dock is
+  // the one prompt in the app, on every screen including the agent's own.
+  // It used to mount a bespoke `Composer` there, which is what put two input
+  // boxes on that screen and made one of them look like a different product.
 
   const commandMode = value.startsWith("/");
   const exchanges = turns.filter((t) => t.role === "user").length;
@@ -345,6 +345,8 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
         selectRun(runKey);
         openTab("/agent", { clusterName: context || undefined });
       }}
+      // The only Stop in the app: the agent screen's own composer is gone.
+      onStop={busy ? () => stopAgentRun() : undefined}
       live={dockLive}
     >
       {children}

@@ -10,8 +10,17 @@ import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 import type { ClusterContext } from "@srelens/core";
 
-const { useAgentRun, useRun, askAgent, clearAgentRun, dismissAgentError, selectRun } = vi.hoisted(() => ({
+const {
+  useAgentRun,
+  useRun,
+  askAgent,
+  clearAgentRun,
+  dismissAgentError,
+  selectRun,
+  stopAgentRun,
+} = vi.hoisted(() => ({
   selectRun: vi.fn(),
+  stopAgentRun: vi.fn(),
   useAgentRun: vi.fn(),
   // The dock reads its OWN route's run, not the active one — so this is the
   // hook under test here, and tests that care about which key it was handed
@@ -28,6 +37,7 @@ vi.mock("../lib/agentRun", () => ({
   clearAgentRun,
   dismissAgentError,
   selectRun,
+  stopAgentRun,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -97,6 +107,7 @@ beforeEach(() => {
   askAgent.mockReset();
   clearAgentRun.mockReset();
   selectRun.mockReset();
+  stopAgentRun.mockReset();
 });
 
 describe("Console", () => {
@@ -530,5 +541,16 @@ describe("Console — header details", () => {
       </ConsoleProvider>,
     );
     expect(screen.getByText("2 exchanges")).toBeDefined();
+  });
+
+  it("wires the dock's Stop to the store, and only while a turn is in flight", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(
+      runState({ busy: true, turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }),
+    );
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(stopAgentRun).toHaveBeenCalledTimes(1);
   });
 });

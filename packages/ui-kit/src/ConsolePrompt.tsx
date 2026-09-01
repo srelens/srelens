@@ -22,6 +22,19 @@ export interface ConsolePromptProps {
   busy?: boolean;
   /** A keycap, `⌘K` — drawn only where the host actually binds one. */
   shortcutHint?: ReactNode;
+  /** The dock opens itself when its input takes focus; the agent screen has
+   *  nothing to open. */
+  onFocus?: () => void;
+  /**
+   * Stop the turn in flight. Offered beside the working spinner, because
+   * `busy` is the only state in which it means anything.
+   *
+   * This is the ONLY Stop in the app now. It used to live on the agent
+   * screen's own composer, and that composer is gone — one prompt component,
+   * every screen. A question that cannot be stopped is worse than an untidy
+   * bar.
+   */
+  onStop?: () => void;
   /** Anything the host puts to the LEFT of the input: the dock's collapse
    *  chevron, the agent screen's nothing. */
   lead?: ReactNode;
@@ -44,7 +57,21 @@ export interface ConsolePromptProps {
  * keycap, the send control, and what a turn in flight looks like.
  */
 export const ConsolePrompt = forwardRef<HTMLInputElement, ConsolePromptProps>(function ConsolePrompt(
-  { value, onValueChange, onSubmit, onKeyDown, placeholder, label, busy = false, shortcutHint, lead, trail, className },
+  {
+    value,
+    onValueChange,
+    onSubmit,
+    onKeyDown,
+    placeholder,
+    label,
+    busy = false,
+    shortcutHint,
+    onFocus,
+    onStop,
+    lead,
+    trail,
+    className,
+  },
   ref,
 ) {
   const ready = value.trim().length > 0 && !busy;
@@ -60,6 +87,7 @@ export const ConsolePrompt = forwardRef<HTMLInputElement, ConsolePromptProps>(fu
         aria-label={`${label} prompt`}
         value={value}
         placeholder={placeholder}
+        onFocus={onFocus}
         onChange={(e) => onValueChange(e.target.value)}
         onKeyDown={(e) => {
           if (onKeyDown?.(e)) return;
@@ -73,6 +101,11 @@ export const ConsolePrompt = forwardRef<HTMLInputElement, ConsolePromptProps>(fu
         <span className="flex shrink-0 items-center gap-1.5">
           <Spinner label="Working" className="size-3" style={{ color: toneColor("accent") }} />
           <Eyebrow className="text-[0.5625rem]">working</Eyebrow>
+          {onStop && (
+            <button type="button" className="text-btn" aria-label="Stop" onClick={onStop}>
+              <span className="eyebrow whitespace-nowrap text-[0.5625rem]">stop</span>
+            </button>
+          )}
         </span>
       ) : (
         <>

@@ -48,6 +48,8 @@ const {
   useRunSummaries,
   getActiveRunKey,
   selectRun,
+  restoreRuns,
+  openSavedRun,
 } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
@@ -59,6 +61,8 @@ const {
   useRunSummaries: vi.fn(() => []),
   getActiveRunKey: vi.fn(() => null),
   selectRun: vi.fn(),
+  restoreRuns: vi.fn(async () => {}),
+  openSavedRun: vi.fn(async () => {}),
 }));
 vi.mock("../lib/agentRun", () => ({
   useAgentRun,
@@ -71,6 +75,8 @@ vi.mock("../lib/agentRun", () => ({
   useRunSummaries,
   getActiveRunKey,
   selectRun,
+  restoreRuns,
+  openSavedRun,
 }));
 
 const CLAUDE: AgentInfo = {
@@ -134,9 +140,17 @@ describe("the agent screen", () => {
     expect(await screen.findByText("Diagnose checkout-api 5xx")).toBeTruthy();
   });
 
-  it("mounts the composer full — no compact copy, and a real send control once agents load", async () => {
+  /**
+   * This screen has no prompt of its own. The dock is the one prompt in the
+   * app — same component, every screen — which is what "just use same console
+   * dock, don't rebuild anything" settled. The bespoke `Composer` that used to
+   * mount here is deleted.
+   */
+  it("mounts no prompt of its own — the dock is the bar here too", () => {
     render(<Agent route="/agent" />);
-    expect(await screen.findByRole("textbox", { name: /ask the agent/i })).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // And no second Send: the dock's is the only one.
+    expect(screen.queryByRole("button", { name: /^send$/i })).toBeNull();
   });
 
   it("draws the rail's three sections beside the transcript", async () => {
@@ -152,18 +166,15 @@ describe("the agent screen", () => {
     expect(clearAgentRun).toHaveBeenCalledTimes(1);
   });
 
-  it("hands the composer the real active cluster's name, never a hardcoded blank", async () => {
+  it("draws the agent picker in the rail, where the screen's own controls live", async () => {
     setContexts([CTX]);
     tabs.setState(defaultState([CTX]));
-    listPrompts.mockResolvedValue([
-      { name: "diagnose", description: "Diagnose a workload", arguments: [{ name: "context", required: true, description: null }] },
-    ]);
-    getPrompt.mockResolvedValue("Diagnose prod-eu");
     render(<Agent route="/agent" />);
-    const box = await screen.findByRole("textbox", { name: /ask the agent/i });
-    await userEvent.type(box, "/");
-    await userEvent.click(await screen.findByText("diagnose"));
-    expect(getPrompt).toHaveBeenCalledWith("diagnose", { context: "prod-eu" });
+    // The picker moved here when the screen lost its bar: the dock is the
+    // prompt, and this rail already held Skills.
+    // "Agent" appears twice — the rail's own head and this section — so the
+    // picker itself is what to assert on.
+    expect(await screen.findByRole("button", { name: /claude/i })).toBeTruthy();
   });
 
   it("heads the transcript with when the run started, off the FIRST turn's own timestamp", async () => {
@@ -188,7 +199,9 @@ describe("the agent screen", () => {
 
   it("draws no started time for a run with no turns yet", async () => {
     render(<Agent route="/agent" />);
-    await screen.findByRole("textbox", { name: /ask the agent/i });
+    // The rail is the settle signal now: the composer this used to wait on is
+    // gone, since the dock is the prompt on every screen.
+    await screen.findByText("Recent runs");
     expect(screen.queryByText(/^started /)).toBeNull();
   });
 
@@ -241,9 +254,11 @@ describe("the agent screen", () => {
     // under this screen's own, reported as a duplicate text box). The fact §5
     // wanted the reader to have is that it is ONE conversation; the sentence
     // says that without naming a control that is not there.
-    const note = await screen.findByText(/same conversation the console carries/i);
-    expect(note).toBeTruthy();
-    expect(note.textContent).not.toMatch(/at the bottom of the window/);
+    // §5's own sentence, and true again: the dock IS at the bottom of the
+    // window on this screen, because it is the prompt here too.
+    expect(
+      await screen.findByText("Continue this run from the console at the bottom of the window"),
+    ).toBeTruthy();
   });
 
   /**

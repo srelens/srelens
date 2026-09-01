@@ -4,8 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { RunsRail } from "./RunsRail";
 import { askAgent, getAgentRun, resetAgentRun } from "../../lib/agentRun";
 
-const { listSessions, listSkills, startChat, sendChat, listAgents } = vi.hoisted(() => ({
+const { listSessions, loadSession, saveSession, deleteSession, listSkills, startChat, sendChat, listAgents } =
+  vi.hoisted(() => ({
   listSessions: vi.fn(),
+  loadSession: vi.fn(),
+  saveSession: vi.fn(),
+  deleteSession: vi.fn(),
   listSkills: vi.fn(),
   startChat: vi.fn(),
   sendChat: vi.fn(),
@@ -14,6 +18,9 @@ const { listSessions, listSkills, startChat, sendChat, listAgents } = vi.hoisted
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   listSessions,
+  loadSession,
+  saveSession,
+  deleteSession,
   listSkills,
   startChat,
   sendChat,
@@ -23,6 +30,8 @@ vi.mock("@srelens/core", async (orig) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   listSessions.mockResolvedValue([]);
+  saveSession.mockResolvedValue(undefined);
+  deleteSession.mockResolvedValue(undefined);
   listSkills.mockResolvedValue([]);
   startChat.mockResolvedValue("sess-1");
   sendChat.mockResolvedValue(null);
@@ -45,11 +54,55 @@ describe("the agent screen's rail", () => {
    * new design persists, #395), and rows that were plain `<div>`s so clicking
    * did nothing.
    */
-  it("says nothing has been asked yet, rather than listing another UI's sessions", async () => {
+  it("says nothing has been asked yet when there is nothing asked and nothing saved", async () => {
     render(<RunsRail />);
     expect(await screen.findByText(/no questions yet/i)).toBeTruthy();
-    // The old list is gone, not merely empty.
-    expect(listSessions).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Conversations are persisted now (#395). The rail lists what is on disk as
+   * well as what this window holds, so a restart does not look like a fresh
+   * install — which is what "conversations are still not showing up" was.
+   *
+   * The earlier defect was different and is still fixed: it listed CLASSIC's
+   * sessions as if they were the reader's runs, and the rows could not be
+   * opened at all.
+   */
+  it("lists a conversation saved by an earlier session, and opens it on click", async () => {
+    listSessions.mockResolvedValue([
+      { id: "s1", title: "check mongodb deployment and find optimisations", createdAt: 1, updatedAt: 2 },
+    ]);
+    loadSession.mockResolvedValue({
+      id: "s1",
+      title: "check mongodb deployment and find optimisations",
+      createdAt: 1,
+      updatedAt: 2,
+      contexts: [],
+      skills: [],
+      cliSessionId: null,
+      agentKind: "claude",
+      messages: [
+        {
+          v: 1,
+          key: "prod-eu|Pod||m01-prod-04-mongodb-0",
+          label: "Pod/m01-prod-04-mongodb-0",
+          turns: [{ id: 1, role: "user", text: "check mongodb deployment", calls: [], at: 1 }],
+          gates: [],
+        },
+      ],
+    });
+    render(<RunsRail />);
+
+    const row = await screen.findByRole("button", { name: /check mongodb deployment/i });
+    // Marked as on disk rather than counted, since its transcript is not
+    // loaded until it is opened.
+    expect(row.textContent).toMatch(/saved/i);
+
+    await userEvent.click(row);
+    // Hydrated into a real run, under its own subject key.
+    await vi.waitFor(() => {
+      expect(getAgentRun().turns.map((t) => t.text)).toContain("check mongodb deployment");
+    });
   });
 
   it("lists a conversation once one has been started, by its subject", async () => {

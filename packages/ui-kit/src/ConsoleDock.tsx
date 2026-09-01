@@ -5,6 +5,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { ConsolePrompt } from "./ConsolePrompt";
 import { EmptyState } from "./EmptyState";
 import { Eyebrow } from "./Eyebrow";
 import { Spinner } from "./Spinner";
@@ -40,6 +41,9 @@ export interface ConsoleDockProps {
   placeholder?: string;
   /** A query is in flight: send is withdrawn and Enter does nothing. */
   busy?: boolean;
+  /** Stop that query. Drawn beside the working spinner; see
+   *  {@link ConsolePromptProps.onStop}. */
+  onStop?: () => void;
   /** Shows the Clear control; the caller does the clearing. */
   onClear?: () => void;
   /**
@@ -105,6 +109,7 @@ export function ConsoleDock({
   status,
   placeholder,
   busy = false,
+  onStop,
   onClear,
   onExpand,
   children,
@@ -152,18 +157,18 @@ export function ConsoleDock({
     if (body) body.scrollTop = body.scrollHeight;
   }, [children, open]);
 
-  function onPromptKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter") {
-      submit();
-      return;
-    }
+  /** Returns true for a key this host has dealt with, so `ConsolePrompt`
+   *  leaves it alone — Enter it handles itself. */
+  function onPromptKeyDown(event: KeyboardEvent<HTMLInputElement>): boolean {
     // Escape backs out of the panel, and only when there is one to back out of
     // — otherwise the console swallows a key something behind it wanted.
     if (event.key === "Escape" && open) {
       event.preventDefault();
       onOpenChange(false);
       inputRef.current?.blur();
+      return true;
     }
+    return false;
   }
 
   return (
@@ -195,7 +200,7 @@ export function ConsoleDock({
               {onExpand && (
                 <button
                   type="button"
-                  className="icon-btn shrink-0"
+                  className="text-btn shrink-0"
                   aria-label={`Open ${label.toLowerCase()} in the full view`}
                   onClick={onExpand}
                 >
@@ -205,7 +210,7 @@ export function ConsoleDock({
               {onClear && (
                 <button
                   type="button"
-                  className="icon-btn shrink-0"
+                  className="text-btn shrink-0"
                   aria-label={`Clear ${label.toLowerCase()}`}
                   onClick={onClear}
                 >
@@ -231,99 +236,52 @@ export function ConsoleDock({
         </>
       )}
 
-      <div className="flex h-[34px] items-center gap-2 px-2.5">
-        <button
-          type="button"
-          className="agent-mark !h-[19px] !w-[19px] !rounded-[5px]"
-          aria-label={
-            open
-              ? `Collapse ${label.toLowerCase()}`
-              : `Expand ${label.toLowerCase()}`
-          }
-          aria-expanded={open}
-          // Only while the panel exists: an `aria-controls` pointing at nothing
-          // is a promise to assistive technology that cannot be kept.
-          aria-controls={open ? bodyId : undefined}
-          onClick={() => onOpenChange(!open)}
-        >
-          {/* Inline rather than an icon-set import: the kit takes no dependency
-              on lucide, and these are the only glyphs it needs. */}
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 24 24"
-            fill="none"
-            aria-hidden="true"
+      {/*
+        The row itself is `ConsolePrompt` — the same component the `/agent`
+        screen's composer uses. It was written inline here, and the agent
+        screen grew its own; extracting it and leaving this copy behind was the
+        duplication the extraction was for. The collapse chevron is this host's
+        `lead`, which is also what stops it floating over the prompt text.
+      */}
+      <ConsolePrompt
+        ref={inputRef}
+        value={value}
+        onValueChange={onValueChange}
+        onSubmit={submit}
+        onKeyDown={onPromptKeyDown}
+        placeholder={placeholder}
+        label={label}
+        busy={busy}
+        onStop={onStop}
+        shortcutHint={shortcutHint}
+        onFocus={() => {
+          if (!open) onOpenChange(true);
+        }}
+        lead={
+          <button
+            type="button"
+            className="agent-mark !h-[19px] !w-[19px] !rounded-[5px]"
+            aria-label={open ? `Collapse ${label.toLowerCase()}` : `Expand ${label.toLowerCase()}`}
+            aria-expanded={open}
+            // Only while the panel exists: an `aria-controls` pointing at
+            // nothing is a promise to assistive technology that cannot be kept.
+            aria-controls={open ? bodyId : undefined}
+            onClick={() => onOpenChange(!open)}
           >
-            <path
-              d={open ? "m6 9 6 6 6-6" : "m6 15 6-6 6 6"}
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-
-        <input
-          ref={inputRef}
-          className="console-input !text-[0.8125rem]"
-          // A placeholder is not a label: it is gone the moment anything is
-          // typed, and the mock's input has nothing else to go on.
-          aria-label={`${label} prompt`}
-          value={value}
-          placeholder={placeholder}
-          onFocus={() => {
-            if (!open) onOpenChange(true);
-          }}
-          onChange={(e) => onValueChange(e.target.value)}
-          onKeyDown={onPromptKeyDown}
-        />
-
-        {busy ? (
-          <span className="flex shrink-0 items-center gap-1.5">
-            <Spinner
-              label="Working"
-              className="size-3"
-              style={{ color: toneColor("accent") }}
-            />
-            <Eyebrow className="text-[0.5625rem]">working</Eyebrow>
-          </span>
-        ) : (
-          <>
-            {filled(shortcutHint) && (
-              <span className="kbd shrink-0">{shortcutHint}</span>
-            )}
-            <button
-              type="button"
-              className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md transition-opacity disabled:opacity-25"
-              style={{
-                background: toneColor("accent"),
-                color: "var(--accent-ink)",
-              }}
-              aria-label="Send"
-              disabled={!ready}
-              onClick={submit}
-            >
-              <svg
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path
-                  d="M12 19V5m0 0-7 7m7-7 7 7"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-          </>
-        )}
-      </div>
+            {/* Inline rather than an icon-set import: the kit takes no
+                dependency on lucide, and these are the only glyphs it needs. */}
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d={open ? "m6 9 6 6 6-6" : "m6 15 6-6 6 6"}
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        }
+      />
     </section>
   );
 }

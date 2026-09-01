@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
-import { listSkills, relativeTime, type SkillMeta } from "@srelens/core";
+import { listAgents, listSkills, relativeTime, type AgentInfo, type SkillMeta } from "@srelens/core";
 import { Alert, RawError, Section, Switch, cx } from "@srelens/ui-kit";
+import { AgentPicker } from "./AgentPicker";
 import {
+  chooseAgent,
   getActiveRunKey,
+  openSavedRun,
+  restoreRuns,
   selectRun,
   setSkillActive,
   useAgentRun,
@@ -49,15 +53,34 @@ export function RunsRail() {
   // statements standing in for a failure this rail never told the reader
   // about (I6).
   const [skills, setSkills] = useState<Read<SkillMeta[]>>(LOADING);
+  // The picker's home now the agent screen has no bar of its own — the dock is
+  // the one prompt in the app, and this rail is where the screen's own
+  // controls live (Skills is right below it).
+  const [agents, setAgents] = useState<Read<AgentInfo[]>>(LOADING);
   // THIS window's conversations, not the sessions classic wrote to disk. See
   // the section's own comment for why that list is gone.
   const runs = useRunSummaries();
   const activeKey = getActiveRunKey();
+  /** Why the reader's own history is missing, when it is. Not swallowed: an
+   *  empty list that should not be empty is exactly the "history is not
+   *  correct" this section has already been wrong about once. */
+  const [historyError, setHistoryError] = useState<unknown>(null);
+
+  useEffect(() => {
+    // Saved conversations, read once per mount. Metadata only — a transcript
+    // is loaded when the reader opens it.
+    void restoreRuns().catch((e: unknown) => setHistoryError(e));
+  }, []);
   // The one set the composer's own `/` menu writes to as well — read here,
   // never copied into local state, so the two controls cannot disagree about
   // which skills are active for this run.
-  const { activeSkills } = useAgentRun();
+  const { activeSkills, agentKind, busy } = useAgentRun();
 
+  useEffect(() => {
+    listAgents()
+      .then((v) => setAgents({ kind: "ready", value: v }))
+      .catch((e) => setAgents({ kind: "error", error: e }));
+  }, []);
   useEffect(() => {
     listSkills()
       .then((v) => setSkills({ kind: "ready", value: v }))
@@ -85,6 +108,11 @@ export function RunsRail() {
         #395's work. Until then they are not shown rather than shown and inert.
       */}
       <Section title="Recent runs" smallCaps>
+        {historyError !== null && (
+          <Alert tone="sev" title="Saved conversations could not be read">
+            <RawError text={String(historyError)} />
+          </Alert>
+        )}
         {runs.length === 0 ? (
           <p className="min-w-0 break-words text-xs text-muted">
             No questions yet. Asking one from any screen starts a conversation about that thing, and
@@ -97,7 +125,13 @@ export function RunsRail() {
                 key={r.key}
                 type="button"
                 aria-current={r.key === activeKey ? "true" : undefined}
-                onClick={() => selectRun(r.key)}
+                onClick={() => {
+                  // A row on disk has to be LOADED; one in memory is just a
+                  // switch. Same control either way, because to the reader
+                  // they are the same thing: a conversation they had.
+                  if (r.savedId !== undefined) void openSavedRun(r.savedId);
+                  else selectRun(r.key);
+                }}
                 className={cx(
                   "flex min-w-0 flex-col gap-0.5 rounded-tile px-2 py-1.5 text-left hover:bg-sunk",
                   r.key === activeKey && "bg-sunk",
@@ -105,12 +139,46 @@ export function RunsRail() {
               >
                 <span className="min-w-0 truncate text-sm">{r.label}</span>
                 <span className="min-w-0 truncate text-xs text-muted">
-                  {r.busy ? "answering…" : `${r.turns} question${r.turns === 1 ? "" : "s"}`} ·{" "}
-                  {relativeTime(r.at, now)}
+                  {r.busy
+                    ? "answering…"
+                    : r.savedId !== undefined
+                      ? "saved"
+                      : `${r.turns} question${r.turns === 1 ? "" : "s"}`}{" "}
+                  · {relativeTime(r.at, now)}
                 </span>
               </button>
             ))}
           </div>
+        )}
+      </Section>
+      <Section title="Agent" smallCaps>
+        {agents.kind === "loading" ? null : agents.kind === "error" ? (
+          <Alert tone="sev" title="Agents could not be checked">
+            <RawError text={String(agents.error)} />
+          </Alert>
+        ) : (
+          (() => {
+            // `available && !gated` filtered here, before the picker sees the
+            // list — an agent that is installed but gated must not be offered,
+            // and filtering inside the picker risks a call site that forgets.
+            const offered = agents.value.filter((a) => a.available && !a.gated);
+            if (offered.length === 0) {
+              return (
+                <p className="min-w-0 break-words text-xs text-muted">
+                  No agent is available. srelens can drive Claude, Codex or Cursor — install one, or
+                  configure srelens&rsquo;s own agent under Settings › Agent &amp; MCP.
+                </p>
+              );
+            }
+            return (
+              <AgentPicker
+                agents={offered}
+                selectedKind={agentKind}
+                onSelect={(kind) => chooseAgent(kind)}
+                disabled={busy}
+              />
+            );
+          })()
         )}
       </Section>
       <Section title="Skills" smallCaps>

@@ -4,13 +4,20 @@ import {
   describeError,
   listAgents,
   loadSkill,
+  listSessions,
+  loadSession,
+  saveSession,
+  deleteSession,
   sendChat,
   startChat,
   type AgentEvent,
+  type Session,
+  type SessionMeta,
   type Skill,
   type ToolStatus,
 } from "@srelens/core";
 import { runKeyFor, runLabelFor, type AskContext } from "./askContext";
+import { newId } from "./tabs";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -182,6 +189,25 @@ type RunState = {
   /** What the rail calls this run, and what it is about — pinned when the run
    *  is created, so a later navigation cannot relabel a conversation. */
   label: string;
+  /**
+   * The id this run is saved under, stable for its lifetime.
+   *
+   * Not the run key: the key is derived from a subject and could in principle
+   * be recomputed differently, and a saved conversation must not lose its file
+   * because a route parser changed. Generated once, carried in the saved
+   * envelope, and reused on rehydration.
+   */
+  id: string;
+  /**
+   * Disk writes for THIS run, serialised.
+   *
+   * Classic learned this the hard way (`AssistantConversation`'s
+   * `persistChainRef`): a save still flushing when the next one starts can
+   * land out of order, and a save racing a delete recreates a file that was
+   * just removed. One chain per run, awaited by anything that touches the same
+   * file.
+   */
+  saving: Promise<void>;
   /** When it was last asked into — for DISPLAY ("3 minutes ago"). */
   at: number;
   /**
@@ -301,6 +327,8 @@ function runFor(key: string, label: string): RunState {
     session: null,
     resume: null,
     stoppedGeneration: null,
+    id: newRunId(),
+    saving: Promise.resolve(),
     label,
     at: Date.now(),
     order: ++touchSeq,
@@ -443,19 +471,36 @@ export type RunSummary = {
   order: number;
   turns: number;
   busy: boolean;
+  /** Set when this row is a conversation on disk that is not loaded yet — the
+   *  rail opens it with {@link openSavedRun} rather than {@link selectRun}. */
+  savedId?: string;
 };
 
 export function getRunSummaries(): RunSummary[] {
-  return [...runs.entries()]
-    .map(([key, s]) => ({
-      key,
-      label: s.label,
-      at: s.at,
-      order: s.order,
-      turns: s.run.turns.filter((t) => t.role === "user").length,
-      busy: s.run.busy,
-    }))
-    .sort((a, b) => b.order - a.order);
+  const live: RunSummary[] = [...runs.entries()].map(([key, s]) => ({
+    key,
+    label: s.label,
+    at: s.at,
+    order: s.order,
+    turns: s.run.turns.filter((t) => t.role === "user").length,
+    busy: s.run.busy,
+    savedId: undefined,
+  }));
+  // Conversations on disk that this window has not opened yet. Listed so a
+  // restart does not look like a fresh install, and marked with `savedId` so
+  // the rail knows a click has to LOAD one rather than just switch to it.
+  const onDisk: RunSummary[] = saved.map((m) => ({
+    key: `saved|${m.id}`,
+    label: m.title,
+    at: m.updatedAt,
+    // Behind every live run: those are this session's, and the reader was just
+    // in them. Negative, so no live run ever sorts below a saved one.
+    order: -1,
+    turns: 0,
+    busy: false,
+    savedId: m.id,
+  }));
+  return [...live.sort((a, b) => b.order - a.order), ...onDisk.sort((a, b) => b.at - a.at)];
 }
 
 /** The rail's list, subscribed. Rebuilt only when the store emits, so its
@@ -693,6 +738,10 @@ export async function askAgent(
   // A stop recorded against an OLDER generation belongs to a turn already
   // gone; this one hasn't been asked to stop by anyone yet.
   state.stoppedGeneration = null;
+  // Saved with the question already in it, before anything is awaited. A
+  // conversation interrupted mid-answer then still holds what the reader
+  // asked, which is the half they cannot reconstruct.
+  persistRun(key);
 
   // Keyed by the backend's own call id, and scoped to this one question: two
   // calls from two different questions never share an id, so there is
@@ -847,6 +896,10 @@ export async function askAgent(
           : t,
       );
       commitTo(key, { ...state.run, busy: false });
+      // Every turn, not only the last: a window closed mid-conversation must
+      // not lose the answers already given, and "save on exit" has no hook to
+      // hang on in a Tauri window the reader can kill.
+      persistRun(key);
     }
   }
 }
@@ -938,6 +991,16 @@ export function clearAgentRun(target?: string): void {
     error: undefined,
     generation: state.run.busy ? state.run.generation + 1 : state.run.generation,
   });
+  // The conversation is over, so its file goes with it — AFTER whatever write
+  // is still in flight. Classic's own comment on this: a save still flushing
+  // when the delete lands recreates the file and its index entry, and the
+  // reader's "New question" quietly un-deletes what they just cleared.
+  //
+  // A fresh id, so the next question in this run writes a new file rather than
+  // reusing the one just removed.
+  const dead = state.id;
+  state.saving = state.saving.then(() => deleteSession(dead)).catch(() => {});
+  state.id = newRunId();
 }
 
 /**
@@ -951,6 +1014,9 @@ export function clearAgentRun(target?: string): void {
 export function forgetRun(key: string): void {
   const state = runs.get(key);
   if (!state || state.run.busy) return;
+  // Same ordering as a clear: drain the write, then remove the file.
+  const dead = state.id;
+  void state.saving.then(() => deleteSession(dead)).catch(() => {});
   runs.delete(key);
   if (activeKey === key) {
     // Fall back to the most recent survivor rather than to nothing, so the
@@ -1050,6 +1116,9 @@ export function noteGate(record: GateRecord): void {
   const gates =
     idx === -1 ? [...state.run.gates, record] : state.run.gates.map((g, i) => (i === idx ? record : g));
   commitTo(key, { ...state.run, gates });
+  // A gate is part of the record decision 1 traded the second set of buttons
+  // for, so it has to survive a restart like the turns do.
+  persistRun(key);
 }
 
 /** Which run holds a gate, so `AgentConsent` can settle the one it recorded
@@ -1069,6 +1138,7 @@ export function noteGateIn(key: string, record: GateRecord): void {
   if (idx === -1) return;
   const gates = state.run.gates.map((g, i) => (i === idx ? record : g));
   commitTo(key, { ...state.run, gates });
+  persistRun(key);
 }
 
 /**
@@ -1087,12 +1157,137 @@ export function dismissAgentError(target?: string): void {
   commitTo(key, { ...state.run, error: undefined });
 }
 
+/** `newId`, reused: it already guards `crypto.randomUUID` for a non-secure
+ *  context, and a second generator would be a second thing to get wrong. */
+function newRunId(): string {
+  return newId();
+}
+
+/**
+ * What a run looks like on disk.
+ *
+ * `Session.messages` is `unknown[]` and documented as opaque to the backend —
+ * "the frontend owns its shape" — so the whole run travels as ONE envelope
+ * element rather than being smeared across fields that mean other things.
+ * `contexts` is which clusters a conversation touched; abusing it to carry a
+ * run key would be the kind of thing that reads fine and breaks later.
+ *
+ * Versioned from the first write. A run saved by this build must still be
+ * readable by the next one, and the alternative to a version is guessing.
+ */
+type SavedRun = {
+  v: 1;
+  /** The subject key, so a restored run merges with the live one for the same
+   *  thing rather than sitting beside it as a duplicate. */
+  key: string;
+  label: string;
+  turns: Turn[];
+  gates: GateRecord[];
+};
+
+function isSavedRun(value: unknown): value is SavedRun {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Partial<SavedRun>;
+  return v.v === 1 && typeof v.key === "string" && typeof v.label === "string" && Array.isArray(v.turns);
+}
+
+/** Sessions on disk that are not (yet) loaded into `runs` — the rail lists
+ *  them so a reader's history survives a restart, and one is hydrated only
+ *  when they open it. */
+let saved: SessionMeta[] = [];
+
+/**
+ * Write one run to disk, behind its own chain.
+ *
+ * Best-effort and deliberately silent: a failed write must not turn into an
+ * error over a conversation that is otherwise fine, and the reader has not
+ * asked for anything here. It is not silent about being best-effort — see
+ * {@link restoreRuns}, which is where a reader learns their history could not
+ * be read.
+ */
+function persistRun(key: string): void {
+  const state = runs.get(key);
+  if (!state) return;
+  // Nothing worth a file until something was actually asked.
+  const asked = state.run.turns.find((t) => t.role === "user");
+  if (!asked) return;
+  const envelope: SavedRun = {
+    v: 1,
+    key,
+    label: state.label,
+    turns: state.run.turns,
+    gates: state.run.gates,
+  };
+  const session: Session = {
+    id: state.id,
+    // What a reader recognises in a list: the question they asked. The subject
+    // is already the rail's label, and repeating it here would make every
+    // session in the picker read the same.
+    title: asked.text.slice(0, 120),
+    createdAt: state.run.turns[0]?.at ?? state.at,
+    updatedAt: state.at,
+    contexts: [],
+    skills: state.run.activeSkills,
+    cliSessionId: state.resume,
+    agentKind: state.run.agentKind,
+    messages: [envelope],
+  };
+  state.saving = state.saving.then(() => saveSession(session)).catch(() => {});
+}
+
+/**
+ * Read the saved conversations back, so a restart does not lose them.
+ *
+ * Only the metadata: `listSessions` is documented as cheap for exactly this
+ * reason, and loading every transcript to draw a list would read a megabyte to
+ * show ten titles. A conversation is hydrated when it is opened.
+ */
+export async function restoreRuns(): Promise<void> {
+  const list = await listSessions();
+  saved = list;
+  emit();
+}
+
+/** Open a saved conversation: load its transcript, put it in the map under its
+ *  own subject key, and show it. */
+export async function openSavedRun(id: string): Promise<void> {
+  const meta = saved.find((m) => m.id === id);
+  const session = await loadSession(id);
+  const envelope = session.messages.find(isSavedRun);
+  // A session this build cannot read — classic's own, or a future shape —
+  // is opened as far as it can be rather than pretended into a run: the
+  // title is real, the transcript is not ours to interpret.
+  const key = envelope?.key ?? `saved|${id}`;
+  const existing = runs.get(key);
+  const state: RunState = existing ?? {
+    run: { ...EMPTY_RUN, agentKind: session.agentKind ?? agentKind, activeSkills },
+    session: null,
+    resume: session.cliSessionId,
+    stoppedGeneration: null,
+    id: session.id,
+    saving: Promise.resolve(),
+    label: envelope?.label ?? meta?.title ?? "saved",
+    at: session.updatedAt,
+    order: ++touchSeq,
+  };
+  runs.set(key, state);
+  if (envelope) {
+    state.run = { ...state.run, turns: envelope.turns, gates: envelope.gates ?? [] };
+  }
+  activeKey = key;
+  // Off the not-yet-loaded list: it is a live run now, and showing it twice
+  // would be the duplicate the rail's own history bug already taught.
+  saved = saved.filter((m) => m.id !== id);
+  emit();
+}
+
 /** Reset the module-level store between tests. */
 export function resetAgentRun(): void {
   runs.clear();
   activeKey = null;
   agentKind = "claude";
   activeSkills = [];
+  saved = [];
   touchSeq = 0;
   summaryStamp = -1;
   emptyRun = { ...EMPTY_RUN };

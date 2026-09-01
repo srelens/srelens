@@ -10,6 +10,8 @@ import {
   setSkillActive,
   stopAgentRun,
   subscribeAgentRun,
+  restoreRuns,
+  openSavedRun,
   getRun,
   getRunSummaries,
   getActiveRunKey,
@@ -17,12 +19,15 @@ import {
   forgetRun,
 } from "./agentRun";
 
-const { startChat, sendChat, listAgents, cancelChat, loadSkill } = vi.hoisted(() => ({
-  startChat: vi.fn(), sendChat: vi.fn(), listAgents: vi.fn(), cancelChat: vi.fn(), loadSkill: vi.fn(),
-}));
+const { startChat, sendChat, listAgents, cancelChat, loadSkill, listSessions, loadSession, saveSession, deleteSession } =
+  vi.hoisted(() => ({
+    startChat: vi.fn(), sendChat: vi.fn(), listAgents: vi.fn(), cancelChat: vi.fn(), loadSkill: vi.fn(),
+    listSessions: vi.fn(), loadSession: vi.fn(), saveSession: vi.fn(), deleteSession: vi.fn(),
+  }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   startChat, sendChat, listAgents, cancelChat, loadSkill,
+  listSessions, loadSession, saveSession, deleteSession,
 }));
 
 /** Let queued microtasks run until `sendChat` has been called `n` times, or
@@ -53,7 +58,17 @@ beforeEach(() => {
   listAgents.mockReset();
   cancelChat.mockReset();
   loadSkill.mockReset();
+  // Reset, not merely re-stubbed: `mockResolvedValue` leaves call history in
+  // place, so without these the persistence tests below counted every
+  // `saveSession` the whole file had made — 115 of them.
+  listSessions.mockReset();
+  loadSession.mockReset();
+  saveSession.mockReset();
+  deleteSession.mockReset();
   startChat.mockResolvedValue("sess-1");
+  listSessions.mockResolvedValue([]);
+  saveSession.mockResolvedValue(undefined);
+  deleteSession.mockResolvedValue(undefined);
   listAgents.mockResolvedValue([{ kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false }]);
   cancelChat.mockResolvedValue(undefined);
 });
@@ -862,6 +877,149 @@ describe("the run store", () => {
       // Dropping the state a turn is writing into would leave its sendChat
       // with nowhere to land and its child untracked.
       expect(getRunSummaries()).toHaveLength(1);
+    });
+  });
+
+  /**
+   * "Conversations are still not showing up" — because nothing was persisted
+   * (#395). Every conversation now survives a restart.
+   */
+  describe("conversations survive the window", () => {
+    const POD = {
+      about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },
+      route: "/k/Pod/ns/mongodb-0",
+    };
+
+    it("saves the reader's question BEFORE the answer, so an interrupted turn keeps it", async () => {
+      // Never resolves: the turn is still in flight when the assertion runs.
+      sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+      void askAgent("why is it restarting?", POD);
+      await untilSendChatCalledTimes(1);
+
+      expect(saveSession).toHaveBeenCalled();
+      const saved = saveSession.mock.calls.at(-1)?.[0] as { messages: unknown[]; title: string };
+      const envelope = saved.messages[0] as { v: number; key: string; turns: { text: string }[] };
+      expect(envelope.v).toBe(1);
+      expect(envelope.turns.map((t) => t.text)).toContain("why is it restarting?");
+      // The title is the question, which is what a reader recognises in a list.
+      expect(saved.title).toContain("why is it restarting?");
+    });
+
+    it("saves again once the answer has landed", async () => {
+      sendChat.mockResolvedValue("cli-conversation-id");
+      await askAgent("q", POD);
+      // At least twice: once with the question, once with the settled turn.
+      expect(saveSession.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const last = saveSession.mock.calls.at(-1)?.[0] as { cliSessionId: string | null };
+      // The CLI's own conversation id travels with it, so a reopened run can
+      // resume rather than start over.
+      expect(last.cliSessionId).toBe("cli-conversation-id");
+    });
+
+    it("writes nothing for a run nobody asked anything in", async () => {
+      sendChat.mockResolvedValue(null);
+      // Selecting a subject is not a conversation.
+      selectRun("prod-eu|/overview");
+      expect(saveSession).not.toHaveBeenCalled();
+    });
+
+    it("lists what is on disk, and opens one into a real run", async () => {
+      listSessions.mockResolvedValue([{ id: "s1", title: "check mongodb", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1",
+        title: "check mongodb",
+        createdAt: 1,
+        updatedAt: 2,
+        contexts: [],
+        skills: [],
+        cliSessionId: "cli-1",
+        agentKind: "claude",
+        messages: [
+          {
+            v: 1,
+            key: "prod-eu|Pod|ns|mongodb-0",
+            label: "Pod/mongodb-0",
+            turns: [{ id: 1, role: "user", text: "check mongodb", calls: [], at: 1 }],
+            gates: [],
+          },
+        ],
+      });
+
+      await restoreRuns();
+      const row = getRunSummaries().find((r) => r.savedId === "s1")!;
+      expect(row.label).toBe("check mongodb");
+
+      await openSavedRun("s1");
+      expect(getAgentRun().turns.map((t) => t.text)).toContain("check mongodb");
+      // Under its own subject key, so the next question about that pod
+      // continues this conversation rather than starting a second one.
+      expect(getActiveRunKey()).toBe("prod-eu|Pod|ns|mongodb-0");
+      // And no longer listed as merely on disk.
+      expect(getRunSummaries().filter((r) => r.savedId === "s1")).toEqual([]);
+    });
+
+    it("resumes the CLI conversation a reopened run came with", async () => {
+      listSessions.mockResolvedValue([{ id: "s1", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: "cli-1", agentKind: "claude",
+        messages: [{ v: 1, key: "prod-eu|Pod|ns|mongodb-0", label: "Pod/mongodb-0", turns: [], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("s1");
+
+      sendChat.mockResolvedValue(null);
+      await askAgent("follow up", POD);
+      // `resume` came off disk, so the CLI picks the conversation back up.
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBe("cli-1");
+    });
+
+    it("deletes the file when the reader clears the conversation, after the write drains", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("q", POD);
+      const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+
+      clearAgentRun();
+      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledWith(id));
+    });
+
+    it("does not delete a file while a write to it is still in flight", async () => {
+      // Classic's own lesson, in its `persistChainRef` comment: a save still
+      // flushing when the delete lands recreates the file and its index entry,
+      // so the reader's clear silently un-deletes itself. One chain per run is
+      // what orders them.
+      let finishWrite!: () => void;
+      // ONLY the first write hangs. Every later one resolves, or the chain
+      // would be waiting on write #2 and this test would pass for the wrong
+      // reason — a delete that never fires because a save never finished.
+      saveSession
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { finishWrite = () => resolve(); }))
+        .mockResolvedValue(undefined);
+      sendChat.mockResolvedValue(null);
+      void askAgent("q", POD);
+      await vi.waitFor(() => expect(saveSession).toHaveBeenCalled());
+
+      clearAgentRun();
+      // The write has not landed, so neither may the delete.
+      await Promise.resolve();
+      expect(deleteSession).not.toHaveBeenCalled();
+
+      finishWrite();
+      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalled());
+    });
+
+    it("does not lose a later conversation to an earlier delete", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("first", POD);
+      const first = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+      clearAgentRun();
+      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledWith(first));
+
+      // A new question in the same run writes a NEW file, not the one just
+      // removed — otherwise the delete and the save race for the same path.
+      await askAgent("second", POD);
+      const second = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+      expect(second).not.toBe(first);
     });
   });
 });
