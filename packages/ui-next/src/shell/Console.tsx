@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
 import { useConsole } from "../console";
-import { askAgent, clearAgentRun, dismissAgentError, useAgentRun } from "../lib/agentRun";
+import { askAgent, clearAgentRun, dismissAgentError, useRun } from "../lib/agentRun";
 import {
   commandsFor,
   matchCommands,
@@ -10,7 +10,7 @@ import {
   type CommandGroup,
 } from "../lib/agentCommands";
 import { suggestionsFor } from "../lib/agentSuggestions";
-import { askContextFor } from "../lib/askContext";
+import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { isTauri } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
@@ -114,21 +114,35 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   const sealed = useWorkspaceSealed();
   const { open, setOpen, scope, registerSubmit } = useConsole();
   const [value, setValue] = useState("");
-  const { turns, gates, busy, error } = useAgentRun();
   const contexts = useContexts();
   const activeCtx = useActiveContext();
   const { tabs, activeId, workspace, workspaces } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
   const context = activeCtx?.name ?? "";
-  // What a question asked from here is ABOUT. Derived from the active route,
-  // which is where a resource's identity lives — a cluster name alone left the
-  // agent with no target for "summarise this stream" and it went searching
-  // four namespaces for one.
   // The reader's standing namespace narrowing for THIS cluster — the picker on
   // the list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
   const selected = useNamespaces(activeCtx?.stableId);
+  // What a question asked from here is ABOUT. Derived from the active route,
+  // which is where a resource's identity lives — a cluster name alone left the
+  // agent with no target for "summarise this stream" and it went searching
+  // four namespaces for one.
   const about = useMemo(() => askContextFor(route, context, selected), [route, context, selected]);
+  /**
+   * The dock shows the conversation about the thing the reader is LOOKING at,
+   * and follows them as they navigate — it is not a window onto whichever run
+   * was asked into last.
+   *
+   * That is the whole point of scoping runs by subject: the dock on a pod's
+   * logs is the conversation about that pod, and walking to a StatefulSets
+   * list puts the dock on that list's conversation instead. `/agent` is the
+   * surface that stays put, on whatever the rail selected.
+   *
+   * A key with no run yet reads as the empty run, which is right — the reader
+   * has navigated somewhere they have not asked about.
+   */
+  const runKey = useMemo(() => runKeyFor(about, route), [about, route]);
+  const { turns, gates, busy, error } = useRun(runKey);
 
   const deps = useMemo<CommandDeps>(
     () => ({
@@ -273,7 +287,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   if (error !== undefined) {
     children = (
       <div className="flex min-w-0 flex-col gap-2">
-        <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError()}>
+        <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError(runKey)}>
           <p className="m-0">{error}</p>
         </Alert>
         {children}
@@ -307,7 +321,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       status={exchanges > 0 ? `${exchanges} exchange${exchanges === 1 ? "" : "s"}` : undefined}
       placeholder={scope ? `Ask about ${scope}` : "Ask about this cluster"}
       shortcutHint={hint("console", apple)}
-      onClear={() => clearAgentRun()}
+      onClear={() => clearAgentRun(runKey)}
       live={dockLive}
     >
       {children}

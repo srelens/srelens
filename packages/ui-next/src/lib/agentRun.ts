@@ -895,12 +895,14 @@ export function stopAgentRun(): void {
  *  Drops `activeSkills` too — a skill picked for a run that no longer exists
  *  is not "still active", and this is the one place that is true regardless
  *  of which component (if any) is mounted to have noticed the run end. */
-export function clearAgentRun(): void {
-  // The run the reader is LOOKING at — "New question" is a gesture about the
-  // conversation on screen, not about whichever happens to be streaming.
-  const state = activeState();
-  if (activeKey === null || !state) return;
-  const key = activeKey;
+export function clearAgentRun(target?: string): void {
+  // A gesture about ONE conversation — the caller's own, since the dock and
+  // `/agent` can be showing different runs. Defaults to the active run for
+  // `/agent`'s header control; the dock passes its own route's key.
+  const key = target ?? activeKey;
+  if (key === null) return;
+  const state = runs.get(key);
+  if (!state) return;
   // Cancel with the generation the in-flight turn was SENT with, before the
   // bump below moves it — the backend matches a Stop against that.
   if (state.run.busy && state.session) {
@@ -1070,10 +1072,12 @@ export function noteGateIn(key: string, record: GateRecord): void {
  * land — and it is rendered by both views. Without a way to dismiss it, the
  * sentence would sit there until the next question happened to clear it.
  */
-export function dismissAgentError(): void {
-  const state = activeState();
-  if (activeKey === null || !state || state.run.error === undefined) return;
-  commitTo(activeKey, { ...state.run, error: undefined });
+export function dismissAgentError(target?: string): void {
+  const key = target ?? activeKey;
+  if (key === null) return;
+  const state = runs.get(key);
+  if (!state || state.run.error === undefined) return;
+  commitTo(key, { ...state.run, error: undefined });
 }
 
 /** Reset the module-level store between tests. */

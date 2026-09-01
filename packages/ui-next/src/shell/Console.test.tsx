@@ -10,13 +10,23 @@ import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 import type { ClusterContext } from "@srelens/core";
 
-const { useAgentRun, askAgent, clearAgentRun, dismissAgentError } = vi.hoisted(() => ({
+const { useAgentRun, useRun, askAgent, clearAgentRun, dismissAgentError } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
+  // The dock reads its OWN route's run, not the active one — so this is the
+  // hook under test here, and tests that care about which key it was handed
+  // assert on its argument.
+  useRun: vi.fn(),
   askAgent: vi.fn(),
   clearAgentRun: vi.fn(),
   dismissAgentError: vi.fn(),
 }));
-vi.mock("../lib/agentRun", () => ({ useAgentRun, askAgent, clearAgentRun, dismissAgentError }));
+vi.mock("../lib/agentRun", () => ({
+  useAgentRun,
+  useRun,
+  askAgent,
+  clearAgentRun,
+  dismissAgentError,
+}));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
 // `api_command.rs` has no `chat_*` arm. jsdom is not Tauri, so without this
@@ -81,6 +91,7 @@ beforeEach(() => {
   __setKnownVaultMode("unlocked");
   resetContexts();
   useAgentRun.mockReset().mockReturnValue(runState());
+  useRun.mockReset().mockReturnValue(runState());
   askAgent.mockReset();
   clearAgentRun.mockReset();
 });
@@ -95,6 +106,58 @@ describe("Console", () => {
     // explicit context, and an agent given none has to guess one.
     expect(askAgent).toHaveBeenCalledWith("why", expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }));
     expect(input.value).toBe("");
+  });
+
+  /**
+   * The dock shows the conversation about the thing the reader is LOOKING at,
+   * and follows them as they navigate. `/agent` is the surface that stays put,
+   * on whatever the rail selected — these are the two halves of "one
+   * conversation per subject".
+   */
+  it("reads the run for its OWN route, not whichever was asked into last", async () => {
+    const prod = ctx("prod-eu-id", "prod-eu");
+    setContexts([prod]);
+    tabsStore.setState(defaultState([prod]));
+    tabsStore.openTab(logsRoute("Pod", "ns", "ai-editor"), { clusterName: "prod-eu" });
+    setup();
+    // The key it asked for names the pod, not the cluster alone.
+    expect(useRun).toHaveBeenCalledWith(expect.stringContaining("Pod"));
+    expect(useRun).toHaveBeenCalledWith(expect.stringContaining("ai-editor"));
+    // And never the ambient "whatever is active" read.
+    expect(useAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("changes which conversation it shows when the reader navigates", async () => {
+    const prod = ctx("prod-eu-id", "prod-eu");
+    setContexts([prod]);
+    tabsStore.setState(defaultState([prod]));
+    tabsStore.openTab(logsRoute("Pod", "ns", "ai-editor"), { clusterName: "prod-eu" });
+    const view = setup();
+    const onPod = useRun.mock.calls.at(-1)?.[0];
+
+    view.unmount();
+    useRun.mockClear();
+    tabsStore.openTab("/k/statefulsets", { clusterName: "prod-eu" });
+    setup();
+    const onList = useRun.mock.calls.at(-1)?.[0];
+
+    expect(onList).not.toBe(onPod);
+    expect(onList).toContain("statefulsets");
+  });
+
+  it("clears its OWN conversation, not whichever is active", async () => {
+    const user = userEvent.setup();
+    const prod = ctx("prod-eu-id", "prod-eu");
+    setContexts([prod]);
+    tabsStore.setState(defaultState([prod]));
+    tabsStore.openTab(logsRoute("Pod", "ns", "ai-editor"), { clusterName: "prod-eu" });
+    useRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }));
+    setup();
+    // The Clear control exists only on an open dock.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    await user.click(screen.getByRole("button", { name: /clear console/i }));
+    // Keyed, not ambient: the dock and `/agent` can be showing different runs.
+    expect(clearAgentRun).toHaveBeenCalledWith(expect.stringContaining("ai-editor"));
   });
 
   it("pins the cluster on screen to the question, by name", async () => {
@@ -301,7 +364,7 @@ describe("Console", () => {
 describe("Console — one live region, not two nested (I7)", () => {
   it("declares exactly one role=\"log\" element for the thread, not one nested inside the other", async () => {
     const user = userEvent.setup();
-    useAgentRun.mockReturnValue(
+    useRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "hi", calls: [], at: 0 }] }),
     );
     setup();
@@ -311,7 +374,7 @@ describe("Console — one live region, not two nested (I7)", () => {
 
   it("keeps the dock's live region on for the ordinary transcript thread", async () => {
     const user = userEvent.setup();
-    useAgentRun.mockReturnValue(
+    useRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "hi", calls: [], at: 0 }] }),
     );
     setup();
@@ -417,14 +480,14 @@ describe("Console — header details", () => {
 
   it("shows the exchange count in the header, pluralised", async () => {
     const user = userEvent.setup();
-    useAgentRun.mockReturnValue(
+    useRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "hi", calls: [], at: 0 }] }),
     );
     const { rerender } = setup();
     await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
     expect(screen.getByText("1 exchange")).toBeDefined();
 
-    useAgentRun.mockReturnValue(
+    useRun.mockReturnValue(
       runState({
         turns: [
           { id: 1, role: "user", text: "hi", calls: [], at: 0 },
