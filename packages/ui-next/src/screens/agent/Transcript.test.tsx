@@ -139,7 +139,10 @@ describe("a run's transcript", () => {
     render(
       <Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.scale", args: {}, outcome: "settled", at }]} />,
     );
-    expect(screen.getByText("No longer waiting 14:06")).toBeTruthy();
+    // The word and the time are two elements now — a badge and a clock —
+    // because the card printed the word twice when they were one string.
+    expect(screen.getByText("No longer waiting")).toBeTruthy();
+    expect(screen.getByText("14:06:00")).toBeTruthy();
     // `mcp://confirm-resolved` carries an id and nothing else, so any of these
     // would be srelens reporting a fact it was never told.
     expect(screen.queryByText(/timed out|expired|denied|applied/i)).toBeNull();
@@ -153,6 +156,51 @@ describe("a run's transcript", () => {
         gates={[{ id: "g", tool: "k8s.scale", args: {}, outcome: "approved", at }]}
       />,
     );
-    expect(screen.getByText("Applied 14:06")).toBeTruthy();
+    expect(screen.getByText("Applied")).toBeTruthy();
+    expect(screen.getByText("14:06:00")).toBeTruthy();
+  });
+
+  describe("the gate card, from §A.1's mock", () => {
+    it("shows the arguments in full, as JSON, because they are what is being approved", () => {
+      render(
+        <Transcript
+          turns={[turn()]}
+          gates={[{ id: "g", tool: "k8s.scale", args: { namespace: "checkout", replicas: 40 }, outcome: "pending" }]}
+        />,
+      );
+      // Not `summarizeArgs`'s one-liner: a gate is the one place a reader is
+      // asked to say yes, and a truncated row is not enough to say it to.
+      const block = screen.getByText(/"replicas": 40/);
+      expect(block.textContent).toContain('"namespace": "checkout"');
+    });
+
+    it("marks a destructive capability, from the registry rather than the name", () => {
+      // `destructive` is a real field on the capability catalog, so this is a
+      // fact and not a guess about what the tool sounds like.
+      render(
+        <Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.deletePod", args: {}, outcome: "pending" }]} />,
+      );
+      expect(screen.getByText("destructive")).toBeTruthy();
+    });
+
+    it("does not mark one that is not", () => {
+      render(
+        <Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.scale", args: {}, outcome: "pending" }]} />,
+      );
+      expect(screen.queryByText("destructive")).toBeNull();
+    });
+
+    it("still offers no way to answer, and claims nothing about what the call will do", () => {
+      render(
+        <Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.deletePod", args: {}, outcome: "pending" }]} />,
+      );
+      // §A.1 draws `Review and run` / `Deny` / `Ask first` here. They are NOT
+      // here: `AgentConsent` is the only thing that answers, and a second set
+      // rebuilds exactly the stale-prompt bug that decision 1 removed.
+      expect(screen.queryByRole("button", { name: /review and run|deny|ask first/i })).toBeNull();
+      // And no effect paragraph: `ConfirmRequest` is `{ id, tool, args }`
+      // (#388), so any sentence about what the call would do is invented.
+      expect(screen.queryByText(/restores|recreates|expected full recovery/i)).toBeNull();
+    });
   });
 });

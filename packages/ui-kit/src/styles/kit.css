@@ -788,6 +788,18 @@
   .section[data-padded="false"] { padding-left: 0; padding-right: 0; }
   .section[data-padded="false"] > .section-title { padding-left: 0.75rem; padding-right: 0.75rem; }
 
+  /* A BANDED LIST — `smallCaps` + `padded={false}`, which `Section` marks with
+     `data-band`. The head is a 25px `.subhead-caps` band with its own bottom
+     rule, and it caps the rows directly: the section's vertical padding and the
+     title's bottom margin left a gap under it, so the band floated above its
+     list instead of heading it. The mock draws them flush.
+
+     This reaches every banded list, not only the agent rail — the cluster
+     overview's Nodes band is the other one — which is the point: it is one
+     design idiom and it should look the same everywhere. */
+  .section[data-band] { padding-top: 0; padding-bottom: 0; }
+  .section[data-band] > .section-title { margin-bottom: 0; }
+
   /* The design's section-head voice (§C.3), recipe verbatim: the same 10px /
      600 / 0.07em / uppercase / --ink-faint `.pane-head` wears, ON
      --surface-sunk, WITH A BOTTOM RULE — and, unlike a pane head, 25px and
@@ -1139,6 +1151,21 @@
     -webkit-app-region: no-drag;
   }
   .text-btn:hover { background: var(--field); color: var(--ink); }
+
+  /* The composer: context chips, a multi-line input, a footer of controls.
+     A box rather than a single line, because a screenshot, an agent picker and
+     a cluster cannot share one 34px row without fighting. */
+  .console-prompt {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin: 0.4rem 0.5rem;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--field);
+  }
+  .console-prompt:focus-within { border-color: var(--accent); }
 
   .tabstrip {
     display: flex;

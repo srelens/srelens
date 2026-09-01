@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { ConsoleProvider, useConsole } from "../console";
@@ -19,7 +19,9 @@ const {
   selectRun,
   stopAgentRun,
   useActiveRunKey,
+  chooseAgent,
 } = vi.hoisted(() => ({
+  chooseAgent: vi.fn(),
   selectRun: vi.fn(),
   stopAgentRun: vi.fn(),
   // Typed, or `vi.fn(() => null)` infers `() => null` and a test cannot hand
@@ -43,16 +45,25 @@ vi.mock("../lib/agentRun", () => ({
   selectRun,
   stopAgentRun,
   useActiveRunKey,
+  chooseAgent,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
 // `api_command.rs` has no `chat_*` arm. jsdom is not Tauri, so without this
 // every test below would be asserting about a dock that correctly renders
 // nothing. The web case has its own test.
-const { isTauri } = vi.hoisted(() => ({ isTauri: vi.fn(() => true) }));
+const { isTauri, listAgents, isApplePlatform } = vi.hoisted(() => ({
+  isTauri: vi.fn(() => true),
+  listAgents: vi.fn(),
+  // `apple` comes from the PROVIDER now, which derives it rather than taking a
+  // prop — so the platform is mocked here instead of passed to `setup`.
+  isApplePlatform: vi.fn(() => true),
+}));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   isTauri,
+  listAgents,
+  isApplePlatform,
 }));
 
 /** The store's shape, defaulted to idle-and-empty — every test overrides only
@@ -72,11 +83,14 @@ function Elsewhere() {
   );
 }
 
-function setup({ apple = true, onToggleTheme = () => {} }: { apple?: boolean; onToggleTheme?: () => void } = {}) {
+function setup({ onToggleTheme = () => {} }: { onToggleTheme?: () => void } = {}) {
+  // The dock takes no props now: it reads `apple` and `onToggleTheme` from the
+  // provider, so it can be mounted anywhere beneath it — the window's bottom
+  // edge on most screens, and `/agent`'s own main column on that one.
   return render(
-    <ConsoleProvider>
+    <ConsoleProvider onToggleTheme={onToggleTheme}>
       <Elsewhere />
-      <Console apple={apple} onToggleTheme={onToggleTheme} />
+      <Console />
     </ConsoleProvider>,
   );
 }
@@ -101,6 +115,10 @@ beforeEach(() => {
   tabsStore.setState(defaultState([]));
   resetLock();
   isTauri.mockReturnValue(true);
+  isApplePlatform.mockReturnValue(true);
+  listAgents.mockResolvedValue([
+    { kind: "claude", label: "Claude Code", available: true, gated: false, path: "/c", version: "1", installUrl: "" },
+  ]);
   // Saying `isTauri` is true means a vault EXISTS, and a fresh lock store has
   // read no mode — which counts as covered, so `sealed` would hide the dock
   // for a reason that has nothing to do with the test. Same beforeEach line,
@@ -113,6 +131,7 @@ beforeEach(() => {
   clearAgentRun.mockReset();
   selectRun.mockReset();
   stopAgentRun.mockReset();
+  chooseAgent.mockReset();
   useActiveRunKey.mockReset().mockReturnValue(null);
 });
 
@@ -259,7 +278,7 @@ describe("Console", () => {
   });
 
   it("prints the console accelerator for the platform", () => {
-    setup({ apple: true });
+    setup();
     expect(screen.getByText("⌘K")).toBeDefined();
   });
 
@@ -515,7 +534,7 @@ describe("Console — header details", () => {
   it("uses the scope in the placeholder once Window has scoped the dock", () => {
     render(
       <ConsoleProvider initialScope="prod-eu / checkout-api">
-        <Console apple onToggleTheme={() => {}} />
+        <Console />
       </ConsoleProvider>,
     );
     const input = screen.getByRole("textbox", { name: "Console prompt" });
@@ -543,7 +562,7 @@ describe("Console — header details", () => {
     rerender(
       <ConsoleProvider>
         <Elsewhere />
-        <Console apple onToggleTheme={() => {}} />
+        <Console />
       </ConsoleProvider>,
     );
     expect(screen.getByText("2 exchanges")).toBeDefined();
@@ -597,5 +616,106 @@ describe("Console — header details", () => {
     expect(screen.queryByText(/start here/i)).toBeNull();
     // And the bar says what is happening.
     expect(screen.getByText(/working/i)).toBeTruthy();
+  });
+
+  describe("pasting a screenshot", () => {
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+
+    it("shows what is attached, and sends it with the question", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      const box = screen.getByRole("textbox", { name: "Console prompt" });
+
+      fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+      // Shown BEFORE it is sent: a screenshot the reader believes is attached
+      // and is not would only be discovered by the answer ignoring it.
+      expect(await screen.findByAltText("Attachment 1")).toBeTruthy();
+
+      await user.type(box, "what is wrong here");
+      fireEvent.keyDown(box, { key: "Enter" });
+      await vi.waitFor(() => {
+        expect(askAgent).toHaveBeenCalledWith(
+          "what is wrong here",
+          expect.objectContaining({ images: [expect.stringContaining("data:image/png")] }),
+        );
+      });
+    });
+
+    it("lets the reader take one off again", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      fireEvent.paste(screen.getByRole("textbox", { name: "Console prompt" }), {
+        clipboardData: { files: [shot()], types: ["Files"] },
+      });
+      await screen.findByAltText("Attachment 1");
+      await user.click(screen.getByRole("button", { name: /remove attachment 1/i }));
+      expect(screen.queryByAltText("Attachment 1")).toBeNull();
+    });
+
+    it("holds nothing over to the next question", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      const box = screen.getByRole("textbox", { name: "Console prompt" });
+      fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+      await screen.findByAltText("Attachment 1");
+
+      await user.type(box, "first");
+      fireEvent.keyDown(box, { key: "Enter" });
+      await vi.waitFor(() => expect(askAgent).toHaveBeenCalled());
+      askAgent.mockClear();
+
+      await user.type(box, "second");
+      fireEvent.keyDown(box, { key: "Enter" });
+      await vi.waitFor(() => {
+        // The screenshot went with the FIRST question; sending it again with
+        // the second would attach something the reader did not mean.
+        expect(askAgent).toHaveBeenCalledWith("second", expect.objectContaining({ images: undefined }));
+      });
+    });
+  });
+
+  describe("the agent picker", () => {
+    it("sits in the composer's footer, on every screen", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      // Beside `+` in the footer, not on one screen's rail: choosing the agent
+      // is part of asking, and the composer is everywhere.
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("switches which agent the next question goes to", async () => {
+      const user = userEvent.setup();
+      listAgents.mockResolvedValue([
+        { kind: "claude", label: "Claude Code", available: true, gated: false, path: "/c", version: "1", installUrl: "" },
+        { kind: "codex", label: "Codex", available: true, gated: false, path: "/x", version: "1", installUrl: "" },
+      ]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      await user.click(await screen.findByRole("button", { name: /claude code/i }));
+      await user.click(await screen.findByRole("option", { name: /codex/i }));
+      expect(chooseAgent).toHaveBeenCalledWith("codex");
+    });
+
+    it("offers no picker when nothing can be offered, rather than an empty one", async () => {
+      const user = userEvent.setup();
+      listAgents.mockResolvedValue([]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(screen.queryByRole("button", { name: /claude/i })).toBeNull();
+    });
+
+    it("does not offer a gated agent, even where one is installed", async () => {
+      const user = userEvent.setup();
+      listAgents.mockResolvedValue([
+        { kind: "codex", label: "Codex", available: true, gated: true, path: "/x", version: "1", installUrl: "" },
+      ]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(screen.queryByRole("button", { name: /codex/i })).toBeNull();
+    });
   });
 });

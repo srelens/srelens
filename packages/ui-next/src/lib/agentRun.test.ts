@@ -887,6 +887,24 @@ describe("the run store", () => {
    * "Conversations are still not showing up" — because nothing was persisted
    * (#395). Every conversation now survives a restart.
    */
+  it("sends raw base64, not the data URI it records", async () => {
+    // `chat_send` hands images to `decode_base64_image`, which is
+    // `STANDARD.decode` (`assistant.rs:245-249`) — it does not strip a
+    // `data:image/png;base64,` prefix, it fails on it. So the URI is what
+    // srelens SHOWS and the payload is what srelens SENDS.
+    sendChat.mockResolvedValue(null);
+    await askAgent("what is this", {
+      about: { cluster: "prod-eu" },
+      route: "/",
+      images: ["data:image/png;base64,AAAB"],
+    });
+    expect(sendChat.mock.calls.at(-1)?.[4]).toEqual(["AAAB"]);
+    // The turn keeps the displayable form, so the transcript can draw it.
+    expect(getAgentRun().turns.find((t) => t.role === "user")?.images).toEqual([
+      "data:image/png;base64,AAAB",
+    ]);
+  });
+
   describe("conversations survive the window", () => {
     const POD = {
       about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },

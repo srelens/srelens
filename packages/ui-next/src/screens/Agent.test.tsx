@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { AgentInfo, ClusterContext } from "@srelens/core";
 import { Agent } from "./Agent";
+import { ConsoleProvider } from "../console";
+import { resetLock, __setKnownVaultMode } from "../shell/LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import * as tabs from "../lib/tabsStore";
@@ -50,6 +52,8 @@ const {
   selectRun,
   restoreRuns,
   openSavedRun,
+  useActiveRunKey,
+  useRun,
 } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
@@ -63,6 +67,10 @@ const {
   selectRun: vi.fn(),
   restoreRuns: vi.fn(async () => {}),
   openSavedRun: vi.fn(async () => {}),
+  // The dock mounts inside this screen now, so the screen's suite meets the
+  // dock's own store reads too.
+  useActiveRunKey: vi.fn<() => string | null>(() => null),
+  useRun: vi.fn(),
 }));
 vi.mock("../lib/agentRun", () => ({
   useAgentRun,
@@ -77,6 +85,8 @@ vi.mock("../lib/agentRun", () => ({
   selectRun,
   restoreRuns,
   openSavedRun,
+  useActiveRunKey,
+  useRun,
 }));
 
 const CLAUDE: AgentInfo = {
@@ -127,16 +137,35 @@ beforeEach(() => {
   listSkills.mockResolvedValue([]);
   listSessions.mockResolvedValue([]);
   useAgentRun.mockReturnValue(runState());
+  useRun.mockReturnValue(runState());
+  // The dock hides itself over a covered workspace, and a fresh lock store has
+  // read no vault mode — which counts as covered. Said out loud here, or every
+  // test below asserts about a dock that correctly renders nothing. Same line,
+  // same reason, as `Console.test.tsx` and `AgentConsent.test.tsx`.
+  resetLock();
+  __setKnownVaultMode("unlocked");
   resetContexts();
   tabs.setState(defaultState([]));
 });
+
+/** The screen mounts the dock inside its own column now, and the dock needs
+ *  the provider. Wrapped rather than mocked: the defects this suite keeps
+ *  finding are in the COMPOSITION of screen and dock, and a mocked dock cannot
+ *  see them. */
+function renderAgent() {
+  return render(
+    <ConsoleProvider>
+      <Agent route="/agent" />
+    </ConsoleProvider>,
+  );
+}
 
 describe("the agent screen", () => {
   it("draws the run's transcript over the one shared store the dock also reads", async () => {
     useAgentRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "Diagnose checkout-api 5xx", calls: [], at: 1 }] }),
     );
-    render(<Agent route="/agent" />);
+    renderAgent();
     expect(await screen.findByText("Diagnose checkout-api 5xx")).toBeTruthy();
   });
 
@@ -146,35 +175,43 @@ describe("the agent screen", () => {
    * dock, don't rebuild anything" settled. The bespoke `Composer` that used to
    * mount here is deleted.
    */
-  it("mounts no prompt of its own — the dock is the bar here too", () => {
-    render(<Agent route="/agent" />);
-    expect(screen.queryByRole("textbox")).toBeNull();
-    // And no second Send: the dock's is the only one.
-    expect(screen.queryByRole("button", { name: /^send$/i })).toBeNull();
+  it("has exactly ONE prompt — the dock, mounted in its own column", async () => {
+    renderAgent();
+    // One, not zero: the dock lives inside this screen now, so its rail can be
+    // a full-height sibling. And not two: the bespoke composer that used to sit
+    // here is gone, which is what put a second input box on screen.
+    // Scoped to the rail: the empty state's copy points the reader AT that
+    // section by name, so a bare text query now matches twice.
+    const rail = await screen.findByRole("complementary", { name: "Agent" });
+    expect(within(rail).getByText("Recent runs")).toBeTruthy();
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
   });
 
   it("draws the rail's three sections beside the transcript", async () => {
-    render(<Agent route="/agent" />);
-    expect(await screen.findByText("Recent runs")).toBeTruthy();
-    expect(screen.getByText("Skills")).toBeTruthy();
-    expect(screen.getByText("MCP clients")).toBeTruthy();
+    renderAgent();
+    const rail = await screen.findByRole("complementary", { name: "Agent" });
+    expect(within(rail).getByText("Recent runs")).toBeTruthy();
+    expect(within(rail).getByText("Skills")).toBeTruthy();
+    expect(within(rail).getByText("MCP clients")).toBeTruthy();
   });
 
   it("starts a fresh run from the header's New question control", async () => {
-    render(<Agent route="/agent" />);
+    renderAgent();
     await userEvent.click(await screen.findByRole("button", { name: /new question/i }));
     expect(clearAgentRun).toHaveBeenCalledTimes(1);
   });
 
-  it("draws the agent picker in the rail, where the screen's own controls live", async () => {
+  it("gets its agent picker from the composer, not from the rail", async () => {
     setContexts([CTX]);
     tabs.setState(defaultState([CTX]));
-    render(<Agent route="/agent" />);
-    // The picker moved here when the screen lost its bar: the dock is the
-    // prompt, and this rail already held Skills.
-    // "Agent" appears twice — the rail's own head and this section — so the
-    // picker itself is what to assert on.
-    expect(await screen.findByRole("button", { name: /claude/i })).toBeTruthy();
+    renderAgent();
+    await screen.findByRole("complementary", { name: "Agent" });
+    const picker = screen.getByRole("button", { name: /claude/i });
+    // In the dock, which this screen mounts — not in the rail, where it briefly
+    // lived. Choosing the agent is part of asking, and the composer is on every
+    // screen while this rail is on one.
+    const rail = screen.getByRole("complementary", { name: "Agent" });
+    expect(rail.contains(picker)).toBe(false);
   });
 
   it("heads the transcript with when the run started, off the FIRST turn's own timestamp", async () => {
@@ -192,16 +229,20 @@ describe("the agent screen", () => {
         ],
       }),
     );
-    render(<Agent route="/agent" />);
-    expect(await screen.findByText("started 14:04")).toBeTruthy();
-    expect(screen.queryByText(/15:30/)).toBeNull();
+    renderAgent();
+    const head = await screen.findByText(/^started /);
+    expect(head.textContent).toContain("started 14:04");
+    // Scoped to the HEAD. Every turn draws its own clock now, so the later
+    // turn's 15:30 is legitimately on screen — what must not happen is the
+    // head reading it.
+    expect(head.textContent).not.toContain("15:30");
   });
 
   it("draws no started time for a run with no turns yet", async () => {
-    render(<Agent route="/agent" />);
+    renderAgent();
     // The rail is the settle signal now: the composer this used to wait on is
     // gone, since the dock is the prompt on every screen.
-    await screen.findByText("Recent runs");
+    await screen.findByRole("complementary", { name: "Agent" });
     expect(screen.queryByText(/^started /)).toBeNull();
   });
 
@@ -234,7 +275,7 @@ describe("the agent screen", () => {
         ],
       }),
     );
-    render(<Agent route="/agent" />);
+    renderAgent();
     expect(await screen.findByText(/3 calls/)).toBeTruthy();
   });
 
@@ -242,23 +283,19 @@ describe("the agent screen", () => {
     useAgentRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "checkout-api is throwing 5xx", calls: [], at: 1 }] }),
     );
-    render(<Agent route="/agent" />);
+    renderAgent();
     await screen.findByText(/^started /);
     expect(screen.queryByText(/call/i)).toBeNull();
   });
 
-  it("tells the reader this screen and the console dock share one run", async () => {
-    render(<Agent route="/agent" />);
-    // §5's sentence named "the console at the bottom of the window" — but the
-    // dock does not render on this screen any more (it put a second input box
-    // under this screen's own, reported as a duplicate text box). The fact §5
-    // wanted the reader to have is that it is ONE conversation; the sentence
-    // says that without naming a control that is not there.
-    // §5's own sentence, and true again: the dock IS at the bottom of the
-    // window on this screen, because it is the prompt here too.
-    expect(
-      await screen.findByText("Continue this run from the console at the bottom of the window"),
-    ).toBeTruthy();
+  it("draws no line telling the reader to use the only prompt there is", () => {
+    renderAgent();
+    // §5's "Continue this run from the console at the bottom of the window"
+    // said this screen and the dock were one conversation — worth saying when
+    // the screen had its own composer and the dock was elsewhere. There is one
+    // prompt now, directly beneath this transcript, so the sentence instructed
+    // the reader to do the only thing they could.
+    expect(screen.queryByText(/continue this run from the console/i)).toBeNull();
   });
 
   /**
@@ -272,13 +309,13 @@ describe("the agent screen", () => {
     useAgentRun.mockReturnValue(
       runState({ error: "srelens is still answering the last question." }),
     );
-    render(<Agent route="/agent" />);
+    renderAgent();
     expect(screen.getByText(/still answering the last question/i)).toBeTruthy();
   });
 
   it("lets the reader put that failure away", async () => {
     useAgentRun.mockReturnValue(runState({ error: "srelens is still answering." }));
-    render(<Agent route="/agent" />);
+    renderAgent();
     await userEvent.click(screen.getByRole("button", { name: /dismiss/i }));
     expect(dismissAgentError).toHaveBeenCalledTimes(1);
   });
@@ -292,7 +329,7 @@ describe("the agent screen", () => {
    */
   it("says the agent is a desktop feature instead of drawing a composer that cannot work", () => {
     isTauri.mockReturnValue(false);
-    render(<Agent route="/agent" />);
+    renderAgent();
     expect(screen.getByTestId("agent-desktop-only").textContent).toMatch(/runs in the srelens desktop app/i);
     // No composer, because there is nothing for it to reach.
     expect(screen.queryByRole("textbox")).toBeNull();
@@ -302,7 +339,30 @@ describe("the agent screen", () => {
 
   it("still says what DOES work in the browser, rather than only what does not", () => {
     isTauri.mockReturnValue(false);
-    render(<Agent route="/agent" />);
+    renderAgent();
     expect(screen.getByText(/srelens server/)).toBeTruthy();
+  });
+
+  /** "Page looks empty" — it said nothing at all with no conversation open. */
+  it("says what the agent actually does when there is no conversation yet", async () => {
+    renderAgent();
+    expect(await screen.findByText(/ask about this cluster/i)).toBeTruthy();
+    // The three things none of which a blank pane implies: it drives a real
+    // CLI, it reads through srelens's own tools, and a change stops for the
+    // reader.
+    expect(screen.getByText(/real agent CLI running on this machine/i)).toBeTruthy();
+    expect(screen.getByText(/comes from the cluster rather than from memory/i)).toBeTruthy();
+    expect(screen.getByText(/stops and asks you first/i)).toBeTruthy();
+  });
+
+  it("draws the transcript instead, once there is something in it", async () => {
+    useAgentRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "what is unhealthy", calls: [], at: 1 }] }),
+    );
+    renderAgent();
+    expect(await screen.findByText("what is unhealthy")).toBeTruthy();
+    // Not both: the explanation is for an empty screen, and leaving it above a
+    // conversation would be a wall of text the reader has moved past.
+    expect(screen.queryByText(/real agent CLI running on this machine/i)).toBeNull();
   });
 });

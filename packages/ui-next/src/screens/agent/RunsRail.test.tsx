@@ -172,4 +172,27 @@ describe("the agent screen's rail", () => {
     await userEvent.click(toggle);
     expect(getAgentRun().activeSkills).toEqual([]);
   });
+
+  /**
+   * The mock draws these lists edge to edge, dense, divided by hairlines. The
+   * rows had grown an inset and a gap, which reads as a stack of cards —
+   * reported against the original design.
+   */
+  it("draws its lists edge to edge, not as inset cards", async () => {
+    sendChat.mockResolvedValue(null);
+    await askAgent("a question", { about: { cluster: "prod-eu" }, route: "/k/statefulsets" });
+    const { container } = render(<RunsRail />);
+
+    // `Section`'s own `padded={false}`: the content runs to both edges while
+    // the heading keeps the inset it labels the band from.
+    // ALL THREE of the rail's sections, so the heads read as one column of
+    // bands rather than two banded and one floating — which is what was left
+    // after the first pass.
+    expect(container.querySelectorAll('[data-band]')).toHaveLength(3);
+
+    const row = await screen.findByRole("button", { name: /a question/ });
+    // Divided by a rule, not spaced apart and rounded.
+    expect(row.className).toContain("border-b");
+    expect(row.className).not.toContain("rounded");
+  });
 });

@@ -570,7 +570,11 @@ export function Window({
             </TabSurface>
           ))}
         </div>
-        {active && <Console apple={apple} onToggleTheme={onToggleTheme} />}
+        {/* Not on `/agent`: that screen mounts the dock at the foot of its own
+            main column, so its rail is a full-height sibling and uses the
+            bottom of the window instead of stopping short of it. One dock
+            component, one instance — never both at once. */}
+        {active && activeTabRoute !== "/agent" && <Console />}
       </div>
       <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
         <div className="flex flex-col gap-3 px-3 py-3">

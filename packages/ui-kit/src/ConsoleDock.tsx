@@ -44,6 +44,39 @@ export interface ConsoleDockProps {
   /** Stop that query. Drawn beside the working spinner; see
    *  {@link ConsolePromptProps.onStop}. */
   onStop?: () => void;
+  /**
+   * Pixels to leave clear on the right, for a screen whose own rail runs down
+   * that edge.
+   *
+   * The dock is window-wide chrome and sits BELOW everything, so on a screen
+   * with a rail the composer ran the full width underneath it and read as
+   * crossing into the sidebar. The host knows which screens have a rail and
+   * how wide; this component cannot.
+   *
+   * The dock keeps the window's full width; the reserved strip is drawn as a
+   * CONTINUATION of the rail's own column — same surface, same left rule — so
+   * the sidebar reads as reaching the bottom of the window.
+   *
+   * Two earlier attempts got this wrong and each produced its own report. A
+   * `margin-right` pulled the dock's surface and top border in and left a hole
+   * in the corner ("there is still a gap"). A `padding-right` filled the
+   * chrome but left the strip blank, so the sidebar still stopped short
+   * ("side bar should go till bottom"). The rail lives inside the screen and
+   * cannot grow past it, so the only thing that can continue that column down
+   * here is this.
+   */
+  insetRight?: number;
+  /** The host's own footer controls, beside the collapse chevron — the agent
+   *  picker lives here. */
+  promptLead?: ReactNode;
+  /** Chips above the input saying what the question is about. */
+  promptContext?: ReactNode;
+  /** Attachments the host is holding, as chips. */
+  attachments?: ReactNode;
+  /** Images pasted into, or picked for, the prompt. Absent means this dock
+   *  takes none, and the `+` is not drawn. */
+  onPasteImages?: (files: File[]) => void;
+  onPickImages?: (files: File[]) => void;
   /** Shows the Clear control; the caller does the clearing. */
   onClear?: () => void;
   /**
@@ -110,6 +143,12 @@ export function ConsoleDock({
   placeholder,
   busy = false,
   onStop,
+  insetRight = 0,
+  promptLead,
+  promptContext,
+  attachments,
+  onPasteImages,
+  onPickImages,
   onClear,
   onExpand,
   children,
@@ -120,7 +159,8 @@ export function ConsoleDock({
   className,
 }: ConsoleDockProps) {
   const bodyId = useId();
-  const inputRef = useRef<HTMLInputElement>(null);
+  // A textarea now: the prompt is a multi-line composer, not a one-line input.
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   // Seeded with the current state so a dock that mounts open leaves focus
   // where it was. Only the transition from closed to open is an act of the
@@ -159,7 +199,7 @@ export function ConsoleDock({
 
   /** Returns true for a key this host has dealt with, so `ConsolePrompt`
    *  leaves it alone — Enter it handles itself. */
-  function onPromptKeyDown(event: KeyboardEvent<HTMLInputElement>): boolean {
+  function onPromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
     // Escape backs out of the panel, and only when there is one to back out of
     // — otherwise the console swallows a key something behind it wanted.
     if (event.key === "Escape" && open) {
@@ -173,115 +213,159 @@ export function ConsoleDock({
 
   return (
     <section aria-label={label} className={cx("console-dock", className)}>
-      {open && (
-        <>
-          <div
-            className="rule-b flex items-center justify-between gap-3 px-2.5 py-1"
-            style={{ background: "var(--surface-sunk)" }}
-          >
-            <div className="flex min-w-0 items-center gap-2">
-              {filled(mode) && <Eyebrow>{mode}</Eyebrow>}
-              {filled(context) && (
-                <span
-                  className="path truncate rounded px-1 py-px"
-                  style={{
-                    background: toneWash("accent"),
-                    color: toneColor("accent"),
-                  }}
-                >
-                  {context}
-                </span>
-              )}
-              {filled(status) && (
-                <Eyebrow className="text-[0.5625rem]">{status}</Eyebrow>
-              )}
-            </div>
-            <div className="flex shrink-0 items-center gap-1">
-              {onExpand && (
-                <button
-                  type="button"
-                  className="text-btn shrink-0"
-                  aria-label={`Open ${label.toLowerCase()} in the full view`}
-                  onClick={onExpand}
-                >
-                  <span className="eyebrow whitespace-nowrap text-[0.5625rem]">full view</span>
-                </button>
-              )}
-              {onClear && (
-                <button
-                  type="button"
-                  className="text-btn shrink-0"
-                  aria-label={`Clear ${label.toLowerCase()}`}
-                  onClick={onClear}
-                >
-                  {/* The class rather than `Eyebrow`, which renders a div: a
+      <div className="flex min-w-0">
+        <div className="flex min-w-0 flex-1 flex-col">
+          {open && (
+            <>
+              <div
+                className="rule-b flex items-center justify-between gap-3 px-2.5 py-1"
+                style={{ background: "var(--surface-sunk)" }}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  {filled(mode) && <Eyebrow>{mode}</Eyebrow>}
+                  {filled(context) && (
+                    <span
+                      className="path truncate rounded px-1 py-px"
+                      style={{
+                        background: toneWash("accent"),
+                        color: toneColor("accent"),
+                      }}
+                    >
+                      {context}
+                    </span>
+                  )}
+                  {filled(status) && (
+                    <Eyebrow className="text-[0.5625rem]">{status}</Eyebrow>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  {onExpand && (
+                    <button
+                      type="button"
+                      className="text-btn shrink-0"
+                      aria-label={`Open ${label.toLowerCase()} in the full view`}
+                      onClick={onExpand}
+                    >
+                      <span className="eyebrow whitespace-nowrap text-[0.5625rem]">
+                        full view
+                      </span>
+                    </button>
+                  )}
+                  {onClear && (
+                    <button
+                      type="button"
+                      className="text-btn shrink-0"
+                      aria-label={`Clear ${label.toLowerCase()}`}
+                      onClick={onClear}
+                    >
+                      {/* The class rather than `Eyebrow`, which renders a div: a
                     button holds phrasing content, and a block inside one is
                     markup no browser is obliged to lay out sensibly. */}
-                  <span className="eyebrow whitespace-nowrap text-[0.5625rem]">clear</span>
-                </button>
-              )}
-            </div>
-          </div>
+                      <span className="eyebrow whitespace-nowrap text-[0.5625rem]">
+                        clear
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
 
-          <div
-            id={bodyId}
-            ref={bodyRef}
-            className="scroll max-h-[42vh] min-h-[132px] px-3 py-2.5"
-            role="log"
-            aria-live={live ? "polite" : "off"}
-            aria-label={`${label} output`}
-          >
-            {filled(children) ? children : <EmptyState title={emptyLabel} />}
-          </div>
-        </>
-      )}
+              <div
+                id={bodyId}
+                ref={bodyRef}
+                className="scroll max-h-[42vh] min-h-[132px] px-3 py-2.5"
+                role="log"
+                aria-live={live ? "polite" : "off"}
+                aria-label={`${label} output`}
+              >
+                {filled(children) ? (
+                  children
+                ) : (
+                  <EmptyState title={emptyLabel} />
+                )}
+              </div>
+            </>
+          )}
 
-      {/*
+          {/*
         The row itself is `ConsolePrompt` — the same component the `/agent`
         screen's composer uses. It was written inline here, and the agent
         screen grew its own; extracting it and leaving this copy behind was the
         duplication the extraction was for. The collapse chevron is this host's
         `lead`, which is also what stops it floating over the prompt text.
       */}
-      <ConsolePrompt
-        ref={inputRef}
-        value={value}
-        onValueChange={onValueChange}
-        onSubmit={submit}
-        onKeyDown={onPromptKeyDown}
-        placeholder={placeholder}
-        label={label}
-        busy={busy}
-        onStop={onStop}
-        shortcutHint={shortcutHint}
-        onFocus={() => {
-          if (!open) onOpenChange(true);
-        }}
-        lead={
-          <button
-            type="button"
-            className="agent-mark !h-[19px] !w-[19px] !rounded-[5px]"
-            aria-label={open ? `Collapse ${label.toLowerCase()}` : `Expand ${label.toLowerCase()}`}
-            aria-expanded={open}
-            // Only while the panel exists: an `aria-controls` pointing at
-            // nothing is a promise to assistive technology that cannot be kept.
-            aria-controls={open ? bodyId : undefined}
-            onClick={() => onOpenChange(!open)}
-          >
-            {/* Inline rather than an icon-set import: the kit takes no
+          <ConsolePrompt
+            ref={inputRef}
+            value={value}
+            onValueChange={onValueChange}
+            onSubmit={submit}
+            onKeyDown={onPromptKeyDown}
+            placeholder={placeholder}
+            label={label}
+            compact={!open}
+            busy={busy}
+            onStop={onStop}
+            context={promptContext}
+            attachments={attachments}
+            onPasteImages={onPasteImages}
+            onPickImages={onPickImages}
+            shortcutHint={shortcutHint}
+            onFocus={() => {
+              if (!open) onOpenChange(true);
+            }}
+            lead={
+              <>
+                <button
+                  type="button"
+                  className="agent-mark !h-[19px] !w-[19px] !rounded-[5px]"
+                  aria-label={
+                    open
+                      ? `Collapse ${label.toLowerCase()}`
+                      : `Expand ${label.toLowerCase()}`
+                  }
+                  aria-expanded={open}
+                  // Only while the panel exists: an `aria-controls` pointing at
+                  // nothing is a promise to assistive technology that cannot be kept.
+                  aria-controls={open ? bodyId : undefined}
+                  onClick={() => onOpenChange(!open)}
+                >
+                  {/* Inline rather than an icon-set import: the kit takes no
                 dependency on lucide, and these are the only glyphs it needs. */}
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path
-                d={open ? "m6 9 6 6 6-6" : "m6 15 6-6 6 6"}
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-        }
-      />
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d={open ? "m6 9 6 6 6-6" : "m6 15 6-6 6 6"}
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+                {promptLead}
+              </>
+            }
+          />
+        </div>
+        {insetRight > 0 && (
+          // Decorative: it carries no content, and a screen reader announcing
+          // an empty region would be noise. What it does is continue the
+          // rail's column to the bottom of the window.
+          <div
+            aria-hidden
+            className="shrink-0 self-stretch"
+            style={{
+              width: insetRight,
+              background: "var(--surface)",
+              borderLeft: "1px solid var(--rule)",
+            }}
+          />
+        )}
+      </div>
     </section>
   );
 }

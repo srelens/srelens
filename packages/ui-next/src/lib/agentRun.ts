@@ -18,6 +18,7 @@ import {
 } from "@srelens/core";
 import { runKeyFor, runLabelFor, type AskContext } from "./askContext";
 import { newId } from "./tabs";
+import { stripDataUri } from "./pastedImages";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -912,7 +913,11 @@ export async function askAgent(
       `${preface}${guidance}${question}`,
       agentPath,
       onEvent,
-      images,
+      // Raw base64, not the data URIs the turn records: `chat_send` passes
+      // these to `decode_base64_image`, which is `STANDARD.decode` and fails on
+      // a `data:` prefix. Stripped here, at the send, so every caller can hold
+      // the displayable form.
+      images?.map(stripDataUri),
       resolvedKind,
       myGeneration,
       state.resume,

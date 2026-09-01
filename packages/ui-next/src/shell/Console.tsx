@@ -5,6 +5,7 @@ import {
   askAgent,
   clearAgentRun,
   dismissAgentError,
+  chooseAgent,
   selectRun,
   stopAgentRun,
   useActiveRunKey,
@@ -18,9 +19,12 @@ import {
   type CommandGroup,
 } from "../lib/agentCommands";
 import { suggestionsFor } from "../lib/agentSuggestions";
+import { AgentPicker } from "../screens/agent/AgentPicker";
+import { LOADING, type Read } from "../lib/read";
 import { askContextFor, runKeyFor } from "../lib/askContext";
+import { readImageFile } from "../lib/pastedImages";
 import { useNamespaces } from "../lib/workspace";
-import { isTauri } from "@srelens/core";
+import { isTauri, listAgents, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -118,10 +122,61 @@ function CommandRows({ commands, onRun }: { commands: readonly Command[]; onRun:
  * `useActiveContext()`'s own answer and nothing this component derives from
  * the label.
  */
-export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleTheme: () => void }) {
+export function Console() {
   const sealed = useWorkspaceSealed();
-  const { open, setOpen, scope, registerSubmit } = useConsole();
+  // From context, not props: this mounts in two places now — the window's
+  // bottom edge on most screens, and the foot of `/agent`'s own main column so
+  // that screen's rail can be a full-height sibling.
+  const { open, setOpen, scope, registerSubmit, apple, onToggleTheme } = useConsole();
   const [value, setValue] = useState("");
+  /**
+   * Screenshots waiting to go with the next question, as data URIs so they can
+   * be shown before they are sent.
+   *
+   * Pasting one was simply never possible in the new design — not a
+   * regression, a gap: the deleted `Composer` had no image handling either.
+   */
+  const [images, setImages] = useState<string[]>([]);
+  const [attachError, setAttachError] = useState<unknown>(null);
+  /**
+   * Which agent the next question goes to — read here because the picker lives
+   * in the composer's footer now, beside `+`.
+   *
+   * It was in `/agent`'s rail, which put it on one screen only; the composer is
+   * on every screen, and choosing the agent is part of asking.
+   */
+  const [agents, setAgents] = useState<Read<AgentInfo[]>>(LOADING);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAgents()
+      .then((v) => {
+        if (!cancelled) setAgents({ kind: "ready", value: v });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setAgents({ kind: "error", error: e });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // `available && !gated` filtered before the picker sees the list: an agent
+  // that is installed but gated must not be offered, and filtering inside the
+  // picker risks a call site that forgets.
+  const offered = agents.kind === "ready" ? agents.value.filter((a) => a.available && !a.gated) : [];
+
+  async function attach(files: File[]) {
+    setAttachError(null);
+    try {
+      const uris = await Promise.all(files.map(readImageFile));
+      setImages((held) => [...held, ...uris]);
+    } catch (e) {
+      // Said, not swallowed: a screenshot the reader believes is attached and
+      // is not would be discovered only by the answer ignoring it.
+      setAttachError(e);
+    }
+  }
   const contexts = useContexts();
   const activeCtx = useActiveContext();
   const { tabs, activeId, workspace, workspaces } = useTabs();
@@ -164,7 +219,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
     () => (route === "/agent" ? activeKey : runKeyFor(about, route)),
     [route, activeKey, about],
   );
-  const { turns, gates, busy, error } = useRun(runKey);
+  const { turns, gates, busy, error, agentKind } = useRun(runKey);
 
   const deps = useMemo<CommandDeps>(
     () => ({
@@ -240,7 +295,8 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
-    void askAgent(raw, { about, route });
+    void askAgent(raw, { about, route, images: images.length > 0 ? images : undefined });
+    setImages([]);
     setValue("");
     setOpen(true);
   }
@@ -289,10 +345,16 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
           }}
         />
       );
-  } else if (turns.length === 0 && !busy) {
+  } else if (turns.length === 0 && !busy && route !== "/agent") {
     // Suggestions are for a conversation that has not started. Not while one
     // is answering either: "Start here" under a question already in flight
     // invites a second that would only be refused.
+    //
+    // And never on `/agent`. That screen has its own empty state saying what
+    // the agent does, and this dock sits directly under a transcript there —
+    // "Start here" appeared beneath a finished answer, which is what got
+    // reported. Two explanations of how to begin, one of them wrong about
+    // whether you already have.
     children = (
       <SuggestionList
         items={suggestionsFor(route)}
@@ -364,7 +426,58 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
         openTab("/agent", { clusterName: context || undefined });
       }}
       // The only Stop in the app: the agent screen's own composer is gone.
+      promptLead={
+        offered.length > 0 ? (
+          <AgentPicker
+            agents={offered}
+            selectedKind={agentKind}
+            onSelect={(kind) => chooseAgent(kind)}
+            disabled={busy}
+          />
+        ) : undefined
+      }
       onStop={busy ? () => stopAgentRun() : undefined}
+      onPasteImages={(files) => void attach(files)}
+      onPickImages={(files) => void attach(files)}
+      promptContext={
+        // What the question is about, said where the question is typed. The
+        // header already carries a context pill, but the header belongs to the
+        // dock's transcript; this belongs to the composer.
+        <>
+          {scope !== "" && <span className="chip"><span>{scope}</span></span>}
+          {about.namespaces?.length === 1 && (
+            <span className="chip">
+              <span>{about.namespaces[0]}</span>
+            </span>
+          )}
+        </>
+      }
+      attachments={
+        <>
+          {images.map((uri, i) => (
+            <span key={i} className="chip">
+              {/* The image itself, not a filename: a pasted screenshot has no
+                  name, and a row of identical "image.png" chips says nothing
+                  about which is which. */}
+              <img src={uri} alt={`Attachment ${i + 1}`} className="h-4 w-4 rounded-sm object-cover" />
+              <span>image {i + 1}</span>
+              <button
+                type="button"
+                aria-label={`Remove attachment ${i + 1}`}
+                className="text-faint hover:text-ink"
+                onClick={() => setImages((held) => held.filter((_, j) => j !== i))}
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+          {attachError !== null && (
+            <span className="chip" style={{ color: "var(--sev)" }}>
+              <span>That image could not be read</span>
+            </span>
+          )}
+        </>
+      }
       live={dockLive}
     >
       {children}

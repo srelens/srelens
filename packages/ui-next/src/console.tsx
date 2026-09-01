@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { isApplePlatform } from "@srelens/core";
 
 /** What a question is delivered to: the dock's own submit handler. */
 type Submit = (question: string) => void;
@@ -21,6 +22,17 @@ export interface ConsoleValue {
   setScope: (scope: string) => void;
   /** The dock says it is listening. Returns the way to stop. */
   registerSubmit: (submit: Submit) => () => void;
+  /**
+   * What the dock needs to render itself, carried here so it can be mounted
+   * ANYWHERE inside this provider rather than only where props reach.
+   *
+   * `/agent` mounts it at the foot of its own main column, so that screen's
+   * rail is a full-height sibling and uses the bottom of the window instead of
+   * stopping short of it. Threading two props down through a screen to reach
+   * one component is how a shell grows a prop nobody can trace.
+   */
+  apple: boolean;
+  onToggleTheme: () => void;
 }
 
 const ConsoleContext = createContext<ConsoleValue | null>(null);
@@ -46,10 +58,16 @@ const ConsoleContext = createContext<ConsoleValue | null>(null);
 export function ConsoleProvider({
   children,
   initialScope = "",
+  onToggleTheme = () => {},
 }: {
   children: ReactNode;
   initialScope?: string;
+  /** Passed through to the dock, wherever it is mounted. */
+  onToggleTheme?: () => void;
 }) {
+  // Derived here rather than taken as a prop: it is platform detection with no
+  // dependency on anything above, and the one consumer is inside this tree.
+  const apple = useMemo(() => isApplePlatform(), []);
   const [open, setOpen] = useState(false);
   const [scope, setScope] = useState(initialScope);
   const submit = useRef<Submit | null>(null);
@@ -77,8 +95,8 @@ export function ConsoleProvider({
   }, []);
 
   const value = useMemo<ConsoleValue>(
-    () => ({ open, setOpen, ask, scope, setScope, registerSubmit }),
-    [open, ask, scope, registerSubmit],
+    () => ({ open, setOpen, ask, scope, setScope, registerSubmit, apple, onToggleTheme }),
+    [open, ask, scope, registerSubmit, apple, onToggleTheme],
   );
 
   return <ConsoleContext.Provider value={value}>{children}</ConsoleContext.Provider>;

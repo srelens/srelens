@@ -1,5 +1,6 @@
-import { Alert, Button, Eyebrow, Screen, SideRail } from "@srelens/ui-kit";
+import { Alert, Button, Screen, SideRail } from "@srelens/ui-kit";
 import { isTauri } from "@srelens/core";
+import { Console } from "../shell/Console";
 import { useActiveContext } from "../lib/clusters";
 import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
@@ -11,15 +12,19 @@ import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
  *  copy, not a store read: it needs no field the store has, so cutting it
  *  alongside the figures #386/#387 exclude would have been over-applying that
  *  rule to a sentence it never touched. */
-/**
- * §5's own sentence, verbatim, and true again.
+/*
+ * §5's footer sentence — "Continue this run from the console at the bottom of
+ * the window" — is GONE, deliberately.
  *
- * It briefly said something else: the dock had been hidden on this screen, so
- * naming "the console at the bottom of the window" pointed at nothing. The
- * dock is the bar here now — one prompt component, every screen — so §5's
- * words are the accurate ones.
+ * It earned its place when this screen had a composer of its own and the dock
+ * was a separate surface: the sentence said those two were one conversation,
+ * which a reader could not otherwise know. There is one prompt in the app now,
+ * directly beneath this transcript, so the line instructed the reader to do
+ * the only thing they could do.
+ *
+ * A sentence justified by a design that no longer exists is not neutral — it
+ * is one more thing to read that says nothing.
  */
-const CONTINUE_FROM_CONSOLE = "Continue this run from the console at the bottom of the window";
 
 /** `started 14:04`, off the first turn's own timestamp — one of the two
  *  figures in §5's `started <time> · <n> calls · <duration>` head that the
@@ -123,21 +128,62 @@ export function Agent(_props: { route: string }) {
           ) : undefined
         }
       >
-        <div className="flex min-h-0 flex-1 min-w-0 flex-col gap-3 p-3">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* Run-level, not turn-level: a submission refused because a turn is
               already in flight, or a Stop that did not land. The store held
               this in `error` and NOTHING drew it, so a chip the reader pressed
               simply did nothing — the exact silence the refusal was meant to
               break. */}
           {error !== undefined && (
-            <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError()}>
-              <p className="m-0">{error}</p>
-            </Alert>
+            <div className="px-3 pt-3">
+              <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError()}>
+                <p className="m-0">{error}</p>
+              </Alert>
+            </div>
           )}
-          <div className="scroll min-h-0 min-w-0 flex-1">
-            <Transcript turns={turns} gates={gates} />
+          <div className="scroll min-h-0 min-w-0 flex-1 px-3 py-3">
+            {turns.length === 0 ? (
+              /* An empty screen said nothing at all — reported as "page looks
+                 empty". What it says is what this agent can actually do,
+                 because none of it is obvious from a blank pane: it drives a
+                 real CLI, it reads through srelens's own tools, and a mutation
+                 stops for the reader's approval. */
+              <div className="mx-auto flex max-w-prose flex-col gap-3 pt-10">
+                <h2 className="text-[0.9375rem] font-medium text-ink">Ask about this cluster</h2>
+                <p className="m-0 text-[0.8125rem] leading-relaxed text-muted">
+                  Questions go to a real agent CLI running on this machine — Claude, Codex, Cursor,
+                  or srelens&rsquo;s own — and it answers by calling srelens&rsquo;s Kubernetes tools,
+                  so what it tells you comes from the cluster rather than from memory.
+                </p>
+                <p className="m-0 text-[0.8125rem] leading-relaxed text-muted">
+                  Every tool call it makes is listed with the arguments it used and how long it took.
+                  Anything that would CHANGE the cluster stops and asks you first.
+                </p>
+                <p className="m-0 text-[0.8125rem] leading-relaxed text-muted">
+                  Ask from any screen and the question is about what you are looking at — a pod&rsquo;s
+                  logs, a list narrowed to one namespace. Each subject keeps its own conversation, and
+                  they are listed in <span className="text-ink">Recent runs</span> beside this.
+                </p>
+                <p className="m-0 text-[0.75rem] leading-relaxed text-faint">
+                  Type below, or press{" "}
+                  <span className="kbd">⌘K</span> from anywhere. Paste a screenshot to send it along.
+                </p>
+              </div>
+            ) : (
+              <Transcript turns={turns} gates={gates} />
+            )}
           </div>
-          <Eyebrow>{CONTINUE_FROM_CONSOLE}</Eyebrow>
+          {/*
+            The dock, mounted HERE rather than at the window's bottom edge.
+            That is what lets this screen's rail be a full-height sibling and
+            use the bottom of the window: the rail lives inside the screen, so
+            a dock below the screen bounds it, and everything under it was dead
+            space three attempts running.
+
+            Still one dock component and one instance — `Window` skips its own
+            on this route.
+          */}
+          <Console />
         </div>
       </SideRail>
     </Screen>

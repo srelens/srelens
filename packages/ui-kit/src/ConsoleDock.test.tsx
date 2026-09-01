@@ -385,4 +385,88 @@ describe("ConsoleDock clearing", () => {
     setup({ busy: true });
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
+
+  /**
+   * "Pasting image is not allowed" — it was not possible at all. Not a
+   * regression from deleting `Composer`: that had no image handling either.
+   */
+  it("hands a pasted image to the host", async () => {
+    const onPasteImages = vi.fn();
+    setup({ onPasteImages });
+    const box = screen.getByRole("textbox");
+    const file = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    // jsdom builds no clipboard for `userEvent.paste`, so the event carries its
+    // own `DataTransfer` — which is what the handler actually reads.
+    const data = { files: [file], items: [], types: ["Files"] };
+    fireEvent.paste(box, { clipboardData: data });
+    expect(onPasteImages).toHaveBeenCalledWith([file]);
+  });
+
+  it("leaves a text paste alone", () => {
+    const onPasteImages = vi.fn();
+    setup({ onPasteImages });
+    fireEvent.paste(screen.getByRole("textbox"), { clipboardData: { files: [], types: ["text/plain"] } });
+    // Only an image paste is intercepted; text must land in the input as usual.
+    expect(onPasteImages).not.toHaveBeenCalled();
+  });
+
+  it("offers no attach control to a host that takes no attachments", () => {
+    setup();
+    expect(screen.queryByRole("button", { name: /attach an image/i })).toBeNull();
+  });
+
+  it("sends on Enter, and makes a newline on Shift-Enter", async () => {
+    const onSubmit = vi.fn();
+    const onValueChange = vi.fn();
+    setup({ value: "why is it restarting", onSubmit, onValueChange });
+    const box = screen.getByRole("textbox");
+
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    // A question about a manifest wants more than one line, so Shift-Enter
+    // must not send.
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * "Closed view is still too big." The expanded composer is a box with a
+   * two-row input and a control row under it — right when a conversation is
+   * open, far too tall for a dock meant to be out of the way.
+   */
+  it("is one line when closed, with no context row and no footer controls", () => {
+    setup({ open: false, onPickImages: () => {}, promptContext: <span>prod-eu</span> });
+    // No attach control, no context chips: the collapsed strip is a prompt and
+    // nothing else.
+    expect(screen.queryByRole("button", { name: /attach an image/i })).toBeNull();
+    expect(screen.queryByText("prod-eu")).toBeNull();
+    expect(screen.getByRole("textbox")).toBeTruthy();
+  });
+
+  it("shows the composer's own rows once open", () => {
+    setup({ open: true, onPickImages: () => {}, promptContext: <span>prod-eu</span> });
+    expect(screen.getByRole("button", { name: /attach an image/i })).toBeTruthy();
+    expect(screen.getByText("prod-eu")).toBeTruthy();
+  });
+
+  it("continues the rail's column to the bottom, rather than leaving it blank", () => {
+    const { container } = setup({ insetRight: 312 });
+    // Not padding and not margin — both were tried and each left something
+    // wrong. A margin pulled the dock's surface in and left a hole in the
+    // corner; padding filled the chrome but left the strip blank, so the
+    // sidebar still stopped short. The strip is a drawn continuation of that
+    // column: same surface, same left rule.
+    const strip = container.querySelector('[aria-hidden="true"][style*="312px"]');
+    expect(strip).not.toBeNull();
+    expect(strip?.getAttribute("style")).toContain("border-left");
+    const section = container.querySelector("section");
+    expect(section?.getAttribute("style")).toBeNull();
+  });
+
+  it("draws no strip for a screen with no rail of its own", () => {
+    const { container } = setup();
+    expect(container.querySelector('[aria-hidden="true"][style*="px"]')).toBeNull();
+  });
+
 });

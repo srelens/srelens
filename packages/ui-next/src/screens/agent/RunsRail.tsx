@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
-import { listAgents, listSkills, relativeTime, type AgentInfo, type SkillMeta } from "@srelens/core";
+import { listSkills, relativeTime, type SkillMeta } from "@srelens/core";
 import { Alert, RawError, Section, Switch, cx } from "@srelens/ui-kit";
-import { AgentPicker } from "./AgentPicker";
 import {
-  chooseAgent,
   getActiveRunKey,
   openSavedRun,
   restoreRuns,
@@ -45,6 +43,25 @@ export const AGENT_RAIL_WIDTH = 312;
  * heading would read as broken rather than as a boundary the app is honest
  * about.
  */
+/**
+ * A compact stamp for a rail row: `14:04` for something from today, `1 Sep
+ * 14:04` for anything older.
+ *
+ * `relativeTime` alone answers "how long ago" and not "when", which is the
+ * question a reader has when matching a conversation against something else
+ * they were doing. `absoluteTimestamp` answers "when" at full length — month,
+ * day, year, seconds — which does not fit a 312px row beside a title.
+ */
+function clockStamp(at: number, now: number): string {
+  const d = new Date(at);
+  const sameDay = new Date(now).toDateString() === d.toDateString();
+  return d.toLocaleString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(sameDay ? {} : { month: "short", day: "numeric" }),
+  });
+}
+
 export function RunsRail() {
   // A rejected read is neither "loading" nor "read, and empty" — see
   // `lib/read.ts`. `.catch(() => setSessions([]))` used to say "No recent
@@ -53,10 +70,9 @@ export function RunsRail() {
   // statements standing in for a failure this rail never told the reader
   // about (I6).
   const [skills, setSkills] = useState<Read<SkillMeta[]>>(LOADING);
-  // The picker's home now the agent screen has no bar of its own — the dock is
-  // the one prompt in the app, and this rail is where the screen's own
-  // controls live (Skills is right below it).
-  const [agents, setAgents] = useState<Read<AgentInfo[]>>(LOADING);
+  // NOTE: the agent picker was briefly here, then moved into the composer's
+  // own footer beside `+`. Choosing the agent is part of asking, and the
+  // composer is on every screen while this rail is on one.
   // THIS window's conversations, not the sessions classic wrote to disk. See
   // the section's own comment for why that list is gone.
   const runs = useRunSummaries();
@@ -74,13 +90,8 @@ export function RunsRail() {
   // The one set the composer's own `/` menu writes to as well — read here,
   // never copied into local state, so the two controls cannot disagree about
   // which skills are active for this run.
-  const { activeSkills, agentKind, busy } = useAgentRun();
+  const { activeSkills } = useAgentRun();
 
-  useEffect(() => {
-    listAgents()
-      .then((v) => setAgents({ kind: "ready", value: v }))
-      .catch((e) => setAgents({ kind: "error", error: e }));
-  }, []);
   useEffect(() => {
     listSkills()
       .then((v) => setSkills({ kind: "ready", value: v }))
@@ -107,19 +118,19 @@ export function RunsRail() {
         offering them means `loadSession` hydrating a transcript, which is
         #395's work. Until then they are not shown rather than shown and inert.
       */}
-      <Section title="Recent runs" smallCaps>
+      <Section title="Recent runs" smallCaps padded={false}>
         {historyError !== null && (
-          <Alert tone="sev" title="Saved conversations could not be read">
+          <Alert tone="sev" className="mx-3" title="Saved conversations could not be read">
             <RawError text={String(historyError)} />
           </Alert>
         )}
         {runs.length === 0 ? (
-          <p className="min-w-0 break-words text-xs text-muted">
+          <p className="min-w-0 break-words px-3 text-xs text-muted">
             No questions yet. Asking one from any screen starts a conversation about that thing, and
             it appears here.
           </p>
         ) : (
-          <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex min-w-0 flex-col">
             {runs.map((r) => (
               <button
                 key={r.key}
@@ -132,8 +143,12 @@ export function RunsRail() {
                   if (r.savedId !== undefined) void openSavedRun(r.savedId);
                   else selectRun(r.key);
                 }}
+                // Edge to edge, divided by a hairline, no rounded tile and no
+                // gap — the design's own list idiom (`Section`'s
+                // `padded={false}`), and what §5 draws. Inset rows with gaps
+                // between them read as cards, which this is not.
                 className={cx(
-                  "flex min-w-0 flex-col gap-0.5 rounded-tile px-2 py-1.5 text-left hover:bg-sunk",
+                  "flex min-w-0 flex-col gap-0.5 border-b border-rule px-3 py-1.5 text-left last:border-b-0 hover:bg-sunk",
                   r.key === activeKey && "bg-sunk",
                 )}
               >
@@ -149,54 +164,27 @@ export function RunsRail() {
                     : r.savedId !== undefined
                       ? "saved"
                       : `${r.turns} question${r.turns === 1 ? "" : "s"}`}{" "}
-                  · {relativeTime(r.at, now)}
+                  · {clockStamp(r.at, now)} · {relativeTime(r.at, now)}
                 </span>
               </button>
             ))}
           </div>
         )}
       </Section>
-      <Section title="Agent" smallCaps>
-        {agents.kind === "loading" ? null : agents.kind === "error" ? (
-          <Alert tone="sev" title="Agents could not be checked">
-            <RawError text={String(agents.error)} />
-          </Alert>
-        ) : (
-          (() => {
-            // `available && !gated` filtered here, before the picker sees the
-            // list — an agent that is installed but gated must not be offered,
-            // and filtering inside the picker risks a call site that forgets.
-            const offered = agents.value.filter((a) => a.available && !a.gated);
-            if (offered.length === 0) {
-              return (
-                <p className="min-w-0 break-words text-xs text-muted">
-                  No agent is available. srelens can drive Claude, Codex or Cursor — install one, or
-                  configure srelens&rsquo;s own agent under Settings › Agent &amp; MCP.
-                </p>
-              );
-            }
-            return (
-              <AgentPicker
-                agents={offered}
-                selectedKind={agentKind}
-                onSelect={(kind) => chooseAgent(kind)}
-                disabled={busy}
-              />
-            );
-          })()
-        )}
-      </Section>
-      <Section title="Skills" smallCaps>
+      <Section title="Skills" smallCaps padded={false}>
         {skills.kind === "loading" ? null : skills.kind === "error" ? (
-          <Alert tone="sev" title="Saved skills could not be checked">
+          <Alert tone="sev" className="mx-3" title="Saved skills could not be checked">
             <RawError text={String(skills.error)} />
           </Alert>
         ) : skills.value.length === 0 ? (
-          <p className="min-w-0 break-words text-xs text-muted">No skills saved yet.</p>
+          <p className="min-w-0 break-words px-3 text-xs text-muted">No skills saved yet.</p>
         ) : (
-          <div className="flex min-w-0 flex-col gap-3">
+          <div className="flex min-w-0 flex-col">
             {skills.value.map((s) => (
-              <div key={s.name} className="flex min-w-0 items-start justify-between gap-2">
+              <div
+                key={s.name}
+                className="flex min-w-0 items-start justify-between gap-2 border-b border-rule px-3 py-1.5 last:border-b-0"
+              >
                 <div className="min-w-0 flex-1">
                   <p className="min-w-0 truncate text-sm font-medium">{s.name}</p>
                   <p className="min-w-0 break-words text-xs text-muted">{s.description}</p>
@@ -211,8 +199,12 @@ export function RunsRail() {
           </div>
         )}
       </Section>
-      <Section title="MCP clients" smallCaps>
-        <p className="min-w-0 break-words text-xs text-muted">
+      <Section title="MCP clients" smallCaps padded={false}>
+        {/* Banded like the two above it, so all three heads read as one column
+            of bands. The paragraph keeps a readable inset of its own — the
+            section stops indenting it, which is not the same as text touching
+            the edge. */}
+        <p className="min-w-0 break-words px-3 py-2 text-xs text-muted">
           srelens generates the config an MCP client reads — it does not know which clients are
           connected right now (#369).
         </p>

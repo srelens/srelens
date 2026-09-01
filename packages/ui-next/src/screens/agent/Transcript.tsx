@@ -1,6 +1,7 @@
 import { parseAssistantMarkdown, type MdBlock, type NoteSpan } from "@srelens/core";
-import { AgentMark, Badge, cx, type Tone } from "@srelens/ui-kit";
+import { AgentMark, Badge, cx, toneWash, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
+import { CAPABILITY_CATALOG } from "@srelens/core";
 import { pad2 } from "../../lib/numbers";
 
 /**
@@ -89,14 +90,73 @@ function gateLabel(gate: GateRecord): string {
   return `${word} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** One gate, as decision 1's record — never a second set of answer buttons. */
+/**
+ * A gate's arguments as pretty JSON, the way §A.1 draws them.
+ *
+ * `summarizeArgs` gives the one-liner a tool-call ROW needs. A gate is the one
+ * place a reader is being asked to approve something, so the arguments are the
+ * thing they are actually judging — `{"replicas":40}` truncated into a row is
+ * not enough to say yes to.
+ */
+function prettyArgs(args: unknown): string {
+  if (args === null || args === undefined) return "";
+  if (typeof args === "object" && Object.keys(args as object).length === 0) return "";
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    // A cyclic or unserialisable payload: better the summary than nothing.
+    return summarizeArgs(args);
+  }
+}
+
+/**
+ * One gate, as decision 1's record — never a second set of answer buttons.
+ *
+ * **What this card takes from §A.1's mock, and what it does not.** The mock
+ * draws a bordered card, the capability in mono, a `DESTRUCTIVE` badge, the
+ * arguments as pretty JSON, and three buttons. The card, the mono capability,
+ * the badge and the JSON are all here. The buttons are not, and neither is the
+ * effect paragraph:
+ *
+ * - **The buttons.** `AgentConsent` is the only subscriber to
+ *   `mcp://confirm-request` and the only caller of `respondToConfirm`, on
+ *   purpose. Classic listened twice and showed a modal AND an inline card,
+ *   each with its own buttons, so answering one left the other stale — which
+ *   is the whole reason `mcp://confirm-resolved` had to be invented. A second
+ *   set here would rebuild exactly that.
+ * - **The effect paragraph** ("Restores DB_POOL_MAX=40 and recreates 12
+ *   pods…"). `ConfirmRequest` is `{ id, tool, args }` (#388). srelens does not
+ *   know what a call will do, and a sentence saying it would be invented.
+ *
+ * The badge IS honest: `destructive` is a real field on the capability
+ * registry, so this reads it rather than guessing from the tool's name.
+ */
 function GateRow({ gate }: { gate: GateRecord }) {
-  const args = summarizeArgs(gate.args);
+  const facts = CAPABILITY_CATALOG.find((c) => c.id === gate.tool);
+  const args = prettyArgs(gate.args);
   return (
-    <div className="tool-call flex min-w-0 items-center gap-2">
-      <span className="shrink-0 text-accent">{gate.tool}</span>
-      {args !== "" && <span className="min-w-0 flex-1 truncate text-faint">{args}</span>}
-      <Badge tone={GATE_TONE[gate.outcome]}>{gateLabel(gate)}</Badge>
+    <div className="min-w-0 rounded-card border border-rule">
+      <div
+        className="flex min-w-0 items-start justify-between gap-3 rounded-t-card px-3 py-2"
+        style={{ background: toneWash(GATE_TONE[gate.outcome]) }}
+      >
+        <div className="min-w-0">
+          <p className="min-w-0 break-words font-mono text-[0.8125rem] font-medium text-ink">{gate.tool}</p>
+          {/* The TIME only. `gateLabel` is word-plus-time, and the badge
+              already carries the word — printing both put "Applied" on the
+              card twice. */}
+          {gate.at !== undefined && <TurnClock at={gate.at} className="mt-0.5 block" />}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {facts?.destructive === true && <Badge tone="sev">destructive</Badge>}
+          <Badge tone={GATE_TONE[gate.outcome]}>{GATE_WORD[gate.outcome]}</Badge>
+        </div>
+      </div>
+      {args !== "" && (
+        <pre className="scroll m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-b-card bg-canvas-deep px-3 py-2 font-mono text-[0.6875rem] leading-relaxed text-faint">
+          {args}
+        </pre>
+      )}
     </div>
   );
 }
@@ -231,6 +291,24 @@ function Answer({ text }: { text: string }) {
 
 /** The reader's own turn — right-aligned in accent wash, images (if any)
  * shown above the text they were attached to. */
+/**
+ * A turn's own clock — `14:04:12`, as the mock draws under every turn.
+ *
+ * `Turn.at` was recorded from the start and nothing showed it, so a transcript
+ * gave no way to line an answer up against anything else that happened. To the
+ * SECOND, unlike the run head's `started 14:04`: turns in one conversation are
+ * often a few seconds apart, and minutes alone would print the same stamp
+ * three times in a row.
+ */
+function TurnClock({ at, className }: { at: number; className?: string }) {
+  const d = new Date(at);
+  return (
+    <span className={cx("text-[0.6875rem] tabular-nums text-faint", className)}>
+      {`${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`}
+    </span>
+  );
+}
+
 function UserTurn({ turn }: { turn: Turn }) {
   return (
     <div className="flex justify-end">
@@ -243,6 +321,9 @@ function UserTurn({ turn }: { turn: Turn }) {
           </div>
         )}
         <p className="whitespace-pre-wrap break-words">{turn.text}</p>
+        {/* Inside the wash and right-aligned with it, the way the mock draws
+            it — the stamp belongs to this turn, not to the gap under it. */}
+        <TurnClock at={turn.at} className="mt-1 block text-right" />
       </div>
     </div>
   );
@@ -293,6 +374,10 @@ function AgentTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
           </p>
         ))}
         <Answer text={turn.text} />
+        {/* Under the answer, not beside the mark: the mock puts it at the end
+            of what was said. Only once there IS something said — a turn still
+            streaming has no finish to stamp. */}
+        {turn.text !== "" && <TurnClock at={turn.at} />}
       </div>
     </div>
   );
