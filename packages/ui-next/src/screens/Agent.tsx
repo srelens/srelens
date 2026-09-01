@@ -221,7 +221,11 @@ export function Agent(_props: { route: string }) {
             Still one dock component and one instance — `Window` skips its own
             on this route.
           */}
-          <Console />
+          {/* `fullView`: the dock is this screen's own composer, sitting
+              directly under the transcript. It is the mount site that knows
+              that — so it says so, rather than leaving the dock to infer it
+              from a route string. */}
+          <Console fullView />
         </div>
       </SideRail>
     </Screen>

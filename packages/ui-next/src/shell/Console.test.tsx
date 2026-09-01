@@ -596,6 +596,76 @@ describe("Console — header details", () => {
     expect(useRun).not.toHaveBeenCalledWith(expect.stringContaining("/agent"));
   });
 
+  /**
+   * Reported from use, with a full transcript on screen above the dock: the
+   * suggestions came back on `/agent`. Neither existing test covers it — one
+   * pins the KEY the dock is handed there, the other pins the empty-run case
+   * off `/agent`. This is the pair: on `/agent`, an empty dock run must still
+   * show no suggestions, because that screen has its own empty state saying
+   * how to begin and the dock sits directly beneath a transcript.
+   */
+  it("offers no Start here suggestions on /agent even when its own run is empty", async () => {
+    const user = userEvent.setup();
+    // Nothing selected, so the dock's run is genuinely empty — the state that
+    // used to reach the suggestions branch.
+    useActiveRunKey.mockReturnValue(null);
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([]));
+    tabsStore.openTab("/agent", {});
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.queryByText(/start here/i)).toBeNull();
+  });
+
+  /**
+   * The structural half. The route string was the only guard, and "Start here"
+   * came back under a full transcript anyway — so the mount site that KNOWS it
+   * is the full view says so, and that alone is enough.
+   */
+  it("offers no Start here suggestions when mounted as the full view's own composer", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
+    // Deliberately NOT an /agent tab: this pins the prop, not the route.
+    tabsStore.setState(defaultState([]));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.queryByText(/start here/i)).toBeNull();
+  });
+
+  it("offers no Full view link when mounted as the full view's own composer", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([]));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.queryByRole("button", { name: /full view/i })).toBeNull();
+  });
+
+  /**
+   * `Full view` opens `/agent`. Offered while ALREADY on `/agent` it is a
+   * control that does nothing a reader can see, on the one screen where the
+   * dock is the full view's own composer.
+   */
+  it("offers no Full view link on /agent", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([]));
+    tabsStore.openTab("/agent", {});
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.queryByRole("button", { name: /full view/i })).toBeNull();
+  });
+
   it("offers no Start here suggestions once the conversation has questions in it", async () => {
     const user = userEvent.setup();
     useRun.mockReturnValue(

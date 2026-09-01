@@ -122,7 +122,7 @@ function CommandRows({ commands, onRun }: { commands: readonly Command[]; onRun:
  * `useActiveContext()`'s own answer and nothing this component derives from
  * the label.
  */
-export function Console() {
+export function Console({ fullView }: { fullView?: boolean }) {
   const sealed = useWorkspaceSealed();
   // From context, not props: this mounts in two places now — the window's
   // bottom edge on most screens, and the foot of `/agent`'s own main column so
@@ -181,6 +181,22 @@ export function Console() {
   const activeCtx = useActiveContext();
   const { tabs, activeId, workspace, workspaces } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
+  /**
+   * Whether this dock IS the full view's own composer — a transcript directly
+   * above it, and a screen that already says how to begin.
+   *
+   * Two sources, deliberately OR-ed. `fullView` is the structural fact, passed
+   * by the one mount site that knows it (`screens/Agent.tsx`); `route` is the
+   * same fact read back out of the tab store. They can disagree only if the
+   * mount and the store disagree about which screen is showing — and in that
+   * case suppressing is right on either's word, since what is being suppressed
+   * is a "Start here" under a finished answer and a link to the screen the
+   * reader is already on.
+   *
+   * Route alone was the guard, and "Start here" was reported back under a full
+   * transcript anyway.
+   */
+  const isFullView = fullView === true || route === "/agent";
   const context = activeCtx?.name ?? "";
   // The reader's standing namespace narrowing for THIS cluster — the picker on
   // the list screens. Without it, a question asked from a list narrowed to one
@@ -345,15 +361,15 @@ export function Console() {
           }}
         />
       );
-  } else if (turns.length === 0 && !busy && route !== "/agent") {
+  } else if (turns.length === 0 && !busy && !isFullView) {
     // Suggestions are for a conversation that has not started. Not while one
     // is answering either: "Start here" under a question already in flight
     // invites a second that would only be refused.
     //
-    // And never on `/agent`. That screen has its own empty state saying what
-    // the agent does, and this dock sits directly under a transcript there —
-    // "Start here" appeared beneath a finished answer, which is what got
-    // reported. Two explanations of how to begin, one of them wrong about
+    // And never in the full view. That screen has its own empty state saying
+    // what the agent does, and this dock sits directly under a transcript
+    // there — "Start here" appeared beneath a finished answer, which is what
+    // got reported. Two explanations of how to begin, one of them wrong about
     // whether you already have.
     children = (
       <SuggestionList
@@ -421,10 +437,16 @@ export function Console() {
       // conversation the reader was just looking at rather than on whichever
       // was asked into last. That is the one thing that could be surprising
       // here, and it is the reason this is not simply `openTab("/agent")`.
-      onExpand={() => {
-        selectRun(runKey);
-        openTab("/agent", { clusterName: context || undefined });
-      }}
+      // Absent in the full view itself: a control that opens the screen the
+      // reader is already looking at does nothing they can see.
+      onExpand={
+        isFullView
+          ? undefined
+          : () => {
+              selectRun(runKey);
+              openTab("/agent", { clusterName: context || undefined });
+            }
+      }
       // The only Stop in the app: the agent screen's own composer is gone.
       promptLead={
         offered.length > 0 ? (

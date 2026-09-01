@@ -3,7 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { AgentInfo, ClusterContext } from "@srelens/core";
 import { Agent } from "./Agent";
-import { ConsoleProvider } from "../console";
+import { ConsoleProvider, useConsole } from "../console";
 import { resetLock, __setKnownVaultMode } from "../shell/LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
@@ -152,6 +152,17 @@ beforeEach(() => {
  *  the provider. Wrapped rather than mocked: the defects this suite keeps
  *  finding are in the COMPOSITION of screen and dock, and a mocked dock cannot
  *  see them. */
+/** Opens the console the way anything else in the app does — the dock starts
+ *  collapsed, and a collapsed dock has no body to assert about. */
+function Opener() {
+  const { setOpen } = useConsole();
+  return (
+    <button type="button" onClick={() => setOpen(true)}>
+      Open the console
+    </button>
+  );
+}
+
 function renderAgent() {
   return render(
     <ConsoleProvider>
@@ -274,6 +285,32 @@ describe("the agent screen", () => {
     // The empty state has its own copy; a title over no conversation would be
     // a name for nothing.
     expect(screen.queryByTitle(/./)).toBeNull();
+  });
+
+  /**
+   * The composition, not either half: this screen mounts the real dock, and
+   * what was reported is what that dock drew INSIDE the full view — "Start
+   * here" beneath a transcript, and a link to the screen already open.
+   */
+  it("mounts the dock as its own composer, offering neither suggestions nor a way here", async () => {
+    const user = userEvent.setup();
+    render(
+      <ConsoleProvider>
+        <Opener />
+        <Agent route="/agent" />
+      </ConsoleProvider>,
+    );
+    await screen.findByRole("complementary", { name: "Agent" });
+    // The dock must be OPEN first. Collapsed it is a 34px strip with no body,
+    // so both absences below would hold for a reason that has nothing to do
+    // with this screen — the first draft of this test passed with the whole
+    // fix reverted.
+    await user.click(screen.getByRole("button", { name: "Open the console" }));
+    expect(await screen.findByRole("textbox", { name: /prompt/i })).toBeTruthy();
+    // This screen's own empty state says how to begin; the dock repeating it
+    // is two explanations, one of them wrong about whether you have begun.
+    expect(screen.queryByText(/start here/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /full view/i })).toBeNull();
   });
 
   it("draws no started time for a run with no turns yet", async () => {
