@@ -10,6 +10,7 @@ import {
   type CommandGroup,
 } from "../lib/agentCommands";
 import { suggestionsFor } from "../lib/agentSuggestions";
+import { askContextFor } from "../lib/askContext";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -117,6 +118,11 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   const { tabs, activeId, workspace, workspaces } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
   const context = activeCtx?.name ?? "";
+  // What a question asked from here is ABOUT. Derived from the active route,
+  // which is where a resource's identity lives — a cluster name alone left the
+  // agent with no target for "summarise this stream" and it went searching
+  // four namespaces for one.
+  const about = useMemo(() => askContextFor(route, context), [route, context]);
 
   const deps = useMemo<CommandDeps>(
     () => ({
@@ -192,7 +198,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
-    void askAgent(raw, { context });
+    void askAgent(raw, { about });
     setValue("");
     setOpen(true);
   }
@@ -234,7 +240,7 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
       <SuggestionList
         items={suggestionsFor(route)}
         onAsk={(question) => {
-          void askAgent(question, { context });
+          void askAgent(question, { about });
           setValue("");
         }}
       />

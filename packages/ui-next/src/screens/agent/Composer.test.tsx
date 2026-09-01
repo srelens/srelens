@@ -281,8 +281,9 @@ describe("the composer", () => {
     // passes, so the store's own active set is what applies.
     expect(opts).not.toHaveProperty("skills");
     // And the cluster IS pinned at the gesture — the agent needs to know
-    // which one it is being asked about.
-    expect(opts?.context).toBe("prod-eu");
+    // which one it is being asked about. `/agent` names no resource, so the
+    // cluster is all there is to say; the dock derives more from its route.
+    expect(opts?.about).toEqual({ cluster: "prod-eu" });
   });
 
   it("submits on Enter when the slash menu is closed, and clears the input", async () => {
@@ -290,7 +291,7 @@ describe("the composer", () => {
     render(<Composer context="" />);
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "hello{Enter}");
-    expect(askAgent).toHaveBeenCalledWith("hello", expect.objectContaining({ context: "" }));
+    expect(askAgent).toHaveBeenCalledWith("hello", expect.objectContaining({ about: { cluster: "" } }));
     expect((box as HTMLInputElement).value).toBe("");
   });
 
@@ -308,7 +309,7 @@ describe("the composer", () => {
     const box = await screen.findByRole("textbox");
     await userEvent.type(box, "  hi there  ");
     await userEvent.click(screen.getByRole("button", { name: /send/i }));
-    expect(askAgent).toHaveBeenCalledWith("hi there", expect.objectContaining({ context: "" }));
+    expect(askAgent).toHaveBeenCalledWith("hi there", expect.objectContaining({ about: { cluster: "" } }));
     expect((box as HTMLInputElement).value).toBe("");
   });
 

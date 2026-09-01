@@ -10,6 +10,7 @@ import {
   type Skill,
   type ToolStatus,
 } from "@srelens/core";
+import type { AskContext } from "./askContext";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -313,10 +314,20 @@ async function loadSkillsGuidance(names: string[]): Promise<string> {
  * {@link loadSkillsGuidance} follows, so the transcript keeps showing the
  * reader's own words.
  */
-function contextPreface(context: string): string {
-  const named = context.trim();
-  if (named === "") return "";
-  return `Current context: cluster ${named}.\n\n`;
+function contextPreface(about: AskContext | undefined): string {
+  const cluster = about?.cluster.trim() ?? "";
+  if (cluster === "") return "";
+  let text = `Current context: cluster ${cluster}`;
+  if (about?.namespace) text += `, namespace ${about.namespace}`;
+  if (about?.kind && about.name) text += `, ${about.kind} ${about.name}`;
+  text += ".";
+  // Said out loud, because it is the difference between answering the question
+  // and going to look for its subject. "Summarise this stream" with only a
+  // cluster named sent the agent searching four namespaces for a pod.
+  if (about?.surface === "logs" && about.name) {
+    text += ` The reader is looking at ${about.name}'s logs; a question about "this stream" means that pod's logs.`;
+  }
+  return `${text}\n\n`;
 }
 
 /**
@@ -350,13 +361,16 @@ export async function askAgent(
     images?: string[];
     skills?: string[];
     /**
-     * The cluster this question is about, pinned by the CALLER at the gesture
-     * rather than read here. Both submit paths already hold it — the dock from
-     * the active context, the composer from its own prop — and reading it in
-     * this module at dispatch time would reintroduce exactly the
-     * read-it-later defect the cluster-identity rule exists to stop.
+     * What this question is about — cluster, and the resource on screen when
+     * the route names one. Pinned by the CALLER at the gesture rather than
+     * read here: both submit paths already hold it, and reading it in this
+     * module at dispatch time would reintroduce exactly the read-it-later
+     * defect the cluster-identity rule exists to stop.
+     *
+     * Structured rather than a bare cluster string, because a cluster alone is
+     * not a target — see {@link AskContext}.
      */
-    context?: string;
+    about?: AskContext;
   },
 ): Promise<void> {
   // ONE turn at a time, refused here rather than at each door.
@@ -461,7 +475,7 @@ export async function askAgent(
     // mean "nobody wants this answered".
     if (stoppedGeneration === myGeneration) return;
     session = started;
-    const preface = contextPreface(opts?.context ?? "");
+    const preface = contextPreface(opts?.about);
     const guidance = await loadSkillsGuidance(skills);
     const agents = await listAgents();
     // The FIRST fix here guarded only the `startChat` window and was too

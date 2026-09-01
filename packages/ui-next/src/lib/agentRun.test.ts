@@ -246,10 +246,10 @@ describe("the run store", () => {
   // sent nothing, so a question like "what is unhealthy right now?" gave the
   // agent no way to name the cluster on screen — and every MCP tool call
   // takes an explicit context, so it would have to guess one.
-  describe("the cluster a question is about", () => {
+  describe("what a question is about", () => {
     it("names the cluster to the agent, without putting it in the reader's transcript", async () => {
       sendChat.mockResolvedValue(null);
-      await askAgent("what is unhealthy right now?", { context: "prod-eu" });
+      await askAgent("what is unhealthy right now?", { about: { cluster: "prod-eu" } });
 
       // Sent.
       expect(sendChat.mock.calls.at(-1)?.[1]).toBe(
@@ -262,7 +262,7 @@ describe("the run store", () => {
 
     it("sends no preface at all when there is no cluster to name", async () => {
       sendChat.mockResolvedValue(null);
-      await askAgent("hello", { context: "   " });
+      await askAgent("hello", { about: { cluster: "   " } });
       // Not an empty "Current context: cluster ." line — a preface naming
       // nothing is worse than none.
       expect(sendChat.mock.calls.at(-1)?.[1]).toBe("hello");
@@ -272,10 +272,48 @@ describe("the run store", () => {
       sendChat.mockResolvedValue(null);
       loadSkill.mockResolvedValue({ name: "oom", body: "oom body" });
       setSkillActive("oom", true);
-      await askAgent("why", { context: "prod-eu" });
+      await askAgent("why", { about: { cluster: "prod-eu" } });
       expect(sendChat.mock.calls.at(-1)?.[1]).toBe(
         "Current context: cluster prod-eu.\n\nApply these skills:\n\noom body\n\nwhy",
       );
+    });
+
+    // The defect a screenshot caught: "Summarise this stream" reached the agent
+    // with the cluster alone, so it had no target and went searching four
+    // namespaces for a pod to read.
+    it("names the namespace and the resource, not just the cluster", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("Summarise the last 500 log lines and group errors by cause", {
+        about: {
+          cluster: "m01-1786968575165/kubernetes-admin@cluster.local",
+          namespace: "m01-cnips-01-services",
+          kind: "Pod",
+          name: "ai-editor",
+        },
+      });
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sent).toContain("namespace m01-cnips-01-services");
+      expect(sent).toContain("Pod ai-editor");
+    });
+
+    it("says the reader is looking at logs, so 'this stream' has a referent", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("Summarise the last 500 log lines and group errors by cause", {
+        about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "ai-editor", surface: "logs" },
+      });
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sent).toMatch(/looking at ai-editor's logs/);
+      expect(sent).toMatch(/"this stream" means that pod's logs/);
+    });
+
+    it("omits a namespace a cluster-scoped resource does not have", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("why is it not ready", {
+        about: { cluster: "prod-eu", kind: "Node", name: "worker-3" },
+      });
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sent).toBe("Current context: cluster prod-eu, Node worker-3.\n\nwhy is it not ready");
+      expect(sent).not.toMatch(/namespace/);
     });
   });
 

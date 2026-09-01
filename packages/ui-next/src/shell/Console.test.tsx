@@ -5,6 +5,7 @@ import { Console } from "./Console";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
+import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock } from "./LockGate";
 import type { ClusterContext } from "@srelens/core";
@@ -75,7 +76,7 @@ describe("Console", () => {
     await user.type(input, "why{Enter}");
     // The cluster travels with the question: every MCP tool call takes an
     // explicit context, and an agent given none has to guess one.
-    expect(askAgent).toHaveBeenCalledWith("why", expect.objectContaining({ context: expect.any(String) }));
+    expect(askAgent).toHaveBeenCalledWith("why", expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }));
     expect(input.value).toBe("");
   });
 
@@ -88,7 +89,39 @@ describe("Console", () => {
     await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "what is unhealthy{Enter}");
     // By name — an `expect.any(String)` here would pass on the empty context
     // this dock sends when no cluster is active, which is the bug.
-    expect(askAgent).toHaveBeenCalledWith("what is unhealthy", expect.objectContaining({ context: "prod-eu" }));
+    expect(askAgent).toHaveBeenCalledWith(
+      "what is unhealthy",
+      expect.objectContaining({ about: expect.objectContaining({ cluster: "prod-eu" }) }),
+    );
+  });
+
+  /**
+   * The end-to-end shape of the defect a screenshot caught. On a pod's logs
+   * tab, "Summarise this stream" reached the agent with the cluster alone —
+   * no namespace, no pod — so it had no target and went hunting through
+   * `kube-system` and three unrelated namespaces for a stream to read.
+   */
+  it("carries the pod and namespace when the question is asked from a logs tab", async () => {
+    const user = userEvent.setup();
+    const prod = ctx("prod-eu-id", "prod-eu");
+    setContexts([prod]);
+    tabsStore.setState(defaultState([prod]));
+    // The reader is on ai-editor's logs, exactly as in the report.
+    tabsStore.openTab(logsRoute("Pod", "m01-cnips-01-services", "ai-editor"), { clusterName: "prod-eu" });
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "summarise this stream{Enter}");
+    expect(askAgent).toHaveBeenCalledWith(
+      "summarise this stream",
+      expect.objectContaining({
+        about: expect.objectContaining({
+          cluster: "prod-eu",
+          namespace: "m01-cnips-01-services",
+          kind: "Pod",
+          name: "ai-editor",
+          surface: "logs",
+        }),
+      }),
+    );
   });
 
   it("opens and forwards a question asked from anywhere else", async () => {
@@ -98,7 +131,7 @@ describe("Console", () => {
     expect(screen.queryByRole("log")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
     expect(screen.getByRole("log", { name: "Console output" })).toBeDefined();
-    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ context: expect.any(String) }));
+    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }));
   });
 
   it("prints the console accelerator for the platform", () => {
@@ -126,7 +159,7 @@ describe("Console", () => {
     await user.click(await screen.findByText("Summarise the last 500 lines"));
     expect(askAgent).toHaveBeenCalledWith(
       "Summarise the last 500 lines",
-      expect.objectContaining({ context: expect.any(String) }),
+      expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }),
     );
   });
 

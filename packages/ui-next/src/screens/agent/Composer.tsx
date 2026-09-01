@@ -340,10 +340,9 @@ export function Composer({ context }: { context: string }) {
     const question = input.trim();
     if (!question || busy) return;
     setInput("");
-    // `context` pinned at the gesture, as the dock does: the agent needs to
-    // know which cluster it is being asked about, and every MCP tool call
-    // takes an explicit one.
-    await askAgent(question, { context });
+    // `/agent` names no resource, so the cluster is all there is to say here.
+    // The dock derives more from its own route — see `askContextFor`.
+    await askAgent(question, { about: { cluster: context } });
   }
 
   // Stop must survive whatever `agents`/`offered` are doing — a turn already
