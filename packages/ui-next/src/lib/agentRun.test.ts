@@ -547,23 +547,33 @@ describe("the run store", () => {
      * answer that streamed for minutes was labelled with the submission time.
      */
     it("stamps the answer when it settles, and the question when it was asked", async () => {
-      let finish: ((s: string | null) => void) | undefined;
-      sendChat.mockImplementationOnce(() => new Promise<string | null>((res) => (finish = res)));
-      const asked = Date.now();
-      void askAgent("why is it restarting");
-      await untilSendChatCalledTimes(1);
+      // Fake timers, and REAL ones restored in the `finally`. The first draft
+      // moved the system clock and never put it back, which left every later
+      // test in this file running 90 seconds into the future — and the full
+      // suite failed once, in this file, in a way that would not reproduce on
+      // its own.
+      vi.useFakeTimers();
+      try {
+        const asked = Date.now();
+        let finish: ((s: string | null) => void) | undefined;
+        sendChat.mockImplementationOnce(() => new Promise<string | null>((res) => (finish = res)));
+        void askAgent("why is it restarting");
+        await untilSendChatCalledTimes(1);
 
-      const askedTurn = getAgentRun().turns[0];
-      // Time passes while the answer streams.
-      vi.setSystemTime(asked + 90_000);
-      finish?.(null);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
+        const askedTurn = getAgentRun().turns[0];
+        // Time passes while the answer streams.
+        vi.setSystemTime(asked + 90_000);
+        finish?.(null);
+        for (let i = 0; i < 50; i++) await Promise.resolve();
 
-      const turns = getAgentRun().turns;
-      // The question keeps its own submission time — that is what it means.
-      expect(turns[0].at).toBe(askedTurn.at);
-      // The answer carries when it actually appeared.
-      expect(turns[1].at).toBeGreaterThanOrEqual(asked + 90_000);
+        const turns = getAgentRun().turns;
+        // The question keeps its own submission time — that is what it means.
+        expect(turns[0].at).toBe(askedTurn.at);
+        // The answer carries when it actually appeared.
+        expect(turns[1].at).toBe(asked + 90_000);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("leaves no conversation behind for a question it refused", async () => {
@@ -973,6 +983,31 @@ describe("the run store", () => {
       expect(getRunSummaries()).toHaveLength(1);
     });
 
+    /**
+     * Codex P1, round 3. The full view holds keys that cannot be recomputed —
+     * a conversation aliased to `saved|<id>` while still carrying its original
+     * subject, and a dock with no stored subject at all — so it names the run
+     * outright. This is the seam: the console test pins that the key is
+     * PASSED, and nothing pinned that it is used.
+     */
+    it("asks into the conversation the caller named, not one derived from the route", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("a follow-up", {
+        key: "saved|older-file",
+        about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },
+        route: "/k/pods/ns/mongodb-0",
+      });
+
+      expect(getActiveRunKey()).toBe("saved|older-file");
+      expect(getRun("saved|older-file").turns.map((t) => t.text)).toContain("a follow-up");
+      // And NOT under the key its subject would have produced, which is the
+      // run the derivation reached.
+      expect(getRun("prod-eu|Pod|ns|mongodb-0").turns).toEqual([]);
+      // The preface still carries the resource, so naming the key does not
+      // cost the conversation its context.
+      expect(sendChat.mock.calls.at(-1)?.[1]).toMatch(/namespace ns, Pod mongodb-0/);
+    });
+
     it("does not fork when the reader only re-narrows the namespace picker", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("first", LIST);
@@ -1324,6 +1359,41 @@ describe("the run store", () => {
       await slow;
 
       expect(getAgentRun().turns.map((t) => t.text)).toEqual(["the one clicked second"]);
+    });
+
+    /**
+     * Codex P2, round 3. After `askAgent` began reading the RUN's agent, a
+     * reopened conversation could show Codex while the module preference was
+     * still Claude — so picking Claude in the picker compared against the
+     * module value, returned early, and left the Codex resume token in place.
+     * A reader whose restored CLI is no longer installed had no way off it.
+     */
+    it("switches a reopened conversation off the CLI it was saved with", async () => {
+      listSessions.mockResolvedValue([{ id: "cdx", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "cdx", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: "codex-token", agentKind: "codex",
+        messages: [{ v: 1, key: "prod-eu|/k/pods", label: "pods", turns: [
+          { id: 1, role: "user", text: "earlier", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("cdx");
+      // The module preference never moved; the run shows the file's CLI.
+      expect(getAgentRun().agentKind).toBe("codex");
+
+      chooseAgent("claude");
+
+      // Not a no-op: the conversation is on Claude now...
+      expect(getAgentRun().agentKind).toBe("claude");
+      // ...and the other CLI's resume token went with the switch, which is the
+      // whole reason `chooseAgent` drops them (ruling AC).
+      listAgents.mockResolvedValue([
+        { kind: "claude", label: "Claude", available: true, gated: false, path: "/claude", version: "1", installUrl: "" },
+      ]);
+      sendChat.mockResolvedValue(null);
+      await askAgent("carry on", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
     });
 
     it("asks the agent the reopened conversation belongs to", async () => {

@@ -761,6 +761,25 @@ export async function askAgent(
      * Pinned by the caller for the same reason `about` is.
      */
     route?: string;
+    /**
+     * The conversation this question belongs to, named outright.
+     *
+     * `about` + `route` normally decide it (see {@link runKeyFor}), and for
+     * every screen's own composer that is right — the surface the reader is on
+     * IS the subject. The full view is not: it shows whichever conversation is
+     * selected, and its key cannot always be reconstructed.
+     *
+     * Two cases where re-deriving reached the WRONG run. A conversation opened
+     * beside a live one about the same subject is aliased to `saved|<id>` while
+     * still carrying that subject, so recomputing landed on the live run and a
+     * follow-up joined the wrong transcript. And a dock expanded before its
+     * first question has no stored subject at all, so the fallback produced
+     * `<cluster>|/agent`.
+     *
+     * When given, this is used verbatim. `about` still supplies the preface,
+     * so a follow-up carries the resource the conversation is about.
+     */
+    key?: string;
   },
 ): Promise<void> {
   // ONE turn at a time, refused here rather than at each door.
@@ -780,7 +799,10 @@ export async function askAgent(
   // does nothing is the defect this branch keeps finding in other shapes.
   const about = opts?.about ?? { cluster: "" };
   const route = opts?.route ?? "";
-  const key = runKeyFor(about, route);
+  // The caller's own key wins. Derivation is a convenience for the surfaces
+  // that ARE their subject; a caller holding the identity has better
+  // information than anything recomputed from a route.
+  const key = opts?.key ?? runKeyFor(about, route);
 
   // Still ONE turn at a time, and across EVERY run rather than per run — see
   // ruling AB. Per-run sessions would make the backend safe for concurrency
@@ -988,21 +1010,28 @@ export async function askAgent(
     markTurnErrorIn(key, agentTurnId, err);
   } finally {
     if (state.run.generation === myGeneration) {
-      // The stream is over: now a note can be judged. Nothing said and a note
-      // recorded means the note was the whole story, so the turn IS its
-      // error. Text alongside it means the answer arrived and the note is a
-      // warning the reader should still see.
-      // Stamped NOW, not when the question was submitted. The transcript draws
+      // Stamped NOW, not when the question was submitted: the transcript draws
       // this clock beneath the finished answer, so an answer that streamed for
-      // minutes was labelled with the moment the reader pressed Enter. The
-      // user turn keeps its own submission time, which is what that one means.
+      // minutes was labelled with the moment the reader pressed Enter. The user
+      // turn keeps its own submission time, which is what that one means.
+      //
+      // Folded into the SAME commit as `busy: false` rather than its own
+      // `updateTurnIn`. One settle is one change, and a separate write here was
+      // a second notification immediately before this one — two renders for one
+      // event, which this store's own emit-count test exists to catch.
       const settledAt = Date.now();
-      updateTurnIn(key, agentTurnId, (t) =>
-        t.role === "agent" && t.text === "" && (t.notes?.length ?? 0) > 0
-          ? { ...t, role: "error", text: t.notes!.join("\n"), notes: undefined, at: settledAt }
-          : { ...t, at: settledAt },
+      const settled = state.run.turns.map((t) =>
+        t.id !== agentTurnId
+          ? t
+          : t.role === "agent" && t.text === "" && (t.notes?.length ?? 0) > 0
+            ? // The stream is over: now a note can be judged. Nothing said and
+              // a note recorded means the note was the whole story, so the turn
+              // IS its error. Text alongside it means the answer arrived and
+              // the note is a warning the reader should still see.
+              { ...t, role: "error" as const, text: t.notes!.join("\n"), notes: undefined, at: settledAt }
+            : { ...t, at: settledAt },
       );
-      commitTo(key, { ...state.run, busy: false });
+      commitTo(key, { ...state.run, turns: settled, busy: false });
       // The condition every refusal was about — a turn in flight — is over, so
       // the sentences saying so stop being true. Cleared here rather than left
       // for the reader to dismiss: a stale message about a current problem is
@@ -1178,7 +1207,16 @@ export function forgetRun(key: string): void {
  * conversation the reader is in the middle of.
  */
 export function chooseAgent(kind: string): void {
-  if (kind === agentKind) return;
+  // The DISPLAYED run as well as the window's preference. A conversation
+  // reopened from disk carries its own agent, and `askAgent` asks THAT one, so
+  // the two can legitimately differ — the module could already say Claude
+  // while the run on screen says Codex. Comparing only the module value made
+  // the visible act of picking Claude a no-op that left the Codex resume
+  // token in place, and left a reader whose restored CLI is no longer
+  // installed with no way to switch off it. The same divergence follows the
+  // automatic fallback below.
+  const shown = activeState()?.run.agentKind;
+  if (kind === agentKind && (shown === undefined || shown === kind)) return;
   // Not while a turn is in flight. Dropping `session` here would leave
   // `stopAgentRun` with nothing to hand `cancelChat` — the running CLI becomes
   // uncancellable — and the turn's own completion would then write its

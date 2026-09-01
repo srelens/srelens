@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
@@ -100,6 +100,33 @@ describe("AgentPane", () => {
     // The old endpoint's models are not on offer for the new one.
     await vi.waitFor(() => {
       expect(screen.queryByText("first-endpoint-model")).toBeNull();
+    });
+  });
+
+  /**
+   * Codex P2, round 3. The draft is trimmed before it is sent, but the
+   * "did the field change while the request was in flight" comparison used the
+   * UNTRIMMED value — so a key pasted with a trailing newline, which is how one
+   * usually arrives from a clipboard, never matched and was left sitting in
+   * component state with Save re-enabled.
+   */
+  it("clears a pasted key that carried whitespace, once it is saved", async () => {
+    llmKeyStatus.mockResolvedValue([]);
+    render(<AgentPane />);
+    const field = await screen.findByLabelText(/anthropic api key/i);
+    // Trailing SPACES, not a newline: an `<input>` strips newlines out of its
+    // own value, so a `\n` fixture never reaches the comparison and the first
+    // draft of this test passed with the fix reverted.
+    fireEvent.change(field, { target: { value: "  sk-secret  " } });
+    await userEvent.click(screen.getByRole("button", { name: /save key/i }));
+
+    // Sent trimmed...
+    expect(llmSetKey).toHaveBeenCalledWith("anthropic", "sk-secret");
+    // ...and the field is empty afterwards, so the credential is not left in
+    // component state. Asserted on the field's value rather than on any text,
+    // because a key is never printed anywhere.
+    await waitFor(() => {
+      expect((field as HTMLInputElement).value).toBe("");
     });
   });
 

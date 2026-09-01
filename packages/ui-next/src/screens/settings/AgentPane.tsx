@@ -269,7 +269,13 @@ export function AgentPane() {
       // while this is in flight, so a reader who pastes a replacement key
       // meanwhile would have had it silently erased by this line — losing a
       // credential they cannot read back from anywhere.
-      setKeyDrafts((d) => (d[provider] === draft ? { ...d, [provider]: "" } : d));
+      // Compared TRIMMED, because `draft` was trimmed before it was sent. A key
+      // pasted with a trailing newline — the usual way one arrives from a
+      // clipboard — never matched the untrimmed field, so the credential stayed
+      // in component state and Save came back enabled, exactly what this line
+      // promises not to do. Genuinely edited input still differs and is still
+      // preserved.
+      setKeyDrafts((d) => (d[provider]?.trim() === draft ? { ...d, [provider]: "" } : d));
       await refreshKeyStatus();
     } catch (e) {
       setKeyActionError((m) => ({ ...m, [provider]: e }));

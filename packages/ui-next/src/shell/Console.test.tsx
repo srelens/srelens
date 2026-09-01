@@ -383,13 +383,61 @@ describe("Console", () => {
     fireEvent.keyDown(box, { key: "Enter" });
 
     await vi.waitFor(() => {
-      // The conversation's OWN subject and route, so `runKeyFor` lands back on
-      // the run the reader is looking at.
+      // The KEY the dock is showing, named outright. Deriving it from the
+      // subject reached a different run whenever the key was aliased — a
+      // conversation opened beside a live one about the same subject — and the
+      // subject still travels for the preface.
       expect(askAgent).toHaveBeenCalledWith(
         "and now",
-        expect.objectContaining({ about: subject.about, route: subject.route }),
+        expect.objectContaining({
+          key: "prod-eu|Pod|ns|ai-editor",
+          about: subject.about,
+          route: subject.route,
+        }),
       );
     });
+  });
+
+  /**
+   * Codex P1, round 3: a dock expanded in the full view before its first
+   * question has NO stored subject, so the fallback produced
+   * `<cluster>|/agent` and the question left the transcript on screen.
+   */
+  it("names the selected run even when it has no stored subject yet", async () => {
+    const user = userEvent.setup();
+    getRunSubject.mockReturnValue(undefined);
+    useActiveRunKey.mockReturnValue("prod-eu|Pod|ns|ai-editor");
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    tabsStore.openTab("/agent");
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    askAgent.mockClear();
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await user.type(box, "and now");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(askAgent).toHaveBeenCalledWith(
+        "and now",
+        expect.objectContaining({ key: "prod-eu|Pod|ns|ai-editor" }),
+      );
+    });
+  });
+
+  it("names no run key outside the full view, where the surface IS the subject", async () => {
+    const user = userEvent.setup();
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    tabsStore.openTab("/k/pods");
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    // `runKeyFor` is right for every screen's own composer — an explicit key
+    // here would freeze the dock onto whichever run it was showing when the
+    // reader navigated.
+    expect(askAgent).toHaveBeenCalledWith("x", expect.not.objectContaining({ key: expect.anything() }));
   });
 
   it("falls back to its own route when the conversation recorded no subject", async () => {

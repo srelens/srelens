@@ -350,6 +350,14 @@ export function Console({ fullView }: { fullView?: boolean }) {
     */
     const selected = isFullView ? getRunSubject(runKey) : undefined;
     void askAgent(raw, {
+      // The KEY, not a route to re-derive one from. `runKey` is what this dock
+      // is showing, and in the full view it cannot always be reconstructed: a
+      // conversation opened beside a live one about the same subject is
+      // aliased, and a dock expanded before its first question has no stored
+      // subject at all. Both re-derivations reached a different run.
+      ...(isFullView && runKey !== null ? { key: runKey } : {}),
+      // The subject still supplies the preface, so a follow-up carries the
+      // resource the conversation is about rather than the cluster alone.
       about: selected?.about ?? about,
       route: selected?.route ?? route,
       images: images.length > 0 ? images : undefined,
