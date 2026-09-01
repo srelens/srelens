@@ -45,6 +45,9 @@ const {
   clearAgentRun,
   dismissAgentError,
   setSkillActive,
+  useRunSummaries,
+  getActiveRunKey,
+  selectRun,
 } = vi.hoisted(() => ({
   useAgentRun: vi.fn(),
   askAgent: vi.fn(),
@@ -53,6 +56,9 @@ const {
   clearAgentRun: vi.fn(),
   dismissAgentError: vi.fn(),
   setSkillActive: vi.fn(),
+  useRunSummaries: vi.fn(() => []),
+  getActiveRunKey: vi.fn(() => null),
+  selectRun: vi.fn(),
 }));
 vi.mock("../lib/agentRun", () => ({
   useAgentRun,
@@ -62,6 +68,9 @@ vi.mock("../lib/agentRun", () => ({
   clearAgentRun,
   dismissAgentError,
   setSkillActive,
+  useRunSummaries,
+  getActiveRunKey,
+  selectRun,
 }));
 
 const CLAUDE: AgentInfo = {

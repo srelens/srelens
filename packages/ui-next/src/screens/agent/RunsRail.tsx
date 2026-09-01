@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
-import { listSessions, listSkills, relativeTime, type SessionMeta, type SkillMeta } from "@srelens/core";
-import { Alert, RawError, Section, Switch } from "@srelens/ui-kit";
-import { setSkillActive, useAgentRun } from "../../lib/agentRun";
+import { listSkills, relativeTime, type SkillMeta } from "@srelens/core";
+import { Alert, RawError, Section, Switch, cx } from "@srelens/ui-kit";
+import {
+  getActiveRunKey,
+  selectRun,
+  setSkillActive,
+  useAgentRun,
+  useRunSummaries,
+} from "../../lib/agentRun";
 import { LOADING, type Read } from "../../lib/read";
 
 /** §5's rail width, and this screen's alone — see `SideRail`'s note on why the
@@ -42,18 +48,16 @@ export function RunsRail() {
   // same for `listSkills`'s "No skills saved yet.": both are confident false
   // statements standing in for a failure this rail never told the reader
   // about (I6).
-  const [sessions, setSessions] = useState<Read<SessionMeta[]>>(LOADING);
   const [skills, setSkills] = useState<Read<SkillMeta[]>>(LOADING);
+  // THIS window's conversations, not the sessions classic wrote to disk. See
+  // the section's own comment for why that list is gone.
+  const runs = useRunSummaries();
+  const activeKey = getActiveRunKey();
   // The one set the composer's own `/` menu writes to as well — read here,
   // never copied into local state, so the two controls cannot disagree about
   // which skills are active for this run.
   const { activeSkills } = useAgentRun();
 
-  useEffect(() => {
-    listSessions()
-      .then((v) => setSessions({ kind: "ready", value: v }))
-      .catch((e) => setSessions({ kind: "error", error: e }));
-  }, []);
   useEffect(() => {
     listSkills()
       .then((v) => setSkills({ kind: "ready", value: v }))
@@ -64,20 +68,47 @@ export function RunsRail() {
 
   return (
     <>
+      {/*
+        This lists the conversations THIS window is holding, and every entry
+        opens. It used to list `listSessions()` — the sessions CLASSIC wrote to
+        disk — which was wrong three ways at once, all three reported from use:
+        the entries were 14 to 22 days old and from a different UI; nothing in
+        the new design persists, so a reader's actual conversations were never
+        in it (#395); and the rows were plain `<div>`s with no handler, so
+        clicking one did nothing.
+
+        A list you cannot open, of conversations you did not have, under a
+        heading that says they are recent, is worse than no list.
+
+        Classic's saved sessions are a real thing and worth offering — but
+        offering them means `loadSession` hydrating a transcript, which is
+        #395's work. Until then they are not shown rather than shown and inert.
+      */}
       <Section title="Recent runs" smallCaps>
-        {sessions.kind === "loading" ? null : sessions.kind === "error" ? (
-          <Alert tone="sev" title="Recent runs could not be checked">
-            <RawError text={String(sessions.error)} />
-          </Alert>
-        ) : sessions.value.length === 0 ? (
-          <p className="min-w-0 break-words text-xs text-muted">No recent runs yet.</p>
+        {runs.length === 0 ? (
+          <p className="min-w-0 break-words text-xs text-muted">
+            No questions yet. Asking one from any screen starts a conversation about that thing, and
+            it appears here.
+          </p>
         ) : (
-          <div className="flex min-w-0 flex-col gap-2">
-            {sessions.value.map((s) => (
-              <div key={s.id} className="flex min-w-0 flex-col gap-0.5">
-                <span className="min-w-0 truncate text-sm">{s.title}</span>
-                <span className="min-w-0 truncate text-xs text-muted">{relativeTime(s.updatedAt, now)}</span>
-              </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            {runs.map((r) => (
+              <button
+                key={r.key}
+                type="button"
+                aria-current={r.key === activeKey ? "true" : undefined}
+                onClick={() => selectRun(r.key)}
+                className={cx(
+                  "flex min-w-0 flex-col gap-0.5 rounded-tile px-2 py-1.5 text-left hover:bg-sunk",
+                  r.key === activeKey && "bg-sunk",
+                )}
+              >
+                <span className="min-w-0 truncate text-sm">{r.label}</span>
+                <span className="min-w-0 truncate text-xs text-muted">
+                  {r.busy ? "answering…" : `${r.turns} question${r.turns === 1 ? "" : "s"}`} ·{" "}
+                  {relativeTime(r.at, now)}
+                </span>
+              </button>
             ))}
           </div>
         )}

@@ -2,22 +2,33 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RunsRail } from "./RunsRail";
-import { getAgentRun, resetAgentRun } from "../../lib/agentRun";
+import { askAgent, getAgentRun, resetAgentRun } from "../../lib/agentRun";
 
-const { listSessions, listSkills } = vi.hoisted(() => ({
+const { listSessions, listSkills, startChat, sendChat, listAgents } = vi.hoisted(() => ({
   listSessions: vi.fn(),
   listSkills: vi.fn(),
+  startChat: vi.fn(),
+  sendChat: vi.fn(),
+  listAgents: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   listSessions,
   listSkills,
+  startChat,
+  sendChat,
+  listAgents,
 }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   listSessions.mockResolvedValue([]);
   listSkills.mockResolvedValue([]);
+  startChat.mockResolvedValue("sess-1");
+  sendChat.mockResolvedValue(null);
+  listAgents.mockResolvedValue([
+    { kind: "claude", label: "Claude", available: true, gated: false, path: "/c" },
+  ]);
   // The real store, not a double — the whole point of this suite's switch
   // test is proving the rail reaches the SAME `activeSkills` the composer
   // writes to, and a mocked `useAgentRun` can only ever assert the render,
@@ -26,63 +37,60 @@ beforeEach(() => {
 });
 
 describe("the agent screen's rail", () => {
-  it("lists recent runs by title and when they were last touched", async () => {
-    listSessions.mockResolvedValue([{ id: "s1", title: "Diagnose checkout-api 5xx", createdAt: 1, updatedAt: 2 }]);
+  /**
+   * `Recent runs` lists THIS window's conversations now, and every entry
+   * opens. It used to list `listSessions()` — the sessions CLASSIC persisted —
+   * which the reader reported as wrong from use: entries 14 to 22 days old
+   * from a different UI, none of their own conversations in it (nothing in the
+   * new design persists, #395), and rows that were plain `<div>`s so clicking
+   * did nothing.
+   */
+  it("says nothing has been asked yet, rather than listing another UI's sessions", async () => {
     render(<RunsRail />);
-    expect(await screen.findByText("Diagnose checkout-api 5xx")).toBeTruthy();
+    expect(await screen.findByText(/no questions yet/i)).toBeTruthy();
+    // The old list is gone, not merely empty.
+    expect(listSessions).not.toHaveBeenCalled();
   });
 
-  it("reads the last-touched time off updatedAt, not createdAt", async () => {
-    // G3: a session whose two timestamps disagree, far enough apart that the
-    // two readings render different words — `relativeTime`'s buckets are
-    // minutes/hours/days, so one second apart would round to the same
-    // "just now" either way and prove nothing.
-    const now = Date.now();
-    listSessions.mockResolvedValue([
-      { id: "s1", title: "Diagnose", createdAt: now - 3 * 60 * 60 * 1000, updatedAt: now - 5 * 60 * 1000 },
-    ]);
+  it("lists a conversation once one has been started, by its subject", async () => {
+    sendChat.mockResolvedValue(null);
+    await askAgent("summarise this stream", {
+      about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "ai-editor", surface: "logs" },
+      route: "/logs/Pod/ns/ai-editor",
+    });
     render(<RunsRail />);
-    await screen.findByText("Diagnose");
-    expect(await screen.findByText("5m ago")).toBeTruthy();
-    expect(screen.queryByText("3h ago")).toBeNull();
+    // The subject, which is what a reader recognises — not the question text
+    // and not the route.
+    expect(await screen.findByRole("button", { name: /Pod\/ai-editor/ })).toBeTruthy();
   });
 
-  it("draws no call count, because none is stored", async () => {
-    listSessions.mockResolvedValue([{ id: "s1", title: "Diagnose", createdAt: 1, updatedAt: 2 }]);
+  it("opens the conversation that is clicked", async () => {
+    sendChat.mockResolvedValue(null);
+    await askAgent("about the list", { about: { cluster: "prod-eu" }, route: "/k/statefulsets" });
+    await askAgent("about the pod", {
+      about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "ai-editor" },
+      route: "/k/Pod/ns/ai-editor",
+    });
     render(<RunsRail />);
-    await screen.findByText("Diagnose");
-    expect(screen.queryByText(/calls/i)).toBeNull();
+
+    // The pod was asked last, so it is active; clicking the list switches.
+    await userEvent.click(screen.getByRole("button", { name: /statefulsets/ }));
+    expect(getAgentRun().turns.map((t) => t.text)).toContain("about the list");
   });
 
-  it("draws a skill's name and description, and no usage count", async () => {
-    listSkills.mockResolvedValue([{ name: "Rollout forensics", description: "Correlates a revision diff" }]);
+  it("marks which conversation is on screen", async () => {
+    sendChat.mockResolvedValue(null);
+    await askAgent("a", { about: { cluster: "prod-eu" }, route: "/k/statefulsets" });
     render(<RunsRail />);
-    expect(await screen.findByText("Rollout forensics")).toBeTruthy();
-    expect(await screen.findByText("Correlates a revision diff")).toBeTruthy();
-    expect(screen.queryByText(/used/i)).toBeNull();
-    expect(screen.queryByText(/×/)).toBeNull();
+    expect(screen.getByRole("button", { name: /statefulsets/ }).getAttribute("aria-current")).toBe("true");
   });
 
-  it("says why there is no connected-clients list rather than drawing an empty one", async () => {
+  it("says a conversation is answering rather than counting its questions", async () => {
+    sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+    void askAgent("long one", { about: { cluster: "prod-eu" }, route: "/k/statefulsets" });
+    await vi.waitFor(() => expect(sendChat).toHaveBeenCalled());
     render(<RunsRail />);
-    expect(await screen.findByText(/does not know which clients are connected/i)).toBeTruthy();
-  });
-
-  it("says so when there are no recent runs, rather than drawing nothing at all", async () => {
-    render(<RunsRail />);
-    expect(await screen.findByText(/no recent runs/i)).toBeTruthy();
-  });
-
-  // I6: `.catch(() => setSessions([]))` rendered "No recent runs yet." for a
-  // failed `listSessions` exactly as it would for an account with none — a
-  // confident false statement standing in for a failure this rail never told
-  // the reader about.
-  it("says the read failed, rather than claiming there are no recent runs, when listSessions rejects", async () => {
-    listSessions.mockRejectedValue(new Error("no such command: session_list"));
-    render(<RunsRail />);
-    expect(await screen.findByText(/could not be checked/i)).toBeTruthy();
-    expect(await screen.findByText(/session_list/)).toBeTruthy();
-    expect(screen.queryByText(/no recent runs/i)).toBeNull();
+    expect(await screen.findByText(/answering/i)).toBeTruthy();
   });
 
   it("says the read failed, rather than claiming there are no saved skills, when listSkills rejects", async () => {

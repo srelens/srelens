@@ -265,7 +265,12 @@ let touchSeq = 0;
 
 const listeners = new Set<() => void>();
 
+/** Bumped on every change, so derived snapshots know when to recompute
+ *  without comparing deeply. */
+let changeStamp = 0;
+
 function emit() {
+  changeStamp += 1;
   for (const listener of listeners) listener();
 }
 
@@ -451,6 +456,24 @@ export function getRunSummaries(): RunSummary[] {
       busy: s.run.busy,
     }))
     .sort((a, b) => b.order - a.order);
+}
+
+/** The rail's list, subscribed. Rebuilt only when the store emits, so its
+ *  identity is stable between changes. */
+export function useRunSummaries(): RunSummary[] {
+  return useSyncExternalStore(subscribeAgentRun, cachedSummaries, cachedSummaries);
+}
+
+let summaryCache: RunSummary[] = [];
+let summaryStamp = -1;
+/** `useSyncExternalStore` compares by identity, so a fresh array per read
+ *  re-renders forever. Recomputed when the store's own change counter moves. */
+function cachedSummaries(): RunSummary[] {
+  if (summaryStamp !== changeStamp) {
+    summaryCache = getRunSummaries();
+    summaryStamp = changeStamp;
+  }
+  return summaryCache;
 }
 
 /** Which run the surfaces default to. */
@@ -1060,6 +1083,7 @@ export function resetAgentRun(): void {
   agentKind = "claude";
   activeSkills = [];
   touchSeq = 0;
+  summaryStamp = -1;
   emptyRun = { ...EMPTY_RUN };
   turnSeq = 0;
   listeners.clear();
