@@ -244,6 +244,17 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   // goes — a reader looking for the agent goes there, and it says so on
   // arrival, which is the same choice Settings makes for the MCP server.
   if (!isTauri()) return null;
+  // NOT on `/agent`. That screen is the full view of the same conversation and
+  // mounts its own composer, so the dock there put a SECOND input box on
+  // screen, stacked under the first — reported as "duplicate text box". Two
+  // prompts for one conversation is also how they disagree about what is
+  // typed.
+  //
+  // It costs nothing: the dock exists so a question can be asked from a screen
+  // that is about something else. On the agent's own screen there is nothing
+  // for it to add, and hiding it gives the transcript and the rail the bottom
+  // of the window back.
+  if (route === "/agent") return null;
 
   const commandMode = value.startsWith("/");
   const exchanges = turns.filter((t) => t.role === "user").length;

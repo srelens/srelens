@@ -12,7 +12,19 @@ import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
  *  copy, not a store read: it needs no field the store has, so cutting it
  *  alongside the figures #386/#387 exclude would have been over-applying that
  *  rule to a sentence it never touched. */
-const CONTINUE_FROM_CONSOLE = "Continue this run from the console at the bottom of the window";
+/**
+ * §5's footer sentence said "Continue this run from the console at the bottom
+ * of the window". It named a console this screen no longer shows: the dock
+ * used to render here too, which put a second input box under this screen's
+ * own — reported as "duplicate text box".
+ *
+ * So the sentence says what is actually true now: the conversation is the same
+ * one the dock carries on every other screen, which is the fact §5 wanted the
+ * reader to have. A line naming a control that is not on screen is worse than
+ * no line.
+ */
+const SAME_RUN_AS_THE_CONSOLE =
+  "The same conversation the console carries on other screens — ask here, or from the console there";
 
 /** `started 14:04`, off the first turn's own timestamp — one of the two
  *  figures in §5's `started <time> · <n> calls · <duration>` head that the
@@ -130,7 +142,7 @@ export function Agent(_props: { route: string }) {
           <div className="scroll min-h-0 min-w-0 flex-1">
             <Transcript turns={turns} gates={gates} />
           </div>
-          <Eyebrow>{CONTINUE_FROM_CONSOLE}</Eyebrow>
+          <Eyebrow>{SAME_RUN_AS_THE_CONSOLE}</Eyebrow>
           <Composer context={context} />
         </div>
       </SideRail>

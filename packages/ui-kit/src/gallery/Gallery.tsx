@@ -17,6 +17,7 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import { Dialog } from "../Dialog";
 import { DiffLines, type DiffRow } from "../DiffLines";
 import { ConsoleDock } from "../ConsoleDock";
+import { ConsolePrompt } from "../ConsolePrompt";
 import { ContextMenu } from "../ContextMenu";
 import { CopyCommand } from "../CopyCommand";
 import { CustomizeMark, type MarkAppearance } from "../CustomizeMark";
@@ -1775,6 +1776,42 @@ export function Gallery() {
             body. An `active` naming a step that is gone falls back to the
             first. */}
         <DrillCard steps={[]} active="signal" onActiveChange={() => {}} title="Nothing selected" />
+      </section>
+
+      <section>
+        <h2>ConsolePrompt</h2>
+        {/* The one prompt bar, wherever srelens asks for a question — the dock
+            uses it, and so does the agent screen. It grew out of the dock
+            having this row inline while the agent screen kept its own: a plain
+            input with the agent's name as loose text beside a Send button,
+            which read as a different product on two screens of one app.
+
+            The host keeps what differs — what a `/` opens, whether there are
+            attachments, what Stop does — and passes it as `lead`/`trail`. */}
+        <div className="card overflow-hidden">
+          <ConsolePrompt
+            value={ask}
+            onValueChange={setAsk}
+            onSubmit={() => setAsk("")}
+            label="Ask the agent"
+            placeholder="Ask about this cluster…   /  for prompts & skills"
+            shortcutHint="⌘K"
+          />
+        </div>
+        {/* With a `lead` — the agent picker's shape on the agent screen — and
+            a turn in flight, where send gives way to the working spinner and
+            the host's own Stop is what acts. */}
+        <div className="card overflow-hidden">
+          <ConsolePrompt
+            value=""
+            onValueChange={() => {}}
+            onSubmit={() => {}}
+            label="Ask the agent"
+            placeholder="Ask about this cluster…"
+            busy
+            lead={<span className="chip"><span>Claude Code</span></span>}
+          />
+        </div>
       </section>
 
       <section>

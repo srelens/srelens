@@ -199,7 +199,7 @@ export function ConsoleDock({
                   aria-label={`Open ${label.toLowerCase()} in the full view`}
                   onClick={onExpand}
                 >
-                  <span className="eyebrow text-[0.5625rem]">full view</span>
+                  <span className="eyebrow whitespace-nowrap text-[0.5625rem]">full view</span>
                 </button>
               )}
               {onClear && (
@@ -212,7 +212,7 @@ export function ConsoleDock({
                   {/* The class rather than `Eyebrow`, which renders a div: a
                     button holds phrasing content, and a block inside one is
                     markup no browser is obliged to lay out sensibly. */}
-                  <span className="eyebrow text-[0.5625rem]">clear</span>
+                  <span className="eyebrow whitespace-nowrap text-[0.5625rem]">clear</span>
                 </button>
               )}
             </div>

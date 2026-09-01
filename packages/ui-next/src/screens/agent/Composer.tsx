@@ -9,7 +9,7 @@ import {
   type PromptSummary,
   type SkillMeta,
 } from "@srelens/core";
-import { Alert, Button, Popover, RawError, TextInput } from "@srelens/ui-kit";
+import { Alert, Button, ConsolePrompt, Popover, RawError } from "@srelens/ui-kit";
 import { askAgent, chooseAgent, setSkillActive, stopAgentRun, useAgentRun } from "../../lib/agentRun";
 import { LOADING, type Read } from "../../lib/read";
 
@@ -148,16 +148,33 @@ function AgentPicker({
   const current = agents.find((a) => a.kind === selectedKind);
   if (disabled) {
     return (
+      // The same `.chip` shape, minus the caret: the reader should see which
+      // agent is answering, and see that it is not theirs to change yet.
       <span
-        className="min-w-0 truncate text-xs text-faint"
+        className="chip opacity-60"
         title="Stop the question in flight before switching agent"
       >
-        {current?.label ?? "Agent"}
+        <span>{current?.label ?? "Agent"}</span>
       </span>
     );
   }
   return (
-    <Popover label="Choose agent" trigger={<span className="truncate">{current?.label ?? "Agent"}</span>}>
+    <Popover
+      label="Choose agent"
+      trigger={
+        // `.chip` — the kit's existing small-control shape, bordered and sunk.
+        // A bare `<span>` here rendered the agent's name as loose text under
+        // the input, which read as a stray label rather than as something to
+        // press; reported as the agent selection needing to look like it
+        // belongs below the box. The caret is what says it opens.
+        <span className="chip">
+          <span>{current?.label ?? "Agent"}</span>
+          <span aria-hidden className="text-faint">
+            ⌄
+          </span>
+        </span>
+      }
+    >
       {(close) => (
         <div role="listbox" className="flex min-w-0 flex-col">
           {agents.map((a) => {
@@ -450,37 +467,52 @@ export function Composer({ context }: { context: string }) {
             onPickSkill={pickSkill}
           />
         )}
-        <TextInput
+        {/*
+          The SAME bar the console dock uses — `ConsolePrompt`, extracted from
+          the dock for this. This screen had its own: a plain `TextInput` with
+          the agent's name as loose text beside a `Send` button, which looked
+          like a different product from the bar on every other screen.
+          Reported as "replace this with the general chat bar used everywhere".
+
+          What differs stays here, where it belongs: the `/` menu this screen
+          opens onto prompts and skills, the agent picker, and Stop. The shape
+          is the kit's.
+        */}
+        <ConsolePrompt
           value={input}
           onValueChange={handleChange}
-          onEnter={() => {
+          onSubmit={() => {
             if (!menuOpen) void submit();
           }}
-          onEscape={() => {
-            if (menuOpen) setMenuDismissed(true);
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && menuOpen) {
+              setMenuDismissed(true);
+              return true;
+            }
+            // Enter belongs to the `/` menu while it is open — the composer
+            // must not submit the raw `/token` the reader is still choosing
+            // from.
+            return e.key === "Enter" && menuOpen;
           }}
           placeholder="Ask about this cluster…   /  for prompts & skills"
-          disabled={busy}
-          aria-label="Ask the agent"
+          label="Ask the agent"
+          busy={busy}
+          lead={
+            <AgentPicker
+              agents={offered}
+              selectedKind={selectedKind}
+              onSelect={(kind) => chooseAgent(kind)}
+              disabled={busy}
+            />
+          }
+          trail={
+            busy ? (
+              <Button type="button" variant="secondary" size="sm" onClick={() => stopAgentRun()}>
+                Stop
+              </Button>
+            ) : undefined
+          }
         />
-      </div>
-      <div className="flex min-w-0 items-center gap-2">
-        <AgentPicker
-          agents={offered}
-          selectedKind={selectedKind}
-          onSelect={(kind) => chooseAgent(kind)}
-          disabled={busy}
-        />
-        <div className="flex-1" />
-        {busy ? (
-          <Button type="button" variant="secondary" size="sm" onClick={() => stopAgentRun()}>
-            Stop
-          </Button>
-        ) : (
-          <Button type="button" variant="primary" size="sm" onClick={() => void submit()} disabled={!input.trim()}>
-            Send
-          </Button>
-        )}
       </div>
     </div>
   );

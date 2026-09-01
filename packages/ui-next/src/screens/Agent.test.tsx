@@ -236,9 +236,14 @@ describe("the agent screen", () => {
 
   it("tells the reader this screen and the console dock share one run", async () => {
     render(<Agent route="/agent" />);
-    expect(
-      await screen.findByText("Continue this run from the console at the bottom of the window"),
-    ).toBeTruthy();
+    // §5's sentence named "the console at the bottom of the window" — but the
+    // dock does not render on this screen any more (it put a second input box
+    // under this screen's own, reported as a duplicate text box). The fact §5
+    // wanted the reader to have is that it is ONE conversation; the sentence
+    // says that without naming a control that is not there.
+    const note = await screen.findByText(/same conversation the console carries/i);
+    expect(note).toBeTruthy();
+    expect(note.textContent).not.toMatch(/at the bottom of the window/);
   });
 
   /**
