@@ -111,8 +111,19 @@ export function AgentPane() {
   const [keyDrafts, setKeyDrafts] = useState<
     Partial<Record<ProviderKind, string>>
   >({});
+  /**
+   * Fetched model lists, each remembering the base URL it came FROM.
+   *
+   * Keyed by provider alone, a list fetched from one OpenAI-compatible
+   * endpoint stayed on screen after the reader pointed the provider at a
+   * different one — so the picker offered model ids that endpoint may not have,
+   * and one of them could be saved. A late response from the old URL could
+   * put them back, too. The url travels with the list and the render compares
+   * it, so a list that no longer belongs to the current endpoint is simply not
+   * shown.
+   */
   const [models, setModels] = useState<
-    Partial<Record<ProviderKind, ModelInfo[]>>
+    Partial<Record<ProviderKind, { url: string; list: ModelInfo[] }>>
   >({});
   const [modelFetchError, setModelFetchError] = useState<
     Partial<Record<ProviderKind, unknown>>
@@ -284,11 +295,12 @@ export function AgentPane() {
     startOp(`models:${provider}`);
     setModelFetchError((m) => ({ ...m, [provider]: null }));
     try {
-      const list = await llmListModels(
-        provider,
-        settings.baseUrls[providerSlug(provider)],
-      );
-      setModels((m) => ({ ...m, [provider]: list }));
+      const url = settings.baseUrls[providerSlug(provider)] ?? "";
+      const list = await llmListModels(provider, url);
+      // Stored WITH the url it was fetched from. A response that arrives after
+      // the reader has edited the endpoint no longer matches, so it is held
+      // rather than shown — see the state's own note.
+      setModels((m) => ({ ...m, [provider]: { url, list } }));
     } catch (e) {
       setModelFetchError((m) => ({ ...m, [provider]: e }));
     } finally {
@@ -362,7 +374,15 @@ export function AgentPane() {
                     {PROVIDERS.map((p) => {
                       const slug = providerSlug(p.kind);
                       const hasKey = keyed?.includes(p.kind) ?? false;
-                      const list = models[p.kind] ?? [];
+                      const fetched = models[p.kind];
+                      // Only the list that belongs to the endpoint currently
+                      // on screen.
+                      // Only the list that belongs to the endpoint currently
+                      // on screen.
+                      const list =
+                        fetched && fetched.url === (settings.baseUrls[slug] ?? "")
+                          ? fetched.list
+                          : [];
                       const model = settings.models[slug] ?? "";
                       const isDefault = settings.defaultProvider === p.kind;
                       const isOpen = expanded === p.kind;

@@ -65,6 +65,20 @@ const { isTauri, listAgents, isApplePlatform } = vi.hoisted(() => ({
   // prop — so the platform is mocked here instead of passed to `setup`.
   isApplePlatform: vi.fn(() => true),
 }));
+/**
+ * `readImageFile` is mocked so a test can hold a read OPEN — the race between
+ * an asynchronous `FileReader` and a synchronous Enter is the whole point of
+ * one test below. The default resolves the same shape the real one does, which
+ * is all the other image tests here ever asserted.
+ */
+const { readImageFile } = vi.hoisted(() => ({
+  readImageFile: vi.fn<(f: File) => Promise<string>>(),
+}));
+vi.mock("../lib/pastedImages", async (orig) => ({
+  ...(await orig<typeof import("../lib/pastedImages")>()),
+  readImageFile,
+}));
+
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   isTauri,
@@ -152,6 +166,7 @@ beforeEach(() => {
   setContexts([HARNESS_CTX]);
   useAgentRun.mockReset().mockReturnValue(runState());
   useRun.mockReset().mockReturnValue(runState());
+  readImageFile.mockReset().mockResolvedValue("data:image/png;base64,AAA");
   askAgent.mockReset();
   clearAgentRun.mockReset();
   selectRun.mockReset();
@@ -950,6 +965,48 @@ describe("Console — header details", () => {
       await screen.findByAltText("Attachment 1");
       await user.click(screen.getByRole("button", { name: /remove attachment 1/i }));
       expect(screen.queryByAltText("Attachment 1")).toBeNull();
+    });
+
+    /**
+     * Codex P2. `FileReader` is asynchronous and Enter is not: submitting
+     * before a read settled sent the question WITHOUT the image, cleared the
+     * attachment row, and then the read appended the image — silently carrying
+     * it onto the NEXT question.
+     */
+    it("holds a question until the image it was pasted with has been read", async () => {
+      const user = userEvent.setup();
+      let release: ((uri: string) => void) | undefined;
+      readImageFile.mockImplementationOnce(() => new Promise<string>((res) => (release = res)));
+      setup();
+      // Opens the dock — and asks "x" on the way, which is what `ask()` does.
+      // Cleared, so the assertions below count only this test's own Enter.
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      askAgent.mockClear();
+      const box = screen.getByRole("textbox", { name: "Console prompt" });
+
+      fireEvent.paste(box, { clipboardData: { files: [shot()], types: ["Files"] } });
+      await vi.waitFor(() => {
+        expect(release).toBeDefined();
+      });
+      // Said on screen, so the reader knows why Enter did nothing.
+      expect(await screen.findByText(/reading an image/i)).toBeTruthy();
+
+      await user.type(box, "what is wrong here");
+      fireEvent.keyDown(box, { key: "Enter" });
+      // Refused, not sent-without-the-image.
+      expect(askAgent).not.toHaveBeenCalled();
+
+      release?.("data:image/png;base64,AAA");
+      await vi.waitFor(() => {
+        expect(screen.queryByText(/reading an image/i)).toBeNull();
+      });
+      fireEvent.keyDown(box, { key: "Enter" });
+      await vi.waitFor(() => {
+        expect(askAgent).toHaveBeenCalledWith(
+          "what is wrong here",
+          expect.objectContaining({ images: ["data:image/png;base64,AAA"] }),
+        );
+      });
     });
 
     it("holds nothing over to the next question", async () => {

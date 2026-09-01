@@ -520,7 +520,12 @@ export type RunSummary = {
 };
 
 export function getRunSummaries(): RunSummary[] {
-  const live: RunSummary[] = [...runs.entries()].map(([key, s]) => ({
+  const live: RunSummary[] = [...runs.entries()]
+    // Nothing asked, nothing to list. A run can exist with no turns — one
+    // created to carry a refusal, or one selected and then cleared — and a row
+    // reading "0 questions" is a conversation the reader never had.
+    .filter(([, s]) => s.run.turns.length > 0)
+    .map(([key, s]) => ({
     key,
     // The QUESTION, like the saved rows — one naming scheme, not two. Live
     // rows used the subject ("cluster", "Pod/mongodb-0") while saved rows used
@@ -987,10 +992,15 @@ export async function askAgent(
       // recorded means the note was the whole story, so the turn IS its
       // error. Text alongside it means the answer arrived and the note is a
       // warning the reader should still see.
+      // Stamped NOW, not when the question was submitted. The transcript draws
+      // this clock beneath the finished answer, so an answer that streamed for
+      // minutes was labelled with the moment the reader pressed Enter. The
+      // user turn keeps its own submission time, which is what that one means.
+      const settledAt = Date.now();
       updateTurnIn(key, agentTurnId, (t) =>
         t.role === "agent" && t.text === "" && (t.notes?.length ?? 0) > 0
-          ? { ...t, role: "error", text: t.notes!.join("\n"), notes: undefined }
-          : t,
+          ? { ...t, role: "error", text: t.notes!.join("\n"), notes: undefined, at: settledAt }
+          : { ...t, at: settledAt },
       );
       commitTo(key, { ...state.run, busy: false });
       // The condition every refusal was about — a turn in flight — is over, so
@@ -1000,6 +1010,18 @@ export async function askAgent(
       for (const [k, st] of runs) {
         if (!st.refusalOnly) continue;
         st.refusalOnly = false;
+        // A run that exists ONLY to have carried a refusal is not a
+        // conversation: nothing was ever asked in it. `askAgent` has to create
+        // it to have somewhere to put the message, and leaving it behind
+        // listed a newest "0 questions" row in Recent runs and opened `/agent`
+        // on a blank transcript. It goes with the message.
+        if (st.run.turns.length === 0) {
+          runs.delete(k);
+          // The conversation the reader is actually watching — the one whose
+          // turn just finished — rather than a key that no longer resolves.
+          if (activeKey === k) activeKey = key;
+          continue;
+        }
         commitTo(k, { ...st.run, error: undefined });
       }
       // Every turn, not only the last: a window closed mid-conversation must
@@ -1491,9 +1513,24 @@ export async function restoreRuns(): Promise<void> {
 
 /** Open a saved conversation: load its transcript, put it in the map under its
  *  own subject key, and show it. */
+/**
+ * Which saved-conversation click is the current one.
+ *
+ * Two clicks before the first `loadSession` returns and BOTH continuations
+ * assigned `activeKey`, so whichever request happened to resolve last won —
+ * a slow first load switched the transcript back after the reader had already
+ * opened the second. Bumped on entry, compared before anything is applied.
+ */
+let openSeq = 0;
+
 export async function openSavedRun(id: string): Promise<void> {
+  const mine = ++openSeq;
   const meta = saved.find((m) => m.id === id);
   const session = await loadSession(id);
+  // A later click has taken over. Nothing is applied — not the run, not
+  // `activeKey`, and not the removal from the not-yet-loaded list, because a
+  // conversation this call is abandoning must stay listed.
+  if (mine !== openSeq) return;
   const envelope = session.messages.find(isSavedRun);
   // Where this conversation WOULD live: the subject it was saved under, or its
   // own file if it was written by a shape this build has no key for.

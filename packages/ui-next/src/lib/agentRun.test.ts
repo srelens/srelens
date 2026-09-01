@@ -535,6 +535,63 @@ describe("the run store", () => {
      * rejection time — so a NEW conversation was told "That question was not
      * sent" for a Stop belonging to the one before it.
      */
+    /**
+     * Codex P2. `askAgent` has to create a run to have somewhere to put the
+     * refusal, and it was left behind: a newest "0 questions" row in Recent
+     * runs, and `/agent` opening on a blank transcript for a question that was
+     * never sent.
+     */
+    /**
+     * Codex P2. The agent turn was stamped when the reader pressed Enter, and
+     * the transcript draws that clock beneath the FINISHED answer — so an
+     * answer that streamed for minutes was labelled with the submission time.
+     */
+    it("stamps the answer when it settles, and the question when it was asked", async () => {
+      let finish: ((s: string | null) => void) | undefined;
+      sendChat.mockImplementationOnce(() => new Promise<string | null>((res) => (finish = res)));
+      const asked = Date.now();
+      void askAgent("why is it restarting");
+      await untilSendChatCalledTimes(1);
+
+      const askedTurn = getAgentRun().turns[0];
+      // Time passes while the answer streams.
+      vi.setSystemTime(asked + 90_000);
+      finish?.(null);
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+
+      const turns = getAgentRun().turns;
+      // The question keeps its own submission time — that is what it means.
+      expect(turns[0].at).toBe(askedTurn.at);
+      // The answer carries when it actually appeared.
+      expect(turns[1].at).toBeGreaterThanOrEqual(asked + 90_000);
+    });
+
+    it("leaves no conversation behind for a question it refused", async () => {
+      const pod = {
+        about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },
+        route: "/k/pods/ns/mongodb-0",
+      };
+      const list = { about: { cluster: "prod-eu" }, route: "/k/statefulsets" };
+      let finish: ((s: string | null) => void) | undefined;
+      sendChat.mockImplementationOnce(() => new Promise<string | null>((res) => (finish = res)));
+      void askAgent("the one in flight", pod);
+      await untilSendChatCalledTimes(1);
+
+      // A question about a DIFFERENT subject, refused because that turn is busy.
+      await askAgent("refused", list);
+      expect(getAgentRun().error).toMatch(/still answering/);
+
+      finish?.(null);
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+
+      // One conversation — the one that was actually asked.
+      const rows = getRunSummaries();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].turns).toBeGreaterThan(0);
+      // And the reader is left on it, not on a key that no longer resolves.
+      expect(getAgentRun().turns.length).toBeGreaterThan(0);
+    });
+
     it("does not blame a new question for the previous Stop's failure", async () => {
       let reject: ((e: unknown) => void) | undefined;
       cancelChat.mockImplementationOnce(() => new Promise<void>((_, rej) => (reject = rej)));
@@ -1229,6 +1286,46 @@ describe("the run store", () => {
      * conversation reopened after restart handed its Codex token to Claude
      * while the picker, which shows `run.agentKind`, still said Codex.
      */
+    /**
+     * Codex P2. Two clicks before the first `loadSession` returned and both
+     * continuations assigned `activeKey`, so the slower one won — the
+     * transcript switched back after the reader had already opened the other.
+     */
+    it("opens the conversation clicked last, whichever load finishes first", async () => {
+      listSessions.mockResolvedValue([
+        { id: "slow", title: "slow", createdAt: 1, updatedAt: 2 },
+        { id: "quick", title: "quick", createdAt: 1, updatedAt: 3 },
+      ]);
+      await restoreRuns();
+
+      let releaseSlow: ((v: unknown) => void) | undefined;
+      loadSession.mockImplementationOnce(
+        () => new Promise((res) => (releaseSlow = res)),
+      );
+      const slow = openSavedRun("slow");
+
+      loadSession.mockResolvedValueOnce({
+        id: "quick", title: "quick", createdAt: 1, updatedAt: 3, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: "k|quick", label: "quick", turns: [
+          { id: 1, role: "user", text: "the one clicked second", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      await openSavedRun("quick");
+
+      // Now the first click's load finally comes back.
+      releaseSlow?.({
+        id: "slow", title: "slow", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: "k|slow", label: "slow", turns: [
+          { id: 2, role: "user", text: "the one clicked first", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      await slow;
+
+      expect(getAgentRun().turns.map((t) => t.text)).toEqual(["the one clicked second"]);
+    });
+
     it("asks the agent the reopened conversation belongs to", async () => {
       listSessions.mockResolvedValue([{ id: "cdx", title: "t", createdAt: 1, updatedAt: 2 }]);
       loadSession.mockResolvedValue({

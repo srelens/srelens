@@ -120,6 +120,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const [attachError, setAttachError] = useState<unknown>(null);
   /** A question refused because srelens has no cluster to ask about. */
   const [noCluster, setNoCluster] = useState(false);
+  /** How many pasted or picked images are still being read. */
+  const [reading, setReading] = useState(0);
   /**
    * Which agent the next question goes to — read here because the picker lives
    * in the composer's footer now, beside `+`.
@@ -150,6 +152,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
 
   async function attach(files: File[]) {
     setAttachError(null);
+    // Counted, because `FileReader` is asynchronous and Enter is not. Submit
+    // before a read settles and the question went WITHOUT the image, cleared
+    // the attachment row, and then this callback appended the image — silently
+    // carrying it onto the next question instead. `onSubmit` refuses while
+    // this is above zero.
+    setReading((n) => n + 1);
     try {
       const uris = await Promise.all(files.map(readImageFile));
       setImages((held) => [...held, ...uris]);
@@ -157,6 +165,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
       // Said, not swallowed: a screenshot the reader believes is attached and
       // is not would be discovered only by the answer ignoring it.
       setAttachError(e);
+    } finally {
+      setReading((n) => n - 1);
     }
   }
   const contexts = useContexts();
@@ -324,6 +334,9 @@ export function Console({ fullView }: { fullView?: boolean }) {
       return;
     }
     setNoCluster(false);
+    // An image still being read belongs to THIS question. Sending now would
+    // send the question without it and attach it to the next one.
+    if (reading > 0) return;
     /*
       In the full view the dock shows whichever conversation is SELECTED, and
       `/agent` is not that conversation's subject — it is not a subject at all.
@@ -539,6 +552,11 @@ export function Console({ fullView }: { fullView?: boolean }) {
           {noCluster && (
             <span className="chip" style={{ color: "var(--sev)" }}>
               <span>No cluster is active — connect one before asking</span>
+            </span>
+          )}
+          {reading > 0 && (
+            <span className="chip">
+              <span>Reading {reading === 1 ? "an image" : `${reading} images`}…</span>
             </span>
           )}
         </>

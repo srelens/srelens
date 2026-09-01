@@ -72,6 +72,37 @@ describe("AgentPane", () => {
     expect(screen.getByText(/not installed/i)).toBeTruthy();
   });
 
+  /**
+   * Codex P2. The fetched list was keyed by provider alone, so a list from one
+   * OpenAI-compatible endpoint stayed on screen after the reader pointed the
+   * provider at another — offering model ids the new endpoint may not have,
+   * and letting one be saved.
+   */
+  it("drops fetched models when the endpoint they came from changes", async () => {
+    llmGetSettings.mockResolvedValue({
+      defaultProvider: "openAiCompatible" as const,
+      models: {},
+      baseUrls: { openAiCompatible: "https://first.example/v1" },
+      maxTokens: 4096,
+    });
+    llmKeyStatus.mockResolvedValue(["openAiCompatible"]);
+    llmListModels.mockResolvedValue([{ id: "first-endpoint-model" }]);
+    render(<AgentPane />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /fetch models/i }));
+    expect(await screen.findByText("first-endpoint-model")).toBeTruthy();
+
+    // Point it somewhere else.
+    const url = screen.getByLabelText(/base URL/i);
+    await userEvent.clear(url);
+    await userEvent.type(url, "https://second.example/v1");
+
+    // The old endpoint's models are not on offer for the new one.
+    await vi.waitFor(() => {
+      expect(screen.queryByText("first-endpoint-model")).toBeNull();
+    });
+  });
+
   it("reports a provider failure in the provider's terms, never the cluster's", async () => {
     llmListModels.mockRejectedValue("ApiError: 401 Unauthorized");
     render(<AgentPane />);
