@@ -386,6 +386,11 @@ pub struct ApplyIn {
     pub context: String,
     /// One or more resource manifests as YAML (documents separated by `---`).
     pub yaml: String,
+    /// Namespace the request is scoped to, used for a document that names
+    /// none. Threaded from the caller (the tab's namespace) rather than
+    /// hardcoded — see `apply_namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Force apply, taking ownership of fields held by other managers.
     #[serde(default)]
     pub force: bool,
@@ -454,6 +459,58 @@ pub fn parse_conflict(message: &str) -> Conflict {
     }
 }
 
+/// The namespace a manifest document must be applied in — `None` meaning the
+/// cluster-scoped endpoint.
+///
+/// The scope of a request is decided by the KIND, never by whether the author
+/// happened to type a `metadata.namespace`. Reading it off the document is what
+/// #404 was: a Secret written without a namespace produced
+/// `PATCH /api/v1/secrets/<name>`, which matches no route on the API server, so
+/// it answered `404 the server could not find the requested resource` — while
+/// `kubectl apply -f` accepts the very same file. The read paths
+/// (`get_manifest_capability`, `get_object_capability`) have always resolved
+/// scope from `gvk_for`'s `namespaced` flag; this is the write paths catching
+/// up.
+///
+/// `fallback` is the namespace the request is scoped to (the tab's), used when
+/// the document names none. It is threaded in from the caller rather than
+/// hardcoded so a New-resource tab pointed at `staging` creates in `staging`.
+/// With no fallback either, `default` — the same last resort the read paths
+/// take.
+///
+/// A kind `gvk_for` does not know is a custom resource whose scope cannot be
+/// decided here (nothing in this process knows a CRD's `scope` without asking
+/// the cluster). Those keep exactly the behaviour they had: the document's own
+/// namespace, or cluster-scoped. Guessing would break applying a cluster-scoped
+/// CRD, which works today.
+///
+/// `gvk_for` keys on the kind alone, so it is only trusted when the document's
+/// group and version match the entry it returns — a custom `Service` in another
+/// group must not be mistaken for the core one.
+pub fn apply_namespace(
+    kind: &str,
+    group: &str,
+    version: &str,
+    doc_namespace: Option<&str>,
+    fallback: Option<&str>,
+) -> Option<String> {
+    let known = gvk_for(kind).filter(|(gvk, _)| gvk.group == group && gvk.version == version);
+    let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    match known {
+        // Namespaced kind: the document's namespace, else the caller's, else
+        // `default`. Never the cluster-scoped path — that is the 404.
+        Some((_, true)) => doc_namespace
+            .and_then(non_empty)
+            .or_else(|| fallback.and_then(non_empty))
+            .or_else(|| Some("default".to_string())),
+        // Cluster-scoped kind: no namespace, even if the document carries one
+        // (the API server ignores it there, and a namespaced path 404s).
+        Some((_, false)) => None,
+        // Unknown kind (a custom resource): unchanged from before.
+        None => doc_namespace.and_then(non_empty),
+    }
+}
+
 /// Split an `apiVersion` into (group, version). Core resources ("v1") have an
 /// empty group.
 pub fn parse_api_version(api_version: &str) -> (String, String) {
@@ -509,7 +566,16 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     let (group, version) = parse_api_version(&r.api_version);
                     let ar =
                         ApiResource::from_gvk(&GroupVersionKind::gvk(&group, &version, &r.kind));
-                    let api: Api<DynamicObject> = match &r.namespace {
+                    // Scope comes from the KIND, not from whether the document
+                    // named a namespace (#404).
+                    let ns = apply_namespace(
+                        &r.kind,
+                        &group,
+                        &version,
+                        r.namespace.as_deref(),
+                        input.namespace.as_deref(),
+                    );
+                    let api: Api<DynamicObject> = match &ns {
                         Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
                         None => Api::all_with(client.clone(), &ar),
                     };
@@ -549,6 +615,11 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 pub struct ValidateIn {
     pub context: String,
     pub yaml: String,
+    /// Namespace the request is scoped to, used for a document that names
+    /// none. Threaded from the caller (the tab's namespace) rather than
+    /// hardcoded — see `apply_namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -587,12 +658,17 @@ fn clean_kube_error(e: kube::Error) -> String {
 async fn validate_document(
     client: &kube::Client,
     value: &serde_json::Value,
+    fallback_namespace: Option<&str>,
 ) -> Option<Result<(), String>> {
     let r = resource_ref(value)?;
     let (group, version) = parse_api_version(&r.api_version);
     let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
     let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = match &r.namespace {
+    // Scope from the KIND (#404): reading it off the document made a valid
+    // manifest with no namespace fail validation, which is the inline red
+    // marker the issue reports.
+    let ns = apply_namespace(&r.kind, &group, &version, r.namespace.as_deref(), fallback_namespace);
+    let api: Api<DynamicObject> = match &ns {
         Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
         None => Api::all_with(client.clone(), &ar),
     };
@@ -677,7 +753,7 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     }
                     results.push((
                         doc_index,
-                        validate_document(client.as_ref().unwrap(), value).await,
+                        validate_document(client.as_ref().unwrap(), value, input.namespace.as_deref()).await,
                     ));
                 }
                 Ok(aggregate_validation(results))
@@ -690,6 +766,11 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 pub struct DiffIn {
     pub context: String,
     pub yaml: String,
+    /// Namespace the request is scoped to, used for a document that names
+    /// none. Threaded from the caller (the tab's namespace) rather than
+    /// hardcoded — see `apply_namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -823,7 +904,17 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     let (group, version) = parse_api_version(&r.api_version);
                     let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
                     let ar = ApiResource::from_gvk(&gvk);
-                    let api: Api<DynamicObject> = match &r.namespace {
+                    // Scope from the KIND (#404): the wrong path made the live
+                    // object read as absent, so the Changes panel showed a full
+                    // create for a resource that already exists.
+                    let doc_ns = apply_namespace(
+                        &r.kind,
+                        &group,
+                        &version,
+                        r.namespace.as_deref(),
+                        input.namespace.as_deref(),
+                    );
+                    let api: Api<DynamicObject> = match &doc_ns {
                         Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
                         None => Api::all_with(client.clone(), &ar),
                     };
@@ -864,7 +955,10 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     documents.push(diff_document(
                         r.kind,
                         r.name,
-                        r.namespace,
+                        // The namespace actually diffed against, not the one the
+                        // document happened to name — they differ exactly when
+                        // the document named none (#404).
+                        doc_ns,
                         exists,
                         current_resource_version,
                         current_json,
@@ -882,6 +976,98 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A stand-in API server that records the request line it was sent, so a
+    /// test can assert the PATH a capability actually built — the level #404
+    /// went wrong at. Answers everything 200 with an empty object.
+    async fn recording_server() -> (kube::Client, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let seen = seen_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let line = req.lines().next().unwrap_or("").to_string();
+                    seen.lock().unwrap().push(line);
+                    let body = "{}";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+        (kube::Client::try_from(config).unwrap(), seen)
+    }
+
+    /// #404 at the wire: a valid TLS Secret with NO `metadata.namespace` must
+    /// be sent to the NAMESPACED endpoint. Before the fix this went to
+    /// `/api/v1/secrets/test-secret`, which matches no route on the API server
+    /// — hence "the server could not find the requested resource".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_namespaceless_secret_is_sent_to_the_namespaced_path() {
+        let (client, seen) = recording_server().await;
+        let doc: serde_json::Value = serde_yaml::from_str(
+            "apiVersion: v1\nkind: Secret\nmetadata:\n  name: test-secret\ntype: kubernetes.io/tls\n",
+        )
+        .unwrap();
+        let _ = validate_document(&client, &doc, None).await;
+
+        let lines = seen.lock().unwrap().clone();
+        assert!(!lines.is_empty(), "no request was sent");
+        let line = &lines[0];
+        assert!(
+            line.contains("/api/v1/namespaces/default/secrets/test-secret"),
+            "expected the namespaced path, got: {line}",
+        );
+        // The exact shape of the bug: the cluster-scoped collection path with a
+        // name hung off it.
+        assert!(
+            !line.contains("/api/v1/secrets/test-secret"),
+            "still building the cluster-scoped path: {line}",
+        );
+    }
+
+    /// The caller's namespace reaches the wire, so a New-resource tab scoped to
+    /// one namespace does not silently create in `default`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_callers_namespace_reaches_the_request_path() {
+        let (client, seen) = recording_server().await;
+        let doc: serde_json::Value =
+            serde_yaml::from_str("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: my-config\n").unwrap();
+        let _ = validate_document(&client, &doc, Some("staging")).await;
+
+        let lines = seen.lock().unwrap().clone();
+        assert!(
+            lines[0].contains("/api/v1/namespaces/staging/configmaps/my-config"),
+            "expected the caller's namespace in the path, got: {}",
+            lines[0],
+        );
+    }
+
+    /// A cluster-scoped kind must NOT gain a namespace segment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cluster_scoped_kind_keeps_the_cluster_path() {
+        let (client, seen) = recording_server().await;
+        let doc: serde_json::Value =
+            serde_yaml::from_str("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: my-ns\n").unwrap();
+        let _ = validate_document(&client, &doc, Some("staging")).await;
+
+        let lines = seen.lock().unwrap().clone();
+        assert!(lines[0].contains("/api/v1/namespaces/my-ns"), "got: {}", lines[0]);
+        assert!(!lines[0].contains("/namespaces/staging/"), "got: {}", lines[0]);
+    }
 
     #[test]
     fn parses_api_version_groups() {
@@ -935,6 +1121,78 @@ metadata:
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[0]["metadata"]["name"], "a");
         assert_eq!(docs[1]["metadata"]["name"], "b");
+    }
+
+    // ---- #404: request scope comes from the KIND, not from the document ----
+
+    /// The bug itself, at the level it was decided: a namespaced kind with no
+    /// `metadata.namespace` must still resolve to a namespace. Reading the
+    /// document instead produced `/api/v1/secrets/<name>`, which matches no
+    /// route, so the API server answered "the server could not find the
+    /// requested resource".
+    #[test]
+    fn a_namespaced_kind_without_a_namespace_is_not_cluster_scoped() {
+        assert_eq!(
+            apply_namespace("Secret", "", "v1", None, None).as_deref(),
+            Some("default"),
+        );
+        // The caller's namespace wins over the `default` last resort, so a
+        // New-resource tab pointed at `staging` creates in `staging`.
+        assert_eq!(
+            apply_namespace("Secret", "", "v1", None, Some("staging")).as_deref(),
+            Some("staging"),
+        );
+        // An explicit namespace still wins over both.
+        assert_eq!(
+            apply_namespace("Secret", "", "v1", Some("prod"), Some("staging")).as_deref(),
+            Some("prod"),
+        );
+        // Empty strings are not namespaces.
+        assert_eq!(
+            apply_namespace("Secret", "", "v1", Some(""), Some("")).as_deref(),
+            Some("default"),
+        );
+        // Not Secret-specific.
+        assert_eq!(apply_namespace("ConfigMap", "", "v1", None, None).as_deref(), Some("default"));
+        assert_eq!(
+            apply_namespace("Deployment", "apps", "v1", None, None).as_deref(),
+            Some("default"),
+        );
+    }
+
+    /// A cluster-scoped kind stays cluster-scoped even when the document names
+    /// a namespace — the API server ignores one there, and a namespaced path
+    /// would 404 the same way.
+    #[test]
+    fn a_cluster_scoped_kind_ignores_any_namespace() {
+        assert_eq!(apply_namespace("Namespace", "", "v1", None, Some("prod")), None);
+        assert_eq!(apply_namespace("Node", "", "v1", Some("prod"), None), None);
+        assert_eq!(
+            apply_namespace("ClusterRole", "rbac.authorization.k8s.io", "v1", Some("prod"), None),
+            None,
+        );
+    }
+
+    /// A kind this process cannot classify (a custom resource — nothing here
+    /// knows a CRD's `scope` without asking the cluster) keeps exactly the
+    /// behaviour it had. Guessing would break applying a cluster-scoped CRD,
+    /// which works today.
+    #[test]
+    fn an_unknown_kind_keeps_its_previous_behaviour() {
+        assert_eq!(
+            apply_namespace("Widget", "acme.io", "v1", Some("prod"), Some("staging")).as_deref(),
+            Some("prod"),
+        );
+        assert_eq!(apply_namespace("Widget", "acme.io", "v1", None, Some("staging")), None);
+    }
+
+    /// `gvk_for` keys on the kind alone, so a custom `Service` in someone
+    /// else's group must not be mistaken for the core one and forced into a
+    /// namespace it may not have.
+    #[test]
+    fn a_same_named_kind_in_another_group_is_not_the_core_one() {
+        assert_eq!(apply_namespace("Service", "", "v1", None, None).as_deref(), Some("default"));
+        assert_eq!(apply_namespace("Service", "acme.io", "v1", None, None), None);
     }
 
     #[test]

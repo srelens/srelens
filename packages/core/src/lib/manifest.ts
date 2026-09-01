@@ -313,6 +313,9 @@ export async function applyManifest(
   context: string,
   yaml: string,
   force = false,
+  /** Namespace to apply a document that names none in. Without it the backend
+   *  falls back to `default` — see `apply_namespace` in crates/kube (#404). */
+  namespace?: string,
   invoke: Invoker = invokeCapability,
 ): Promise<{ documents?: ApplyDoc[]; applied?: boolean; error?: string }> {
   try {
@@ -320,6 +323,7 @@ export async function applyManifest(
       context,
       yaml,
       force,
+      namespace,
     });
     return { documents: out.documents, applied: out.applied };
   } catch (e) {
@@ -331,10 +335,12 @@ export async function applyManifest(
 export async function diffManifest(
   context: string,
   yaml: string,
+  /** Namespace for a document that names none (#404). */
+  namespace?: string,
   invoke: Invoker = invokeCapability,
 ): Promise<{ documents?: DiffDoc[]; error?: string }> {
   try {
-    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", { context, yaml });
+    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", { context, yaml, namespace });
     return { documents: out.documents };
   } catch (e) {
     return { error: String(e) };
@@ -367,12 +373,15 @@ export interface ValidateError {
 export async function validateManifest(
   context: string,
   yaml: string,
+  /** Namespace for a document that names none (#404). */
+  namespace?: string,
   invoke: Invoker = invokeCapability,
 ): Promise<{ valid?: boolean; errors?: ValidateError[]; error?: string }> {
   try {
     const out = await invoke<{ valid: boolean; errors: ValidateError[] }>("k8s.validateManifest", {
       context,
       yaml,
+      namespace,
     });
     return { valid: out.valid, errors: out.errors };
   } catch (e) {
