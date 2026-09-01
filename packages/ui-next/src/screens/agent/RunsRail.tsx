@@ -81,6 +81,9 @@ export function RunsRail() {
    *  empty list that should not be empty is exactly the "history is not
    *  correct" this section has already been wrong about once. */
   const [historyError, setHistoryError] = useState<unknown>(null);
+  /** One saved conversation that would not open — separate from the listing
+   *  failure above it, which is about reading the index rather than a file. */
+  const [openError, setOpenError] = useState<unknown>(null);
 
   useEffect(() => {
     // Saved conversations, read once per mount. Metadata only — a transcript
@@ -124,6 +127,16 @@ export function RunsRail() {
             <RawError text={String(historyError)} />
           </Alert>
         )}
+        {openError !== null && (
+          <Alert
+            tone="sev"
+            className="mx-3"
+            title="That conversation could not be opened"
+            onDismiss={() => setOpenError(null)}
+          >
+            <RawError text={String(openError)} />
+          </Alert>
+        )}
         {runs.length === 0 ? (
           <p className="min-w-0 break-words px-3 text-xs text-muted">
             No questions yet. Asking one from any screen starts a conversation about that thing, and
@@ -140,8 +153,14 @@ export function RunsRail() {
                   // A row on disk has to be LOADED; one in memory is just a
                   // switch. Same control either way, because to the reader
                   // they are the same thing: a conversation they had.
-                  if (r.savedId !== undefined) void openSavedRun(r.savedId);
-                  else selectRun(r.key);
+                  if (r.savedId !== undefined) {
+                    // Caught, not fire-and-forget. A file listed a moment ago
+                    // can be gone, truncated or unreadable by the time it is
+                    // opened, and the rejection had nowhere to go: the click
+                    // appeared to do nothing and the rejection went unhandled.
+                    setOpenError(null);
+                    void openSavedRun(r.savedId).catch((e: unknown) => setOpenError(e));
+                  } else selectRun(r.key);
                 }}
                 // Edge to edge, divided by a hairline, no rounded tile and no
                 // gap — the design's own list idiom (`Section`'s

@@ -581,6 +581,10 @@ describe("the run store", () => {
         about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },
         route: "/k/pods/ns/mongodb-0",
       };
+      // What a subscriber SEES at each notification, not merely that it was
+      // notified: `commitTo(busy:false)` emits in the same flush, so "was
+      // called" is true with the removal's own emit deleted.
+      const snapshots: { rows: number; key: string | null }[] = [];
       const list = { about: { cluster: "prod-eu" }, route: "/k/statefulsets" };
       let finish: ((s: string | null) => void) | undefined;
       sendChat.mockImplementationOnce(() => new Promise<string | null>((res) => (finish = res)));
@@ -591,9 +595,21 @@ describe("the run store", () => {
       await askAgent("refused", list);
       expect(getAgentRun().error).toMatch(/still answering/);
 
+      // Subscribed only now, so the count below is about the removal rather
+      // than about everything the two questions already emitted.
+      const off = subscribeAgentRun(() =>
+        snapshots.push({ rows: getRunSummaries().length, key: getActiveRunKey() }),
+      );
       finish?.(null);
       for (let i = 0; i < 50; i++) await Promise.resolve();
+      off();
 
+      // The LAST thing a subscriber was told already has the refusal gone. A
+      // delete does not emit and neither does reassigning `activeKey`, so
+      // without the removal's own emit the final notification a hook received
+      // still described two conversations — the alert and the blank run stayed
+      // on screen until some unrelated update woke it.
+      expect(snapshots.at(-1)).toEqual({ rows: 1, key: "prod-eu|Pod|ns|mongodb-0" });
       // One conversation — the one that was actually asked.
       const rows = getRunSummaries();
       expect(rows).toHaveLength(1);
@@ -1394,6 +1410,42 @@ describe("the run store", () => {
       sendChat.mockResolvedValue(null);
       await askAgent("carry on", { about: { cluster: "prod-eu" }, route: "/k/pods" });
       expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+    });
+
+    /**
+     * Codex P2, round 4: `openSeq` was only ever advanced by another saved-row
+     * click, so selecting an already-loaded conversation while a load was in
+     * flight left that load free to switch the transcript back when it landed.
+     */
+    it("lets an explicit selection outrank a load still in flight", async () => {
+      sendChat.mockResolvedValue(null);
+      // A live conversation to switch to.
+      await askAgent("the live one", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      const liveKey = getActiveRunKey();
+
+      listSessions.mockResolvedValue([{ id: "slow", title: "slow", createdAt: 1, updatedAt: 2 }]);
+      await restoreRuns();
+      let release: ((v: unknown) => void) | undefined;
+      loadSession.mockImplementationOnce(() => new Promise((res) => (release = res)));
+      const slow = openSavedRun("slow");
+      await vi.waitFor(() => {
+        expect(release).toBeDefined();
+      });
+
+      // The reader gives up waiting and picks the conversation already loaded.
+      selectRun(liveKey);
+
+      release?.({
+        id: "slow", title: "slow", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: "k|slow", label: "slow", turns: [
+          { id: 9, role: "user", text: "the slow one", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      await slow;
+
+      expect(getActiveRunKey()).toBe(liveKey);
+      expect(getAgentRun().turns.map((t) => t.text)).toContain("the live one");
     });
 
     it("asks the agent the reopened conversation belongs to", async () => {

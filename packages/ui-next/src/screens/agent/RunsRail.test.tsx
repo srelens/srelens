@@ -105,6 +105,26 @@ describe("the agent screen's rail", () => {
     });
   });
 
+  /**
+   * Codex P2: `void openSavedRun(id)` had no rejection handler. A file listed a
+   * moment ago can be gone, truncated or unreadable by the time it is opened —
+   * the click appeared to do nothing, and the rejection went unhandled.
+   */
+  it("says so when a saved conversation cannot be opened", async () => {
+    listSessions.mockResolvedValue([
+      { id: "gone", title: "a conversation whose file went away", createdAt: 1, updatedAt: 2 },
+    ]);
+    loadSession.mockRejectedValue(new Error("No such file (os error 2)"));
+    render(<RunsRail />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /file went away/i }));
+
+    // The reader is told, and told what happened — not left with a click that
+    // did nothing.
+    expect(await screen.findByText(/could not be opened/i)).toBeTruthy();
+    expect(screen.getByText(/os error 2/i)).toBeTruthy();
+  });
+
   it("lists a conversation once one has been started, by its subject", async () => {
     sendChat.mockResolvedValue(null);
     await askAgent("summarise this stream", {

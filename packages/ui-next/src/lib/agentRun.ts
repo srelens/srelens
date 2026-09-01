@@ -322,6 +322,23 @@ function refreshEmptyRun() {
  * gone is not a fact this module wants to be carrying around).
  */
 let stoppedGeneration: number | null = null;
+
+/**
+ * Which saved-conversation load is the current one.
+ *
+ * Two clicks before the first `loadSession` returns and BOTH continuations
+ * assigned `activeKey`, so whichever request happened to resolve last won — a
+ * slow first load switched the transcript back after the reader had already
+ * opened the second. Bumped by `openSavedRun` on entry AND by `selectRun`,
+ * since an explicit selection is the reader saying which conversation they
+ * want; compared before anything is applied.
+ *
+ * Declared here with the rest of the module's state rather than beside
+ * `openSavedRun`: `selectRun` reads it 900 lines earlier, and a `let` used
+ * above its own declaration is a temporal dead zone waiting for the first
+ * caller that runs during module evaluation.
+ */
+let openSeq = 0;
 /** Ids are the store's own, not the backend's. */
 let turnSeq = 0;
 /** Monotonic, so recency never ties. See {@link RunState.order}. */
@@ -612,6 +629,13 @@ export function useActiveRunKey(): string | null {
 /** Show a different conversation — the rail's switch. */
 export function selectRun(key: string | null): void {
   if (key === null) return;
+  // BEFORE the early return below, deliberately. Any saved-conversation load
+  // still in flight is stale the moment the reader says which conversation
+  // they want — and the commonest way to say it is clicking the one already
+  // active, to get back to it while a slow load spins. Placed after the guard,
+  // that click invalidated nothing and the load still switched the transcript
+  // away when it landed.
+  openSeq += 1;
   if (activeKey === key) return;
   // A key with no run yet is ACCEPTED, deliberately. The dock's "full view"
   // control selects its own subject before navigating, and the reader may not
@@ -1036,6 +1060,12 @@ export async function askAgent(
       // the sentences saying so stop being true. Cleared here rather than left
       // for the reader to dismiss: a stale message about a current problem is
       // the class of defect this branch exists to remove.
+      // Whether anything was REMOVED rather than committed. `commitTo` emits;
+      // a delete does not, and neither does reassigning `activeKey` — so
+      // without the emit below, `useAgentRun`, `useActiveRunKey` and `useRun`
+      // kept showing the refusal alert or a blank run until some unrelated
+      // store update happened to wake them.
+      let removed = false;
       for (const [k, st] of runs) {
         if (!st.refusalOnly) continue;
         st.refusalOnly = false;
@@ -1049,10 +1079,13 @@ export async function askAgent(
           // The conversation the reader is actually watching — the one whose
           // turn just finished — rather than a key that no longer resolves.
           if (activeKey === k) activeKey = key;
+          removed = true;
           continue;
         }
         commitTo(k, { ...st.run, error: undefined });
       }
+      if (removed) emit();
+
       // Every turn, not only the last: a window closed mid-conversation must
       // not lose the answers already given, and "save on exit" has no hook to
       // hang on in a Tauri window the reader can kill.
@@ -1551,16 +1584,6 @@ export async function restoreRuns(): Promise<void> {
 
 /** Open a saved conversation: load its transcript, put it in the map under its
  *  own subject key, and show it. */
-/**
- * Which saved-conversation click is the current one.
- *
- * Two clicks before the first `loadSession` returns and BOTH continuations
- * assigned `activeKey`, so whichever request happened to resolve last won —
- * a slow first load switched the transcript back after the reader had already
- * opened the second. Bumped on entry, compared before anything is applied.
- */
-let openSeq = 0;
-
 export async function openSavedRun(id: string): Promise<void> {
   const mine = ++openSeq;
   const meta = saved.find((m) => m.id === id);
