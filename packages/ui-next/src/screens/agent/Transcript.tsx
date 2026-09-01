@@ -1,5 +1,5 @@
 import { parseAssistantMarkdown, type MdBlock, type NoteSpan } from "@srelens/core";
-import { AgentMark, Badge, cx, toneWash, type Tone } from "@srelens/ui-kit";
+import { AgentMark, Badge, CopyButton, cx, toneWash, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
 import { CAPABILITY_CATALOG } from "@srelens/core";
 import { pad2 } from "../../lib/numbers";
@@ -311,19 +311,23 @@ function TurnClock({ at, className }: { at: number; className?: string }) {
 
 function UserTurn({ turn }: { turn: Turn }) {
   return (
+    // NO fill of its own. §5 draws the question in an accent wash, and inside
+    // an exchange card that wash is a second canvas — so one exchange read as
+    // two, which is what got reported after the container went in. The
+    // exchange is the canvas; the question is told apart by weight and by
+    // sitting right, not by having a surface of its own.
     <div className="flex justify-end">
-      <div className="min-w-0 max-w-[85%] rounded-card bg-accent-wash px-3 py-2 text-sm">
+      <div className="min-w-0 max-w-[85%] px-0 py-0 text-right text-sm font-medium text-ink">
         {turn.images && turn.images.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-1.5">
+          <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
             {turn.images.map((src, i) => (
               <img key={i} src={src} alt="Attached" className="h-16 w-16 rounded-tile object-cover" />
             ))}
           </div>
         )}
         <p className="whitespace-pre-wrap break-words">{turn.text}</p>
-        {/* Inside the wash and right-aligned with it, the way the mock draws
-            it — the stamp belongs to this turn, not to the gap under it. */}
-        <TurnClock at={turn.at} className="mt-1 block text-right" />
+        {/* Right-aligned with the question it belongs to. */}
+        <TurnClock at={turn.at} className="mt-0.5 block text-right" />
       </div>
     </div>
   );
@@ -399,6 +403,40 @@ function ErrorTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
   );
 }
 
+/**
+ * The turns, grouped into exchanges: each starts at the reader's question and
+ * carries everything that answered it.
+ *
+ * `turns` is flat, and drawn flat it gave no seam between one question and the
+ * next — a long answer ran straight into the following question. A leading run
+ * of non-user turns (a restored transcript, an answer with no recorded
+ * question) becomes its own group rather than being dropped.
+ */
+function exchanges(turns: readonly Turn[]): Turn[][] {
+  const out: Turn[][] = [];
+  for (const turn of turns) {
+    if (turn.role === "user" || out.length === 0) out.push([turn]);
+    else out[out.length - 1].push(turn);
+  }
+  return out;
+}
+
+/**
+ * An exchange as plain text, for the clipboard — the question, then what was
+ * said back.
+ *
+ * Tool calls are left out on purpose: they are how the answer was reached, not
+ * the answer, and a paste full of `k8s_listPods {...}` buries the part the
+ * reader wanted. Empty when nothing has been said yet, so the control does not
+ * offer to copy a question on its own.
+ */
+function exchangeText(exchange: readonly Turn[]): string {
+  const said = exchange.filter((t) => t.role !== "user" && t.text !== "");
+  if (said.length === 0) return "";
+  const asked = exchange.find((t) => t.role === "user");
+  return [asked?.text, ...said.map((t) => t.text)].filter(Boolean).join("\n\n");
+}
+
 export function Transcript({
   turns,
   gates,
@@ -424,14 +462,33 @@ export function Transcript({
       {...(live ? { role: "log" as const, "aria-live": "polite" as const } : {})}
       className="flex min-w-0 flex-col gap-3"
     >
-      {turns.map((turn) => (
-        <div key={turn.id} className="min-w-0">
-          {turn.role === "user" ? (
-            <UserTurn turn={turn} />
-          ) : turn.role === "error" ? (
-            <ErrorTurn turn={turn} compact={compact} />
-          ) : (
-            <AgentTurn turn={turn} compact={compact} />
+      {exchanges(turns).map((exchange) => (
+        <div
+          key={exchange[0].id}
+          // One EXCHANGE per container: the question and everything answering
+          // it, inside a thin border. A flat run of turns left no seam between
+          // one question and the next, so a long answer and the question after
+          // it read as continuous.
+          className="flex min-w-0 flex-col gap-2 rounded-card border border-rule bg-surface px-3 py-2.5"
+        >
+          {exchange.map((turn) => (
+            <div key={turn.id} className="min-w-0">
+              {turn.role === "user" ? (
+                <UserTurn turn={turn} />
+              ) : turn.role === "error" ? (
+                <ErrorTurn turn={turn} compact={compact} />
+              ) : (
+                <AgentTurn turn={turn} compact={compact} />
+              )}
+            </div>
+          ))}
+          {/* One copy per exchange, not per turn: what a reader wants is the
+              question and its answer together — pasting an answer with no
+              question is half a record. Only once there IS an answer. */}
+          {exchangeText(exchange) !== "" && (
+            <div className="flex justify-end">
+              <CopyButton text={exchangeText(exchange)} label="Copy this question and answer" iconOnly />
+            </div>
           )}
         </div>
       ))}

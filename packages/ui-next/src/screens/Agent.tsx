@@ -141,7 +141,11 @@ export function Agent(_props: { route: string }) {
               </Alert>
             </div>
           )}
-          <div className="scroll min-h-0 min-w-0 flex-1 px-3 py-3">
+          {/* The chat sits on the CANVAS, not the surface. Exchanges are cards
+              now — `bg-surface` inside a thin border — and a card on the same
+              colour as its own ground is not a card. This is the pairing the
+              mock uses: light ground, white exchanges. */}
+          <div className="scroll min-h-0 min-w-0 flex-1 bg-canvas px-3 py-3">
             {turns.length === 0 ? (
               /* An empty screen said nothing at all — reported as "page looks
                  empty". What it says is what this agent can actually do,

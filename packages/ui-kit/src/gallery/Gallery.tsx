@@ -18,6 +18,7 @@ import { Dialog } from "../Dialog";
 import { DiffLines, type DiffRow } from "../DiffLines";
 import { ConsoleDock } from "../ConsoleDock";
 import { ConsolePrompt } from "../ConsolePrompt";
+import { CopyButton } from "../CopyButton";
 import { ContextMenu } from "../ContextMenu";
 import { CopyCommand } from "../CopyCommand";
 import { CustomizeMark, type MarkAppearance } from "../CustomizeMark";
@@ -1776,6 +1777,21 @@ export function Gallery() {
             body. An `active` naming a step that is gone falls back to the
             first. */}
         <DrillCard steps={[]} active="signal" onActiveChange={() => {}} title="Nothing selected" />
+      </section>
+
+      <section>
+        <h2>CopyButton</h2>
+        {/* The clipboard dance in one place: the `copied` flag, the timer that
+            clears it, and the silence when there is no clipboard at all — a
+            non-secure origin has none, and "Copied" over an empty clipboard is
+            the only outcome that actually misleads. `CopyCommand` uses this. */}
+        <div className="flex items-center gap-3">
+          <CopyButton text="kubectl -n checkout get pods" label="Copy the command" />
+          {/* Icon only, for a control beside content that is already labelled —
+              a transcript turn. The accessible name is still the label, and
+              that is the one form where it does not silence the text. */}
+          <CopyButton text="the answer" label="Copy the answer" iconOnly />
+        </div>
       </section>
 
       <section>

@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Transcript } from "./Transcript";
 import type { Turn } from "../../lib/agentRun";
 
@@ -202,5 +203,84 @@ describe("a run's transcript", () => {
       // (#388), so any sentence about what the call would do is invented.
       expect(screen.queryByText(/restores|recreates|expected full recovery/i)).toBeNull();
     });
+  });
+
+  describe("an exchange", () => {
+    const q = (id: number, text: string) => ({ id, role: "user" as const, text, calls: [], at: 1 });
+    const a = (id: number, text: string) => ({ id, role: "agent" as const, text, calls: [], at: 2 });
+
+    it("puts a question and what answered it in one bordered container", () => {
+      const { container } = render(
+        <Transcript turns={[q(1, "why 5xx"), a(2, "the pool shrank"), q(3, "roll it back")]} gates={[]} />,
+      );
+      // Two exchanges, not three loose turns and not one continuous run: a
+      // long answer ran straight into the next question without a seam.
+      const cards = container.querySelectorAll(".border.border-rule");
+      expect(cards).toHaveLength(2);
+      expect(cards[0].textContent).toContain("why 5xx");
+      expect(cards[0].textContent).toContain("the pool shrank");
+      expect(cards[1].textContent).toContain("roll it back");
+    });
+
+    it("copies the question together with the answer", async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      render(<Transcript turns={[q(1, "why 5xx"), a(2, "the pool shrank")]} gates={[]} />);
+
+      await userEvent.click(screen.getByRole("button", { name: /copy this question and answer/i }));
+      // Both halves: an answer with no question is half a record.
+      expect(writeText).toHaveBeenCalledWith("why 5xx\n\nthe pool shrank");
+    });
+
+    it("offers no copy for a question nothing has answered yet", () => {
+      render(<Transcript turns={[q(1, "why 5xx")]} gates={[]} />);
+      expect(screen.queryByRole("button", { name: /copy this question and answer/i })).toBeNull();
+    });
+
+    it("leaves tool calls out of what it copies", async () => {
+      const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      render(
+        <Transcript
+          turns={[
+            q(1, "why 5xx"),
+            { id: 2, role: "agent", text: "the pool shrank", at: 2, calls: [{ id: "c", tool: "k8s.listPods", args: {}, status: "ok", ms: 12 }] },
+          ]}
+          gates={[]}
+        />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: /copy this question and answer/i }));
+      // How the answer was reached is not the answer, and a paste full of
+      // `k8s.listPods {...}` buries the part that was wanted.
+      expect(writeText).toHaveBeenCalledWith("why 5xx\n\nthe pool shrank");
+    });
+
+    it("groups a restored transcript that starts with an answer", () => {
+      const { container } = render(<Transcript turns={[a(1, "restored answer")]} gates={[]} />);
+      // A leading run of non-user turns gets its own group rather than being
+      // dropped on the floor.
+      expect(container.querySelectorAll(".border.border-rule")).toHaveLength(1);
+      expect(screen.getByText("restored answer")).toBeTruthy();
+    });
+  });
+
+  it("gives the question no canvas of its own inside the exchange", () => {
+    const { container } = render(
+      <Transcript
+        turns={[
+          { id: 1, role: "user", text: "why 5xx", calls: [], at: 1 },
+          { id: 2, role: "agent", text: "the pool shrank", calls: [], at: 2 },
+        ]}
+        gates={[]}
+      />,
+    );
+    // §5 draws the question in an accent wash. Inside an exchange card that
+    // wash is a SECOND canvas, so one exchange read as two — reported right
+    // after the container went in. The card is the canvas; the question is
+    // told apart by weight and by sitting right.
+    expect(container.querySelector(".bg-accent-wash")).toBeNull();
+    // Still distinguishable, or it is just more prose.
+    const asked = screen.getByText("why 5xx");
+    expect(asked.closest(".font-medium")).not.toBeNull();
   });
 });
