@@ -6,6 +6,7 @@ import {
   Box,
   BriefcaseBusiness,
   Circle,
+  Check,
   Clock3,
   Compass,
   Copy,
@@ -192,6 +193,7 @@ export const Icons = {
   // The application log screen's own actions.
   refresh: RefreshCw,
   copy: Copy,
+  check: Check,
   reveal: FolderOpen,
 
   // The row menu's write actions, shared by every kind that offers them.

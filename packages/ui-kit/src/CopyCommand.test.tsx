@@ -61,7 +61,7 @@ describe("CopyCommand", () => {
     expect(container.querySelector(".copy-command-check")).not.toBeNull();
   });
 
-  it("leaves the command readable on a machine with no clipboard", async () => {
+  it("keeps the command readable and reports a clipboard failure", async () => {
     // A non-secure origin has no `navigator.clipboard`. The command is still
     // the thing the reader came for: it stays on screen and selectable, and
     // the button does not claim to have copied anything.
@@ -72,7 +72,9 @@ describe("CopyCommand", () => {
       fireEvent.click(copyButton());
     });
 
-    expect(screen.getByRole("button", { name: "Copy" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Copy failed" })).toBeDefined();
+    expect(screen.getByRole("status").textContent).toBe("Could not copy to clipboard");
+    expect(screen.queryByRole("button", { name: "Copied" })).toBeNull();
     expect(container.querySelector("code")?.textContent).toBe(COMMAND);
   });
 

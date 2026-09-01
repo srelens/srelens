@@ -196,6 +196,10 @@ describe("ResourceDetailView", () => {
     descriptorFor.mockReturnValue(undefined);
     codeEditorProps.length = 0;
     asked.length = 0;
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
     // Which blocks are open is a module-level store that outlives a render,
     // exactly as it outlives a launch. Cleared, so no test inherits another's
     // choices — least of all one about a Secret.
@@ -1433,6 +1437,31 @@ describe("ResourceDetailView", () => {
       // Nothing was left over to fold, so there is no overflow to open onto an
       // empty menu.
       expect(queryByRole("button", { name: "More actions" })).toBeNull();
+    });
+
+    it("confirms Copy as kubectl on the footer itself, with no toast host", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      getObject.mockResolvedValue({
+        object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } },
+      });
+      descriptorFor.mockReturnValue(undefined);
+      const { getByRole } = render(
+        <ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />,
+      );
+      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+
+      await userEvent.click(within(footer()!).getByRole("button", { name: "Copy as kubectl" }));
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText.mock.calls[0][0]).toBe(
+        "kubectl get widget w-1 -n default --context ctx -o yaml",
+      );
+      expect(await within(footer()!).findByRole("button", { name: "Copied" })).toBeDefined();
+      expect(within(footer()!).getByRole("status").textContent).toBe("Copied to clipboard");
     });
 
     it("offers the same actions in the tab's header row, only more of them on the bar", async () => {

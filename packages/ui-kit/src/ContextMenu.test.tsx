@@ -90,6 +90,14 @@ describe("ContextMenu", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
+  it("can keep a feedback-bearing item visible after it is picked", async () => {
+    const onPick = vi.fn();
+    await open({ items: [{ label: "Copy", closeOnPick: false, onPick }] });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy" }));
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("menu")).toBeDefined();
+  });
+
   it("draws a separator that is not itself an item", async () => {
     await open();
     const menu = screen.getByRole("menu");

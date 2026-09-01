@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   K8S_KIND,
-  copyKubectlCommand,
   cordonNode,
   drainNode,
   formatStorageSize,
@@ -21,6 +20,7 @@ import {
   ActionBar,
   Alert,
   Button,
+  ClipboardCopyStatus,
   ConfirmDialog,
   EmptyState,
   ErrorState,
@@ -36,9 +36,11 @@ import {
   StatusPill,
   StatusRow,
   Table,
+  useClipboardCopy,
   loadTone,
   statusTone,
   type ActionBarAction,
+  type ClipboardCopyController,
   type Column,
   type Tone,
 } from "@srelens/ui-kit";
@@ -708,6 +710,7 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const clipboard = useClipboardCopy();
 
   const all: NodeRow[] = nodes.nodes.map(({ node, usage }) => ({ ...node, usage }));
   // Sorted on a copy: `nodes.nodes` is the loader's array and shared with the
@@ -742,7 +745,10 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
     },
     [reset],
   );
-  const columns = useMemo(() => nodeColumns(context, open), [context, open]);
+  const columns = useMemo(
+    () => nodeColumns(context, open, clipboard),
+    [context, open, clipboard.feedback, clipboard.statusFor, clipboard.write],
+  );
 
   function close() {
     setPending(null);
@@ -858,6 +864,7 @@ function Nodes({ context, nodes }: { context: string; nodes: OverviewNodes }) {
           onCancel={close}
         />
       )}
+      <ClipboardCopyStatus feedback={clipboard.feedback} />
     </Section>
   );
 }
@@ -936,7 +943,11 @@ function podsRead(pods: NodeUsage["pods"]): string {
   return `${pods.used}/${pods.allocatable}`;
 }
 
-function nodeColumns(context: string, open: (pending: Pending) => void): Column<NodeRow>[] {
+function nodeColumns(
+  context: string,
+  open: (pending: Pending) => void,
+  clipboard: ClipboardCopyController,
+): Column<NodeRow>[] {
   return [
     {
       key: "name",
@@ -1000,7 +1011,11 @@ function nodeColumns(context: string, open: (pending: Pending) => void): Column<
       sortable: false,
       filterable: false,
       render: (row) => (
-        <ActionBar actions={nodeActions(context, row, open)} label={`Actions for ${row.name}`} max={2} />
+        <ActionBar
+          actions={nodeActions(context, row, open, clipboard)}
+          label={`Actions for ${row.name}`}
+          max={2}
+        />
       ),
     },
   ];
@@ -1016,8 +1031,15 @@ function nodeColumns(context: string, open: (pending: Pending) => void): Column<
  * ephemeral debug-pod flow, which this screen has no path to, and an action
  * that cannot work is worse than one that is absent.
  */
-function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => void): ActionBarAction[] {
+function nodeActions(
+  context: string,
+  row: NodeRow,
+  open: (pending: Pending) => void,
+  clipboard: ClipboardCopyController,
+): ActionBarAction[] {
   const kubectlBase = { kind: "Node", name: row.name, namespace: null, context } as const;
+  const copyKey = `${context}/Node/${row.name}`;
+  const copyStatus = clipboard.statusFor(copyKey);
   return [
     row.unschedulable
       ? {
@@ -1052,8 +1074,19 @@ function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => 
     },
     {
       id: "copy",
-      label: ROW_ACTION_LABEL.copy,
-      onSelect: () => void copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
+      label:
+        copyStatus === "copied"
+          ? "Copied"
+          : copyStatus === "failed"
+            ? "Copy failed"
+            : ROW_ACTION_LABEL.copy,
+      icon: copyStatus === "copied" ? Icons.check : copyStatus === "failed" ? Icons.warn : Icons.copy,
+      closeOnSelect: false,
+      onSelect: () =>
+        void clipboard.write(
+          copyKey,
+          toKubectl({ ...kubectlBase, action: "get", output: "yaml" }),
+        ),
     },
   ];
 }
@@ -1365,7 +1398,7 @@ function NodeConfirm({
               </>
             )}
           </p>
-          <KubectlPreview command={command} onCopy={() => void copyKubectlCommand(command)} />
+          <KubectlPreview command={command} />
           {/* The dialog stays open on a refusal, so this is the whole of what
               the reader is told about why the action did not happen. */}
           {error && <FailureLine error={error} className="text-sev" />}

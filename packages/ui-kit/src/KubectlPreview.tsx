@@ -1,14 +1,18 @@
 import { cx } from "./cx";
 import { filled } from "./slot";
 import { IconButton, type IconComponent } from "./IconButton";
+import {
+  ClipboardCopyStatus,
+  CopyFailureGlyph,
+  CopySuccessGlyph,
+  useClipboardCopy,
+} from "./clipboardCopy";
 
 export interface KubectlPreviewProps {
   /** The kubectl-equivalent command. Omit (and pass `note` instead) when there's no faithful one-liner. */
   command?: string;
   /** Shown instead of a command when no clean kubectl equivalent exists (e.g. evict). */
   note?: string;
-  /** Copy-to-clipboard handler; renders a copy affordance next to `command` when set. */
-  onCopy?: () => void;
   className?: string;
 }
 
@@ -44,16 +48,26 @@ const CopyGlyph: IconComponent = ({ size = 14, ...rest }) => (
  * top margin. Commands are long and dialogs are narrow, so the line wraps
  * rather than truncating — a preview you cannot finish reading is not one. (#318)
  */
-export function KubectlPreview({ command, note, onCopy, className }: KubectlPreviewProps) {
+export function KubectlPreview({ command, note, className }: KubectlPreviewProps) {
+  const copy = useClipboardCopy();
   if (!filled(command)) {
     if (!filled(note)) return null;
     return <p className={cx("mt-2 text-xs text-muted", className)}>{note}</p>;
   }
+  const copyCommand = command as string;
+  const status = copy.statusFor(copyCommand);
+  const icon = status === "copied" ? CopySuccessGlyph : status === "failed" ? CopyFailureGlyph : CopyGlyph;
+  const label = status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : "Copy kubectl command";
   return (
     <p className={cx("mt-2 flex flex-wrap items-center gap-1 text-xs text-muted", className)}>
       <span>Equivalent kubectl:</span>
       <code className="code min-w-0 break-words">{command}</code>
-      {onCopy && <IconButton icon={CopyGlyph} label="Copy kubectl command" onClick={onCopy} />}
+      <IconButton
+        icon={icon}
+        label={label}
+        onClick={() => void copy.write(copyCommand, copyCommand)}
+      />
+      <ClipboardCopyStatus feedback={copy.feedback} />
     </p>
   );
 }

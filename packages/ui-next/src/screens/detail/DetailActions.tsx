@@ -70,6 +70,7 @@ function toBarActions(items: ContextMenuItem[]): ActionBarAction[] {
       label: BAR_LABEL[item.label] ?? item.label,
       icon: item.icon,
       danger: item.danger,
+      closeOnSelect: item.closeOnPick,
       onSelect: item.onPick,
     });
   }

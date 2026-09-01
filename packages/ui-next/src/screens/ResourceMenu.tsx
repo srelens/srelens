@@ -1,6 +1,5 @@
 import { useState, type ReactNode } from "react";
 import {
-  copyKubectlCommand,
   cronjobSetSuspend,
   cronjobTriggerNow,
   defaultContainer,
@@ -17,7 +16,15 @@ import {
   type ContainerChoice,
   type KubectlInput,
 } from "@srelens/core";
-import { ConfirmDialog, KubectlPreview, Select, TextInput, type ContextMenuItem } from "@srelens/ui-kit";
+import {
+  ClipboardCopyStatus,
+  ConfirmDialog,
+  KubectlPreview,
+  Select,
+  TextInput,
+  useClipboardCopy,
+  type ContextMenuItem,
+} from "@srelens/ui-kit";
 import { ClusterMovedAlert, useClusterGate } from "../lib/clusterMoved";
 import { detailRoute, editRoute } from "../lib/detailRoute";
 import { FailureLine } from "../lib/errorCopy";
@@ -165,6 +172,7 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [replicas, setReplicas] = useState("");
+  const clipboard = useClipboardCopy();
 
   /**
    * The divergence banner, its acknowledgement and the refusal behind it.
@@ -380,10 +388,19 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
       // and the second pick focused the first resource. See {@link editRoute}.
       onPick: () => openTab(editRoute(kind, row.namespace ?? null, row.name), { clusterName: context }),
     });
+    const copyKey = `${context}/${kind}/${ns}/${row.name}`;
+    const copyStatus = clipboard.statusFor(copyKey);
+    const copyCommand = toKubectl({ ...kubectlBase, action: "get", output: "yaml" });
     list.push({
-      label: ROW_ACTION_LABEL.copy,
-      icon: Icons.copy,
-      onPick: () => void copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
+      label:
+        copyStatus === "copied"
+          ? "Copied"
+          : copyStatus === "failed"
+            ? "Copy failed"
+            : ROW_ACTION_LABEL.copy,
+      icon: copyStatus === "copied" ? Icons.check : copyStatus === "failed" ? Icons.warn : Icons.copy,
+      closeOnPick: false,
+      onPick: () => void clipboard.write(copyKey, copyCommand),
     });
 
     if (actions.suspend) {
@@ -489,7 +506,15 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     />
   ) : null;
 
-  return { items, dialog };
+  return {
+    items,
+    dialog: (
+      <>
+        <ClipboardCopyStatus feedback={clipboard.feedback} />
+        {dialog}
+      </>
+    ),
+  };
 }
 
 // `suspend` isn't here: its title depends on direction (Suspend vs. Resume),
@@ -648,7 +673,7 @@ function PendingDialog({
               autoFocus
             />
           )}
-          <KubectlPreview command={command} note={note} onCopy={command ? () => void copyKubectlCommand(command) : undefined} />
+          <KubectlPreview command={command} note={note} />
           {/* The dialog stays open on a refusal rather than closing as if the
               write had happened, so this line is the whole of what the reader
               is told about why. A validation message this component wrote

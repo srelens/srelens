@@ -19,6 +19,7 @@ import { DiffLines, type DiffRow } from "../DiffLines";
 import { ConsoleDock } from "../ConsoleDock";
 import { ContextMenu } from "../ContextMenu";
 import { CopyCommand } from "../CopyCommand";
+import { ClipboardCopyStatus } from "../clipboardCopy";
 import { CustomizeMark, type MarkAppearance } from "../CustomizeMark";
 import { Drawer } from "../Drawer";
 import { DrillCard } from "../DrillCard";
@@ -771,10 +772,19 @@ export function Gallery() {
       </section>
 
       <section>
+        <h2>ClipboardCopyStatus</h2>
+        {/* This component is intentionally present only in the accessibility
+            tree: these two examples let the gallery audit both polite messages
+            without inventing visible UI that the real component does not own. */}
+        <ClipboardCopyStatus feedback={{ key: "success", status: "copied", revision: 1 }} />
+        <ClipboardCopyStatus feedback={{ key: "failure", status: "failed", revision: 1 }} />
+      </section>
+
+      <section>
         <h2>KubectlPreview</h2>
         {/* Not `CopyCommand`: this sits inside a confirm dialog, beside an
             action the app is about to perform, and says so. */}
-        <KubectlPreview command="kubectl delete pod web-1 -n default" onCopy={() => {}} />
+        <KubectlPreview command="kubectl delete pod web-1 -n default" />
         {/* Not every action has a faithful one-liner; the note says so in the
             same place rather than leaving the dialog silent. */}
         <KubectlPreview note="Eviction is an API call with no kubectl verb of its own." />
@@ -1231,7 +1241,7 @@ export function Gallery() {
             },
           ]}
           menuFooter={
-            <KubectlPreview command="kubectl -n prod-eu get pod checkout-api-7d9f4-x2k9" onCopy={() => {}} />
+            <KubectlPreview command="kubectl -n prod-eu get pod checkout-api-7d9f4-x2k9" />
           }
         />
         {/* An unusable `max` still leaves one action on the bar rather than an
@@ -1767,7 +1777,9 @@ export function Gallery() {
             {
               id: "act",
               label: "Act",
-              content: <KubectlPreview command="kubectl -n prod-eu set resources deploy/checkout-api --limits=memory=1Gi" onCopy={() => {}} />,
+              content: (
+                <KubectlPreview command="kubectl -n prod-eu set resources deploy/checkout-api --limits=memory=1Gi" />
+              ),
             },
           ]}
         />

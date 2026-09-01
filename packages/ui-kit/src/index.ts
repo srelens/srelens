@@ -9,6 +9,13 @@ export { Badge, type BadgeTone } from "./Badge";
 export { Breadcrumb, type BreadcrumbProps } from "./Breadcrumb";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
+export {
+  ClipboardCopyStatus,
+  useClipboardCopy,
+  type ClipboardCopyController,
+  type ClipboardCopyFeedback,
+  type ClipboardCopyStatusKind,
+} from "./clipboardCopy";
 export { ClusterRail, type ClusterRailItem, type ClusterRailMarker, type ClusterRailProps } from "./ClusterRail";
 export { CodeEditor, documentDiagnostics, yamlDiagnostics, type CodeEditorProps } from "./CodeEditor";
 export { ColumnPicker, type ColumnOption, type ColumnPickerProps } from "./ColumnPicker";

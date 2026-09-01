@@ -1483,6 +1483,7 @@
     color: var(--ink-muted);
   }
   .copy-command-check { color: var(--ok); flex-shrink: 0; }
+  .copy-command-failure { color: var(--sev); flex-shrink: 0; }
 
   .scroll { overflow: auto; scrollbar-gutter: stable; }
 }
