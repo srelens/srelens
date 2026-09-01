@@ -6,6 +6,7 @@ import {
   clearAgentRun,
   dismissAgentError,
   chooseAgent,
+  getRunSubject,
   selectRun,
   stopAgentRun,
   useActiveRunKey,
@@ -117,6 +118,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
    */
   const [images, setImages] = useState<string[]>([]);
   const [attachError, setAttachError] = useState<unknown>(null);
+  /** A question refused because srelens has no cluster to ask about. */
+  const [noCluster, setNoCluster] = useState(false);
   /**
    * Which agent the next question goes to — read here because the picker lives
    * in the composer's footer now, beside `+`.
@@ -293,7 +296,51 @@ export function Console({ fullView }: { fullView?: boolean }) {
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
-    void askAgent(raw, { about, route, images: images.length > 0 ? images : undefined });
+    /*
+      In a browser this component renders `null` further down — nothing served
+      by `srelens server` can answer a question, since `api_command.rs` has no
+      `chat_*` arm. That guard is BELOW the effect that registers this handler,
+      so a screen-level Ask button (`Overview.tsx`'s, for one) still reached
+      `askAgent`, whose `chat_start` came back unsupported, and the dock that
+      would have shown the failure was not on screen to show it.
+
+      So a question asked in web mode does the one useful thing available: it
+      opens `/agent`, which carries the explanation of why the agent needs the
+      desktop app. Handled here rather than by skipping the registration — an
+      Ask button that silently does nothing is the same dead end by a quieter
+      route.
+    */
+    if (!isTauri()) {
+      openTab("/agent", { clusterName: context || undefined });
+      return;
+    }
+    // #7: every MCP tool call takes an explicit context, so a question sent
+    // with no cluster lets the agent pick one — and the run is keyed under an
+    // empty cluster, so it vanishes from the dock the moment a context does
+    // resolve. Refused where the reader can see it, rather than sent and left
+    // to fail somewhere they cannot.
+    if (context === "") {
+      setNoCluster(true);
+      return;
+    }
+    setNoCluster(false);
+    /*
+      In the full view the dock shows whichever conversation is SELECTED, and
+      `/agent` is not that conversation's subject — it is not a subject at all.
+      Submitting with this component's own route recomputed the destination as
+      `<cluster>|/agent`, so a follow-up typed under a pod's transcript started
+      a separate run and left that conversation's CLI resume behind.
+
+      The conversation remembers what it is about (`RunState.subject`), so the
+      follow-up goes back to it. A run restored from a file written before that
+      was recorded has none, and falls back to this route — the old behaviour.
+    */
+    const selected = isFullView ? getRunSubject(runKey) : undefined;
+    void askAgent(raw, {
+      about: selected?.about ?? about,
+      route: selected?.route ?? route,
+      images: images.length > 0 ? images : undefined,
+    });
     setImages([]);
     setValue("");
     setOpen(true);
@@ -307,6 +354,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
   useEffect(() => registerSubmit((q) => onSubmitRef.current(q)), [registerSubmit]);
+
 
   // After every hook above, never before: the guard decides what renders,
   // not which hooks run, so the hook order stays identical whether the
@@ -486,6 +534,11 @@ export function Console({ fullView }: { fullView?: boolean }) {
           {attachError !== null && (
             <span className="chip" style={{ color: "var(--sev)" }}>
               <span>That image could not be read</span>
+            </span>
+          )}
+          {noCluster && (
+            <span className="chip" style={{ color: "var(--sev)" }}>
+              <span>No cluster is active — connect one before asking</span>
             </span>
           )}
         </>

@@ -522,6 +522,73 @@ describe("the run store", () => {
       expect(getAgentRun().generation).toBe(sent + 1);
     });
 
+    /**
+     * Codex P1. Stop before `startChat` resolves leaves the generation where it
+     * is (there is no session to cancel), so the marker is the abandoned turn's
+     * only evidence — and `askAgent` clears that marker for the turn it is
+     * starting. The discarded question then passed BOTH guards and went out
+     * beside the replacement, on a session Stop could no longer reach.
+     */
+    /**
+     * Codex P2. A `cancelChat` rejection landing after the reader had cleared
+     * the run or asked something else spread whatever `run` was current at
+     * rejection time — so a NEW conversation was told "That question was not
+     * sent" for a Stop belonging to the one before it.
+     */
+    it("does not blame a new question for the previous Stop's failure", async () => {
+      let reject: ((e: unknown) => void) | undefined;
+      cancelChat.mockImplementationOnce(() => new Promise<void>((_, rej) => (reject = rej)));
+      sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+
+      void askAgent("the first one");
+      await untilSendChatCalledTimes(1);
+      stopAgentRun();
+      await vi.waitFor(() => {
+        expect(reject).toBeDefined();
+      });
+
+      // The reader moves on before the cancel comes back.
+      clearAgentRun();
+      sendChat.mockResolvedValue(null);
+      await askAgent("a fresh question");
+
+      reject?.(new Error("cancel failed"));
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+
+      // The new conversation is not carrying the old Stop's failure.
+      expect(getAgentRun().error).toBeUndefined();
+    });
+
+    it("does not send a question stopped before its session existed, even after a replacement", async () => {
+      let release: ((s: string) => void) | undefined;
+      startChat.mockImplementationOnce(() => new Promise<string>((res) => (release = res)));
+
+      void askAgent("the abandoned one");
+      await vi.waitFor(() => {
+        expect(release).toBeDefined();
+      });
+
+      // Stop with no session yet: recorded as a stop, generation untouched.
+      stopAgentRun();
+      // ...and immediately a replacement, which resets the marker.
+      startChat.mockResolvedValue("sess-2");
+      await askAgent("the replacement");
+
+      // Now the first `startChat` comes back.
+      release?.("sess-1");
+      // Flushed HARD. The abandoned continuation has three more awaits to get
+      // through (`loadSkillsGuidance`, `listAgents`, then the send), and the
+      // first draft of this test asserted after two microtasks — so it passed
+      // with the whole fix reverted, which is the one thing a regression test
+      // must not do.
+      await untilSendChatCalledTimes(2);
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+
+      const asked = sendChat.mock.calls.map((c) => c[1] as string);
+      expect(asked).toContain("the replacement");
+      expect(asked).not.toContain("the abandoned one");
+    });
+
     it("leaves the generation alone when there was nothing in flight to abandon", async () => {
       const before = getAgentRun().generation;
       clearAgentRun();
@@ -1120,6 +1187,71 @@ describe("the run store", () => {
       // A row with no capability name reads as a call srelens made and cannot
       // name — worse than not drawing it.
       expect(getAgentRun().turns[0].calls.map((c) => c.tool)).toEqual(["k8s.listPods"]);
+    });
+
+    /**
+     * Codex P1. The reader asks about a subject after a restart, then opens the
+     * OLDER saved conversation about that same subject. Reusing the live run
+     * replaced its turns and gates while keeping its id, resume token, save
+     * chain and busy state — so a streaming answer's deltas could no longer
+     * find their turn, and the saved transcript was persisted under the live
+     * conversation's file.
+     */
+    it("opens a saved conversation beside a live one about the same subject, not into it", async () => {
+      sendChat.mockResolvedValue(null);
+      // A live conversation about the pod, asked in this window.
+      await askAgent("what is it doing now", POD);
+      const liveKey = getActiveRunKey();
+      const liveTurns = getRun(liveKey).turns.map((t) => t.text);
+
+      // An OLDER saved conversation about the same pod, under its own file.
+      listSessions.mockResolvedValue([{ id: "older", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "older", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: liveKey, label: "Pod/mongodb-0", turns: [
+          { id: 99, role: "user", text: "the older question", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("older");
+
+      // The saved one is what is open...
+      expect(getAgentRun().turns.map((t) => t.text)).toEqual(["the older question"]);
+      // ...and the live conversation is untouched, still under its own key.
+      expect(getRun(liveKey).turns.map((t) => t.text)).toEqual(liveTurns);
+      expect(getActiveRunKey()).not.toBe(liveKey);
+    });
+
+    /**
+     * Codex P2. `openSavedRun` restored the file's resume token and set the
+     * RUN's agent, but `askAgent` read the module-level kind — so a Codex
+     * conversation reopened after restart handed its Codex token to Claude
+     * while the picker, which shows `run.agentKind`, still said Codex.
+     */
+    it("asks the agent the reopened conversation belongs to", async () => {
+      listSessions.mockResolvedValue([{ id: "cdx", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "cdx", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: "codex-token", agentKind: "codex",
+        messages: [{ v: 1, key: "prod-eu|/k/pods", label: "pods", turns: [
+          { id: 1, role: "user", text: "earlier", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      listAgents.mockResolvedValue([
+        { kind: "claude", label: "Claude", available: true, gated: false, path: "/claude", version: "1", installUrl: "" },
+        { kind: "codex", label: "Codex", available: true, gated: false, path: "/codex", version: "1", installUrl: "" },
+      ]);
+      sendChat.mockResolvedValue(null);
+
+      await restoreRuns();
+      await openSavedRun("cdx");
+      expect(getAgentRun().agentKind).toBe("codex");
+
+      await askAgent("carry on", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      // The path of the agent this conversation belongs to — not the window's
+      // default, which would have received the other CLI's resume token.
+      expect(sendChat.mock.calls.at(-1)?.[2]).toBe("/codex");
     });
 
     it("resumes the CLI conversation a reopened run came with", async () => {

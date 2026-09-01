@@ -198,6 +198,21 @@ type RunState = {
    * honoured by `askAgent` once its own `startChat()` resolves.
    */
   stoppedGeneration: number | null;
+  /**
+   * What this conversation is ABOUT, and the route it was asked from — kept so
+   * a follow-up can continue it from a surface that is not that route.
+   *
+   * The full view is the case that needs it. There the dock shows whichever
+   * conversation is selected, but it submitted with `route === "/agent"`, so
+   * `askAgent` recomputed the destination as `<cluster>|/agent` and every
+   * follow-up typed under a pod's transcript started a SEPARATE run — losing
+   * that conversation's CLI resume with it.
+   *
+   * Absent for a conversation restored from a file written before this was
+   * recorded; the dock falls back to its own route then, which is the old
+   * behaviour rather than a crash.
+   */
+  subject?: { about: AskContext; route: string };
   /** What the rail calls this run, and what it is about — pinned when the run
    *  is created, so a later navigation cannot relabel a conversation. */
   label: string;
@@ -568,6 +583,17 @@ function cachedSummaries(): RunSummary[] {
 }
 
 /** Which run the surfaces default to. */
+/**
+ * What the conversation at `key` is about, when it is known.
+ *
+ * For the full-view composer, which continues the SELECTED conversation and
+ * cannot derive its subject from its own route — that route is `/agent`, which
+ * is not a subject at all.
+ */
+export function getRunSubject(key: string | null): { about: AskContext; route: string } | undefined {
+  return key === null ? undefined : runs.get(key)?.subject;
+}
+
 export function getActiveRunKey(): string | null {
   return activeKey;
 }
@@ -781,6 +807,9 @@ export async function askAgent(
   activeKey = key;
   state.at = Date.now();
   state.order = ++touchSeq;
+  // What this conversation is about, so a follow-up asked from the full view
+  // reaches THIS run rather than one keyed by `/agent`.
+  state.subject = { about, route };
 
   const images = opts?.images;
   const skills = opts?.skills ?? activeSkills;
@@ -788,7 +817,13 @@ export async function askAgent(
   const agentTurnId = ++turnSeq;
   const agentTurn: Turn = { id: agentTurnId, role: "agent", text: "", calls: [], at: Date.now() };
   const myGeneration = state.run.generation + 1;
-  const myAgentKind = agentKind;
+  // The RUN's agent, not the module's. They are the same for a fresh run
+  // (`runFor` seeds it from the module value), and they differ for a
+  // conversation reopened from disk: `openSavedRun` restores that file's kind
+  // and its resume token, and reading the module value here handed a Codex
+  // conversation's token to Claude while the picker — which shows
+  // `run.agentKind` — still said Codex.
+  const myAgentKind = state.run.agentKind;
 
   commitTo(key, {
     ...state.run,
@@ -863,12 +898,7 @@ export async function askAgent(
     // purpose, because reassigning it here is exactly how a discarded question
     // used to go on and reach `sendChat`.
     //
-    // Deliberately NOT `run.generation !== myGeneration`. That is true of an
-    // ordinary superseded turn too — the reader asked twice in quick
-    // succession — and both of those questions were asked on purpose. Only an
-    // explicit stop or clear records a generation here, and only those two
-    // mean "nobody wants this answered".
-    if (state.stoppedGeneration === myGeneration) return;
+    if (abandoned(state, myGeneration)) return;
     state.session = started;
     const preface = contextPreface(about);
     const guidance = await loadSkillsGuidance(skills);
@@ -930,7 +960,7 @@ export async function askAgent(
     }
     // Last thing before the question actually leaves. Every await above is a
     // window in which the reader can abandon this turn.
-    if (state.stoppedGeneration === myGeneration) return;
+    if (abandoned(state, myGeneration)) return;
     const result = await sendChat(
       started,
       `${preface}${guidance}${question}`,
@@ -1010,6 +1040,13 @@ export function stopAgentRun(): void {
   const activeSession = state.session;
   const generation = state.run.generation;
   void cancelChat(activeSession, generation).catch((err: unknown) => {
+    // Only if this is still the turn that was cancelled. A rejection landing
+    // after the reader cleared the run or asked something else spread
+    // whatever `run` was current at rejection time, so a NEW conversation was
+    // told "That question was not sent" for a Stop belonging to the one
+    // before it — and a clear could appear to fail after it had already
+    // succeeded.
+    if (state.run.generation !== generation) return;
     commitTo(key, { ...state.run, error: describeError(err).detail });
   });
 }
@@ -1261,6 +1298,16 @@ type SavedRun = {
   label: string;
   turns: Turn[];
   gates: GateRecord[];
+  /**
+   * What the conversation is about, so a follow-up typed in the full view
+   * reaches it after a restart too.
+   *
+   * Optional: files written before this existed have none, and a run restored
+   * without it falls back to the composer's own route — the old behaviour, not
+   * a crash. `v` stays `1` for the same reason: nothing about the old shape
+   * became unreadable.
+   */
+  subject?: { about: AskContext; route: string };
 };
 
 function isSavedRun(value: unknown): value is SavedRun {
@@ -1355,6 +1402,33 @@ function turnsFromClassic(messages: readonly unknown[], at: number): Turn[] {
   }));
 }
 
+/**
+ * Whether the turn that started at `generation` has been abandoned — so a
+ * continuation resolving after an await must not go on to send.
+ *
+ * **Two halves, and both are needed.**
+ *
+ * `stoppedGeneration` catches a Stop or a clear with nothing asked after it:
+ * `stopAgentRun` leaves the generation where it is when the turn has no
+ * session yet, so currency alone would let that turn through.
+ *
+ * Currency catches the case the marker cannot. `askAgent` resets
+ * `stoppedGeneration` to null for the turn it is starting — a stop recorded
+ * against an older turn does not belong to this one — and that reset ERASED
+ * the only marker the abandoned turn had. Press Stop before `startChat`
+ * resolves, ask again immediately, and the discarded question passed both
+ * guards and went out alongside the replacement, on a session Stop could no
+ * longer reach. A single `number | null` cannot hold two abandoned
+ * generations either, so the marker was never enough on its own.
+ *
+ * Currency is safe here BECAUSE `askAgent` refuses while any run is busy
+ * (ruling AB): two turns are never legitimately in flight, so a generation
+ * that is no longer current was abandoned rather than merely overtaken.
+ */
+function abandoned(state: RunState, generation: number): boolean {
+  return state.stoppedGeneration === generation || state.run.generation !== generation;
+}
+
 /** Sessions on disk that are not (yet) loaded into `runs` — the rail lists
  *  them so a reader's history survives a restart, and one is hydrated only
  *  when they open it. */
@@ -1381,6 +1455,7 @@ function persistRun(key: string): void {
     label: state.label,
     turns: state.run.turns,
     gates: state.run.gates,
+    ...(state.subject ? { subject: state.subject } : {}),
   };
   const session: Session = {
     id: state.id,
@@ -1420,10 +1495,26 @@ export async function openSavedRun(id: string): Promise<void> {
   const meta = saved.find((m) => m.id === id);
   const session = await loadSession(id);
   const envelope = session.messages.find(isSavedRun);
-  // A session this build cannot read — classic's own, or a future shape —
-  // is opened as far as it can be rather than pretended into a run: the
-  // title is real, the transcript is not ours to interpret.
-  const key = envelope?.key ?? `saved|${id}`;
+  // Where this conversation WOULD live: the subject it was saved under, or its
+  // own file if it was written by a shape this build has no key for.
+  const subjectKey = envelope?.key ?? `saved|${id}`;
+  const holder = runs.get(subjectKey);
+  /*
+    A different live conversation already holds that subject — the reader asked
+    about this pod after a restart, then opened the older saved conversation
+    about it — so this one gets an identity of its own.
+
+    Reusing that run replaced its turns and gates while KEEPING its id, resume
+    token, save chain and busy state. If it was streaming, the deltas arriving
+    afterwards could no longer find the agent turn they belonged to, and the
+    saved transcript was then persisted under the live conversation's file. Two
+    conversations about one subject is a real thing; one conversation wearing
+    another's history is not.
+
+    Compared by FILE id, not by identity: the same file already open at that
+    key IS this conversation, and hydrating it again is exactly right.
+  */
+  const key = holder && holder.id !== session.id ? `saved|${id}` : subjectKey;
   const existing = runs.get(key);
   const state: RunState = existing ?? {
     run: { ...EMPTY_RUN, agentKind: session.agentKind ?? agentKind, activeSkills },
@@ -1438,13 +1529,32 @@ export async function openSavedRun(id: string): Promise<void> {
     order: ++touchSeq,
   };
   runs.set(key, state);
+  if (existing) {
+    // Reopening a conversation already loaded: its own file, so its resume
+    // token and agent are the ones on disk. Kept in step with `run.agentKind`
+    // below, which `askAgent` now reads.
+    state.resume = session.cliSessionId;
+  }
+  // What it is about, so a follow-up typed in the full view continues THIS
+  // conversation rather than opening one keyed by `/agent`.
+  if (envelope?.subject) state.subject = envelope.subject;
   if (envelope) {
-    state.run = { ...state.run, turns: envelope.turns, gates: envelope.gates ?? [] };
+    state.run = {
+      ...state.run,
+      turns: envelope.turns,
+      gates: envelope.gates ?? [],
+      agentKind: session.agentKind ?? state.run.agentKind,
+    };
   } else {
     // No envelope of ours: classic wrote this one. Its transcript is readable
     // and it is the reader's own conversation, so it opens rather than opening
     // empty.
-    state.run = { ...state.run, turns: turnsFromClassic(session.messages, session.createdAt), gates: [] };
+    state.run = {
+      ...state.run,
+      turns: turnsFromClassic(session.messages, session.createdAt),
+      gates: [],
+      agentKind: session.agentKind ?? state.run.agentKind,
+    };
   }
   activeKey = key;
   // Off the not-yet-loaded list: it is a live run now, and showing it twice

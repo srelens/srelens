@@ -21,7 +21,11 @@ const {
   stopAgentRun,
   useActiveRunKey,
   chooseAgent,
+  getRunSubject,
 } = vi.hoisted(() => ({
+  // What the conversation in the full view is ABOUT — the dock asks the store
+  // rather than deriving it from `/agent`, which is not a subject.
+  getRunSubject: vi.fn<() => { about: unknown; route: string } | undefined>(() => undefined),
   chooseAgent: vi.fn(),
   selectRun: vi.fn(),
   stopAgentRun: vi.fn(),
@@ -47,6 +51,7 @@ vi.mock("../lib/agentRun", () => ({
   stopAgentRun,
   useActiveRunKey,
   chooseAgent,
+  getRunSubject,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -117,11 +122,16 @@ const ctx = (stableId: string, name = stableId): ClusterContext => ({
   authKind: "client certificate",
 });
 
+/** The cluster every test starts with — see the `setContexts` note below. */
+const HARNESS_CTX = ctx("prod-eu-id", "prod-eu");
+
 beforeEach(() => {
   // A clean workspace for every test: the route-aware suggestions test opens
   // a `/logs` tab of its own, and nothing here may leak into a later test —
   // the store is module-level, not reset between tests on its own.
-  tabsStore.setState(defaultState([]));
+  // The active cluster comes from the tabs store, so the workspace has to hold
+  // it for `useActiveContext` to resolve.
+  tabsStore.setState(defaultState([HARNESS_CTX]));
   resetLock();
   isTauri.mockReturnValue(true);
   isApplePlatform.mockReturnValue(true);
@@ -133,7 +143,13 @@ beforeEach(() => {
   // for a reason that has nothing to do with the test. Same beforeEach line,
   // and same reason, as `AgentConsent.test.tsx`.
   __setKnownVaultMode("unlocked");
+  // A cluster, because the console now refuses to send without one: every MCP
+  // tool call takes an explicit context, and a question sent with none lets the
+  // agent pick its own. A harness with no cluster was asserting about a send
+  // that the shipped app would refuse. Tests that need the refusal clear this
+  // themselves.
   resetContexts();
+  setContexts([HARNESS_CTX]);
   useAgentRun.mockReset().mockReturnValue(runState());
   useRun.mockReset().mockReturnValue(runState());
   askAgent.mockReset();
@@ -319,6 +335,109 @@ describe("Console", () => {
     // Once on the screen, in the dock's header. The chip that repeated it
     // between the header and the placeholder is gone.
     expect(screen.getAllByText(scope)).toHaveLength(1);
+  });
+
+  /**
+   * Codex P1: the full-view composer submitted with `route === "/agent"`, so
+   * `askAgent` recomputed the destination as `<cluster>|/agent` — every
+   * follow-up typed under a pod's transcript started a separate run and left
+   * that conversation's CLI resume behind.
+   */
+  it("continues the selected conversation from the full-view composer", async () => {
+    const user = userEvent.setup();
+    const subject = {
+      about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "ai-editor" },
+      route: "/k/pods/ns/ai-editor",
+    };
+    getRunSubject.mockReturnValue(subject);
+    useActiveRunKey.mockReturnValue("prod-eu|Pod|ns|ai-editor");
+    useRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "why is it restarting", calls: [], at: 1 }] }),
+    );
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    tabsStore.openTab("/agent");
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await user.type(box, "and now");
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    await vi.waitFor(() => {
+      // The conversation's OWN subject and route, so `runKeyFor` lands back on
+      // the run the reader is looking at.
+      expect(askAgent).toHaveBeenCalledWith(
+        "and now",
+        expect.objectContaining({ about: subject.about, route: subject.route }),
+      );
+    });
+  });
+
+  it("falls back to its own route when the conversation recorded no subject", async () => {
+    const user = userEvent.setup();
+    // A run restored from a file written before the subject was recorded. The
+    // old behaviour rather than a crash.
+    getRunSubject.mockReturnValue(undefined);
+    useActiveRunKey.mockReturnValue("prod-eu|/k/pods");
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    tabsStore.openTab("/agent");
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await user.type(box, "and now");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(askAgent).toHaveBeenCalledWith("and now", expect.objectContaining({ route: "/agent" }));
+    });
+  });
+
+  /**
+   * Codex P1: every MCP tool call takes an explicit context. With no active
+   * cluster the console sent `about.cluster === ""`, letting the agent pick a
+   * context of its own — and keyed the run under an empty cluster, so it
+   * vanished from the dock once a context resolved.
+   */
+  it("refuses a question when no cluster is active, and says so", async () => {
+    const user = userEvent.setup();
+    resetContexts();
+    tabsStore.setState(defaultState([]));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await user.type(box, "what is unhealthy");
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    expect(await screen.findByText(/no cluster is active/i)).toBeTruthy();
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Codex P1: this component renders `null` in a browser, but the guard sits
+   * BELOW the effect that registers the submit handler — so a screen's own Ask
+   * button still reached `askAgent`, whose `chat_start` came back unsupported,
+   * with no dock on screen to show the failure.
+   */
+  it("sends a browser reader to the agent screen instead of a question that cannot be answered", async () => {
+    const user = userEvent.setup();
+    isTauri.mockReturnValue(false);
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    setup();
+    // `ask()` from a screen-level control, which is the path that reached this.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+    expect(askAgent).not.toHaveBeenCalled();
+    // `/agent` is where the explanation lives, and opening it is the one
+    // useful thing available.
+    expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/agent");
   });
 
   it("prints the console accelerator for the platform", () => {
