@@ -1272,6 +1272,77 @@ describe("the run store", () => {
       expect(getAgentRun().turns.map((t) => t.text)).toEqual(["the real one"]);
     });
 
+    /**
+     * Codex P2, round 5: `isSavedRun` checked only that `turns` was an array,
+     * so a truncated or hand-edited file whose turn lacked `calls` was assigned
+     * straight to the run — and `Transcript` reads `turn.calls.length` the
+     * moment it renders, taking the agent screen down.
+     */
+    it("does not hydrate an envelope whose turns are malformed", async () => {
+      listSessions.mockResolvedValue([{ id: "bad", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "bad", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1,
+          key: "prod-eu|/k/pods",
+          label: "pods",
+          // A turn with no `calls` — what a write truncated mid-flush leaves.
+          turns: [{ id: 1, role: "user", text: "q", at: 1 }],
+          gates: [],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("bad");
+      // Opened empty rather than crashing the screen: every turn the transcript
+      // is handed can be rendered.
+      expect(getAgentRun().turns).toEqual([]);
+    });
+
+    it("does not hydrate an envelope whose gates are not a list", async () => {
+      listSessions.mockResolvedValue([{ id: "bad", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "bad", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1,
+          key: "prod-eu|/k/pods",
+          label: "pods",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          // `Transcript` calls `gates.map`.
+          gates: "not a list",
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("bad");
+      expect(getAgentRun().turns).toEqual([]);
+      expect(getAgentRun().gates).toEqual([]);
+    });
+
+    it("hydrates an envelope whose turns are all well formed", async () => {
+      // The presence half. Without it, tightening the predicate until it
+      // accepts nothing would pass both tests above.
+      listSessions.mockResolvedValue([{ id: "good", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "good", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1,
+          key: "prod-eu|/k/pods",
+          label: "pods",
+          turns: [
+            { id: 1, role: "user", text: "q", calls: [], at: 1 },
+            { id: 2, role: "agent", text: "a", calls: [{ id: "c", tool: "k8s.listPods" }], at: 2 },
+          ],
+          gates: [{ id: "g", tool: "k8s.scale" }],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("good");
+      expect(getAgentRun().turns.map((t) => t.text)).toEqual(["q", "a"]);
+      expect(getAgentRun().gates).toHaveLength(1);
+    });
+
     it("drops a stored tool call it cannot name, keeping the ones it can", async () => {
       listSessions.mockResolvedValue([{ id: "old", title: "t", createdAt: 1, updatedAt: 5 }]);
       loadSession.mockResolvedValue({
@@ -1446,6 +1517,42 @@ describe("the run store", () => {
 
       expect(getActiveRunKey()).toBe(liveKey);
       expect(getAgentRun().turns.map((t) => t.text)).toContain("the live one");
+    });
+
+    /**
+     * Codex P2, round 5: the dock is keyed by its own route, which off `/agent`
+     * need not be the ACTIVE run — so the picker can render a restored Codex
+     * conversation while `activeKey` points at a Claude one, and comparing the
+     * active run made the pick a no-op.
+     */
+    it("switches the run whose picker was used, not whichever is active", async () => {
+      sendChat.mockResolvedValue(null);
+      // A Claude conversation, and it is the active one.
+      await askAgent("the active one", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      const activeKeyNow = getActiveRunKey();
+
+      // A second conversation restored from a Codex file, NOT selected: its
+      // load leaves `activeKey` on itself, so put the first back in front.
+      listSessions.mockResolvedValue([{ id: "cdx", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "cdx", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: "codex-token", agentKind: "codex",
+        messages: [{ v: 1, key: "prod-eu|/k/statefulsets", label: "statefulsets", turns: [
+          { id: 1, role: "user", text: "earlier", calls: [], at: 1 },
+        ], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("cdx");
+      selectRun(activeKeyNow);
+      expect(getRun("prod-eu|/k/statefulsets").agentKind).toBe("codex");
+
+      // The reader is on another tab, whose dock shows the Codex conversation,
+      // and picks Claude there.
+      chooseAgent("claude", "prod-eu|/k/statefulsets");
+
+      // Not a no-op, even though both the module and the ACTIVE run already
+      // said Claude.
+      expect(getRun("prod-eu|/k/statefulsets").agentKind).toBe("claude");
     });
 
     it("asks the agent the reopened conversation belongs to", async () => {

@@ -503,6 +503,54 @@ describe("Console", () => {
     expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/agent");
   });
 
+  /**
+   * Codex P2, round 5: the dock has two mount points — the window's bottom
+   * edge and `/agent`'s own main column — and switching between them unmounts
+   * one and mounts the other. A draft held in component state was silently
+   * lost, along with any pasted screenshot.
+   */
+  it("keeps a draft when the dock is remounted somewhere else", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    /*
+      One provider, and the dock at two DIFFERENT positions in the tree — which
+      is what a tab switch actually does: `Window`'s own instance unmounts as
+      its condition flips, and `/agent`'s mounts inside the screen.
+
+      The first version of this rendered `full ? <Console fullView/> :
+      <Console/>` in one position, so React reconciled them as the same element
+      and never unmounted anything — it passed with the whole fix reverted.
+    */
+    function Host({ full }: { full: boolean }) {
+      return (
+        <ConsoleProvider onToggleTheme={() => {}}>
+          <Elsewhere />
+          {!full && (
+            <div data-mount="window">
+              <Console />
+            </div>
+          )}
+          {full && (
+            <section data-mount="agent">
+              <Console fullView />
+            </section>
+          )}
+        </ConsoleProvider>
+      );
+    }
+    const view = render(<Host full={false} />);
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "half a question");
+
+    // The reader switches to the agent tab, where the dock mounts elsewhere.
+    view.rerender(<Host full />);
+
+    expect((screen.getByRole("textbox", { name: "Console prompt" }) as HTMLTextAreaElement).value).toBe(
+      "half a question",
+    );
+  });
+
   it("prints the console accelerator for the platform", () => {
     setup();
     expect(screen.getByText("⌘K")).toBeDefined();
@@ -1100,7 +1148,10 @@ describe("Console — header details", () => {
       await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
       await user.click(await screen.findByRole("button", { name: /claude code/i }));
       await user.click(await screen.findByRole("option", { name: /codex/i }));
-      expect(chooseAgent).toHaveBeenCalledWith("codex");
+      // With the run whose picker was used. The dock is keyed by its own route,
+      // which need not be the ACTIVE run — so the store cannot work out which
+      // conversation the reader was looking at, and is told.
+      expect(chooseAgent).toHaveBeenCalledWith("codex", expect.any(String));
     });
 
     it("offers no picker when nothing can be offered, rather than an empty one", async () => {

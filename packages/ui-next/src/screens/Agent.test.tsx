@@ -3,6 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { AgentInfo, ClusterContext } from "@srelens/core";
 import { Agent } from "./Agent";
+import { PortalScopeProvider } from "@srelens/ui-kit";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetLock, __setKnownVaultMode } from "../shell/LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
@@ -311,6 +312,29 @@ describe("the agent screen", () => {
     // is two explanations, one of them wrong about whether you have begun.
     expect(screen.queryByText(/start here/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /full view/i })).toBeNull();
+  });
+
+  /**
+   * Codex P2, round 5: `TabSurface` keeps hidden tabs MOUNTED, so an `/agent`
+   * tab sitting behind another one kept this dock alive while `Window` mounted
+   * its own — two live consoles, each with its own draft, both registering
+   * against the single provider.
+   */
+  it("mounts no dock while its own tab is behind another", async () => {
+    render(
+      <ConsoleProvider>
+        <Opener />
+        {/* `visible={false}` is what `Window` passes a tab that is not the one
+            on screen — the subtree stays mounted, hidden. */}
+        <PortalScopeProvider scope={{ container: undefined, visible: false, hold: () => () => {} }}>
+          <Agent route="/agent" />
+        </PortalScopeProvider>
+      </ConsoleProvider>,
+    );
+    await screen.findByRole("complementary", { name: "Agent" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open the console" }));
+    // No second console behind the one the window is showing.
+    expect(screen.queryByRole("textbox", { name: /prompt/i })).toBeNull();
   });
 
   it("draws no started time for a run with no turns yet", async () => {

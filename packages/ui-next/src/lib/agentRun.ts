@@ -1239,16 +1239,23 @@ export function forgetRun(key: string): void {
  * whatever it can offer, and a no-op call must not quietly end the
  * conversation the reader is in the middle of.
  */
-export function chooseAgent(kind: string): void {
-  // The DISPLAYED run as well as the window's preference. A conversation
-  // reopened from disk carries its own agent, and `askAgent` asks THAT one, so
-  // the two can legitimately differ — the module could already say Claude
-  // while the run on screen says Codex. Comparing only the module value made
-  // the visible act of picking Claude a no-op that left the Codex resume
-  // token in place, and left a reader whose restored CLI is no longer
-  // installed with no way to switch off it. The same divergence follows the
-  // automatic fallback below.
-  const shown = activeState()?.run.agentKind;
+export function chooseAgent(kind: string, shownIn?: string | null): void {
+  /*
+    The run whose PICKER was used, as well as the window's preference.
+
+    A conversation reopened from disk carries its own agent and `askAgent` asks
+    THAT one, so the two legitimately differ. Comparing only the module value
+    made the visible act of picking Claude a no-op that left the other CLI's
+    resume token in place.
+
+    `shownIn` matters because the dock is keyed by its own route, which is not
+    always the ACTIVE run: off `/agent` the picker renders `useRun(runKey)`, so
+    a reader could be looking at a restored Codex conversation while `activeKey`
+    points at a Claude one. Falling back to the active run keeps every caller
+    that has no key to give — the `/` menu, tests — working as before.
+  */
+  const shown = (shownIn !== undefined && shownIn !== null ? runs.get(shownIn) : activeState())?.run
+    .agentKind;
   if (kind === agentKind && (shown === undefined || shown === kind)) return;
   // Not while a turn is in flight. Dropping `session` here would leave
   // `stopAgentRun` with nothing to hand `cancelChat` — the running CLI becomes
@@ -1403,10 +1410,62 @@ type SavedRun = {
   subject?: { about: AskContext; route: string };
 };
 
+/** One recorded tool call, checked before the transcript reads it. */
+function isSavedCall(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const c = value as { id?: unknown; tool?: unknown };
+  return typeof c.id === "string" && typeof c.tool === "string";
+}
+
+/**
+ * One recorded turn.
+ *
+ * `calls` is required and must be an ARRAY, because `Transcript` reads
+ * `turn.calls.length` — a truncated or hand-edited file whose turn lacks it
+ * took the agent screen down rather than being reported as unreadable.
+ */
+function isSavedTurn(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const t = value as { id?: unknown; role?: unknown; text?: unknown; calls?: unknown; at?: unknown };
+  return (
+    typeof t.id === "number" &&
+    (t.role === "user" || t.role === "agent" || t.role === "error") &&
+    typeof t.text === "string" &&
+    typeof t.at === "number" &&
+    Array.isArray(t.calls) &&
+    t.calls.every(isSavedCall)
+  );
+}
+
+/** One recorded gate. `gates` is optional; a present one must be usable. */
+function isSavedGate(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const g = value as { id?: unknown; tool?: unknown };
+  return typeof g.id === "string" && typeof g.tool === "string";
+}
+
+/**
+ * Whether a stored message is one of THIS build's run envelopes.
+ *
+ * Every turn, call and gate is checked, not just the shape around them. A file
+ * can be truncated mid-write, hand-edited, or written by a future build, and
+ * the transcript reads `turn.calls.length` and `gates.map` the moment it
+ * renders — so a structurally-plausible envelope with malformed contents used
+ * to take the agent screen down instead of being reported as unreadable. A
+ * session that fails here falls through to the classic reader, and then to an
+ * empty transcript, rather than to a crash.
+ */
 function isSavedRun(value: unknown): value is SavedRun {
   if (typeof value !== "object" || value === null) return false;
-  const v = value as Partial<SavedRun>;
-  return v.v === 1 && typeof v.key === "string" && typeof v.label === "string" && Array.isArray(v.turns);
+  const v = value as Partial<SavedRun> & { gates?: unknown };
+  return (
+    v.v === 1 &&
+    typeof v.key === "string" &&
+    typeof v.label === "string" &&
+    Array.isArray(v.turns) &&
+    v.turns.every(isSavedTurn) &&
+    (v.gates === undefined || (Array.isArray(v.gates) && v.gates.every(isSavedGate)))
+  );
 }
 
 /** One of classic's stored tool calls (`StoredToolCall`), checked before it is

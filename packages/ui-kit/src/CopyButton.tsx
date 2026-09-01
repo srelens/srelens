@@ -79,18 +79,40 @@ export function CopyButton({ text, label, iconOnly = false, className }: CopyBut
   }
 
   return (
-    <Button
-      variant="ghost"
-      size="xs"
-      // Only when there is no text to be the name. With a label AND visible
-      // text, the label wins — so "Copied" stopped being announced at all, and
-      // the state change became invisible to a screen reader.
-      aria-label={iconOnly ? label : undefined}
-      className={cx(className)}
-      onClick={() => void copy()}
-    >
-      {copied ? <CheckGlyph /> : <CopyGlyph />}
-      {!iconOnly && (copied ? "Copied" : "Copy")}
-    </Button>
+    <>
+      <Button
+        variant="ghost"
+        size="xs"
+        // Only when there is no text to be the name. With a label AND visible
+        // text, the label wins — so "Copied" stopped being announced at all,
+        // and the state change became invisible to a screen reader.
+        //
+        // The name STAYS the action, either way. A control that renames itself
+        // to its own outcome mid-interaction is the other half of that same
+        // defect.
+        aria-label={iconOnly ? label : undefined}
+        className={cx(className)}
+        onClick={() => void copy()}
+      >
+        {copied ? <CheckGlyph /> : <CopyGlyph />}
+        {!iconOnly && (copied ? "Copied" : "Copy")}
+      </Button>
+      {/*
+        The icon-only form has no visible word to change, and both glyphs are
+        `aria-hidden` — so a successful copy was something only a sighted
+        reader learned about. A live region says it instead, leaving the
+        button's own name alone.
+
+        A SIBLING, not a child: content inside a button contributes to its
+        accessible name, and `.sr-only` is absolutely positioned so it costs no
+        layout. Only in the icon-only case — where there IS a visible word, it
+        changes to "Copied" already, and a second announcement would be two.
+      */}
+      {iconOnly && (
+        <span role="status" aria-live="polite" className="sr-only">
+          {copied ? "Copied" : ""}
+        </span>
+      )}
+    </>
   );
 }

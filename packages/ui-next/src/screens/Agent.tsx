@@ -1,4 +1,4 @@
-import { Alert, Button, CopyButton, Screen, SideRail } from "@srelens/ui-kit";
+import { Alert, Button, CopyButton, Screen, SideRail, usePortalShowing } from "@srelens/ui-kit";
 import { isTauri } from "@srelens/core";
 import { Console } from "../shell/Console";
 import { useActiveContext } from "../lib/clusters";
@@ -73,6 +73,8 @@ export function Agent(_props: { route: string }) {
   const { turns, gates, error } = useAgentRun();
   const activeCtx = useActiveContext();
   const context = activeCtx?.name ?? "";
+  // Whether this tab is the one on screen — see the dock's own note below.
+  const showing = usePortalShowing();
   const started = startedLabel(turns);
   const calls = callCount(turns);
   const head = started && calls > 0 ? `${started} · ${calls} call${calls === 1 ? "" : "s"}` : started;
@@ -221,11 +223,21 @@ export function Agent(_props: { route: string }) {
             Still one dock component and one instance — `Window` skips its own
             on this route.
           */}
-          {/* `fullView`: the dock is this screen's own composer, sitting
-              directly under the transcript. It is the mount site that knows
-              that — so it says so, rather than leaving the dock to infer it
-              from a route string. */}
-          <Console fullView />
+          {/*
+            `fullView`: the dock is this screen's own composer, sitting directly
+            under the transcript. It is the mount site that knows that — so it
+            says so, rather than leaving the dock to infer it from a route
+            string.
+
+            And only while this tab is the one on SCREEN. `TabSurface` keeps
+            hidden tabs mounted, so an `/agent` tab sitting behind another one
+            kept this dock alive while `Window` mounted its own — two live
+            consoles, each with its own draft and attachments, both registering
+            against the single provider, with whichever effect ran last owning
+            `ask()`. `Window`'s comment claiming "one instance — never both at
+            once" was simply untrue.
+          */}
+          {showing && <Console fullView />}
         </div>
       </SideRail>
     </Screen>

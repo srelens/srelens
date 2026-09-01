@@ -33,6 +33,19 @@ export interface ConsoleValue {
    */
   apple: boolean;
   onToggleTheme: () => void;
+  /**
+   * The draft: what is typed at the prompt, and the images attached to it.
+   *
+   * Here rather than in the dock, because the dock has TWO mount points — the
+   * window's bottom edge, and `/agent`'s own main column — and switching
+   * between them unmounts one instance and mounts the other. A draft held in
+   * component state was silently lost on that switch, along with any pasted
+   * screenshots. The provider outlives both.
+   */
+  draft: string;
+  setDraft: (draft: string) => void;
+  images: string[];
+  setImages: (next: string[] | ((held: string[]) => string[])) => void;
 }
 
 const ConsoleContext = createContext<ConsoleValue | null>(null);
@@ -69,6 +82,8 @@ export function ConsoleProvider({
   // dependency on anything above, and the one consumer is inside this tree.
   const apple = useMemo(() => isApplePlatform(), []);
   const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [images, setImages] = useState<string[]>([]);
   const [scope, setScope] = useState(initialScope);
   const submit = useRef<Submit | null>(null);
   // Held rather than timed. Anything asked while nothing is listening waits
@@ -95,8 +110,21 @@ export function ConsoleProvider({
   }, []);
 
   const value = useMemo<ConsoleValue>(
-    () => ({ open, setOpen, ask, scope, setScope, registerSubmit, apple, onToggleTheme }),
-    [open, ask, scope, registerSubmit, apple, onToggleTheme],
+    () => ({
+      open,
+      setOpen,
+      ask,
+      scope,
+      setScope,
+      registerSubmit,
+      apple,
+      onToggleTheme,
+      draft,
+      setDraft,
+      images,
+      setImages,
+    }),
+    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images],
   );
 
   return <ConsoleContext.Provider value={value}>{children}</ConsoleContext.Provider>;

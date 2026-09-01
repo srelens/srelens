@@ -52,6 +52,7 @@ export {
   usePortalContainer,
   usePortalHost,
   usePortalScoped,
+  usePortalShowing,
   type PortalScope,
 } from "./portal";
 export { Progress, type ProgressProps } from "./Progress";

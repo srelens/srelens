@@ -572,8 +572,13 @@ export function Window({
         </div>
         {/* Not on `/agent`: that screen mounts the dock at the foot of its own
             main column, so its rail is a full-height sibling and uses the
-            bottom of the window instead of stopping short of it. One dock
-            component, one instance — never both at once. */}
+            bottom of the window instead of stopping short of it.
+            
+            One dock component and one INSTANCE — which takes both halves. This
+            condition is one; the other is that `/agent` mounts its own only
+            while its tab is the one showing, because `TabSurface` keeps hidden
+            tabs mounted and a hidden `/agent` otherwise kept a second console
+            alive behind this one. */}
         {active && activeTabRoute !== "/agent" && <Console />}
       </div>
       <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>

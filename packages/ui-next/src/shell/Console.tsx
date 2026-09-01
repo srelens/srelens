@@ -107,8 +107,22 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // From context, not props: this mounts in two places now — the window's
   // bottom edge on most screens, and the foot of `/agent`'s own main column so
   // that screen's rail can be a full-height sibling.
-  const { open, setOpen, scope, registerSubmit, apple, onToggleTheme } = useConsole();
-  const [value, setValue] = useState("");
+  const {
+    open,
+    setOpen,
+    scope,
+    registerSubmit,
+    apple,
+    onToggleTheme,
+    // The draft lives in the provider, not here: this component has two mount
+    // points — the window's bottom edge and `/agent`'s own main column — and
+    // switching between them unmounts one and mounts the other, which silently
+    // lost whatever was typed and any screenshot pasted with it.
+    draft: value,
+    setDraft: setValue,
+    images,
+    setImages,
+  } = useConsole();
   /**
    * Screenshots waiting to go with the next question, as data URIs so they can
    * be shown before they are sent.
@@ -116,7 +130,6 @@ export function Console({ fullView }: { fullView?: boolean }) {
    * Pasting one was simply never possible in the new design — not a
    * regression, a gap: the deleted `Composer` had no image handling either.
    */
-  const [images, setImages] = useState<string[]>([]);
   const [attachError, setAttachError] = useState<unknown>(null);
   /** A question refused because srelens has no cluster to ask about. */
   const [noCluster, setNoCluster] = useState(false);
@@ -506,7 +519,11 @@ export function Console({ fullView }: { fullView?: boolean }) {
           <AgentPicker
             agents={offered}
             selectedKind={agentKind}
-            onSelect={(kind) => chooseAgent(kind)}
+            // The run this picker is SHOWING. The dock is keyed by its own
+            // route, which off `/agent` need not be the active run — so
+            // without this, picking the agent a restored conversation is not
+            // on could return early as a no-op.
+            onSelect={(kind) => chooseAgent(kind, runKey)}
             disabled={busy}
           />
         ) : undefined
