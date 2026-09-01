@@ -63,6 +63,25 @@ export interface ConsoleValue {
    */
   reading: number;
   setReading: (next: number | ((n: number) => number)) => void;
+  /**
+   * A pasted or picked image that could not be read, and a question refused
+   * because there was no cluster to ask about.
+   *
+   * Here for the same reason as everything above: this is the state of the
+   * question being COMPOSED, and the dock has two mount points, so a tab switch
+   * unmounts the instance holding it. `attachError` in particular arrives late —
+   * a read that fails after the switch set state on the unmounted instance while
+   * the provider-level counter still decremented, so the replacement composer
+   * showed neither an attachment nor a reason it was missing.
+   *
+   * Everything belonging to the composition of a question lives here. Splitting
+   * it has now produced the same defect three times: `images` without
+   * `reading`, and `reading` without this.
+   */
+  attachError: unknown;
+  setAttachError: (e: unknown) => void;
+  noCluster: boolean;
+  setNoCluster: (v: boolean) => void;
 }
 
 const ConsoleContext = createContext<ConsoleValue | null>(null);
@@ -102,6 +121,8 @@ export function ConsoleProvider({
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [reading, setReading] = useState(0);
+  const [attachError, setAttachError] = useState<unknown>(null);
+  const [noCluster, setNoCluster] = useState(false);
   const [scope, setScope] = useState(initialScope);
   const submit = useRef<Submit | null>(null);
   // Held rather than timed. Anything asked while nothing is listening waits
@@ -143,8 +164,12 @@ export function ConsoleProvider({
       setImages,
       reading,
       setReading,
+      attachError,
+      setAttachError,
+      noCluster,
+      setNoCluster,
     }),
-    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images, reading],
+    [open, ask, scope, registerSubmit, apple, onToggleTheme, draft, images, reading, attachError, noCluster],
   );
 
   return <ConsoleContext.Provider value={value}>{children}</ConsoleContext.Provider>;

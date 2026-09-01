@@ -16,6 +16,7 @@ import {
   getRun,
   getRunSummaries,
   getActiveRunKey,
+  getRunSubject,
   selectRun,
   forgetRun,
 } from "./agentRun";
@@ -1332,6 +1333,85 @@ describe("the run store", () => {
      * OPTIONAL ones were not, so `images: "broken"` passed and `UserTurn` then
      * called `turn.images.map`.
      */
+    /**
+     * Codex P1, round 9: the classic branch restored the transcript and the CLI
+     * resume token and IGNORED `session.contexts`, which is where classic put
+     * the cluster. Opening a `prod-eu` conversation while the workspace was on
+     * `staging` therefore displayed staging, sent a staging preface, and
+     * resumed the prod CLI conversation underneath.
+     */
+    it("restores the cluster a classic conversation was had on", async () => {
+      listSessions.mockResolvedValue([{ id: "old", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "old", title: "t", createdAt: 1, updatedAt: 2,
+        // Classic's own field, one entry per attached context.
+        contexts: ["prod-eu"],
+        skills: [], cliSessionId: "claude-token", agentKind: "claude",
+        messages: [{ id: 1, role: "user", text: "check the mongodb replica set" }],
+      });
+      await restoreRuns();
+      await openSavedRun("old");
+
+      const key = getActiveRunKey();
+      expect(getRunSubject(key)?.about.cluster).toBe("prod-eu");
+    });
+
+    it("names no cluster for a classic conversation that spanned several", async () => {
+      // Classic's multi-context mode wrote several, and `AskContext.cluster` is
+      // one string — there is no honest single answer, so nothing is invented.
+      // A real remaining gap rather than a handled case.
+      listSessions.mockResolvedValue([{ id: "multi", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "multi", title: "t", createdAt: 1, updatedAt: 2,
+        contexts: ["prod-eu", "staging-eu"],
+        skills: [], cliSessionId: null, agentKind: "claude",
+        messages: [{ id: 1, role: "user", text: "compare them" }],
+      });
+      await restoreRuns();
+      await openSavedRun("multi");
+      expect(getRunSubject(getActiveRunKey())).toBeUndefined();
+    });
+
+    it("does not hydrate an envelope whose subject is malformed", async () => {
+      // `shown.about.cluster` is read DURING RENDER in the full view, so a
+      // `subject: {}` took the agent screen down.
+      listSessions.mockResolvedValue([{ id: "bad", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "bad", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|/k/pods", label: "pods",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          gates: [],
+          subject: {},
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("bad");
+      expect(getAgentRun().turns).toEqual([]);
+    });
+
+    it("hydrates an envelope whose subject is well formed", async () => {
+      listSessions.mockResolvedValue([{ id: "good", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "good", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|Pod|ns|mongodb-0", label: "Pod/mongodb-0",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          gates: [],
+          subject: {
+            about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },
+            route: "/k/pods/ns/mongodb-0",
+          },
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("good");
+      expect(getAgentRun().turns.map((t) => t.text)).toEqual(["q"]);
+      expect(getRunSubject(getActiveRunKey())?.about.cluster).toBe("prod-eu");
+    });
+
     it("does not hydrate an envelope whose optional fields are the wrong shape", async () => {
       for (const bad of [
         { images: "broken" },

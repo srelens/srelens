@@ -1536,16 +1536,47 @@ function isSavedGate(value: unknown): boolean {
  * session that fails here falls through to the classic reader, and then to an
  * empty transcript, rather than to a crash.
  */
+/**
+ * A recorded subject.
+ *
+ * `about.cluster` is what the full view reads DURING RENDER — `shown.about
+ * .cluster` — so a `subject: {}` in a truncated or hand-edited file took the
+ * agent screen down. Checked to the same depth it is used.
+ */
+function isSavedSubject(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const sub = value as { about?: unknown; route?: unknown };
+  if (typeof sub.route !== "string") return false;
+  if (typeof sub.about !== "object" || sub.about === null) return false;
+  const a = sub.about as {
+    cluster?: unknown;
+    namespace?: unknown;
+    kind?: unknown;
+    name?: unknown;
+    surface?: unknown;
+    namespaces?: unknown;
+  };
+  return (
+    typeof a.cluster === "string" &&
+    (a.namespace === undefined || typeof a.namespace === "string") &&
+    (a.kind === undefined || typeof a.kind === "string") &&
+    (a.name === undefined || typeof a.name === "string") &&
+    (a.surface === undefined || a.surface === "logs") &&
+    isStringsOrAbsent(a.namespaces)
+  );
+}
+
 function isSavedRun(value: unknown): value is SavedRun {
   if (typeof value !== "object" || value === null) return false;
-  const v = value as Partial<SavedRun> & { gates?: unknown };
+  const v = value as Partial<SavedRun> & { gates?: unknown; subject?: unknown };
   return (
     v.v === 1 &&
     typeof v.key === "string" &&
     typeof v.label === "string" &&
     Array.isArray(v.turns) &&
     v.turns.every(isSavedTurn) &&
-    (v.gates === undefined || (Array.isArray(v.gates) && v.gates.every(isSavedGate)))
+    (v.gates === undefined || (Array.isArray(v.gates) && v.gates.every(isSavedGate))) &&
+    (v.subject === undefined || isSavedSubject(v.subject))
   );
 }
 
@@ -1778,9 +1809,33 @@ export async function openSavedRun(id: string): Promise<void> {
     // below, which `askAgent` now reads.
     state.resume = session.cliSessionId;
   }
-  // What it is about, so a follow-up typed in the full view continues THIS
-  // conversation rather than opening one keyed by `/agent`.
+  /*
+    What it is about, so a follow-up typed in the full view continues THIS
+    conversation rather than opening one keyed by `/agent` — and, more
+    importantly, so it goes to the CLUSTER the conversation was had on.
+
+    The envelope carries a subject when this build wrote the file. When it does
+    not — a classic session, or one written before that was recorded — the
+    cluster is still on disk: classic persisted `Session.contexts`, one entry
+    per attached context. Ignoring it meant opening a `prod-eu` conversation
+    while the workspace was on `staging` displayed staging, sent a staging
+    preface, and resumed the prod CLI conversation underneath — Kubernetes work
+    aimed at the wrong cluster, which is the one defect class this migration has
+    spent the most findings on.
+
+    Exactly ONE context is a cluster srelens can name. Classic's multi-context
+    mode wrote several, and `AskContext.cluster` is one string: there is no
+    honest single answer there, so nothing is invented and the subject stays
+    absent. That case is a real remaining gap, not a handled one.
+  */
+  const savedCluster = session.contexts.length === 1 ? session.contexts[0] : undefined;
   if (envelope?.subject) state.subject = envelope.subject;
+  else if (savedCluster !== undefined && savedCluster !== "") {
+    // Route empty: the conversation's own route was never recorded, and an
+    // invented one would key it somewhere it never lived. The cluster is the
+    // part that matters here and the part that is actually known.
+    state.subject = { about: { cluster: savedCluster }, route: "" };
+  }
   if (envelope) {
     state.run = {
       ...state.run,

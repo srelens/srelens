@@ -755,6 +755,53 @@ describe("Console", () => {
     expect(screen.getByText("m01-prod-05-dataservices")).toBeTruthy();
   });
 
+  /**
+   * Codex P2, round 9: `reading` and `images` moved to the provider and
+   * `attachError` did not — so a read FAILING after a tab switch set state on
+   * the unmounted instance while the provider counter still decremented, and
+   * the replacement composer showed neither an attachment nor a reason.
+   */
+  it("shows a read failure that arrives after the dock has moved", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    let fail: ((e: unknown) => void) | undefined;
+    readImageFile.mockImplementationOnce(() => new Promise<string>((_, rej) => (fail = rej)));
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+
+    function Host({ full }: { full: boolean }) {
+      return (
+        <ConsoleProvider onToggleTheme={() => {}}>
+          <Elsewhere />
+          {!full && (
+            <div data-mount="window">
+              <Console />
+            </div>
+          )}
+          {full && (
+            <section data-mount="agent">
+              <Console fullView />
+            </section>
+          )}
+        </ConsoleProvider>
+      );
+    }
+    const view = render(<Host full={false} />);
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    fireEvent.paste(screen.getByRole("textbox", { name: "Console prompt" }), {
+      clipboardData: { files: [shot()], types: ["Files"] },
+    });
+    await vi.waitFor(() => {
+      expect(fail).toBeDefined();
+    });
+
+    // The reader switches tabs, then the read fails.
+    view.rerender(<Host full />);
+    fail?.(new Error("not an image"));
+
+    // Said on the composer that is now on screen, not on the one that is gone.
+    expect(await screen.findByText(/could not be read/i)).toBeTruthy();
+  });
+
   it("prints the console accelerator for the platform", () => {
     setup();
     expect(screen.getByText("⌘K")).toBeDefined();

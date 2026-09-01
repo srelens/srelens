@@ -124,9 +124,14 @@ export function Console({ fullView }: { fullView?: boolean }) {
     images,
     setImages,
     // With the draft, not here: a read still in flight outlives this
-    // component when a tab switch remounts the dock elsewhere.
+    // component when a tab switch remounts the dock elsewhere — and so does
+    // the failure it may arrive with.
     reading,
     setReading,
+    attachError,
+    setAttachError,
+    noCluster,
+    setNoCluster,
   } = useConsole();
   /**
    * Screenshots waiting to go with the next question, as data URIs so they can
@@ -135,9 +140,6 @@ export function Console({ fullView }: { fullView?: boolean }) {
    * Pasting one was simply never possible in the new design — not a
    * regression, a gap: the deleted `Composer` had no image handling either.
    */
-  const [attachError, setAttachError] = useState<unknown>(null);
-  /** A question refused because srelens has no cluster to ask about. */
-  const [noCluster, setNoCluster] = useState(false);
   /**
    * Which agent the next question goes to — read here because the picker lives
    * in the composer's footer now, beside `+`.
