@@ -37,6 +37,11 @@ pub struct PodSummary {
     pub ready: String,
     pub restarts: i32,
     pub node: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and a summary
+    /// is only rebuilt when a watch event arrives for the object — so it goes
+    /// stale (#405). Prefer this; `age` stays for callers that have no clock.
+    pub created: Option<String>,
     pub age: String,
     /// Container image(s) the pod runs, e.g. `acme/checkout-api:118a7e`.
     /// A pod with several containers joins them as `"img-a, img-b"`; a pod
@@ -154,6 +159,7 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         ready: format!("{ready_count}/{total}"),
         restarts,
         node,
+        created: crate::creation_rfc3339(pod.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(pod.metadata.creation_timestamp.as_ref()),
         image,
         waiting_reason,

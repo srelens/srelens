@@ -10,7 +10,11 @@ export function ageFromTimestamp(iso?: string, now: number = Date.now()): string
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  return `${days}d`;
+  if (days < 365) return `${days}d`;
+  // Matches `format_age` in crates/kube and the `y` unit `ageSeconds` already
+  // knows about: without this a two-year-old object read "730d" here and "2y"
+  // from the backend, for the same object on two screens.
+  return `${Math.floor(days / 365)}y`;
 }
 
 /** Human-readable duration between two ISO timestamps, e.g. "2m 30s". */

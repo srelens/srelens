@@ -48,6 +48,11 @@ pub struct SecretSummary {
     pub type_: String,
     /// Number of keys — NOT their names or values.
     pub keys: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and a summary
+    /// is only rebuilt when a watch event arrives for the object — so it goes
+    /// stale (#405). Prefer this; `age` stays for callers that have no clock.
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -64,6 +69,7 @@ pub(crate) fn summarise(secret: Secret) -> SecretSummary {
         namespace: secret.metadata.namespace.clone().unwrap_or_default(),
         type_: secret.type_.clone().unwrap_or_default(),
         keys: keys as i32,
+        created: crate::creation_rfc3339(secret.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(secret.metadata.creation_timestamp.as_ref()),
     }
 }

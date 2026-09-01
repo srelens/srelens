@@ -32,6 +32,7 @@ import {
   type StatusVerdict,
   type StorageClassSummary,
 } from "@srelens/core";
+import { AgeCell } from "../ageCell";
 import { Badge, StatusPill, type Column, type Tone } from "@srelens/ui-kit";
 
 export type PodRow = PodSummary & { cpu?: number; memory?: number };
@@ -102,7 +103,10 @@ export const podColumns: Column<PodRow>[] = [
   { key: "restarts", header: "Restarts", sortable: true, align: "end" },
   { key: "cpu", header: "CPU", sortable: true, align: "end", render: (p) => metric(p.cpu, formatCpu), getSortValue: (p) => metricSort(p.cpu) },
   { key: "memory", header: "Memory", sortable: true, align: "end", render: (p) => metric(p.memory, formatMemory), getSortValue: (p) => metricSort(p.memory) },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: derived here against a ticking clock, from the summary's
+  // `created` timestamp — the backend's `age` string is rendered once per
+  // watch event and freezes for an object nothing is changing.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
   // Not sortable: a comma-joined list of container images (PodSummary.image)
   // has no single natural order, and the design mock renders a plain header
   // for it — no SortHeader. Left filterable-unset like every other column
@@ -282,7 +286,10 @@ export const configMapColumns: Column<ConfigMapSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "keys", header: "Keys", sortable: true, align: "end", render: (c) => String(c.keys) },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: derived here against a ticking clock, from the summary's
+  // `created` timestamp — the backend's `age` string is rendered once per
+  // watch event and freezes for an object nothing is changing.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const secretColumns: Column<SecretSummary>[] = [
@@ -290,7 +297,10 @@ export const secretColumns: Column<SecretSummary>[] = [
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "type", header: "Type" },
   { key: "keys", header: "Keys", sortable: true, align: "end", render: (s) => String(s.keys) },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: derived here against a ticking clock, from the summary's
+  // `created` timestamp — the backend's `age` string is rendered once per
+  // watch event and freezes for an object nothing is changing.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const resourceQuotaColumns: Column<ResourceQuotaSummary>[] = [

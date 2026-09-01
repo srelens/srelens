@@ -877,6 +877,7 @@ mod tests {
             ready: "1/1".into(),
             restarts: 0,
             node: "n".into(),
+            created: None,
             age: "1m".into(),
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
