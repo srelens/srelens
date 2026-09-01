@@ -4,6 +4,7 @@ import { Console } from "../shell/Console";
 import { useActiveContext } from "../lib/clusters";
 import { clearAgentRun, dismissAgentError, useAgentRun, type Turn } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
+import { titleFromQuestion } from "../lib/runTitle";
 import { Transcript, transcriptText } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
 
@@ -79,6 +80,10 @@ export function Agent(_props: { route: string }) {
   // each answer; this is the one for taking the lot into a ticket. Empty until
   // something has been said, so the control is not offered over nothing.
   const chatText = transcriptText(turns);
+  // The conversation's own name, from the question that opened it — the same
+  // derivation the rail row and the saved session use, so one conversation is
+  // called one thing everywhere.
+  const title = titleFromQuestion(turns.find((t) => t.role === "user")?.text ?? "");
 
   // The one place a web reader is TOLD, rather than left to discover it from a
   // failed send. `askAgent` starts with `chat_start`, and the web command
@@ -125,18 +130,33 @@ export function Agent(_props: { route: string }) {
         width={AGENT_RAIL_WIDTH}
         rail={<RunsRail />}
         mainHead={
-          // Right-hand end of the head: `started 12:39 · 12 calls` is a
-          // FIGURE about the run, and figures sit right in this design —
-          // beside the control that acts on the same run.
-          head || chatText !== "" ? (
-            <span className="flex w-full min-w-0 items-center justify-end gap-2">
+          // The head reads left to right as: WHAT this conversation is, then
+          // the figures about it, then the control that acts on it. The title
+          // was derived and wired into the rail row and the saved file, and
+          // NOTHING drew it here — so the screen said `Agent` twice and named
+          // the open conversation nowhere.
+          title || head || chatText !== "" ? (
+            <span className="flex w-full min-w-0 items-center gap-3">
+              {title !== "" && (
+                <span
+                  className="min-w-0 flex-1 truncate normal-case tracking-normal text-[0.8125rem] font-medium text-ink"
+                  title={title}
+                >
+                  {title}
+                </span>
+              )}
+              {/* Figures sit right, beside the control acting on the same run.
+                  `ml-auto` so they stay right even with no title to push
+                  them there. */}
               {head && (
-                <span className="min-w-0 truncate normal-case tracking-normal text-[0.75rem] text-ink">
+                <span className="ml-auto min-w-0 shrink-0 truncate normal-case tracking-normal text-[0.75rem] text-faint">
                   {head}
                 </span>
               )}
               {chatText !== "" && (
-                <CopyButton text={chatText} label="Copy the whole conversation" iconOnly />
+                <span className={head ? "shrink-0" : "ml-auto shrink-0"}>
+                  <CopyButton text={chatText} label="Copy the whole conversation" iconOnly />
+                </span>
               )}
             </span>
           ) : undefined

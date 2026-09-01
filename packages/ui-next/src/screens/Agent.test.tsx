@@ -166,7 +166,10 @@ describe("the agent screen", () => {
       runState({ turns: [{ id: 1, role: "user", text: "Diagnose checkout-api 5xx", calls: [], at: 1 }] }),
     );
     renderAgent();
-    expect(await screen.findByText("Diagnose checkout-api 5xx")).toBeTruthy();
+    // Scoped to the TRANSCRIPT: the head now names the conversation from the
+    // same question, so an unscoped query matches both and proves neither.
+    const log = await screen.findByRole("log");
+    expect(log.textContent).toContain("Diagnose checkout-api 5xx");
   });
 
   /**
@@ -236,6 +239,41 @@ describe("the agent screen", () => {
     // turn's 15:30 is legitimately on screen — what must not happen is the
     // head reading it.
     expect(head.textContent).not.toContain("15:30");
+  });
+
+  /**
+   * Reported as "still no title shown": the derivation was wired into the rail
+   * row and the saved session and NOTHING drew it on the screen, so the head
+   * read `Agent` above `started 12:39 · 12 calls` and named the open
+   * conversation nowhere.
+   */
+  it("names the open conversation in the head, from the question that opened it", async () => {
+    useAgentRun.mockReturnValue(
+      runState({
+        turns: [
+          {
+            id: 1,
+            role: "user",
+            text: "show me what m01-prod-04-mongodb-0 is using",
+            calls: [],
+            at: new Date(2026, 0, 1, 12, 39).getTime(),
+          },
+        ],
+      }),
+    );
+    renderAgent();
+    // The filler opener is dropped and the first letter raised — the same
+    // derivation the rail row uses, so one conversation is called one thing in
+    // both places.
+    await screen.findByText("What m01-prod-04-mongodb-0 is using");
+  });
+
+  it("names no conversation in the head when nothing has been asked", async () => {
+    renderAgent();
+    await screen.findByRole("complementary", { name: "Agent" });
+    // The empty state has its own copy; a title over no conversation would be
+    // a name for nothing.
+    expect(screen.queryByTitle(/./)).toBeNull();
   });
 
   it("draws no started time for a run with no turns yet", async () => {
@@ -382,7 +420,9 @@ describe("the agent screen", () => {
       renderAgent();
       const head = await screen.findByText(/^started /);
       // A figure about the run, beside the control that acts on the same run.
-      expect(head.closest(".justify-end")).not.toBeNull();
+      // `ml-auto` is what pushes it right now that a title occupies the left —
+      // the row itself no longer justifies its whole content to the end.
+      expect(head.className).toContain("ml-auto");
     });
 
     it("copies the whole conversation from the head", async () => {
