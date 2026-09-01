@@ -33,6 +33,22 @@ export interface AskContext {
    * agent reading that pod's logs and hunting for a pod to read.
    */
   surface?: "logs";
+  /**
+   * The namespaces the reader has narrowed this cluster to — the standing
+   * selection behind the list screens' picker (`workspace.ts`'s
+   * `useNamespaces`), NOT a property of any one resource.
+   *
+   * It is the reader's stated scope, and the agent has to be told or it
+   * ignores it. On a StatefulSets list narrowed to one namespace, "which
+   * MongoDB replica set spiked?" ran `podMetrics` across TEN namespaces —
+   * every `*-dataservices` in the cluster — because nothing said the reader
+   * had already answered that question with the picker.
+   *
+   * Empty means the reader chose "all namespaces", which is a real answer and
+   * gets no sentence: a preface claiming a scope the reader did not set would
+   * be worse than none.
+   */
+  namespaces?: string[];
 }
 
 /**
@@ -44,7 +60,10 @@ export interface AskContext {
  * A route that names no resource yields the cluster alone, which is honest:
  * there is nothing more to say about `/overview`.
  */
-export function askContextFor(route: string, cluster: string): AskContext {
+export function askContextFor(route: string, cluster: string, namespaces: string[] = []): AskContext {
+  // A route that names ONE resource is more specific than any standing
+  // selection, so the picker is not carried alongside it — it would only
+  // widen what is already exact.
   const logs = parseLogsRoute(route);
   if (logs) {
     return { cluster, namespace: logs.namespace, kind: logs.kind, name: logs.name, surface: "logs" };
@@ -61,5 +80,7 @@ export function askContextFor(route: string, cluster: string): AskContext {
       name: detail.name,
     };
   }
-  return { cluster };
+  // A list, an overview, anything without a subject of its own: the reader's
+  // own narrowing is the best statement of scope there is.
+  return namespaces.length > 0 ? { cluster, namespaces: [...namespaces] } : { cluster };
 }

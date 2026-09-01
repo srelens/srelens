@@ -44,4 +44,37 @@ describe("what a question asked from a route is about", () => {
     const route = logsRoute("Pod", "ns", "weird/name");
     expect(askContextFor(route, "prod-eu")).toMatchObject({ namespace: "ns", name: "weird/name" });
   });
+
+  /**
+   * The screenshot: a StatefulSets list narrowed to one namespace by the
+   * picker, and "which MongoDB replica set spiked?" ran `podMetrics` across
+   * ten namespaces — every `*-dataservices` in the cluster. The reader had
+   * already answered "which namespace" with the picker and nothing told the
+   * agent.
+   */
+  it("carries the reader's namespace narrowing on a list route", () => {
+    expect(askContextFor("/k/statefulsets", "prod-eu", ["m01-prod-04-dataservices"])).toEqual({
+      cluster: "prod-eu",
+      namespaces: ["m01-prod-04-dataservices"],
+    });
+  });
+
+  it("carries several, when the reader picked several", () => {
+    const about = askContextFor("/k/statefulsets", "prod-eu", ["a", "b"]);
+    expect(about.namespaces).toEqual(["a", "b"]);
+  });
+
+  it("says nothing about namespaces when the reader chose all of them", () => {
+    // An empty selection IS "all namespaces" — a real answer, and inventing a
+    // scope the reader did not set would be worse than saying nothing.
+    expect(askContextFor("/k/statefulsets", "prod-eu", [])).toEqual({ cluster: "prod-eu" });
+  });
+
+  it("prefers a route's own resource over the standing selection", () => {
+    // A logs route names one pod; the picker could only widen that.
+    const route = logsRoute("Pod", "m01-cnips-01-services", "ai-editor");
+    const about = askContextFor(route, "prod-eu", ["some-other-namespace"]);
+    expect(about.namespace).toBe("m01-cnips-01-services");
+    expect(about.namespaces).toBeUndefined();
+  });
 });

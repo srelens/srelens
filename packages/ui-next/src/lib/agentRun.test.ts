@@ -306,6 +306,22 @@ describe("the run store", () => {
       expect(sent).toMatch(/"this stream" means that pod's logs/);
     });
 
+    it("tells the agent the scope the reader set with the namespace picker", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("which MongoDB replica set spiked?", {
+        about: { cluster: "prod-eu", namespaces: ["m01-prod-04-dataservices"] },
+      });
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sent).toMatch(/narrowed to namespace m01-prod-04-dataservices/);
+      expect(sent).toMatch(/that is the scope of the question/);
+    });
+
+    it("says nothing about scope when the reader narrowed to nothing", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("what is unhealthy", { about: { cluster: "prod-eu", namespaces: [] } });
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("Current context: cluster prod-eu.\n\nwhat is unhealthy");
+    });
+
     it("omits a namespace a cluster-scoped resource does not have", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("why is it not ready", {

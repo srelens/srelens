@@ -11,6 +11,7 @@ import {
 } from "../lib/agentCommands";
 import { suggestionsFor } from "../lib/agentSuggestions";
 import { askContextFor } from "../lib/askContext";
+import { useNamespaces } from "../lib/workspace";
 import { isTauri } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
@@ -123,7 +124,11 @@ export function Console({ apple, onToggleTheme }: { apple: boolean; onToggleThem
   // which is where a resource's identity lives — a cluster name alone left the
   // agent with no target for "summarise this stream" and it went searching
   // four namespaces for one.
-  const about = useMemo(() => askContextFor(route, context), [route, context]);
+  // The reader's standing namespace narrowing for THIS cluster — the picker on
+  // the list screens. Without it, a question asked from a list narrowed to one
+  // namespace had the agent sweep every namespace in the cluster.
+  const selected = useNamespaces(activeCtx?.stableId);
+  const about = useMemo(() => askContextFor(route, context, selected), [route, context, selected]);
 
   const deps = useMemo<CommandDeps>(
     () => ({
