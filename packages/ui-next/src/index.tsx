@@ -126,7 +126,7 @@ export function NextApp({
       <div className="min-h-0 flex-1" hidden={gallery}>
         {/* The provider wraps the window, not the gallery: the gallery has no
             console, and the dock is the window's own bottom edge. */}
-        <ConsoleProvider>
+        <ConsoleProvider onToggleTheme={onToggleTheme}>
           <Window
             ported={ported}
             active={!gallery}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button } from "./Button";
+import { CopyButton } from "./CopyButton";
 import { cx } from "./cx";
 
 /** How long the button stays flipped after a copy, from the design's §12. */
@@ -79,32 +79,13 @@ function CheckGlyph() {
  * over the top of it, which would be a second string saying the same thing.
  */
 export function CopyCommand({ command, className }: CopyCommandProps) {
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), COPIED_MS);
-    return () => clearTimeout(timer);
-  }, [copied]);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-    } catch {
-      // No clipboard on a non-secure origin, and nothing to recover: the
-      // command is rendered in full beside the button and can be selected.
-      // Saying "Copied" when nothing was copied would be the only real harm.
-    }
-  }
-
   return (
     <div className={cx("copy-command", className)}>
       <code className="code copy-command-text">{command}</code>
-      <Button variant="ghost" size="xs" onClick={() => void copy()}>
-        {copied && <CheckGlyph />}
-        {copied ? "Copied" : "Copy"}
-      </Button>
+      {/* The clipboard dance lives in `CopyButton` now — one place for the
+          `copied` flag, its timer, and the silence when there is no clipboard
+          at all. */}
+      <CopyButton text={command} label="Copy the command" />
     </div>
   );
 }

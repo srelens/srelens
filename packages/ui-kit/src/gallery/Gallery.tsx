@@ -17,6 +17,8 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import { Dialog } from "../Dialog";
 import { DiffLines, type DiffRow } from "../DiffLines";
 import { ConsoleDock } from "../ConsoleDock";
+import { ConsolePrompt } from "../ConsolePrompt";
+import { CopyButton } from "../CopyButton";
 import { ContextMenu } from "../ContextMenu";
 import { CopyCommand } from "../CopyCommand";
 import { CustomizeMark, type MarkAppearance } from "../CustomizeMark";
@@ -41,6 +43,7 @@ import { MetricTile } from "../MetricTile";
 import { NavIcon } from "../NavIcon";
 import { PairList } from "../PairList";
 import { Panel } from "../Panel";
+import { OptionCheck } from "../OptionCheck";
 import { Popover } from "../Popover";
 import { Progress } from "../Progress";
 import { Radio } from "../Radio";
@@ -1132,6 +1135,23 @@ export function Gallery() {
       </section>
 
       <section>
+        <h2>OptionCheck</h2>
+        {/* Both states side by side, because the point of this component is
+            that the OFF one still takes its space — the labels line up, and a
+            check appearing would shove its row sideways. */}
+        <div className="flex flex-col" style={{ width: "200px" }}>
+          <span className="ns-row" data-on="true">
+            <OptionCheck checked />
+            <span className="flex-1 truncate">Chosen</span>
+          </span>
+          <span className="ns-row">
+            <OptionCheck checked={false} />
+            <span className="flex-1 truncate">Not chosen</span>
+          </span>
+        </div>
+      </section>
+
+      <section>
         <h2>Popover</h2>
         {/* Closed, which is how it spends most of its life: this is the trigger
             and nothing else. */}
@@ -1775,6 +1795,57 @@ export function Gallery() {
             body. An `active` naming a step that is gone falls back to the
             first. */}
         <DrillCard steps={[]} active="signal" onActiveChange={() => {}} title="Nothing selected" />
+      </section>
+
+      <section>
+        <h2>CopyButton</h2>
+        {/* The clipboard dance in one place: the `copied` flag, the timer that
+            clears it, and the silence when there is no clipboard at all — a
+            non-secure origin has none, and "Copied" over an empty clipboard is
+            the only outcome that actually misleads. `CopyCommand` uses this. */}
+        <div className="flex items-center gap-3">
+          <CopyButton text="kubectl -n checkout get pods" label="Copy the command" />
+          {/* Icon only, for a control beside content that is already labelled —
+              a transcript turn. The accessible name is still the label, and
+              that is the one form where it does not silence the text. */}
+          <CopyButton text="the answer" label="Copy the answer" iconOnly />
+        </div>
+      </section>
+
+      <section>
+        <h2>ConsolePrompt</h2>
+        {/* The one prompt bar, wherever srelens asks for a question — the dock
+            uses it, and so does the agent screen. It grew out of the dock
+            having this row inline while the agent screen kept its own: a plain
+            input with the agent's name as loose text beside a Send button,
+            which read as a different product on two screens of one app.
+
+            The host keeps what differs — what a `/` opens, whether there are
+            attachments, what Stop does — and passes it as `lead`/`trail`. */}
+        <div className="card overflow-hidden">
+          <ConsolePrompt
+            value={ask}
+            onValueChange={setAsk}
+            onSubmit={() => setAsk("")}
+            label="Ask the agent"
+            placeholder="Ask about this cluster…   /  for prompts & skills"
+            shortcutHint="⌘K"
+          />
+        </div>
+        {/* With a `lead` — the agent picker's shape on the agent screen — and
+            a turn in flight, where send gives way to the working spinner and
+            the host's own Stop is what acts. */}
+        <div className="card overflow-hidden">
+          <ConsolePrompt
+            value=""
+            onValueChange={() => {}}
+            onSubmit={() => {}}
+            label="Ask the agent"
+            placeholder="Ask about this cluster…"
+            busy
+            lead={<span className="chip"><span>Claude Code</span></span>}
+          />
+        </div>
       </section>
 
       <section>

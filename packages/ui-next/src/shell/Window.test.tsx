@@ -179,7 +179,7 @@ if (!("ResizeObserver" in globalThis)) {
   };
 }
 
-import { ConsoleProvider } from "../console";
+import { ConsoleProvider, useConsole } from "../console";
 import { Window } from "./Window";
 import * as store from "../lib/tabsStore";
 import { resetProbes } from "../lib/probe";
@@ -528,6 +528,46 @@ describe("Window strip", () => {
     await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
     expect(onOpenInClassic).toHaveBeenCalledWith("/", "prod");
+  });
+});
+
+describe("Window — the console dock's scope", () => {
+  /** Reads `useConsole().scope` back for a test to see — `Window` writes it,
+   *  nothing in `Window` itself reads it back, so a probe is the only way to
+   *  observe the effect actually firing. */
+  function ScopeProbe() {
+    const { scope } = useConsole();
+    return <span data-testid="scope-probe">{scope}</span>;
+  }
+
+  async function bootedWithScope() {
+    render(
+      <ConsoleProvider>
+        <ScopeProbe />
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+  }
+
+  it("scopes the dock to the active cluster on boot, then to a resource once one is open", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod", "prod-eu")] });
+    await bootedWithScope();
+    // The home route is `pinned` (`agentSuggestions.ts`'s own doc), so it
+    // contributes no subject of its own — bare `prod-eu`, not `prod-eu / control room`.
+    expect(screen.getByTestId("scope-probe").textContent).toBe("prod-eu");
+    act(() => store.openTab("/k/Deployment/checkout/api", { clusterName: "prod-eu" }));
+    await waitFor(() => expect(screen.getByTestId("scope-probe").textContent).toBe("prod-eu / api"));
+  });
+
+  it("re-scopes the dock when the active cluster changes, not only the route", async () => {
+    listContexts.mockResolvedValue({
+      contexts: [ctx("prod", "prod-eu"), ctx("stage", "stage-eu")],
+    });
+    await bootedWithScope();
+    expect(screen.getByTestId("scope-probe").textContent).toBe("prod-eu");
+    act(() => store.setActiveCluster("stage", "stage-eu"));
+    await waitFor(() => expect(screen.getByTestId("scope-probe").textContent).toBe("stage-eu"));
   });
 });
 

@@ -10,6 +10,7 @@ import {
   type RoutedScreenProps,
   type ScreenComponent,
 } from "./routes";
+import { Agent } from "../screens/Agent";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
 import { Connections } from "../screens/Connections";
@@ -223,6 +224,10 @@ suite("screenFor", () => {
 
   it("resolves the tab strip's default cluster route to the Workloads union", () => {
     expect(screenFor("/resources")).toBe(Workloads);
+  });
+
+  it("resolves /agent to the full run view, the same store the console dock reads", () => {
+    expect(screenFor("/agent")).toBe(Agent);
   });
 
   it("resolves /events to the Events screen", () => {

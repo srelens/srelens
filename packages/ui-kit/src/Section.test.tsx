@@ -279,4 +279,37 @@ describe("an unpadded band's rule", () => {
     const rule = components.slice(components.indexOf('.section[data-padded="false"] {'));
     expect(rule.slice(0, rule.indexOf("}"))).not.toContain("padding-top");
   });
+
+  /**
+   * A banded list: a `smallCaps` head over content that runs to both edges.
+   * The head is a 25px band with its own bottom rule and it caps the rows
+   * directly — the section's vertical padding left a gap under it, so the band
+   * floated above its list. Reported against the mock, which draws them flush.
+   */
+  it("marks a smallCaps section whose content runs to the edges as a band", () => {
+    const { container } = render(
+      <Section title="Recent runs" smallCaps padded={false}>
+        <p>a row</p>
+      </Section>,
+    );
+    // Derived from the two props rather than a third of its own: this
+    // combination IS the banded list.
+    expect(container.querySelector("[data-band]")).not.toBeNull();
+  });
+
+  it("does not mark a padded section, or one with a bold head", () => {
+    const padded = render(
+      <Section title="Recent runs" smallCaps>
+        <p>a row</p>
+      </Section>,
+    );
+    expect(padded.container.querySelector("[data-band]")).toBeNull();
+
+    const bold = render(
+      <Section title="Recent runs" padded={false}>
+        <p>a row</p>
+      </Section>,
+    );
+    expect(bold.container.querySelector("[data-band]")).toBeNull();
+  });
 });
