@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, ValidationDirective};
-use kube::core::{ApiResource, GroupVersionKind};
+use kube::core::{discovery::Scope, ApiResource, GroupVersionKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
@@ -386,6 +386,9 @@ pub struct ApplyIn {
     pub context: String,
     /// One or more resource manifests as YAML (documents separated by `---`).
     pub yaml: String,
+    /// Namespace used when a namespaced document omits `metadata.namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Force apply, taking ownership of fields held by other managers.
     #[serde(default)]
     pub force: bool,
@@ -463,6 +466,60 @@ pub fn parse_api_version(api_version: &str) -> (String, String) {
     }
 }
 
+/// Resolve both the resource name and its scope from the document's GVK.
+///
+/// The static table avoids discovery for built-in kinds. Unknown kinds use
+/// discovery because `ApiResource::from_gvk` only guesses their plural and
+/// cannot tell a namespaced CRD from a cluster-scoped one.
+async fn resolve_manifest_resource(
+    client: &kube::Client,
+    resource: &ResourceRef,
+) -> Result<(ApiResource, bool), CapabilityError> {
+    let (group, version) = parse_api_version(&resource.api_version);
+    let gvk = GroupVersionKind::gvk(&group, &version, &resource.kind);
+    if let Some((known_gvk, namespaced)) = gvk_for(&resource.kind) {
+        // A CRD may reuse a built-in kind name in another API group. Only the
+        // built-in group is safe to resolve from the static table.
+        if known_gvk.group == group {
+            return Ok((ApiResource::from_gvk(&gvk), namespaced));
+        }
+    }
+    let (ar, capabilities) = tokio::time::timeout(
+        request_timeout(),
+        kube::discovery::pinned_kind(client, &gvk),
+    )
+    .await
+    .map_err(|_| CapabilityError::Handler("resource discovery timed out".into()))?
+    .map_err(|e| CapabilityError::Handler(format!("discover {}: {e}", resource.kind)))?;
+    Ok((ar, capabilities.scope == Scope::Namespaced))
+}
+
+/// Build the correctly-scoped dynamic API and report the namespace it uses.
+/// An explicit document namespace wins, then the caller's tab/context scope,
+/// then the kubeconfig context's default namespace. Cluster-scoped kinds
+/// ignore all three so a fallback can never put a Node or cluster-scoped CRD
+/// on a bad URL.
+fn manifest_api(
+    client: kube::Client,
+    ar: &ApiResource,
+    namespaced: bool,
+    document_namespace: Option<&str>,
+    fallback_namespace: Option<&str>,
+) -> (Api<DynamicObject>, Option<String>) {
+    if !namespaced {
+        return (Api::all_with(client, ar), None);
+    }
+    let namespace = document_namespace
+        .filter(|namespace| !namespace.is_empty())
+        .or_else(|| fallback_namespace.filter(|namespace| !namespace.is_empty()))
+        .map(str::to_string)
+        .unwrap_or_else(|| client.default_namespace().to_string());
+    (
+        Api::namespaced_with(client, &namespace, ar),
+        Some(namespace),
+    )
+}
+
 /// True only when there is at least one document and every one applied.
 fn overall_applied(docs: &[ApplyDoc]) -> bool {
     !docs.is_empty() && docs.iter().all(|d| d.applied)
@@ -506,13 +563,14 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                             continue;
                         }
                     };
-                    let (group, version) = parse_api_version(&r.api_version);
-                    let ar =
-                        ApiResource::from_gvk(&GroupVersionKind::gvk(&group, &version, &r.kind));
-                    let api: Api<DynamicObject> = match &r.namespace {
-                        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
-                        None => Api::all_with(client.clone(), &ar),
-                    };
+                    let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
+                    let (api, _) = manifest_api(
+                        client.clone(),
+                        &ar,
+                        namespaced,
+                        r.namespace.as_deref(),
+                        input.namespace.as_deref(),
+                    );
                     let mut params = PatchParams::apply("srelens");
                     if input.force {
                         params = params.force();
@@ -549,6 +607,9 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 pub struct ValidateIn {
     pub context: String,
     pub yaml: String,
+    /// Namespace used when a namespaced document omits `metadata.namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -587,15 +648,20 @@ fn clean_kube_error(e: kube::Error) -> String {
 async fn validate_document(
     client: &kube::Client,
     value: &serde_json::Value,
+    fallback_namespace: Option<&str>,
 ) -> Option<Result<(), String>> {
     let r = resource_ref(value)?;
-    let (group, version) = parse_api_version(&r.api_version);
-    let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
-    let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = match &r.namespace {
-        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
-        None => Api::all_with(client.clone(), &ar),
+    let (ar, namespaced) = match resolve_manifest_resource(client, &r).await {
+        Ok(resolved) => resolved,
+        Err(error) => return Some(Err(error.to_string())),
     };
+    let (api, _) = manifest_api(
+        client.clone(),
+        &ar,
+        namespaced,
+        r.namespace.as_deref(),
+        fallback_namespace,
+    );
     let params = PatchParams {
         field_manager: Some("srelens".into()),
         dry_run: true,
@@ -677,7 +743,12 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     }
                     results.push((
                         doc_index,
-                        validate_document(client.as_ref().unwrap(), value).await,
+                        validate_document(
+                            client.as_ref().unwrap(),
+                            value,
+                            input.namespace.as_deref(),
+                        )
+                        .await,
                     ));
                 }
                 Ok(aggregate_validation(results))
@@ -690,6 +761,9 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 pub struct DiffIn {
     pub context: String,
     pub yaml: String,
+    /// Namespace used when a namespaced document omits `metadata.namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -820,13 +894,15 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                         // it rather than aborting the whole diff.
                         None => continue,
                     };
-                    let (group, version) = parse_api_version(&r.api_version);
-                    let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
-                    let ar = ApiResource::from_gvk(&gvk);
-                    let api: Api<DynamicObject> = match &r.namespace {
-                        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
-                        None => Api::all_with(client.clone(), &ar),
-                    };
+                    let (group, _) = parse_api_version(&r.api_version);
+                    let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
+                    let (api, effective_namespace) = manifest_api(
+                        client.clone(),
+                        &ar,
+                        namespaced,
+                        r.namespace.as_deref(),
+                        input.namespace.as_deref(),
+                    );
                     let is_secret = r.kind == "Secret" && group.is_empty();
 
                     // Current live object (may not exist).
@@ -864,7 +940,7 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     documents.push(diff_document(
                         r.kind,
                         r.name,
-                        r.namespace,
+                        effective_namespace,
                         exists,
                         current_resource_version,
                         current_json,
@@ -1089,6 +1165,131 @@ metadata:
         }))
         .unwrap();
         assert!(!input.force);
+    }
+
+    #[test]
+    fn manifest_inputs_accept_a_fallback_namespace() {
+        let apply: ApplyIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: ConfigMap", "namespace": "team-a"
+        }))
+        .unwrap();
+        let validate: ValidateIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: ConfigMap", "namespace": "team-a"
+        }))
+        .unwrap();
+        let diff: DiffIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: ConfigMap", "namespace": "team-a"
+        }))
+        .unwrap();
+        assert_eq!(apply.namespace.as_deref(), Some("team-a"));
+        assert_eq!(validate.namespace.as_deref(), Some("team-a"));
+        assert_eq!(diff.namespace.as_deref(), Some("team-a"));
+    }
+
+    #[tokio::test]
+    async fn namespaced_manifest_without_metadata_namespace_uses_fallback_path() {
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(String::new()));
+        let captured = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            *captured.lock().unwrap() = request.uri().path().to_string();
+            async move {
+                let body = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": { "name": "cfg", "namespace": "team-a" }
+                })
+                .to_string();
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "client-default");
+        let ar = ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "ConfigMap"));
+        let (api, namespace) = manifest_api(client, &ar, true, None, Some("team-a"));
+        let value = serde_json::json!({
+            "apiVersion": "v1", "kind": "ConfigMap", "metadata": { "name": "cfg" }
+        });
+        api.patch("cfg", &PatchParams::apply("srelens"), &Patch::Apply(&value))
+            .await
+            .unwrap();
+
+        assert_eq!(namespace.as_deref(), Some("team-a"));
+        assert_eq!(&*seen.lock().unwrap(), "/api/v1/namespaces/team-a/configmaps/cfg");
+    }
+
+    #[tokio::test]
+    async fn explicit_namespace_wins_and_cluster_scope_ignores_fallback() {
+        use std::convert::Infallible;
+
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            Ok::<_, Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let client = kube::Client::new(service, "client-default");
+        let config_maps = ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "ConfigMap"));
+        let (_, explicit) = manifest_api(
+            client.clone(),
+            &config_maps,
+            true,
+            Some("from-yaml"),
+            Some("from-tab"),
+        );
+        let (_, context_default) =
+            manifest_api(client.clone(), &config_maps, true, None, None);
+        let nodes = ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "Node"));
+        let (_, cluster_scoped) = manifest_api(
+            client,
+            &nodes,
+            false,
+            None,
+            Some("from-tab"),
+        );
+        assert_eq!(explicit.as_deref(), Some("from-yaml"));
+        assert_eq!(context_default.as_deref(), Some("client-default"));
+        assert_eq!(cluster_scoped, None);
+    }
+
+    #[tokio::test]
+    async fn discovers_unknown_kind_plural_and_cluster_scope() {
+        use std::convert::Infallible;
+
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({
+                "apiVersion": "v1",
+                "groupVersion": "example.com/v1",
+                "kind": "APIResourceList",
+                "resources": [{
+                    "name": "people",
+                    "singularName": "person",
+                    "namespaced": false,
+                    "kind": "Person",
+                    "verbs": ["get", "patch"]
+                }]
+            })
+            .to_string();
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        });
+        let client = kube::Client::new(service, "default");
+        let resource = ResourceRef {
+            api_version: "example.com/v1".into(),
+            kind: "Person".into(),
+            name: "ada".into(),
+            namespace: None,
+        };
+        let (ar, namespaced) = resolve_manifest_resource(&client, &resource).await.unwrap();
+        assert_eq!(ar.plural, "people");
+        assert!(!namespaced);
     }
 
     // -- aggregate_validation -----------------------------------------------

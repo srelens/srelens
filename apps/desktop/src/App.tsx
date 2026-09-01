@@ -831,7 +831,16 @@ export function App() {
   function openNewResource(initialKind?: string) {
     if (!activeCluster) return;
     const id = tabIdRef.current++;
-    setTabs((ts) => [...ts, { id, cluster: activeCluster, kind: "newresource", create: { initialKind } }]);
+    setTabs((ts) => [
+      ...ts,
+      {
+        id,
+        cluster: activeCluster,
+        kind: "newresource",
+        create: { initialKind },
+        namespace: activeTab?.namespace ?? namespaceFor(activeCluster),
+      },
+    ]);
     setActiveTabId(id);
   }
 
@@ -1080,6 +1089,7 @@ export function App() {
                     <NewResourceEditor
                       key={activeTab.id}
                       context={activeCluster}
+                      namespace={activeTab.namespace ?? "default"}
                       initialKind={activeTab.create?.initialKind}
                     />
                   ) : activeCluster && activeKind === "editresource" && activeTab.edit ? (

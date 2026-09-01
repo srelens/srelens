@@ -312,6 +312,7 @@ export interface DiffDoc {
 export async function applyManifest(
   context: string,
   yaml: string,
+  namespace: string | null,
   force = false,
   invoke: Invoker = invokeCapability,
 ): Promise<{ documents?: ApplyDoc[]; applied?: boolean; error?: string }> {
@@ -319,6 +320,7 @@ export async function applyManifest(
     const out = await invoke<{ documents: ApplyDoc[]; applied: boolean }>("k8s.applyManifest", {
       context,
       yaml,
+      namespace,
       force,
     });
     return { documents: out.documents, applied: out.applied };
@@ -331,10 +333,15 @@ export async function applyManifest(
 export async function diffManifest(
   context: string,
   yaml: string,
+  namespace: string | null,
   invoke: Invoker = invokeCapability,
 ): Promise<{ documents?: DiffDoc[]; error?: string }> {
   try {
-    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", { context, yaml });
+    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", {
+      context,
+      yaml,
+      namespace,
+    });
     return { documents: out.documents };
   } catch (e) {
     return { error: String(e) };
@@ -367,12 +374,14 @@ export interface ValidateError {
 export async function validateManifest(
   context: string,
   yaml: string,
+  namespace: string | null,
   invoke: Invoker = invokeCapability,
 ): Promise<{ valid?: boolean; errors?: ValidateError[]; error?: string }> {
   try {
     const out = await invoke<{ valid: boolean; errors: ValidateError[] }>("k8s.validateManifest", {
       context,
       yaml,
+      namespace,
     });
     return { valid: out.valid, errors: out.errors };
   } catch (e) {
