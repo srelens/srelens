@@ -367,7 +367,7 @@ function sortEqual(a: TableSort | null | undefined, b: TableSort | null | undefi
 }
 
 /**
- * A resource list's sort, filter string and active filter column, merged
+ * A resource list's sort, filter string, mode and active filter column, merged
  * into whatever the tab already has. Guarded like every other action here:
  * one subscriber writes a file, so patching a view with values it already
  * holds must not emit.
@@ -378,7 +378,12 @@ export function setTabView(tabId: string, patch: Partial<NonNullable<Tab["view"]
     if (at < 0) return w;
     const current = w.tabs[at].view ?? EMPTY_VIEW;
     const next: NonNullable<Tab["view"]> = { ...current, ...patch };
-    if (sortEqual(current.sort, next.sort) && current.filter === next.filter && current.filterKey === next.filterKey) {
+    if (
+      sortEqual(current.sort, next.sort) &&
+      current.filter === next.filter &&
+      current.filterKey === next.filterKey &&
+      current.regex === next.regex
+    ) {
       return w;
     }
     const tabs = w.tabs.map((t, i) => (i === at ? { ...t, view: next } : t));

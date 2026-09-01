@@ -18,6 +18,7 @@ import {
   SideRail,
   Table,
   filterTableData,
+  tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -191,7 +192,17 @@ function KindList({
   // Sort, filter text and filter column live on the tab — see
   // `useResourceTabView`'s own comment for why, and why `filterKey` is
   // derived rather than merely cleared when this screen hides a column.
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(route, columns);
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   const rows = useMemo(
     () =>
@@ -201,9 +212,10 @@ function KindList({
     [list.rows, clusterScoped, selection],
   );
   const filtered = useMemo(
-    () => filterTableData(rows, columns, filter, filterKey),
-    [rows, columns, filter, filterKey],
+    () => filterTableData(rows, columns, filter, filterKey, regex),
+    [rows, columns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   // Called unconditionally — same reason every hook above it is: the guard
   // for "no descriptor yet" is a `return` below, not a skip, and a hook
@@ -486,6 +498,9 @@ function KindList({
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
       >

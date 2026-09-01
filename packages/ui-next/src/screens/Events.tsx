@@ -19,6 +19,7 @@ import {
   Table,
   Tabs,
   filterTableData,
+  tableFilterError,
   type TabItem,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -173,10 +174,17 @@ function EventList({
 
   // Sort, filter text and filter column live on this route's own tab, so they
   // survive a restart with it — see `useResourceTabView`'s own comment.
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(
-    route,
-    columns,
-  );
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   // The segment narrows the rows on screen and nothing else: it never touches
   // the watch above, so switching segments cannot re-list. Component state
@@ -205,9 +213,10 @@ function EventList({
     [columns, filterKey],
   );
   const filtered = useMemo(
-    () => filterTableData(segmented, searchColumns, filter, filterKey),
-    [segmented, searchColumns, filter, filterKey],
+    () => filterTableData(segmented, searchColumns, filter, filterKey, regex),
+    [segmented, searchColumns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   // Both counts are of what is ON SCREEN, per §8 — a header that counted the
   // loaded set would disagree with the rows under it the moment anyone typed.
@@ -318,6 +327,9 @@ function EventList({
         <FilterBar
           value={filter}
           onValueChange={setFilter}
+          regex={regex}
+          onRegexChange={setRegex}
+          invalid={invalidFilter}
           label={`Filter ${lower}`}
           // Verbatim from §8. The label above is what NAMES the field; this only
           // says what it matches.

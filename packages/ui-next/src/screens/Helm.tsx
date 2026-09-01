@@ -30,6 +30,7 @@ import {
   StatusPill,
   Table,
   filterTableData,
+  tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -53,6 +54,7 @@ import {
   NoClusterScreen,
   StaleSelectionAlert,
   emptyTableCopy,
+  useResourceTabView,
 } from "./resourceShell";
 
 /**
@@ -250,7 +252,7 @@ export function Helm({ route }: { route: string }) {
     return <NoClusterScreen title={title} noun="Helm releases" />;
   }
 
-  return <HelmReleases title={title} context={context} />;
+  return <HelmReleases route={route} title={title} context={context} />;
 }
 
 /**
@@ -271,7 +273,15 @@ export function Helm({ route }: { route: string }) {
  * owns its own 420px frame — `aside.side-rail`, head, body and footer — so a
  * `SideRail` around it would be a second rail around the first.
  */
-function HelmReleases({ title, context }: { title: string; context: ClusterContext }) {
+function HelmReleases({
+  route,
+  title,
+  context,
+}: {
+  route: string;
+  title: string;
+  context: ClusterContext;
+}) {
   // Core takes a context *name*; the workspace holds a `stableId`. The two are
   // never interchangeable — see `lib/clusters`.
   const name = context.name;
@@ -283,7 +293,7 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
   const [list, setList] = useState<ListLoad>({ status: "loading" });
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
-  const [filter, setFilter] = useState("");
+  const { filter, regex, setFilter, setRegex } = useResourceTabView<ReleaseRow>(route, []);
 
   /**
    * **The namespace selection is the cluster's, not this screen's.**
@@ -769,7 +779,8 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
    * `useMemo` keyed on it would recompute every time regardless — an honest
    * call is cheaper than a cache that never hits.
    */
-  const visible = filterTableData(rows, columns, filter, null);
+  const visible = filterTableData(rows, columns, filter, null, regex);
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   /**
    * §16's pane head, made to describe what the reader is looking at.
@@ -878,6 +889,9 @@ function HelmReleases({ title, context }: { title: string; context: ClusterConte
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label="Filter releases"
         placeholder="Filter releases…"
       >

@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from "react";
+import { useId, useRef, type ReactNode } from "react";
 import { cx } from "./cx";
 import { filled } from "./slot";
 
@@ -14,6 +14,12 @@ export interface FilterBarProps {
   /** Shown while the field is empty. Not a substitute for `label`. */
   placeholder?: string;
   disabled?: boolean;
+  /** Whether the field currently interprets its value as a regular expression. */
+  regex?: boolean;
+  /** Supplying this enables the in-field regular-expression toggle. */
+  onRegexChange?: (on: boolean) => void;
+  /** Marks the current regular expression as incomplete or invalid. */
+  invalid?: boolean;
   /** Controls that filter alongside the text — a namespace picker, a toggle. */
   children?: ReactNode;
   className?: string;
@@ -56,10 +62,14 @@ export function FilterBar({
   label,
   placeholder,
   disabled,
+  regex = false,
+  onRegexChange,
+  invalid = false,
   children,
   className,
 }: FilterBarProps) {
   const fieldRef = useRef<HTMLInputElement>(null);
+  const invalidId = useId();
 
   return (
     <div
@@ -68,7 +78,11 @@ export function FilterBar({
       className={cx("rule-b flex shrink-0 flex-wrap items-center gap-3 px-2.5 py-1.5", className)}
       style={{ background: "var(--surface-sunk)" }}
     >
-      <div className="flex min-w-[200px] flex-1 items-center gap-1.5">
+      <div
+        className="flex min-w-[200px] flex-1 items-center gap-1.5 rounded border border-transparent px-1"
+        data-invalid={invalid ? "true" : undefined}
+        style={{ borderColor: invalid ? "var(--sev)" : "transparent" }}
+      >
         {/* Inline rather than an icon-set import: the kit takes no dependency
             on lucide, and this is the only glyph it needs. */}
         <svg
@@ -98,6 +112,9 @@ export function FilterBar({
           placeholder={placeholder}
           disabled={disabled}
           aria-label={label}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={invalid ? invalidId : undefined}
+          title={invalid ? "Invalid regular expression" : undefined}
           className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
         />
         {value !== "" && (
@@ -118,6 +135,34 @@ export function FilterBar({
               <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
           </button>
+        )}
+        {onRegexChange && (
+          <button
+            type="button"
+            className="icon-btn shrink-0 text-[0.6875rem] font-semibold"
+            aria-label="Use regular expression"
+            aria-pressed={regex}
+            data-on={regex}
+            title="Use regular expression"
+            disabled={disabled}
+            onClick={() => onRegexChange(!regex)}
+            style={
+              regex
+                ? {
+                    background: "var(--field)",
+                    color: "var(--accent)",
+                    boxShadow: "inset 0 0 0 1px var(--accent)",
+                  }
+                : undefined
+            }
+          >
+            .*
+          </button>
+        )}
+        {invalid && (
+          <span id={invalidId} className="sr-only">
+            Invalid regular expression
+          </span>
         )}
       </div>
       {filled(children) && (

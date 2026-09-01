@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Table, filterTableData, computeVisibleRange, rowPitch, type Column } from "./Table";
+import {
+  Table,
+  filterTableData,
+  tableFilterError,
+  computeVisibleRange,
+  rowPitch,
+  type Column,
+} from "./Table";
 
 /**
  * Compact ages as seconds, standing in for core's `ageSeconds`, which the kit
@@ -601,6 +608,21 @@ describe("Table", () => {
     expect(filterTableData(data, columns, "running", null)).toEqual([data[0]]);
     expect(filterTableData(data, columns, "web", "phase")).toEqual([]);
     expect(filterTableData(data, columns, "web-2", "name")).toEqual([data[1]]);
+  });
+
+  it("filters raw cell values with case-insensitive regular expressions", () => {
+    expect(filterTableData(data, columns, "^WEB-1$", null, true)).toEqual([data[0]]);
+    expect(filterTableData(data, columns, "(running|pending)", "phase", true)).toEqual(data);
+    expect(filterTableData(data, columns, "-\\d+$", "name", true)).toEqual(data);
+    expect(filterTableData(data, columns, "^(?!.*web-2)", "name", true)).toEqual([data[0]]);
+  });
+
+  it("treats an invalid or empty regular expression as no filter", () => {
+    expect(filterTableData(data, columns, "^web-(", null, true)).toBe(data);
+    expect(filterTableData(data, columns, "  ", null, true)).toBe(data);
+    expect(tableFilterError("^web-(", true)).toBe("Invalid regular expression");
+    expect(tableFilterError("^web-(a|b)", true)).toBeNull();
+    expect(tableFilterError("[", false)).toBeNull();
   });
 
   it("resizes a column with the keyboard and resets it on double click", () => {

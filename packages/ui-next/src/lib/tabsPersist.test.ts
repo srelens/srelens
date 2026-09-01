@@ -119,7 +119,12 @@ describe("parseStoredState", () => {
 
   it("keeps a tab's sort through a save and a load", () => {
     const s = valid();
-    s.workspaces[0].tabs[1].view = { sort: { key: "restarts", direction: "desc" }, filter: "crash", filterKey: "status" };
+    s.workspaces[0].tabs[1].view = {
+      sort: { key: "restarts", direction: "desc" },
+      filter: "crash",
+      filterKey: "status",
+      regex: true,
+    };
     const storage = memory();
     saveTabsState(s, storage);
     const parsed = parseStoredState(storage.getItem(STORAGE_KEY));
@@ -127,6 +132,17 @@ describe("parseStoredState", () => {
       sort: { key: "restarts", direction: "desc" },
       filter: "crash",
       filterKey: "status",
+      regex: true,
+    });
+  });
+
+  it("drops a non-boolean regex mode without losing the rest of the view", () => {
+    const s = valid();
+    s.workspaces[0].tabs[1].view = { filter: "crash" };
+    const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+    doc.workspaces[0].tabs[1].view.regex = "yes";
+    expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].tabs[1].view).toEqual({
+      filter: "crash",
     });
   });
 

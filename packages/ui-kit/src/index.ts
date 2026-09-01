@@ -71,7 +71,7 @@ export { StatusRow, type StatusRowProps } from "./StatusRow";
 export { SubHead, type SubHeadProps, type SubHeadVariant } from "./SubHead";
 export { SurfaceToast, type SurfaceToastProps } from "./SurfaceToast";
 export { Switch, type SwitchProps } from "./Switch";
-export { Table, computeVisibleRange, filterTableData, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
+export { Table, computeVisibleRange, filterTableData, tableFilterError, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
 export { Tabs, type TabItem, type TabsProps, type TabsVariant } from "./Tabs";
 export { TabStrip, type StripTab, type TabStripProps } from "./TabStrip";
 export { TextInput, type TextInputProps } from "./TextInput";
