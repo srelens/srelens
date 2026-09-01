@@ -94,8 +94,18 @@ vi.mock("@srelens/core/lib/kinds", () => ({
     services: "Services",
     settings: "Settings",
     assistant: "Assistant",
+    newresource: "New Resource",
+    editresource: "Edit Resource",
   },
-  K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "", assistant: "" },
+  K8S_KIND: {
+    overview: "",
+    pods: "Pod",
+    services: "Service",
+    settings: "",
+    assistant: "",
+    newresource: "",
+    editresource: "",
+  },
 }));
 vi.mock("./components/ResourceBrowser", () => ({
   ResourceBrowser: ({
@@ -105,6 +115,7 @@ vi.mock("./components/ResourceBrowser", () => ({
     onViewChange,
     onOpenResource,
     onOpenEdit,
+    onOpenNew,
   }: {
     context: string;
     kind: string;
@@ -112,6 +123,7 @@ vi.mock("./components/ResourceBrowser", () => ({
     onViewChange?: (patch: { query?: string }) => void;
     onOpenResource?: (target: { kind: string; namespace: string | null; name: string }) => void;
     onOpenEdit?: (kind: string, namespace: string | null, name: string) => void;
+    onOpenNew?: (initialKind?: string) => void;
   }) => (
     <div data-testid="browser">
       {context}:{kind}
@@ -123,6 +135,7 @@ vi.mock("./components/ResourceBrowser", () => ({
         linked-pod
       </button>
       <button onClick={() => onOpenEdit?.("Deployment", "default", "web")}>edit-web</button>
+      <button onClick={() => onOpenNew?.("Secret")}>new-secret</button>
     </div>
   ),
 }));
@@ -149,11 +162,58 @@ vi.mock("@srelens/core/lib/clusters", async (importOriginal) => ({
   listContexts: listContextsMock,
 }));
 vi.mock("./components/EditResourceTab", () => ({
-  EditResourceTab: ({ kind, name }: { kind: string; name: string }) => (
+  EditResourceTab: ({
+    kind,
+    name,
+    draft,
+    onDraftChange,
+    onEdited,
+  }: {
+    kind: string;
+    name: string;
+    draft: string | null;
+    onDraftChange: (yaml: string) => void;
+    onEdited?: () => void;
+  }) => (
     <div data-testid="edit-tab">
       {kind}/{name}
+      <textarea
+        aria-label="mock edit draft"
+        value={draft ?? "kind: Deployment\nmetadata:\n  name: web\n"}
+        onChange={(event) => onDraftChange(event.target.value)}
+      />
+      <button onClick={onEdited}>mock apply succeeds</button>
     </div>
   ),
+}));
+vi.mock("./components/NewResourceEditor", () => ({
+  NewResourceEditor: ({
+    initialKind,
+    draft,
+    onDraftChange,
+    onCreated,
+  }: {
+    initialKind?: string;
+    draft?: { template: string; yaml: string };
+    onDraftChange: (draft: { template: string; yaml: string }) => void;
+    onCreated?: () => void;
+  }) => {
+    const current = draft ?? {
+      template: initialKind ?? "Deployment",
+      yaml: `kind: ${initialKind ?? "Deployment"}\nmetadata:\n  name: stock\n`,
+    };
+    return (
+      <div data-testid="new-resource-tab">
+        <span>{current.template}</span>
+        <textarea
+          aria-label="mock new draft"
+          value={current.yaml}
+          onChange={(event) => onDraftChange({ ...current, yaml: event.target.value })}
+        />
+        <button onClick={onCreated}>mock create succeeds</button>
+      </div>
+    );
+  },
 }));
 
 import { App } from "./App";
@@ -265,13 +325,68 @@ describe("App", () => {
     fireEvent.click(screen.getByText("open-kind-dev"));
     fireEvent.click(screen.getByText("nav-services"));
     fireEvent.click(screen.getByText("edit-web"));
-    expect(screen.getByTestId("edit-tab").textContent).toBe("Deployment/web");
+    expect(screen.getByTestId("edit-tab").textContent).toContain("Deployment/web");
     expect(screen.getByRole("tab", { name: /edit: Deployment\/web/ })).toBeDefined();
 
     // Re-edit the same resource from the services tab → focuses, doesn't duplicate.
     fireEvent.click(screen.getByRole("tab", { name: /Services/ }));
     fireEvent.click(screen.getByText("edit-web"));
     expect(screen.getAllByRole("tab", { name: /edit: Deployment\/web/ })).toHaveLength(1);
+  });
+
+  it("keeps new-resource YAML in its tab while another tab is active (#403)", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("new-secret"));
+
+    const editor = screen.getByLabelText("mock new draft") as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "kind: Secret\nmetadata:\n  name: unsaved\n" } });
+    fireEvent.click(screen.getByRole("tab", { name: /Services · kind-dev/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /New Resource · kind-dev/ }));
+    expect((screen.getByLabelText("mock new draft") as HTMLTextAreaElement).value).toContain(
+      "name: unsaved",
+    );
+  });
+
+  it("keeps edit-resource YAML in its tab and does not replace it on return (#403)", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("edit-web"));
+
+    const editor = screen.getByLabelText("mock edit draft") as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "kind: Deployment\nmetadata:\n  name: unsaved\n" } });
+    fireEvent.click(screen.getByRole("tab", { name: /Services · kind-dev/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /edit: Deployment\/web/ }));
+    expect((screen.getByLabelText("mock edit draft") as HTMLTextAreaElement).value).toContain(
+      "name: unsaved",
+    );
+  });
+
+  it("clears each in-memory draft after its apply succeeds", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+
+    fireEvent.click(screen.getByText("new-secret"));
+    fireEvent.change(screen.getByLabelText("mock new draft"), {
+      target: { value: "kind: Secret\nmetadata:\n  name: created\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock create succeeds" }));
+    expect((screen.getByLabelText("mock new draft") as HTMLTextAreaElement).value).toContain(
+      "name: stock",
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: /Services · kind-dev/ }));
+    fireEvent.click(screen.getByText("edit-web"));
+    fireEvent.change(screen.getByLabelText("mock edit draft"), {
+      target: { value: "kind: Deployment\nmetadata:\n  name: edited\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock apply succeeds" }));
+    expect((screen.getByLabelText("mock edit draft") as HTMLTextAreaElement).value).toContain(
+      "name: web",
+    );
   });
 
   it("opens views across multiple clusters and closes tabs", () => {

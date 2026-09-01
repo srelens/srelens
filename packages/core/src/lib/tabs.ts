@@ -2,6 +2,12 @@ import type { CrdRef } from "./crds";
 import type { ResourceKind } from "./kinds";
 import type { TabViewState } from "./tabView";
 
+/** Unsaved state for one New Resource tab. Kept in memory, never persisted. */
+export interface NewResourceDraft {
+  template: string;
+  yaml: string;
+}
+
 /**
  * One open tab in the workspace. It lives here rather than beside the
  * component that renders it because `openTabs` persists it, and a persistence
@@ -15,10 +21,10 @@ export interface ViewTab {
   crd?: CrdRef;
   /** Deep-link target from global search (opens the resource's detail). */
   focus?: { name: string; namespace: string | null; nonce: number };
-  /** For a "new resource" tab: the template kind to start from. */
-  create?: { initialKind?: string };
-  /** For an "edit resource" tab: the resource to preload and apply back. */
-  edit?: { kind: string; namespace: string | null; name: string };
+  /** For a "new resource" tab: its starting kind and in-memory working copy. */
+  create?: { initialKind?: string; draft?: NewResourceDraft };
+  /** For an "edit resource" tab: its target and loaded/in-memory working copy. */
+  edit?: { kind: string; namespace: string | null; name: string; draft?: string };
   /** Identity of `cluster` (#265). The display name changes when another
    *  kubeconfig declares the same context name; this does not, so a rename
    *  never reads as a deleted context and never closes the tab. */

@@ -84,7 +84,7 @@ import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "@srelens/core";
 import { deletePod } from "@srelens/core";
 import { clearAccessCache } from "@srelens/core/react";
-import type { ViewTab } from "@srelens/core";
+import type { NewResourceDraft, ViewTab } from "@srelens/core";
 
 /** How long a closing window waits for the settings write to land. */
 const CLOSE_WRITE_TIMEOUT_MS = 2000;
@@ -835,6 +835,25 @@ export function App() {
     setActiveTabId(id);
   }
 
+  /** Keep an editor's working copy on its tab so unmounting it is harmless. */
+  function setNewResourceDraft(tabId: number, draft: NewResourceDraft | undefined) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.create
+          ? { ...tab, create: { ...tab.create, draft } }
+          : tab,
+      ),
+    );
+  }
+
+  function setEditResourceDraft(tabId: number, draft: string | undefined) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft } } : tab,
+      ),
+    );
+  }
+
   /** Open (or focus) a full-tab editor preloaded with a resource's manifest. */
   function openEditResource(kind: string, namespace: string | null, name: string) {
     if (!activeCluster) return;
@@ -1081,6 +1100,9 @@ export function App() {
                       key={activeTab.id}
                       context={activeCluster}
                       initialKind={activeTab.create?.initialKind}
+                      draft={activeTab.create?.draft}
+                      onDraftChange={(draft) => setNewResourceDraft(activeTab.id, draft)}
+                      onCreated={() => setNewResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster && activeKind === "editresource" && activeTab.edit ? (
                     <EditResourceTab
@@ -1089,6 +1111,9 @@ export function App() {
                       kind={activeTab.edit.kind}
                       namespace={activeTab.edit.namespace}
                       name={activeTab.edit.name}
+                      draft={activeTab.edit.draft ?? null}
+                      onDraftChange={(draft) => setEditResourceDraft(activeTab.id, draft)}
+                      onEdited={() => setEditResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster ? (
                     <ResourceBrowser
