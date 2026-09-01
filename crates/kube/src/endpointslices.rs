@@ -33,6 +33,10 @@ pub struct EndpointSliceSummary {
     pub ports: String,
     /// Owning Service (from the `kubernetes.io/service-name` label).
     pub service: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -79,6 +83,7 @@ pub(crate) fn summarise(slice: EndpointSlice) -> EndpointSliceSummary {
         endpoints: format!("{ready}/{total}"),
         ports,
         service,
+        created: crate::creation_rfc3339(slice.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(slice.metadata.creation_timestamp.as_ref()),
     }
 }

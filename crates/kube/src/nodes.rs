@@ -28,6 +28,10 @@ pub struct NodeSummary {
     pub taints: u32,
     pub version: String,
     pub roles: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// `status.allocatable.cpu`, converted to millicores — the unit metrics-server uses.
     #[serde(rename = "allocatableCpuMillicores")]
@@ -136,6 +140,7 @@ fn summarise(node: Node) -> NodeSummary {
         taints,
         version,
         roles,
+        created: crate::creation_rfc3339(node.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(node.metadata.creation_timestamp.as_ref()),
         allocatable_cpu_millicores,
         allocatable_memory_mib,

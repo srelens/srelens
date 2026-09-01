@@ -26,6 +26,10 @@ pub struct ServiceAccountSummary {
     pub namespace: String,
     /// Number of referenced secrets.
     pub secrets: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -39,6 +43,7 @@ pub(crate) fn summarise(sa: ServiceAccount) -> ServiceAccountSummary {
         name: sa.metadata.name.clone().unwrap_or_default(),
         namespace: sa.metadata.namespace.clone().unwrap_or_default(),
         secrets: sa.secrets.as_ref().map_or(0, |s| s.len()) as i32,
+        created: crate::creation_rfc3339(sa.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(sa.metadata.creation_timestamp.as_ref()),
     }
 }

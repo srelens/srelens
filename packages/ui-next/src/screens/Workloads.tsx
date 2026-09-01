@@ -59,6 +59,7 @@ import {
   toggleColumnVisibility,
   useResourceTabView,
 } from "./resourceShell";
+import { AgeCell } from "../lib/ageCell";
 
 /** The row identifier: always shown, never offered to the column picker. */
 const NAME_KEY = "name";
@@ -84,6 +85,8 @@ interface WorkloadRow extends ListRow {
   cpu?: number;
   memory?: number;
   image?: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age (#405). */
+  created?: string | null;
   age?: string;
   flagged: boolean;
   /**
@@ -128,6 +131,7 @@ function fromVerdict(row: ListRow, kind: string, ready: string, verdict: StatusV
     ready,
     statusLabel: verdict.status,
     statusKind: verdict.health,
+    created: (row as { created?: string | null }).created,
     age: (row as { age?: string }).age,
     // From the same verdict as the word beside it — not from the descriptor's
     // own `flagged`, which is that verdict's `.flagged` anyway. One call, so
@@ -221,7 +225,8 @@ const UNION_COLUMNS: Column<WorkloadRow>[] = [
     render: (r) => (r.memory == null ? "—" : formatMemory(r.memory)),
     getSortValue: (r) => r.memory ?? -1,
   },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, from the row's `created` timestamp.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
   // Not sortable, same reason `podColumns` gives it none: a comma-joined list
   // of images has no single natural order.
   { key: "image", header: "Image", sortable: false, render: (r) => r.image || "—" },

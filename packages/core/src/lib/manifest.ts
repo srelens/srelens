@@ -11,6 +11,9 @@ export interface NodeSummary {
   taints: number;
   version: string;
   roles: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
   /** `status.allocatable.cpu`, in millicores — the unit metrics-server uses. */
   allocatableCpuMillicores: number;
@@ -383,6 +386,9 @@ export async function validateManifest(
 export interface ResourceRow {
   name: string;
   namespace: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -399,6 +405,9 @@ export interface EventSummary {
   reason: string;
   object: string;
   message: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
   /** How many times this event has fired. The backend sends 1 when absent. */
   count: number;

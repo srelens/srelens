@@ -30,6 +30,10 @@ pub struct JobSummary {
     pub duration: String,
     /// Owning CronJob name from ownerReferences, or "".
     pub owner: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -66,6 +70,7 @@ pub(crate) fn summarise(job: Job) -> JobSummary {
         failed: status.and_then(|s| s.failed).unwrap_or(0),
         duration,
         owner,
+        created: crate::creation_rfc3339(job.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(job.metadata.creation_timestamp.as_ref()),
     }
 }

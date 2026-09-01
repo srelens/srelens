@@ -8,6 +8,7 @@ import {
 } from "@srelens/core";
 import type { Column } from "@srelens/ui-kit";
 import type { KindActions, KindDescriptor } from "./types";
+import { AgeCell } from "../ageCell";
 
 /**
  * A custom resource's table, built from the printer columns the API server
@@ -36,7 +37,8 @@ export function customColumns(crd: CrdRef): Column<CustomRow>[] {
       getSortValue: (row) => printerSortValue(printer.type, row.columns?.[index] ?? "", row.sortKeys?.[index]),
     });
   });
-  columns.push({ key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue });
+  // #405: live age for a custom resource too.
+  columns.push({ key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue });
   return columns;
 }
 
