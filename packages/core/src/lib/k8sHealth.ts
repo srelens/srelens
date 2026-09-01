@@ -32,8 +32,10 @@ export function phaseKind(phase: string): HealthKind {
     case "Running":
     case "Succeeded":
     case "Ready":
+    case "Active":
       return "success";
     case "Pending":
+    case "Terminating":
       return "warning";
     case "Failed":
     case "Unknown":

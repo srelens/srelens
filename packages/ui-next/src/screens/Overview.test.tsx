@@ -655,7 +655,7 @@ const SICK_PODS: PodSummary[] = [
   aPod("bb-queue-0", "n2", { namespace: "payments", phase: "Pending", ready: "0/1" }),
   // A phase core's table does not know: neutral, and still flagged — not
   // recognising a state is not the same as knowing it is fine.
-  aPod("dd-mystery-0", "n3", { namespace: "search", phase: "Terminating", ready: "0/1" }),
+  aPod("dd-mystery-0", "n3", { namespace: "search", phase: "Mysterious", ready: "0/1" }),
   aPod("ok-web-0", "n1", { namespace: "checkout" }),
   aPod("done-backup-0", "n2", { namespace: "ops", phase: "Succeeded", ready: "0/1" }),
 ];
@@ -761,7 +761,7 @@ describe("Overview — the not-ready list", () => {
         ),
       ],
       ["bb-queue-0", resourceStatusLine("Pod", asObject("Pod", {}, { phase: "Pending" }))],
-      ["dd-mystery-0", resourceStatusLine("Pod", asObject("Pod", {}, { phase: "Terminating" }))],
+      ["dd-mystery-0", resourceStatusLine("Pod", asObject("Pod", {}, { phase: "Mysterious" }))],
     ];
 
     // Three distinct tones among them, so a single wrong tone cannot pass by
