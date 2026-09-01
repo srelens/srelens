@@ -23,6 +23,53 @@ function setup(props: Partial<Parameters<typeof ConsoleDock>[0]> = {}) {
 }
 
 describe("ConsoleDock", () => {
+  describe("as a composer only", () => {
+    /**
+     * The mount where the SCREEN is the output. Reported twice from use: first
+     * "Start here" under a full transcript, then — once that was suppressed —
+     * a blank strip where the transcript copy had been.
+     */
+    it("draws no header and no body when there is nothing but the prompt", () => {
+      setup({ composerOnly: true, children: undefined, context: "prod-eu", onClear: () => {} });
+      // The prompt is still there — this is a composer, not a hidden dock.
+      expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
+      // No output region of its own: the screen above declares one.
+      expect(screen.queryByRole("log")).toBeNull();
+      // And no second copy of what the screen already carries.
+      expect(screen.queryByText("prod-eu")).toBeNull();
+      expect(screen.queryByRole("button", { name: /clear/i })).toBeNull();
+    });
+
+    it("still opens the body for what has nowhere else to go", () => {
+      // The command palette and an error live in the body. Dropping the body
+      // outright would make `/` type into a void.
+      setup({ composerOnly: true, children: <p>rollout restart</p> });
+      expect(screen.getByText("rollout restart")).toBeDefined();
+      expect(screen.getByRole("log")).toBeDefined();
+    });
+
+    it("holds no floor of blank space under the prompt", () => {
+      setup({ composerOnly: true, children: <p>rollout restart</p> });
+      // `min-h-[132px]` is right for a dock whose body IS the conversation;
+      // under a screen that draws the conversation itself it is dead space.
+      expect(screen.getByRole("log").className).not.toContain("min-h-");
+    });
+
+    it("keeps the header when the dock owns its own output", () => {
+      setup({ children: undefined, context: "prod-eu", onClear: () => {} });
+      expect(screen.getByText("prod-eu")).toBeDefined();
+      expect(screen.getByRole("button", { name: /clear/i })).toBeDefined();
+    });
+
+    it("floors the body it does own, and only that one", () => {
+      // `min-h-[132px]` keeps a streaming answer from resizing the dock line
+      // by line. Under a screen that draws the conversation itself it is dead
+      // space, which is the pair this asserts.
+      setup({ children: <p>transcript</p>, emptyLabel: "Nothing yet" });
+      expect(screen.getByRole("log").className).toContain("min-h-");
+    });
+  });
+
   it("is a named region", () => {
     setup();
     expect(screen.getByRole("region", { name: "Console" })).toBeDefined();
@@ -66,9 +113,16 @@ describe("ConsoleDock", () => {
     expect(screen.getByRole("log").getAttribute("aria-live")).toBe("off");
   });
 
-  it("says so when there is nothing in the output yet", () => {
+  it("draws no output region at all when there is nothing to put in it", () => {
+    // No `emptyLabel` given. It used to default to "Nothing yet", so an unused
+    // dock drew a 132px panel with a placeholder in it — asked to go, as
+    // "make the dock clean". The caller says what an empty body should read,
+    // or there is no body.
     setup({ children: null });
-    expect(screen.getByText("Nothing yet")).toBeDefined();
+    expect(screen.queryByRole("log")).toBeNull();
+    // The composer is unaffected: this is a dock with nothing to SHOW, not a
+    // dock with nothing to do.
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
   });
 
   it("takes the caller's wording for the empty output", () => {

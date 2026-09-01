@@ -273,7 +273,10 @@ describe("Console", () => {
     // Closed to begin with: nothing to read, so no output region.
     expect(screen.queryByRole("log")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
-    expect(screen.getByRole("log", { name: "Console output" })).toBeDefined();
+    // Opened: the prompt is on screen and focused-ready. Not the output
+    // region — an empty conversation has no body now, so asserting one would
+    // be asserting the placeholder that was just removed.
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
     expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }));
   });
 
@@ -282,28 +285,20 @@ describe("Console", () => {
     expect(screen.getByText("⌘K")).toBeDefined();
   });
 
-  it("shows route-aware suggestions when there is nothing to show yet", async () => {
+  it("shows nothing at all when there is nothing to show yet", async () => {
     const user = userEvent.setup();
-    // Route-aware: `/logs` is what makes "Summarise the last 500 lines" the
-    // right set rather than the control room's own (`suggestionsFor`'s doc).
-    tabsStore.openTab("/logs/Pod/checkout/api-0");
-    setup();
-    // Suggestions live in the expanded panel, not the always-visible prompt —
-    // focusing the prompt is what opens it (`ConsoleDock`'s own contract).
-    await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
-    expect(await screen.findByText("Summarise the last 500 lines")).toBeTruthy();
-  });
-
-  it("asks the agent immediately when a suggestion is picked", async () => {
-    const user = userEvent.setup();
+    // This was "Start here" over three route-aware suggestions. Removed with
+    // the surface — "remove question not needed, make the dock clean" — so an
+    // opened dock over an empty conversation is its composer and no more.
     tabsStore.openTab("/logs/Pod/checkout/api-0");
     setup();
     await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
-    await user.click(await screen.findByText("Summarise the last 500 lines"));
-    expect(askAgent).toHaveBeenCalledWith(
-      "Summarise the last 500 lines",
-      expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }),
-    );
+    expect(screen.queryByRole("log")).toBeNull();
+    // Pinned on the copy too, not only on the region: the sets themselves are
+    // gone from `agentSuggestions.ts`, and a query for the region alone would
+    // pass if they came back inside some other container.
+    expect(screen.queryByText("Summarise the last 500 lines")).toBeNull();
+    expect(screen.queryByText(/start here/i)).toBeNull();
   });
 
   it("turns into the command palette when the query starts with a slash", async () => {
@@ -445,11 +440,16 @@ describe("Console — one live region, not two nested (I7)", () => {
     expect(screen.getByRole("log").getAttribute("aria-live")).toBe("polite");
   });
 
-  it("turns the dock's live region off for suggestions, so a keystroke that changes the list is not read out", async () => {
+  it("turns the dock's live region off for the command palette, so a keystroke that changes the list is not read out", async () => {
     const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
     setup();
-    await user.click(screen.getByRole("textbox", { name: "Console prompt" }));
-    expect(screen.getByRole("log").getAttribute("aria-live")).toBe("off");
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    // The palette re-renders its whole body on every character; a polite
+    // region would read the matched list out again each time (I7). The
+    // suggestions list was the other case, and it no longer exists.
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/re");
+    expect((await screen.findByRole("log")).getAttribute("aria-live")).toBe("off");
   });
 
   it("turns the dock's live region off for the command palette, so typing / does not re-announce the matched list", async () => {
@@ -649,6 +649,74 @@ describe("Console — header details", () => {
     );
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
     expect(screen.queryByRole("button", { name: /full view/i })).toBeNull();
+  });
+
+  /**
+   * The dock in the full view is a COMPOSER. A compact transcript there is the
+   * same conversation twice; an empty one is a blank strip between the header
+   * and the prompt, which is what came back after the suggestions were
+   * suppressed.
+   */
+  it("draws no second copy of the conversation in the full view", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(
+      runState({ turns: [{ id: 1, role: "user", text: "why is it restarting", calls: [], at: 1 }] }),
+    );
+    tabsStore.setState(defaultState([]));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.getByRole("textbox", { name: /prompt/i })).toBeDefined();
+    // The screen above draws it. Pinned on the QUESTION rather than on the
+    // absence of a region, so this cannot pass by the dock rendering nothing
+    // at all.
+    expect(screen.queryByText("why is it restarting")).toBeNull();
+  });
+
+  /**
+   * The wiring itself. Both halves above pass with the flag never reaching the
+   * dock — the dock's own tests cover what it does WITH the flag, and this is
+   * the only thing that says `Console` hands it over.
+   */
+  it("gives the full view a composer with no header and no empty body", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([]));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.getByRole("textbox", { name: /prompt/i })).toBeDefined();
+    // `New question` on the screen already clears the run; a second control
+    // saying so in the dock header is the duplication that was reported.
+    expect(screen.queryByRole("button", { name: /clear/i })).toBeNull();
+    // And no "Nothing yet" over a 132px floor: the screen's own empty state
+    // says how to begin.
+    expect(screen.queryByText(/nothing yet/i)).toBeNull();
+  });
+
+  it("still opens the command palette in the full view", async () => {
+    const user = userEvent.setup();
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([]));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    // A composer-only dock that dropped its body outright would make `/` type
+    // into a void — the palette has nowhere else to appear.
+    await user.type(screen.getByRole("textbox", { name: /prompt/i }), "/");
+    expect(await screen.findByRole("log")).toBeDefined();
   });
 
   /**

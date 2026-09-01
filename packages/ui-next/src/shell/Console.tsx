@@ -18,7 +18,6 @@ import {
   type CommandDeps,
   type CommandGroup,
 } from "../lib/agentCommands";
-import { suggestionsFor } from "../lib/agentSuggestions";
 import { AgentPicker } from "../screens/agent/AgentPicker";
 import { LOADING, type Read } from "../lib/read";
 import { askContextFor, runKeyFor } from "../lib/askContext";
@@ -38,27 +37,6 @@ const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Cluster", "Workspace"]
 
 /** §F's empty-palette line, verbatim. */
 const NO_COMMAND_MATCH = "No command matches. Press ⏎ to ask the agent instead.";
-
-/** Suggestions mode: the eyebrow `Start here` over three route-aware prompts,
- *  each of which asks immediately when picked — a suggestion is already a
- *  full question, not a draft to edit first. */
-function SuggestionList({ items, onAsk }: { items: readonly string[]; onAsk: (question: string) => void }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1.5">
-      <Eyebrow>Start here</Eyebrow>
-      {items.map((question) => (
-        <button
-          key={question}
-          type="button"
-          className="min-w-0 truncate rounded-tile px-2 py-1.5 text-left text-sm hover:bg-sunk"
-          onClick={() => onAsk(question)}
-        >
-          {question}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 /** Command palette mode: the matched commands, grouped under §F's four
  *  headings — a group with nothing in it draws no heading at all, which is
@@ -98,9 +76,10 @@ function CommandRows({ commands, onRun }: { commands: readonly Command[]; onRun:
  * **Three modes, picked by what there is to show, not by a mode flag this
  * component remembers.** The query starting with `/` is the command palette
  * (matched against `commandsFor`'s own list, or §F's empty-palette line,
- * verbatim, when nothing matches); an empty run is `suggestionsFor` the
- * active route; anything else is `<Transcript compact />` over the shared
- * store `lib/agentRun.ts` holds. The full `/agent` screen is a second
+ * verbatim, when nothing matches); a conversation with something in it is
+ * `<Transcript compact />` over the shared store `lib/agentRun.ts` holds; and
+ * anything else — an empty run, or the full view where the screen draws the
+ * conversation itself — is NOTHING, so the dock is just its composer. The full `/agent` screen is a second
  * renderer over the SAME store — not built here, and not this component's to
  * mount (`Composer`, Task 5's own submit surface, belongs to that screen; this
  * dock keeps `ConsoleDock`'s own single-line prompt, wired straight to
@@ -361,25 +340,23 @@ export function Console({ fullView }: { fullView?: boolean }) {
           }}
         />
       );
-  } else if (turns.length === 0 && !busy && !isFullView) {
-    // Suggestions are for a conversation that has not started. Not while one
-    // is answering either: "Start here" under a question already in flight
-    // invites a second that would only be refused.
-    //
-    // And never in the full view. That screen has its own empty state saying
-    // what the agent does, and this dock sits directly under a transcript
-    // there — "Start here" appeared beneath a finished answer, which is what
-    // got reported. Two explanations of how to begin, one of them wrong about
-    // whether you already have.
-    children = (
-      <SuggestionList
-        items={suggestionsFor(route)}
-        onAsk={(question) => {
-          void askAgent(question, { about, route });
-          setValue("");
-        }}
-      />
-    );
+  } else if (isFullView || turns.length === 0) {
+    /*
+      Nothing. A dock with nothing in it is a composer, not a panel with a
+      placeholder in it.
+
+      This branch used to be "Start here" over three route-aware suggestions.
+      They were reported three times running — under a finished answer in the
+      full view, then as prompts nobody wanted at all — and asked to go:
+      "remove question not needed, make the dock clean". A canned question is
+      also the one thing on this surface srelens cannot say is about anything
+      the reader is looking at.
+
+      In the full view it is nothing even WITH turns: the screen above draws
+      that conversation, and a compact copy of it in the dock is the same
+      conversation twice.
+    */
+    children = undefined;
   } else {
     // `live={false}`: `ConsoleDock`'s own body already declares its own ARIA
     // log region, polite or off, around whichever children it is given
@@ -414,6 +391,10 @@ export function Console({ fullView }: { fullView?: boolean }) {
 
   return (
     <ConsoleDock
+      // In the full view the screen carries the transcript, the context and a
+      // `New question` of its own; the dock's own header and body would each
+      // be a second copy.
+      composerOnly={isFullView}
       open={open}
       onOpenChange={setOpen}
       value={value}

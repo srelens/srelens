@@ -1,72 +1,15 @@
 /**
- * What the console dock offers to ask, and what it says it is asking about —
- * both derived from the active route, and both pure: no React, no store, no
- * I/O. This is the part of the dock that can be reasoned about without
- * mounting anything.
+ * What the console dock says it is asking about, derived from the active route
+ * — pure: no React, no store, no I/O.
+ *
+ * It also held §F's five sets of canned suggestions. Those were removed with
+ * the surface that drew them ("remove question not needed, make the dock
+ * clean"), and the sets went with it rather than sitting here unread.
  *
  * Design: `docs/superpowers/specs/mock-full-design.md` §F (the agent dock).
  */
 import { parseDetailRoute } from "./detailRoute";
 import { describe } from "./routes";
-
-/** §F's five suggestion sets, verbatim — this is copy, not paraphrase. */
-const LOGS_SUGGESTIONS = [
-  "Summarise the last 500 lines",
-  "Which trace ids failed?",
-  "Group these errors by cause",
-] as const;
-
-const RESOURCE_SUGGESTIONS = [
-  "Why is this workload degraded?",
-  "What changed in the last hour?",
-  "Compare rev 119 with rev 118",
-] as const;
-
-const HELM_SUGGESTIONS = [
-  "What did release 119 change?",
-  "Roll back checkout to 118",
-  "Which releases drift from git?",
-] as const;
-
-const INCIDENTS_SUGGESTIONS = [
-  "Why is checkout-api returning 5xx?",
-  "What changed in prod-eu today?",
-  "Is any other service affected?",
-] as const;
-
-/**
- * The "anything else" set — a missing reading is absent, never a placeholder,
- * so every route gets a real set of suggestions and this is what an unmatched
- * route falls back to.
- */
-const FALLBACK_SUGGESTIONS = [
-  "What is unhealthy right now?",
-  "Show me pods restarting today",
-  "Explain this screen",
-] as const;
-
-/**
- * §F's route-aware `Start here` prompts. Matched by route shape, in the order
- * §F lists them, with the fallback set always last.
- *
- * The resource set is matched via `describe(route).kind === "resource"` rather
- * than a `/resources/` prefix or `parseDetailRoute` alone: the mock predates
- * `detailRoute`'s `/k/<kind>/<ns>/<name>` shape, and a real resource tab's
- * route never starts with `/resources/` any more — but a tab a previous
- * session persisted still can (`describe`'s own legacy branch, `routes.ts`
- * around line 133), and it is just as much a resource as the modern shape.
- * `describe` already tells the two `/resources` shapes apart from the
- * WORKLOADS LIST at that exact route (`kind: "workloads"`, not `"resource"`),
- * so reusing its `kind` here catches both resource shapes without also
- * catching the list.
- */
-export function suggestionsFor(route: string): readonly string[] {
-  if (route.startsWith("/logs")) return LOGS_SUGGESTIONS;
-  if (describe(route).kind === "resource") return RESOURCE_SUGGESTIONS;
-  if (route.startsWith("/helm")) return HELM_SUGGESTIONS;
-  if (route === "/incidents" || route === "/") return INCIDENTS_SUGGESTIONS;
-  return FALLBACK_SUGGESTIONS;
-}
 
 /**
  * Join a cluster name and a subject with `" / "`, but only when BOTH halves

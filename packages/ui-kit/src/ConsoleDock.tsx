@@ -91,7 +91,28 @@ export interface ConsoleDockProps {
   /** The output — a transcript, a command list, suggestions. */
   children?: ReactNode;
   /** What to say when there is no output yet. */
+  /**
+   * What to say in the body when the caller has nothing to put there.
+   *
+   * No default, deliberately. It used to be `"Nothing yet"`, which meant an
+   * unused dock drew a 132px panel with a placeholder in it — reported as
+   * blank space under the prompt, and asked to go ("make the dock clean").
+   * With nothing given there is no body region at all, and the dock is its
+   * composer. A caller that genuinely wants an empty state asks for one.
+   */
   emptyLabel?: ReactNode;
+  /**
+   * The dock is a composer and nothing else: no header, and a body only when
+   * there is genuinely something to put in it.
+   *
+   * For the one mount where the SCREEN is the output — `/agent`, which draws
+   * the transcript itself and carries its own `New question` — a header
+   * repeating the context pill and a body holding an empty transcript are two
+   * copies of what is already on screen, the second of them 132px of blank.
+   * The command palette and an error still open the body, because those have
+   * nowhere else to appear.
+   */
+  composerOnly?: boolean;
   /** Names the dock, its prompt and its output. */
   label?: string;
   /** The accelerator, as printed beside the prompt. */
@@ -152,7 +173,8 @@ export function ConsoleDock({
   onClear,
   onExpand,
   children,
-  emptyLabel = "Nothing yet",
+  emptyLabel,
+  composerOnly,
   label = "Console",
   shortcutHint = MOD,
   live = true,
@@ -215,7 +237,7 @@ export function ConsoleDock({
     <section aria-label={label} className={cx("console-dock", className)}>
       <div className="flex min-w-0">
         <div className="flex min-w-0 flex-1 flex-col">
-          {open && (
+          {open && !composerOnly && (
             <>
               <div
                 className="rule-b flex items-center justify-between gap-3 px-2.5 py-1"
@@ -269,21 +291,25 @@ export function ConsoleDock({
                 </div>
               </div>
 
-              <div
-                id={bodyId}
-                ref={bodyRef}
-                className="scroll max-h-[42vh] min-h-[132px] px-3 py-2.5"
-                role="log"
-                aria-live={live ? "polite" : "off"}
-                aria-label={`${label} output`}
-              >
-                {filled(children) ? (
-                  children
-                ) : (
-                  <EmptyState title={emptyLabel} />
-                )}
-              </div>
             </>
+          )}
+
+          {/* The body is its own region, not part of the header's fragment: a
+              composer-only dock still has to open it for the command palette
+              and for an error, both of which have nowhere else to go. What it
+              must NOT do is hold a floor of blank space under a transcript the
+              screen is already drawing. */}
+          {open && (filled(children) || filled(emptyLabel)) && (
+            <div
+              id={bodyId}
+              ref={bodyRef}
+              className={cx("scroll max-h-[42vh] px-3 py-2.5", !composerOnly && "min-h-[132px]")}
+              role="log"
+              aria-live={live ? "polite" : "off"}
+              aria-label={`${label} output`}
+            >
+              {filled(children) ? children : <EmptyState title={emptyLabel} />}
+            </div>
           )}
 
           {/*
