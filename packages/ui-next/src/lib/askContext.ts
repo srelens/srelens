@@ -1,5 +1,24 @@
+import { K8S_KIND } from "@srelens/core";
 import { parseDetailRoute } from "./detailRoute";
 import { parseLogsRoute } from "../screens/Logs";
+import { isBuiltInKind } from "./routes";
+
+/** The agent screen's own route — the one tab that is not a subject. */
+const AGENT_ROUTE = "/agent";
+
+/**
+ * The Kubernetes kind a built-in list route shows — `/k/pods` is `Pod`.
+ *
+ * `undefined` for anything that is not one of core's kinds: the control room,
+ * `/helm`, a route nobody minted. Naming a kind srelens cannot resolve would
+ * be worse than naming none.
+ */
+function listKind(route: string): string | undefined {
+  const slug = route.startsWith("/k/") ? route.slice(3).split("/")[0] : "";
+  // `isBuiltInKind` is a type guard, so the lookup below is indexed by a
+  // `ResourceKind` rather than by any string that arrived from a route.
+  return slug !== "" && isBuiltInKind(slug) ? K8S_KIND[slug] : undefined;
+}
 
 /**
  * What a question is ABOUT — the cluster, and the resource on screen when the
@@ -34,8 +53,8 @@ export interface AskContext {
    */
   surface?: "logs";
   /**
-   * The namespaces the reader has narrowed this cluster to — the standing
-   * selection behind the list screens' picker (`workspace.ts`'s
+   * The namespaces the tab the question was asked from is narrowed to — the
+   * standing selection behind the list screens' picker (`workspace.ts`'s
    * `useNamespaces`), NOT a property of any one resource.
    *
    * It is the reader's stated scope, and the agent has to be told or it
@@ -44,9 +63,11 @@ export interface AskContext {
    * every `*-dataservices` in the cluster — because nothing said the reader
    * had already answered that question with the picker.
    *
-   * Empty means the reader chose "all namespaces", which is a real answer and
-   * gets no sentence: a preface claiming a scope the reader did not set would
-   * be worse than none.
+   * Carried for the tab the question comes FROM, and never for a conversation
+   * started on the agent tab, which is about the cluster and has no list
+   * behind it. Empty means the reader chose "all namespaces", which is a real
+   * answer and gets no sentence: a preface claiming a scope the reader did not
+   * set would be worse than none.
    */
   namespaces?: string[];
 }
@@ -57,10 +78,19 @@ export interface AskContext {
  * Derived from the route rather than from component state, because the route
  * IS a resource's identity here — `logsRoute` and `detailRoute` both bake
  * kind, namespace and name into it, which is why tabs dedupe by route string.
- * A route that names no resource yields the cluster alone, which is honest:
- * there is nothing more to say about `/overview`.
+ * A route that names no resource still says what it can — which list is open,
+ * and the namespaces that list is narrowed to. A route with none of that
+ * yields the cluster alone, which is honest: there is nothing more to say
+ * about `/overview`. The agent tab is the one route that says only the
+ * cluster by rule rather than for want of anything to add.
  */
 export function askContextFor(route: string, cluster: string, namespaces: string[] = []): AskContext {
+  // The agent tab is not a subject. It is the full view of whichever
+  // conversation is selected, so a NEW conversation started there is about the
+  // cluster and nothing else — no list to be narrowed, no kind on screen.
+  // Anything more would be scope borrowed from a tab the reader is not on.
+  if (route === AGENT_ROUTE) return { cluster };
+
   // A route that names ONE resource is more specific than any standing
   // selection, so the picker is not carried alongside it — it would only
   // widen what is already exact.
@@ -80,9 +110,19 @@ export function askContextFor(route: string, cluster: string, namespaces: string
       name: detail.name,
     };
   }
-  // A list, an overview, anything without a subject of its own: the reader's
-  // own narrowing is the best statement of scope there is.
-  return namespaces.length > 0 ? { cluster, namespaces: [...namespaces] } : { cluster };
+  // A list: WHICH list, and the namespaces this tab is narrowed to. Both are
+  // things the reader can see and the agent cannot — "pass kind type like
+  // which tab is opened".
+  //
+  // The kind travels without a name, which is deliberate: `Pod` alone says
+  // the reader is looking at pods, and the run key needs BOTH a kind and a
+  // name before it treats a subject as its own conversation, so a list stays
+  // keyed by its route.
+  const kind = listKind(route);
+  const about: AskContext = { cluster };
+  if (kind !== undefined) about.kind = kind;
+  if (namespaces.length > 0) about.namespaces = [...namespaces];
+  return about;
 }
 
 /**
@@ -97,6 +137,8 @@ export function askContextFor(route: string, cluster: string, namespaces: string
  * - The namespace picker is NOT in the key. Narrowing is a filter adjusted
  *   while thinking, so re-narrowing must not fork the chat. It travels in the
  *   preface as scope instead (see {@link AskContext.namespaces}).
+ * - A list's kind is not in the key either, for the same reason it is not a
+ *   subject: `${cluster}|${route}` already separates one list from another.
  *
  * The cluster is always in the key: the same pod name in two clusters is two
  * subjects, which is the whole lesson of this migration's cluster-identity

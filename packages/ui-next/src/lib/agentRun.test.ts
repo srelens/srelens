@@ -350,11 +350,36 @@ describe("the run store", () => {
     it("tells the agent the scope the reader set with the namespace picker", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("which MongoDB replica set spiked?", {
-        about: { cluster: "prod-eu", namespaces: ["m01-prod-04-dataservices"] },
+        about: { cluster: "prod-eu", kind: "StatefulSet", namespaces: ["m01-prod-04-dataservices"] },
       });
       const sent = sendChat.mock.calls.at(-1)?.[1] as string;
       expect(sent).toMatch(/narrowed to namespace m01-prod-04-dataservices/);
       expect(sent).toMatch(/that is the scope of the question/);
+    });
+
+    /**
+     * "Pass kind type like which tab is opened." A list has a kind and no
+     * name, and the agent cannot see the tab — so which list is open is
+     * something only srelens can say.
+     */
+    it("says which list the reader is looking at, when that is all there is", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("what is unhealthy", { about: { cluster: "prod-eu", kind: "StatefulSet" } });
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sent).toMatch(/looking at the StatefulSet list/);
+    });
+
+    it("says list of nothing when the route named a resource", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("why is it restarting", {
+        about: { cluster: "prod-eu", namespace: "ns", kind: "Pod", name: "mongodb-0" },
+      });
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      // A kind WITH a name is the subject itself, already stated as
+      // `Pod mongodb-0`. Adding "looking at the Pod list" beside it would be
+      // srelens describing a screen the reader is not on.
+      expect(sent).toMatch(/namespace ns, Pod mongodb-0/);
+      expect(sent).not.toMatch(/looking at the Pod list/);
     });
 
     it("says nothing about scope when the reader narrowed to nothing", async () => {

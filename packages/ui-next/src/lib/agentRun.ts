@@ -658,10 +658,19 @@ function contextPreface(about: AskContext | undefined): string {
   // Said out loud, because it is the difference between answering the question
   // and going to look for its subject. "Summarise this stream" with only a
   // cluster named sent the agent searching four namespaces for a pod.
-  // The reader's own narrowing, when the route has no subject of its own.
-  // Said as scope rather than as a fact, because that is what it is: they set
-  // the picker, and an agent not told about it sweeps every namespace in the
-  // cluster instead.
+  // What the reader is looking at, when it is a list rather than one resource:
+  // the kind alone, since that is all a list has. Said because the agent
+  // cannot see the tab — "pass kind type like which tab is opened".
+  //
+  // `!about.name` matters: a kind WITH a name is the subject itself and is
+  // already stated above as `Pod mongodb-0`. Saying "looking at the Pod list"
+  // beside it would be srelens describing a screen the reader is not on.
+  if (about?.kind && !about.name) {
+    text += ` The reader is looking at the ${about.kind} list.`;
+  }
+  // The narrowing the tab carries. Said as SCOPE rather than as a fact,
+  // because that is what it is: the reader set the picker, and an agent not
+  // told about it sweeps every namespace in the cluster instead.
   const narrowed = about?.namespaces ?? [];
   if (narrowed.length === 1) {
     text += ` The reader has this cluster narrowed to namespace ${narrowed[0]}; unless they say otherwise, that is the scope of the question.`;

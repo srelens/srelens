@@ -21,8 +21,8 @@ import {
 import { AgentPicker } from "../screens/agent/AgentPicker";
 import { LOADING, type Read } from "../lib/read";
 import { askContextFor, runKeyFor } from "../lib/askContext";
-import { readImageFile } from "../lib/pastedImages";
 import { useNamespaces } from "../lib/workspace";
+import { readImageFile } from "../lib/pastedImages";
 import { isTauri, listAgents, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
@@ -180,11 +180,14 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // The reader's standing namespace narrowing for THIS cluster — the picker on
   // the list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
-  const selected = useNamespaces(activeCtx?.stableId);
   // What a question asked from here is ABOUT. Derived from the active route,
   // which is where a resource's identity lives — a cluster name alone left the
   // agent with no target for "summarise this stream" and it went searching
   // four namespaces for one.
+  // The reader's standing namespace narrowing for THIS cluster — the picker on
+  // the list screens. Without it, a question asked from a list narrowed to one
+  // namespace had the agent sweep every namespace in the cluster.
+  const selected = useNamespaces(activeCtx?.stableId);
   const about = useMemo(() => askContextFor(route, context, selected), [route, context, selected]);
   /**
    * The dock shows the conversation about the thing the reader is LOOKING at,
@@ -446,14 +449,20 @@ export function Console({ fullView }: { fullView?: boolean }) {
         // What the question is about, said where the question is typed. The
         // header already carries a context pill, but the header belongs to the
         // dock's transcript; this belongs to the composer.
-        <>
-          {scope !== "" && <span className="chip"><span>{scope}</span></span>}
-          {about.namespaces?.length === 1 && (
-            <span className="chip">
-              <span>{about.namespaces[0]}</span>
-            </span>
-          )}
-        </>
+        // ONLY what nothing else on screen says. The scope was a chip here as
+        // well as the dock header's pill AND the prompt's own placeholder —
+        // the same long context name three times in a column, reported as
+        // "this still has duplicate in chat box and header, drop from one
+        // place". It is dropped from here, where the placeholder directly
+        // beneath it already reads `Ask about <scope>`.
+        //
+        // The namespace stays: it is the one part of the scope no other line
+        // states, and it is what the question will actually be narrowed to.
+        about.namespaces?.length === 1 ? (
+          <span className="chip">
+            <span>{about.namespaces[0]}</span>
+          </span>
+        ) : undefined
       }
       attachments={
         <>

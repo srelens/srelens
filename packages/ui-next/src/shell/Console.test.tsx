@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -71,6 +72,14 @@ vi.mock("@srelens/core", async (orig) => ({
  *  for the same store. */
 function runState(overrides: { turns?: unknown[]; gates?: unknown[]; busy?: boolean } = {}) {
   return { turns: [], gates: [], busy: false, generation: 0, agentKind: "claude", ...overrides };
+}
+
+/** Sets the console's scope, which `Window`'s own effect does in the shipped
+ *  tree and nothing does here. */
+function Scoped({ scope }: { scope: string }) {
+  const { setScope } = useConsole();
+  useEffect(() => setScope(scope), [scope, setScope]);
+  return null;
 }
 
 /** Anything else on screen, putting a question to the console from outside it. */
@@ -278,6 +287,38 @@ describe("Console", () => {
     // be asserting the placeholder that was just removed.
     expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
     expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ cluster: expect.any(String) }) }));
+  });
+
+  /**
+   * "This still has duplicate in chat box and header, drop from one place."
+   * The scope was a chip above the prompt, the dock header's pill, AND the
+   * prompt's own placeholder — the same long context name three times in a
+   * column.
+   */
+  it("names the scope once above the prompt, not twice", async () => {
+    const user = userEvent.setup();
+    const scope = "prod-eu / pods";
+    useRun.mockReturnValue(runState());
+    tabsStore.setState(defaultState([]));
+    tabsStore.openTab("/k/pods");
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Scoped scope={scope} />
+        <Elsewhere />
+        <Console />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+    // The placeholder is the copy that stays — it sits where the chip was, and
+    // it is what the prompt is for. It is an attribute, so it is not one of
+    // the text nodes counted below.
+    expect(screen.getByRole("textbox", { name: "Console prompt" }).getAttribute("placeholder")).toBe(
+      `Ask about ${scope}`,
+    );
+    // Once on the screen, in the dock's header. The chip that repeated it
+    // between the header and the placeholder is gone.
+    expect(screen.getAllByText(scope)).toHaveLength(1);
   });
 
   it("prints the console accelerator for the platform", () => {

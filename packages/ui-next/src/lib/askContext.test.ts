@@ -46,28 +46,53 @@ describe("what a question asked from a route is about", () => {
   });
 
   /**
-   * The screenshot: a StatefulSets list narrowed to one namespace by the
-   * picker, and "which MongoDB replica set spiked?" ran `podMetrics` across
-   * ten namespaces — every `*-dataservices` in the cluster. The reader had
-   * already answered "which namespace" with the picker and nothing told the
-   * agent.
+   * The rule, as stated: "if open in a tab where namespace is selected then
+   * that, pass kind type like which tab is opened etc, when a new one is
+   * initialised from agents tab then only cluster context should be passed."
+   *
+   * The screenshot behind it: a question asked with a chip reading
+   * `m01-prod-04-dataservices` that never changed, because the narrowing
+   * belongs to a cluster and outlives every conversation.
    */
-  it("carries the reader's namespace narrowing on a list route", () => {
+  it("carries the tab's kind and the namespace it is narrowed to", () => {
     expect(askContextFor("/k/statefulsets", "prod-eu", ["m01-prod-04-dataservices"])).toEqual({
       cluster: "prod-eu",
+      kind: "StatefulSet",
       namespaces: ["m01-prod-04-dataservices"],
     });
   });
 
   it("carries several, when the reader picked several", () => {
-    const about = askContextFor("/k/statefulsets", "prod-eu", ["a", "b"]);
-    expect(about.namespaces).toEqual(["a", "b"]);
+    expect(askContextFor("/k/pods", "prod-eu", ["a", "b"]).namespaces).toEqual(["a", "b"]);
   });
 
   it("says nothing about namespaces when the reader chose all of them", () => {
     // An empty selection IS "all namespaces" — a real answer, and inventing a
-    // scope the reader did not set would be worse than saying nothing.
-    expect(askContextFor("/k/statefulsets", "prod-eu", [])).toEqual({ cluster: "prod-eu" });
+    // scope the reader did not set would be worse than saying nothing. The
+    // kind still travels: which list is open is not a guess.
+    expect(askContextFor("/k/statefulsets", "prod-eu", [])).toEqual({
+      cluster: "prod-eu",
+      kind: "StatefulSet",
+    });
+  });
+
+  it("names no kind for a route that is not one of core's lists", () => {
+    // `/helm` and the control room show no Kubernetes kind. Naming one srelens
+    // cannot resolve would be worse than naming none.
+    expect(askContextFor("/helm", "prod-eu", [])).toEqual({ cluster: "prod-eu" });
+    expect(askContextFor("/", "prod-eu", [])).toEqual({ cluster: "prod-eu" });
+  });
+
+  /**
+   * The agent tab is the FULL VIEW of whichever conversation is selected, not a
+   * subject of its own — so a new conversation started there has no list behind
+   * it and no kind on screen. Anything more would be scope borrowed from a tab
+   * the reader is not on.
+   */
+  it("passes the cluster alone for a conversation started on the agent tab", () => {
+    expect(askContextFor("/agent", "prod-eu", ["m01-prod-04-dataservices"])).toEqual({
+      cluster: "prod-eu",
+    });
   });
 
   it("prefers a route's own resource over the standing selection", () => {
@@ -76,5 +101,12 @@ describe("what a question asked from a route is about", () => {
     const about = askContextFor(route, "prod-eu", ["some-other-namespace"]);
     expect(about.namespace).toBe("m01-cnips-01-services");
     expect(about.namespaces).toBeUndefined();
+  });
+
+  it("still takes a namespace the ROUTE names", () => {
+    // The route is a resource's identity here, and that has not changed — what
+    // went is the standing filter, not the subject on screen.
+    const route = logsRoute("Pod", "m01-cnips-01-services", "ai-editor");
+    expect(askContextFor(route, "prod-eu").namespace).toBe("m01-cnips-01-services");
   });
 });
