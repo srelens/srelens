@@ -263,7 +263,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // The cluster the next question reaches, and the label that says so. A
   // selected conversation outranks the active workspace, because it is what
   // `askAgent` will be given.
-  const askCluster = shown?.about.cluster ?? context;
+  const askAbout = shown?.about ?? about;
+  const askCluster = askAbout.cluster || context;
   const askScope = shown ? contextLabelFor(shown.route, shown.about.cluster) : scope;
 
   const deps = useMemo<CommandDeps>(
@@ -385,8 +386,24 @@ export function Console({ fullView }: { fullView?: boolean }) {
     void submit(raw);
   }
 
-  /** Sends, and clears the draft only if the store TOOK the question. */
+  /**
+   * Sends, and puts the draft back if the store REFUSES the question.
+   *
+   * Cleared first, restored on refusal — rather than cleared after `askAgent`
+   * resolves. That promise settles when the ANSWER settles, which can be
+   * minutes, and the reader goes on typing the next question meanwhile: a clear
+   * at the end wiped a newer draft and its screenshots. The refusal, by
+   * contrast, happens before `askAgent` awaits anything at all, so the restore
+   * lands in the same microtask and is never seen.
+   *
+   * The restore is conditional both ways: if the reader has typed since, their
+   * text stands. Nothing here overwrites something newer.
+   */
   async function submit(raw: string) {
+    const sent = images;
+    setValue("");
+    setImages([]);
+    setOpen(true);
     const accepted = await askAgent(raw, {
       // The KEY, not a route to re-derive one from. `runKey` is what this dock
       // is showing, and in the full view it cannot always be reconstructed: a
@@ -396,20 +413,21 @@ export function Console({ fullView }: { fullView?: boolean }) {
       ...(isFullView && runKey !== null ? { key: runKey } : {}),
       // The subject still supplies the preface, so a follow-up carries the
       // resource the conversation is about rather than the cluster alone.
-      about: shown?.about ?? about,
+      about: askAbout,
       route: shown?.route ?? route,
-      images: images.length > 0 ? images : undefined,
+      images: sent.length > 0 ? sent : undefined,
     });
-    setOpen(true);
-    // Only once it was taken. `askAgent` refuses a question while ANOTHER
-    // run's turn is in flight, and this dock is not busy — its own run is
-    // idle — so the reader can submit and be refused. Clearing regardless
-    // discarded the typed question and any screenshot with it, while the
-    // alert said it had not been sent: they were left retyping something they
-    // could see a moment earlier.
-    if (!accepted) return;
-    setImages([]);
-    setValue("");
+    if (accepted) return;
+    // Refused — `askAgent` turns a question away while ANOTHER run's turn is in
+    // flight, and this dock is not busy, so the reader can submit and be
+    // refused. Discarding the question then left them retyping something they
+    // could see a moment earlier, while the alert said it had not been sent.
+    //
+    // Only if they have not moved on: an empty field takes the question back,
+    // and an empty attachment row takes the screenshots back. Anything they
+    // have typed or attached since is newer than this and stands.
+    setValue((v) => (v === "" ? raw : v));
+    setImages((held) => (held.length === 0 ? sent : held));
   }
 
   // A ref, not `[registerSubmit]` alone closing over a stale `onSubmit`: a
@@ -574,12 +592,23 @@ export function Console({ fullView }: { fullView?: boolean }) {
         // place". It is dropped from here, where the placeholder directly
         // beneath it already reads `Ask about <scope>`.
         //
-        // The namespace stays: it is the one part of the scope no other line
-        // states, and it is what the question will actually be narrowed to.
-        about.namespaces?.length === 1 ? (
-          <span className="chip">
-            <span>{about.namespaces[0]}</span>
-          </span>
+        // The namespaces stay: they are the one part of the scope no other line
+        // states, and they are what the question will actually be narrowed to.
+        //
+        // ALL of them, from `askAbout` — the same effective context `submit`
+        // sends. This drew a chip only for exactly ONE, so a list narrowed to
+        // two or more looked cluster-wide while the preface restricted the
+        // agent to that set; and it read the ROUTE's context, so in the full
+        // view even a single saved namespace was hidden behind `/agent`'s own
+        // subject-less context.
+        (askAbout.namespaces?.length ?? 0) > 0 ? (
+          <>
+            {askAbout.namespaces?.map((ns) => (
+              <span key={ns} className="chip">
+                <span>{ns}</span>
+              </span>
+            ))}
+          </>
         ) : undefined
       }
       attachments={

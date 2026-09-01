@@ -339,6 +339,17 @@ let stoppedGeneration: number | null = null;
  * caller that runs during module evaluation.
  */
 let openSeq = 0;
+
+/**
+ * Conversations this window has deleted, so a listing issued before the delete
+ * cannot put them back.
+ *
+ * Ids, not metadata, and never pruned within a session: the whole point is that
+ * a stale `listSessions` answer may arrive at any later moment, and there is no
+ * point at which srelens can be sure none is still in flight. One string per
+ * cleared conversation is a cost worth paying for that.
+ */
+const deleted = new Set<string>();
 /** Ids are the store's own, not the backend's. */
 let turnSeq = 0;
 /** Monotonic, so recency never ties. See {@link RunState.order}. */
@@ -1236,6 +1247,7 @@ export function clearAgentRun(target?: string | null): void {
   // reader just cleared reappear immediately as a saved row — openable until
   // the delete landed, and a load error afterwards.
   saved = saved.filter((m) => m.id !== dead);
+  deleted.add(dead);
   state.saving = state.saving.then(() => deleteSession(dead)).catch(() => {});
   state.id = newRunId();
 }
@@ -1257,6 +1269,7 @@ export function forgetRun(key: string): void {
   // row. Fixed as a class rather than at the one site that was reported.
   const dead = state.id;
   saved = saved.filter((m) => m.id !== dead);
+  deleted.add(dead);
   void state.saving.then(() => deleteSession(dead)).catch(() => {});
   runs.delete(key);
   if (activeKey === key) {
@@ -1461,23 +1474,47 @@ function isSavedCall(value: unknown): boolean {
   return typeof c.id === "string" && typeof c.tool === "string";
 }
 
+/** A list of strings, or absent. `undefined` and a real list are both fine;
+ *  anything else reaches a `.map` in the transcript. */
+function isStringsOrAbsent(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every((v) => typeof v === "string"));
+}
+
 /**
  * One recorded turn.
  *
  * `calls` is required and must be an ARRAY, because `Transcript` reads
  * `turn.calls.length` — a truncated or hand-edited file whose turn lacks it
- * took the agent screen down rather than being reported as unreadable.
+ * took the agent screen down rather than being reported as unreadable. The
+ * optional fields are checked for the same reason: `images` and `notes` each
+ * reach a `.map`, and `thoughts` is handed to React.
  */
 function isSavedTurn(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  const t = value as { id?: unknown; role?: unknown; text?: unknown; calls?: unknown; at?: unknown };
+  const t = value as {
+    id?: unknown;
+    role?: unknown;
+    text?: unknown;
+    calls?: unknown;
+    at?: unknown;
+    images?: unknown;
+    notes?: unknown;
+    thoughts?: unknown;
+  };
   return (
     typeof t.id === "number" &&
     (t.role === "user" || t.role === "agent" || t.role === "error") &&
     typeof t.text === "string" &&
     typeof t.at === "number" &&
     Array.isArray(t.calls) &&
-    t.calls.every(isSavedCall)
+    t.calls.every(isSavedCall) &&
+    // The OPTIONAL fields too. The required ones were checked and these were
+    // not, so `images: "broken"` passed and `UserTurn` then called
+    // `turn.images.map`; `notes` reaches a `.map` the same way, and a
+    // `thoughts` that is not a string is handed straight to React.
+    isStringsOrAbsent(t.images) &&
+    isStringsOrAbsent(t.notes) &&
+    (t.thoughts === undefined || typeof t.thoughts === "string")
   );
 }
 
@@ -1681,7 +1718,12 @@ function persistRun(key: string): void {
  */
 export async function restoreRuns(): Promise<void> {
   const list = await listSessions();
-  saved = list;
+  // Minus anything cleared or forgotten. `listSessions` can have been issued
+  // BEFORE a clear and answered after it, in which case the response still
+  // names a file that is being deleted — and assigning it wholesale brought the
+  // conversation the reader just cleared back as a saved row, which then opened
+  // with a load error once the delete landed.
+  saved = list.filter((m) => !deleted.has(m.id));
   emit();
 }
 

@@ -566,7 +566,10 @@ describe("Console", () => {
   it("keeps the draft and the attachments when the store refuses the question", async () => {
     const user = userEvent.setup();
     const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
-    askAgent.mockResolvedValue(false);
+    // The click that opens the dock asks "x" through `ask()`, and that one is
+    // taken — otherwise it is restored into the field and this test types on
+    // top of it. Only the submission below is refused.
+    askAgent.mockResolvedValueOnce(true).mockResolvedValue(false);
     setup();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
     const box = screen.getByRole("textbox", { name: "Console prompt" });
@@ -690,6 +693,66 @@ describe("Console", () => {
         expect.objectContaining({ images: ["data:image/png;base64,AAA"] }),
       );
     });
+  });
+
+  /**
+   * Codex P2, round 8: `askAgent`'s promise settles when the ANSWER settles,
+   * which can be minutes — and the reader goes on typing the next question
+   * meanwhile. Clearing at the end wiped that newer draft.
+   */
+  it("clears the prompt at once, not when the answer arrives", async () => {
+    const user = userEvent.setup();
+    let finish: ((ok: boolean) => void) | undefined;
+    askAgent.mockImplementationOnce(async () => true);
+    askAgent.mockImplementationOnce(() => new Promise<boolean>((res) => (finish = res)));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+
+    await user.type(box, "the first question");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await vi.waitFor(() => {
+      expect(finish).toBeDefined();
+    });
+    // Empty already, while the answer is still streaming.
+    expect((box as HTMLTextAreaElement).value).toBe("");
+
+    // The reader starts the next one while waiting.
+    await user.type(box, "the next question");
+    finish?.(true);
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    // Their newer draft survives the first answer settling.
+    expect((box as HTMLTextAreaElement).value).toBe("the next question");
+  });
+
+  /**
+   * Codex P2, round 8: the chip drew only for exactly ONE namespace and read
+   * the ROUTE's context — so a list narrowed to several looked cluster-wide
+   * while the preface restricted the agent to that set.
+   */
+  it("shows every namespace the next question will be narrowed to", async () => {
+    const user = userEvent.setup();
+    useRunSubject.mockReturnValue({
+      about: { cluster: "prod-eu", namespaces: ["m01-prod-04-dataservices", "m01-prod-05-dataservices"] },
+      route: "/k/statefulsets",
+    });
+    useActiveRunKey.mockReturnValue("prod-eu|/k/statefulsets");
+    tabsStore.setState(defaultState([HARNESS_CTX]));
+    tabsStore.openTab("/agent");
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console fullView />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+    // Both, and from the SELECTED run rather than from `/agent`'s own context.
+    expect(screen.getByText("m01-prod-04-dataservices")).toBeTruthy();
+    expect(screen.getByText("m01-prod-05-dataservices")).toBeTruthy();
   });
 
   it("prints the console accelerator for the platform", () => {

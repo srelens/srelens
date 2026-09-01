@@ -43,7 +43,10 @@ export interface ConsoleValue {
    * screenshots. The provider outlives both.
    */
   draft: string;
-  setDraft: (draft: string) => void;
+  /** Takes an updater as well as a value: the composer restores a refused
+   *  question only if the field is still empty, which it cannot know without
+   *  reading the current draft at the moment it writes. */
+  setDraft: (next: string | ((held: string) => string)) => void;
   images: string[];
   setImages: (next: string[] | ((held: string[]) => string[])) => void;
   /**

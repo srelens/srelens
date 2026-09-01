@@ -1327,6 +1327,61 @@ describe("the run store", () => {
       expect(getAgentRun().turns).toEqual([]);
     });
 
+    /**
+     * Codex P2, round 8: the required fields were checked last round and the
+     * OPTIONAL ones were not, so `images: "broken"` passed and `UserTurn` then
+     * called `turn.images.map`.
+     */
+    it("does not hydrate an envelope whose optional fields are the wrong shape", async () => {
+      for (const bad of [
+        { images: "broken" },
+        { notes: 3 },
+        { thoughts: { why: "no" } },
+        { images: [1, 2] },
+      ]) {
+        resetAgentRun();
+        listSessions.mockResolvedValue([{ id: "bad", title: "t", createdAt: 1, updatedAt: 2 }]);
+        loadSession.mockResolvedValue({
+          id: "bad", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+          cliSessionId: null, agentKind: "claude",
+          messages: [{
+            v: 1,
+            key: "prod-eu|/k/pods",
+            label: "pods",
+            turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1, ...bad }],
+            gates: [],
+          }],
+        });
+        await restoreRuns();
+        await openSavedRun("bad");
+        expect(getAgentRun().turns, `accepted ${JSON.stringify(bad)}`).toEqual([]);
+      }
+    });
+
+    it("hydrates an envelope whose optional fields are well formed", async () => {
+      // The presence half, so tightening this until it accepts nothing would
+      // not pass: absent and well-formed are both fine.
+      listSessions.mockResolvedValue([{ id: "good", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "good", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1,
+          key: "prod-eu|/k/pods",
+          label: "pods",
+          turns: [
+            { id: 1, role: "user", text: "q", calls: [], at: 1, images: ["data:image/png;base64,AA"] },
+            { id: 2, role: "agent", text: "a", calls: [], at: 2, notes: ["a warning"], thoughts: "hmm" },
+          ],
+          gates: [],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("good");
+      expect(getAgentRun().turns.map((t) => t.text)).toEqual(["q", "a"]);
+      expect(getAgentRun().turns[0].images).toEqual(["data:image/png;base64,AA"]);
+    });
+
     it("does not hydrate an envelope whose gates are not a list", async () => {
       listSessions.mockResolvedValue([{ id: "bad", title: "t", createdAt: 1, updatedAt: 2 }]);
       loadSession.mockResolvedValue({
@@ -1629,6 +1684,34 @@ describe("the run store", () => {
       clearAgentRun();
 
       // Gone, not moved to the saved list under its dead id.
+      expect(getRunSummaries()).toEqual([]);
+    });
+
+    /**
+     * Codex P2, round 8: `listSessions` can be issued BEFORE a clear and
+     * answered after it, so assigning the response wholesale put the cleared
+     * conversation back as a saved row — which then opened with a load error
+     * once the delete landed.
+     */
+    it("does not let a listing in flight reinstate a conversation just cleared", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("something to clear", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+      const fileId = (await saveSession.mock.calls.at(-1)?.[0])?.id ?? "";
+
+      // A listing issued now, answered later — with the file still in it.
+      let release: ((v: unknown) => void) | undefined;
+      listSessions.mockImplementationOnce(() => new Promise((res) => (release = res)));
+      const listing = restoreRuns();
+      await vi.waitFor(() => {
+        expect(release).toBeDefined();
+      });
+
+      clearAgentRun();
+
+      release?.([{ id: fileId, title: "t", createdAt: 1, updatedAt: 2 }]);
+      await listing;
+
+      // Still gone. The response named a file this window had already deleted.
       expect(getRunSummaries()).toEqual([]);
     });
 
