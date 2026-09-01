@@ -7,6 +7,7 @@ import {
   listServices,
   listReplicaSets,
   podsForSelector,
+  podsOnNode,
   podMetrics,
   deletePod,
   evictPod,
@@ -226,6 +227,27 @@ describe("podsForSelector", () => {
 
   it("normalises errors", async () => {
     const outcome = await podsForSelector("x", "default", {}, [], () =>
+      Promise.reject(new Error("forbidden")),
+    );
+    expect(outcome.pods).toBeUndefined();
+    expect(outcome.error).toContain("forbidden");
+  });
+});
+
+describe("podsOnNode", () => {
+  it("passes context and node and returns timestamped pods", async () => {
+    const pods = [{ name: "web-1", namespace: "default", createdAt: "2026-08-20T00:00:00Z" }];
+    const invoke = vi.fn().mockResolvedValue({ pods });
+    const outcome = await podsOnNode("kind-dev", "worker-2", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.podsOnNode", {
+      context: "kind-dev",
+      node: "worker-2",
+    });
+    expect(outcome.pods).toEqual(pods);
+  });
+
+  it("normalises errors", async () => {
+    const outcome = await podsOnNode("x", "worker-2", () =>
       Promise.reject(new Error("forbidden")),
     );
     expect(outcome.pods).toBeUndefined();

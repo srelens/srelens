@@ -249,6 +249,7 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
           <div>{subject.labels}</div>
           <div className="rule-l">{subject.annotations}</div>
         </div>
+        {subject.afterMetadata}
       </>
     ) : null;
   if (active === PANE_METRICS) pane = subject.metricsPane;
