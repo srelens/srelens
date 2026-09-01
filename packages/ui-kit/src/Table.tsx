@@ -300,23 +300,50 @@ export function rowPitch(tops: readonly number[], fallbackHeight: number): numbe
   return Number.isFinite(pitch) && pitch > 0 ? pitch : fallbackHeight;
 }
 
+/** The stable message FilterBar exposes when a regex is still being typed. */
+export function tableFilterError(query: string, regex = false): string | null {
+  const pattern = query.trim();
+  if (!regex || pattern === "") return null;
+  try {
+    new RegExp(pattern, "i");
+    return null;
+  } catch {
+    return "Invalid regular expression";
+  }
+}
+
 /** Apply the toolbar query to one selected column, or all searchable columns. */
 export function filterTableData<T>(
   data: T[],
   columns: Column<T>[],
   query: string,
   activeFilterKey: string | null,
+  regex = false,
 ): T[] {
-  const normalized = query.trim().toLocaleLowerCase();
-  if (!normalized) return data;
+  const pattern = query.trim();
+  if (!pattern) return data;
   const searchable = activeFilterKey
     ? columns.filter((column) => column.key === activeFilterKey)
     : columns.filter((column) => column.filterable !== false);
   if (searchable.length === 0) return data;
+  let matcher: RegExp | null = null;
+  if (regex) {
+    try {
+      // No global flag: `test` stays stateless while the same compiled pattern
+      // is reused for every cell in this pass.
+      matcher = new RegExp(pattern, "i");
+    } catch {
+      // An incomplete expression is normal while someone types. Keep the
+      // current list available; FilterBar names the invalid state beside it.
+      return data;
+    }
+  }
+  const normalized = pattern.toLocaleLowerCase();
   return data.filter((row) =>
-    searchable.some((column) =>
-      String(getColumnValue(row, column) ?? "").toLocaleLowerCase().includes(normalized),
-    ),
+    searchable.some((column) => {
+      const value = String(getColumnValue(row, column) ?? "");
+      return matcher ? matcher.test(value) : value.toLocaleLowerCase().includes(normalized);
+    }),
   );
 }
 

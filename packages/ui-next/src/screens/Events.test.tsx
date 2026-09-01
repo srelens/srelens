@@ -229,6 +229,16 @@ const eyebrowText = () =>
   );
 
 describe("Events", () => {
+  it("applies regex mode to the same event fields as plain filtering", async () => {
+    open();
+    await waitFor(() => expect(reasons()).toHaveLength(4));
+
+    await userEvent.type(search(), "^(BackOff|Unhealthy)$");
+    await waitFor(() => expect(reasons()).toEqual([]));
+    await userEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    await waitFor(() => expect(reasons()).toEqual(["BackOff", "Unhealthy"]));
+  });
+
   it("renders the design's eight columns, in its order", async () => {
     open();
     await waitFor(() => expect(cells().length).toBe(4));

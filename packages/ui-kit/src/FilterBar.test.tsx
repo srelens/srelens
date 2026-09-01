@@ -138,9 +138,41 @@ describe("FilterBar", () => {
   });
 
   it("can be disabled while the list behind it is loading", () => {
-    setup({ value: "nginx", disabled: true });
+    setup({ value: "nginx", disabled: true, regex: true, onRegexChange: vi.fn() });
     expect((field() as HTMLInputElement).disabled).toBe(true);
     expect((clear() as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Use regular expression" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers an accessible pressed toggle only when regex mode is supported", async () => {
+    expect(setup().queryByRole("button", { name: "Use regular expression" })).toBeNull();
+
+    const onRegexChange = vi.fn();
+    const view = setup({ regex: false, onRegexChange });
+    const toggle = screen.getByRole("button", { name: "Use regular expression" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(toggle);
+    expect(onRegexChange).toHaveBeenCalledWith(true);
+
+    view.rerender(
+      <FilterBar
+        label="Filter pods"
+        value="^web"
+        onValueChange={() => {}}
+        regex
+        onRegexChange={onRegexChange}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Use regular expression" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("names an invalid regular expression without hiding the current text", () => {
+    setup({ value: "^web-(", regex: true, onRegexChange: vi.fn(), invalid: true });
+    expect(field().getAttribute("aria-invalid")).toBe("true");
+    const descriptionId = field().getAttribute("aria-describedby");
+    expect(descriptionId).not.toBeNull();
+    expect(document.getElementById(descriptionId!)?.textContent).toBe("Invalid regular expression");
+    expect((field() as HTMLInputElement).value).toBe("^web-(");
   });
 
   it("forwards className onto the bar", () => {

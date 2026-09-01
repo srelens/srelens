@@ -17,7 +17,7 @@ export interface Tab {
    * to the tab, not the screen, so it survives a restart the way the rest of
    * the tab does. Absent until the user sorts or filters — see `setTabView`.
    */
-  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null };
+  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean };
 }
 
 export interface Workspace {

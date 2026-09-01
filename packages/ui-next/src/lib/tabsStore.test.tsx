@@ -481,9 +481,11 @@ describe("setTabView / useTabView", () => {
     const id = active().id;
     store.setTabView(id, { filter: "abc" });
     store.setTabView(id, { sort: { key: "name", direction: "asc" } });
+    store.setTabView(id, { regex: true });
     expect(store.currentWorkspace().tabs.find((t) => t.id === id)?.view).toEqual({
       filter: "abc",
       sort: { key: "name", direction: "asc" },
+      regex: true,
     });
   });
 
@@ -492,6 +494,12 @@ describe("setTabView / useTabView", () => {
     const { result } = renderHook(() => store.useTabView(id));
     act(() => store.setTabView(id, { filter: "x" }));
     expect(result.current.filter).toBe("x");
+  });
+
+  it("does not discard a regex-only view change", () => {
+    const id = active().id;
+    store.setTabView(id, { regex: true });
+    expect(store.currentWorkspace().tabs.find((t) => t.id === id)?.view?.regex).toBe(true);
   });
 
   it("ignores an id that is not there", () => {

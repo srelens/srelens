@@ -141,6 +141,18 @@ describe("Workloads", () => {
     expect(watchResource).toHaveBeenCalledTimes(5);
   });
 
+  it("applies regex mode across the combined workload list", async () => {
+    open();
+    await waitFor(() => expect(rowNames()).toHaveLength(5));
+    const input = screen.getByRole("searchbox", { name: "Filter workloads" });
+
+    await userEvent.type(input, "^web-\\d+$");
+    await waitFor(() => expect(rowNames()).toEqual([]));
+    await userEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+    expect(tabFor("/resources").view?.regex).toBe(true);
+  });
+
   it("reads a crash-looping pod's waiting reason in the row, not the phase that hides it", async () => {
     // The row already got its unhealthy dot from `podFlagged`, which asks
     // core. The label asked `row.phase` instead — and a pod whose container

@@ -189,9 +189,11 @@ export interface ResourceListTabView {
   sort: TableSort | null;
   filter: string;
   filterKey: string | null;
+  regex: boolean;
   setFilter: (value: string) => void;
   setSort: (next: TableSort | null) => void;
   setFilterKey: (key: string | null) => void;
+  setRegex: (on: boolean) => void;
 }
 
 /**
@@ -216,14 +218,17 @@ export function useResourceTabView<T>(route: string, columns: readonly Column<T>
   const sort = view.sort ?? null;
   const filter = view.filter ?? "";
   const filterKey = view.filterKey && columns.some((column) => column.key === view.filterKey) ? view.filterKey : null;
+  const regex = view.regex ?? false;
   return {
     tabId,
     sort,
     filter,
     filterKey,
+    regex,
     setFilter: (value) => setTabView(tabId, { filter: value }),
     setSort: (next) => setTabView(tabId, { sort: next }),
     setFilterKey: (key) => setTabView(tabId, { filterKey: key }),
+    setRegex: (on) => setTabView(tabId, { regex: on }),
   };
 }
 

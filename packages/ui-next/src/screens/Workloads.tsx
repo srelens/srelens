@@ -22,6 +22,7 @@ import {
   Table,
   Tabs,
   filterTableData,
+  tableFilterError,
   type Column,
   type ContextMenuItem,
   type StatusKind,
@@ -395,12 +396,23 @@ function WorkloadList({
     [columns, ask],
   );
 
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(route, columns);
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   const filtered = useMemo(
-    () => filterTableData(segmented, columns, filter, filterKey),
-    [segmented, columns, filter, filterKey],
+    () => filterTableData(segmented, columns, filter, filterKey, regex),
+    [segmented, columns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   function onToggleColumn(key: string) {
     toggleColumnVisibility({ key, storageKey: "workloads", hidden, filterKey, tabId });
@@ -442,6 +454,9 @@ function WorkloadList({
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
       >
