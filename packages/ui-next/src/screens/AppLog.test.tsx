@@ -78,6 +78,15 @@ describe("AppLog", () => {
     expect(core.readAppLog).toHaveBeenCalledTimes(2);
   });
 
+  it("does not describe a local-file timeout as a Kubernetes timeout", async () => {
+    core.readAppLog.mockRejectedValueOnce(new Error("read operation timed out"));
+    render(<AppLog route="/logs" />);
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/local operation/i)).toBeTruthy();
+    expect(alert.textContent).not.toMatch(/Kubernetes|cluster|kubeconfig/);
+  });
+
   it("does not read anything in the browser, and says where the log lives", async () => {
     core.isTauri.mockReturnValue(false);
     render(<AppLog route="/logs" />);

@@ -95,6 +95,27 @@ describe("describeError", () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
+  it("does not send an HTTP timeout to Kubernetes settings (#383)", () => {
+    const result = describeError("the update download timed out", { domain: "http" });
+    expect(result.title).toBe("Request timed out");
+    expect(result.detail).toMatch(/network connection/i);
+    expect(result.detail).not.toMatch(/Kubernetes|cluster|kubeconfig|SRELENS_TIMEOUT_SECS/);
+  });
+
+  it("does not blame kubeconfig for another server's TLS certificate (#383)", () => {
+    const result = describeError("x509: certificate signed by unknown authority", {
+      domain: "http",
+    });
+    expect(result.title).toBe("Couldn't verify the connection");
+    expect(result.detail).toMatch(/server's TLS certificate/i);
+    expect(result.detail).not.toMatch(/cluster|kubeconfig|certificate-authority/);
+  });
+
+  it("keeps cluster timeout and TLS guidance as the default", () => {
+    expect(describeError("list pods timed out").detail).toMatch(/Kubernetes API server/);
+    expect(describeError("x509: unknown authority").detail).toMatch(/kubeconfig/);
+  });
+
   it("classifies a refused connection", () => {
     expect(describeError("tcp connect error: connection refused").title).toBe(
       "Can't reach the cluster",

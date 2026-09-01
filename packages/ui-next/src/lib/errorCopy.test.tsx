@@ -107,6 +107,18 @@ describe("FailureState", () => {
     expect(screen.getByText(REDACTION_REFUSED)).toBeDefined();
     expect(screen.queryByText("Something went wrong")).toBeNull();
   });
+
+  it("passes the caller's domain to the classifier", () => {
+    render(
+      <FailureState
+        title="Could not check for updates"
+        error="request timed out"
+        domain="http"
+      />,
+    );
+    expect(screen.getByText(/network connection/i)).toBeDefined();
+    expect(screen.queryByText(/Kubernetes API server/i)).toBeNull();
+  });
 });
 
 describe("FailureAlert", () => {
