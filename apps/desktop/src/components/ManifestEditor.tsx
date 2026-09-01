@@ -34,6 +34,7 @@ const CodeEditor = lazy(() => import("../ui/CodeEditor").then((m) => ({ default:
  */
 export function ManifestEditor({
   context,
+  namespace = null,
   yaml,
   onYamlChange,
   ariaLabel = "Manifest YAML",
@@ -48,6 +49,8 @@ export function ManifestEditor({
   onApplied,
 }: {
   context: string;
+  /** Namespace to use when a namespaced document omits metadata.namespace. */
+  namespace?: string | null;
   yaml: string;
   onYamlChange: (yaml: string) => void;
   ariaLabel?: string;
@@ -170,7 +173,7 @@ export function ManifestEditor({
   async function doApply(force: boolean) {
     setBusy(true);
     setError("");
-    const out = await applyManifest(context, yaml, force);
+    const out = await applyManifest(context, yaml, namespace, force);
     setBusy(false);
     if (out.error) {
       setError(describeError(out.error).detail);
@@ -241,7 +244,7 @@ export function ManifestEditor({
     let active = true;
     setDiffing(true);
     const t = setTimeout(() => {
-      void diffManifest(context, yaml).then((out) => {
+      void diffManifest(context, yaml, namespace).then((out) => {
         if (!active) return;
         const docs = out.error ? [] : out.documents ?? [];
         // After a successful apply, adopt the freshly-bumped resourceVersion as
@@ -261,7 +264,7 @@ export function ManifestEditor({
       active = false;
       clearTimeout(t);
     };
-  }, [context, yaml, fill]);
+  }, [context, namespace, yaml, fill]);
 
   const editor = (
     <Suspense fallback={<Spinner label="Loading editor" />}>
@@ -274,7 +277,9 @@ export function ManifestEditor({
         minHeight={fill ? undefined : 320}
         maxHeight={fill ? undefined : 520}
         schemaValidate={(y) =>
-          validateManifest(context, y).then((r) => (r.valid === false ? r.errors ?? [] : []))
+          validateManifest(context, y, namespace).then((r) =>
+            r.valid === false ? r.errors ?? [] : [],
+          )
         }
         schemaSource={(apiVersion, kind) =>
           openApiSchema(context, apiVersion, kind).then((r) => ("error" in r ? null : r))

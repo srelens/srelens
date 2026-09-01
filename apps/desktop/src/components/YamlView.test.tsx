@@ -81,7 +81,12 @@ describe("YamlView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     await waitFor(() =>
-      expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", "kind: ConfigMap\ndata:\n  k: v\n", false),
+      expect(applyManifestMock).toHaveBeenCalledWith(
+        "kind-dev",
+        "kind: ConfigMap\ndata:\n  k: v\n",
+        "default",
+        false,
+      ),
     );
   });
 });

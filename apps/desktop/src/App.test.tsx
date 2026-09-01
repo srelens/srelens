@@ -94,8 +94,9 @@ vi.mock("@srelens/core/lib/kinds", () => ({
     services: "Services",
     settings: "Settings",
     assistant: "Assistant",
+    newresource: "New Resource",
   },
-  K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "", assistant: "" },
+  K8S_KIND: { overview: "", pods: "Pod", services: "Service", settings: "", assistant: "", newresource: "" },
 }));
 vi.mock("./components/ResourceBrowser", () => ({
   ResourceBrowser: ({
@@ -105,6 +106,8 @@ vi.mock("./components/ResourceBrowser", () => ({
     onViewChange,
     onOpenResource,
     onOpenEdit,
+    onOpenNew,
+    onNamespaceChange,
   }: {
     context: string;
     kind: string;
@@ -112,6 +115,8 @@ vi.mock("./components/ResourceBrowser", () => ({
     onViewChange?: (patch: { query?: string }) => void;
     onOpenResource?: (target: { kind: string; namespace: string | null; name: string }) => void;
     onOpenEdit?: (kind: string, namespace: string | null, name: string) => void;
+    onOpenNew?: (initialKind?: string) => void;
+    onNamespaceChange?: (namespace: string) => void;
   }) => (
     <div data-testid="browser">
       {context}:{kind}
@@ -123,6 +128,8 @@ vi.mock("./components/ResourceBrowser", () => ({
         linked-pod
       </button>
       <button onClick={() => onOpenEdit?.("Deployment", "default", "web")}>edit-web</button>
+      <button onClick={() => onNamespaceChange?.("team-a")}>use-team-a</button>
+      <button onClick={() => onOpenNew?.("ConfigMap")}>new-config-map</button>
     </div>
   ),
 }));
@@ -153,6 +160,11 @@ vi.mock("./components/EditResourceTab", () => ({
     <div data-testid="edit-tab">
       {kind}/{name}
     </div>
+  ),
+}));
+vi.mock("./components/NewResourceEditor", () => ({
+  NewResourceEditor: ({ namespace }: { namespace?: string }) => (
+    <div data-testid="new-resource-editor">{namespace}</div>
   ),
 }));
 
@@ -272,6 +284,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Services/ }));
     fireEvent.click(screen.getByText("edit-web"));
     expect(screen.getAllByRole("tab", { name: /edit: Deployment\/web/ })).toHaveLength(1);
+  });
+
+  it("scopes a new-resource editor to the namespace selected in its source tab (#404)", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("use-team-a"));
+    fireEvent.click(screen.getByText("new-config-map"));
+    expect(screen.getByTestId("new-resource-editor").textContent).toBe("team-a");
   });
 
   it("opens views across multiple clusters and closes tabs", () => {
