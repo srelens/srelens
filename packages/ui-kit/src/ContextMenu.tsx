@@ -19,7 +19,15 @@ export type ContextMenuItem =
       hint?: string;
       /** Tints the row with the danger colour, over a label that already says so. */
       danger?: boolean;
-      onPick: () => void;
+      /**
+       * What a bar built from these items says after the action succeeds — see
+       * {@link ActionBarAction.confirmLabel}. A menu ignores it: a menu row
+       * closes on the pick, so there is nothing left on screen to confirm on.
+       * It rides here because `DetailActions` builds its bar from these items
+       * and has nowhere else to learn it from. (#410)
+       */
+      confirmLabel?: string;
+      onPick: () => void | boolean | Promise<void | boolean>;
     };
 
 export interface ContextMenuProps {

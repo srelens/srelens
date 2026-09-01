@@ -1,10 +1,12 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "./Button";
+import { CopyAnnounce } from "./CopyAnnounce";
 import { cx } from "./cx";
 import type { IconComponent } from "./IconButton";
 import { Popover } from "./Popover";
 import { filled } from "./slot";
 import { toneColor } from "./tone";
+import { useCopied } from "./useCopied";
 
 export interface ActionBarAction {
   /** Unique within the bar. Identifies the action, never shown. */
@@ -19,7 +21,17 @@ export interface ActionBarAction {
    * a blocked action with no explanation is worse than no action at all.
    */
   disabledReason?: string;
-  onSelect: () => void;
+  /**
+   * Turns this into an action that answers. After `onSelect` resolves — and
+   * does not resolve `false` — the button shows this word with a check for a
+   * moment, then goes back to `label`.
+   *
+   * Only the bar draws it. A menu row closes on the pick, so a confirmation
+   * there would be drawn on something already gone; the point of this is the
+   * button the reader is still looking at. (#410)
+   */
+  confirmLabel?: string;
+  onSelect: () => void | boolean | Promise<void | boolean>;
 }
 
 export interface ActionBarProps {
@@ -108,29 +120,7 @@ export function ActionBar({
       aria-label={label}
       className={cx("flex flex-wrap items-center gap-1.5", className)}
     >
-      {head.map((a) => {
-        const blocked = filled(a.disabledReason);
-        const Icon = a.icon;
-        return (
-          <Button
-            key={a.id}
-            type="button"
-            variant={a.danger ? "danger" : "secondary"}
-            // Not `disabled`: see the note above — the reason has to stay
-            // reachable, and a disabled button cannot be focused to read it.
-            aria-disabled={blocked || undefined}
-            title={a.disabledReason}
-            className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
-            onClick={() => {
-              if (blocked) return;
-              a.onSelect();
-            }}
-          >
-            {Icon && <Icon size={12} aria-hidden="true" />}
-            {a.label}
-          </Button>
-        );
-      })}
+      {head.map((a) => <BarButton key={a.id} action={a} />)}
 
       {rest.length > 0 && (
         <Popover
@@ -196,5 +186,68 @@ export function ActionBar({
         </Popover>
       )}
     </div>
+  );
+}
+
+/* Inline rather than an icon-set import: the kit takes no dependency on lucide,
+   and this is the only glyph it needs. */
+function CheckGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="m5 13 4 4 10-10"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * One action on the bar.
+ *
+ * A component of its own rather than JSX inside the map, because an action that
+ * confirms needs state and a hook cannot live in a loop — the number of actions
+ * changes between renders, which is the same reason `Rail` reads its probes once
+ * for the whole list. Each button owning its own confirmation is also what keeps
+ * two of them from sharing one: copying and then restarting must not flash
+ * "Copied" on Restart.
+ */
+function BarButton({ action: a }: { action: ActionBarAction }) {
+  const { state, run } = useCopied();
+  const blocked = filled(a.disabledReason);
+  const confirming = filled(a.confirmLabel) && state === "copied";
+  const failed = filled(a.confirmLabel) && state === "failed";
+  const Icon = a.icon;
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant={a.danger ? "danger" : "secondary"}
+        // Not `disabled`: see the note above — the reason has to stay
+        // reachable, and a disabled button cannot be focused to read it.
+        aria-disabled={blocked || undefined}
+        title={a.disabledReason}
+        className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+        onClick={() => {
+          if (blocked) return;
+          // Only an action that asked to confirm is awaited for its answer;
+          // every other one keeps the fire-and-forget call it had.
+          if (filled(a.confirmLabel)) void run(a.onSelect);
+          else void a.onSelect();
+        }}
+      >
+        {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
+        {confirming ? a.confirmLabel : failed ? `${a.label} failed` : a.label}
+      </Button>
+      {/* Outside the button, not inside it. A live region nested in the control
+          becomes part of the control's accessible name, so the button would be
+          called "Copied Copied to clipboard" — the announcement read back as
+          the name of the thing that made it. */}
+      {filled(a.confirmLabel) && <CopyAnnounce state={state} />}
+    </>
   );
 }

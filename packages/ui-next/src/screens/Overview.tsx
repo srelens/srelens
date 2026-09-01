@@ -1053,7 +1053,8 @@ function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => 
     {
       id: "copy",
       label: ROW_ACTION_LABEL.copy,
-      onSelect: () => void copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
+      confirmLabel: "Copied",
+      onSelect: () => copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
     },
   ];
 }
@@ -1365,7 +1366,7 @@ function NodeConfirm({
               </>
             )}
           </p>
-          <KubectlPreview command={command} onCopy={() => void copyKubectlCommand(command)} />
+          <KubectlPreview command={command} onCopy={() => copyKubectlCommand(command)} />
           {/* The dialog stays open on a refusal, so this is the whole of what
               the reader is told about why the action did not happen. */}
           {error && <FailureLine error={error} className="text-sev" />}

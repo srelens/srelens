@@ -18,7 +18,9 @@ import { Dialog } from "../Dialog";
 import { DiffLines, type DiffRow } from "../DiffLines";
 import { ConsoleDock } from "../ConsoleDock";
 import { ContextMenu } from "../ContextMenu";
+import { CopyAnnounce } from "../CopyAnnounce";
 import { CopyCommand } from "../CopyCommand";
+import { CopyIconButton } from "../CopyIconButton";
 import { CustomizeMark, type MarkAppearance } from "../CustomizeMark";
 import { Drawer } from "../Drawer";
 import { DrillCard } from "../DrillCard";
@@ -146,6 +148,20 @@ const CLUSTER_MARK: MarkAppearance = {
  * on a real cluster: a pod over its limit, a series with no samples yet, a node
  * reporting a figure nobody designed for.
  */
+/* The catalogue needs a glyph to hand `CopyIconButton`; the kit takes no icon
+   dependency, so it draws its own. */
+const GalleryCopyGlyph = ({ size = 14, ...rest }: { size?: number } & Record<string, unknown>) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" {...rest}>
+    <rect x="9" y="9" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="2" />
+    <path
+      d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 export function Gallery() {
   // The inputs are controlled, so the catalogue has to hold their value; typing
   // into a component that never updates is not a working example of it.
@@ -768,6 +784,35 @@ export function Gallery() {
         <div style={{ width: 264 }}>
           <CopyCommand command="kubectl --context prod-eu get servicemonitors.monitoring.coreos.com -A -o wide" />
         </div>
+      </section>
+
+      <section>
+        <h2>CopyIconButton</h2>
+        {/* The icon-only sibling of `CopyCommand`, for the places with no room
+            to print what is being copied — a table row's trailing column. Both
+            take their timing and their never-say-Copied-on-failure rule from
+            `useCopied`. Click it: the glyph becomes a check and the name
+            becomes "Copied" for 1.4s. */}
+        <div className="flex items-center gap-2">
+          <CopyIconButton
+            icon={GalleryCopyGlyph}
+            label="Copy address for web-0"
+            onCopy={() => navigator.clipboard?.writeText("127.0.0.1:8080")}
+          />
+          {/* A copy that refuses, so the failed state is reviewable too. */}
+          <CopyIconButton icon={GalleryCopyGlyph} label="Copy the impossible" onCopy={() => false} />
+        </div>
+      </section>
+
+      <section>
+        <h2>CopyAnnounce</h2>
+        {/* Renders nothing a sighted reader can see: it is the live region the
+            copy controls above speak through, drawn here only so the catalogue
+            can claim every export. */}
+        <p className="text-[0.75rem] text-muted">
+          A visually hidden <code className="code">role=&quot;status&quot;</code> region — the spoken
+          half of the copy controls. <CopyAnnounce state="copied" />
+        </p>
       </section>
 
       <section>
