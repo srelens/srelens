@@ -4,63 +4,114 @@ use serde::{Deserialize, Serialize};
 use srelens_llm::types::ProviderKind;
 use srelens_llm::ProviderConfig;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AiProvider {
+    Anthropic,
+    OpenAi,
+    Gemini,
+    OpenAiCompatible,
+    Cursor,
+}
+
+impl AiProvider {
+    pub fn to_llm_kind(self) -> Option<ProviderKind> {
+        match self {
+            AiProvider::Anthropic => Some(ProviderKind::Anthropic),
+            AiProvider::OpenAi => Some(ProviderKind::OpenAi),
+            AiProvider::Gemini => Some(ProviderKind::Gemini),
+            AiProvider::OpenAiCompatible => Some(ProviderKind::OpenAiCompatible),
+            AiProvider::Cursor => None,
+        }
+    }
+}
+
 /// All supported AI providers in order of display.
-pub const ALL_PROVIDERS: [ProviderKind; 4] = [
-    ProviderKind::Anthropic,
-    ProviderKind::OpenAi,
-    ProviderKind::Gemini,
-    ProviderKind::OpenAiCompatible,
+pub const ALL_PROVIDERS: [AiProvider; 5] = [
+    AiProvider::Anthropic,
+    AiProvider::OpenAi,
+    AiProvider::Gemini,
+    AiProvider::OpenAiCompatible,
+    AiProvider::Cursor,
 ];
 
-pub fn provider_slug(kind: ProviderKind) -> &'static str {
+pub fn provider_slug(kind: AiProvider) -> &'static str {
     match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::OpenAi => "openai",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::OpenAiCompatible => "openai-compatible",
+        AiProvider::Anthropic => "anthropic",
+        AiProvider::OpenAi => "openai",
+        AiProvider::Gemini => "gemini",
+        AiProvider::OpenAiCompatible => "openai-compatible",
+        AiProvider::Cursor => "cursor",
     }
 }
 
-pub fn provider_display_name(kind: ProviderKind) -> &'static str {
+pub fn provider_display_name(kind: AiProvider) -> &'static str {
     match kind {
-        ProviderKind::Anthropic => "Anthropic (Claude)",
-        ProviderKind::OpenAi => "OpenAI (GPT-4o)",
-        ProviderKind::Gemini => "Google Gemini",
-        ProviderKind::OpenAiCompatible => "OpenAI-Compatible / Ollama (Local)",
+        AiProvider::Anthropic => "Anthropic (Claude)",
+        AiProvider::OpenAi => "OpenAI (GPT-4o)",
+        AiProvider::Gemini => "Google Gemini",
+        AiProvider::OpenAiCompatible => "OpenAI-Compatible / Ollama (Local)",
+        AiProvider::Cursor => "Cursor Agent (cursor-agent)",
     }
 }
 
-pub fn default_model_for_provider(kind: ProviderKind) -> &'static str {
+pub fn default_model_for_provider(kind: AiProvider) -> &'static str {
     match kind {
-        ProviderKind::Anthropic => "claude-3-7-sonnet-20250219",
-        ProviderKind::OpenAi => "gpt-4o",
-        ProviderKind::Gemini => "gemini-2.5-flash",
-        ProviderKind::OpenAiCompatible => "llama3.2",
+        AiProvider::Anthropic => "claude-3-7-sonnet-20250219",
+        AiProvider::OpenAi => "gpt-4o",
+        AiProvider::Gemini => "gemini-2.5-flash",
+        AiProvider::OpenAiCompatible => "llama3.2",
+        AiProvider::Cursor => "default",
     }
 }
 
-pub fn default_base_url_for_provider(kind: ProviderKind) -> &'static str {
+pub fn default_base_url_for_provider(kind: AiProvider) -> &'static str {
     match kind {
-        ProviderKind::Anthropic => "https://api.anthropic.com",
-        ProviderKind::OpenAi => "https://api.openai.com/v1",
-        ProviderKind::Gemini => "https://generativelanguage.googleapis.com",
-        ProviderKind::OpenAiCompatible => "http://localhost:11434/v1",
+        AiProvider::Anthropic => "https://api.anthropic.com",
+        AiProvider::OpenAi => "https://api.openai.com/v1",
+        AiProvider::Gemini => "https://generativelanguage.googleapis.com",
+        AiProvider::OpenAiCompatible => "http://localhost:11434/v1",
+        AiProvider::Cursor => "",
     }
 }
 
-pub fn env_var_for_provider(kind: ProviderKind) -> &'static str {
+pub fn env_var_for_provider(kind: AiProvider) -> &'static str {
     match kind {
-        ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
-        ProviderKind::OpenAi => "OPENAI_API_KEY",
-        ProviderKind::Gemini => "GEMINI_API_KEY",
-        ProviderKind::OpenAiCompatible => "OLLAMA_HOST",
+        AiProvider::Anthropic => "ANTHROPIC_API_KEY",
+        AiProvider::OpenAi => "OPENAI_API_KEY",
+        AiProvider::Gemini => "GEMINI_API_KEY",
+        AiProvider::OpenAiCompatible => "OLLAMA_HOST",
+        AiProvider::Cursor => "CURSOR_API_KEY",
     }
+}
+
+pub fn find_cursor_binary() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("which").arg("cursor-agent").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        format!("{}/.local/bin/cursor-agent", home),
+        "/usr/local/bin/cursor-agent".to_string(),
+        "/opt/homebrew/bin/cursor-agent".to_string(),
+    ];
+    for c in candidates {
+        if Path::new(&c).exists() {
+            return Some(c);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSettings {
-    pub default_provider: ProviderKind,
+    pub default_provider: AiProvider,
     #[serde(default)]
     pub api_keys: HashMap<String, String>,
     #[serde(default)]
@@ -86,7 +137,7 @@ impl Default for AiSettings {
         }
 
         Self {
-            default_provider: ProviderKind::Anthropic,
+            default_provider: AiProvider::Anthropic,
             api_keys: HashMap::new(),
             models,
             base_urls,
@@ -152,7 +203,7 @@ impl AiSettings {
     }
 
     /// Resolve API key: explicitly stored in settings or from environment variable.
-    pub fn get_api_key(&self, kind: ProviderKind) -> Option<String> {
+    pub fn get_api_key(&self, kind: AiProvider) -> Option<String> {
         let slug = provider_slug(kind);
         if let Some(key) = self.api_keys.get(slug).filter(|k| !k.trim().is_empty()) {
             return Some(key.clone());
@@ -167,7 +218,7 @@ impl AiSettings {
         None
     }
 
-    pub fn get_model(&self, kind: ProviderKind) -> String {
+    pub fn get_model(&self, kind: AiProvider) -> String {
         let slug = provider_slug(kind);
         self.models
             .get(slug)
@@ -176,7 +227,7 @@ impl AiSettings {
             .unwrap_or_else(|| default_model_for_provider(kind).to_string())
     }
 
-    pub fn get_base_url(&self, kind: ProviderKind) -> String {
+    pub fn get_base_url(&self, kind: AiProvider) -> String {
         let slug = provider_slug(kind);
         self.base_urls
             .get(slug)
@@ -185,21 +236,22 @@ impl AiSettings {
             .unwrap_or_else(|| default_base_url_for_provider(kind).to_string())
     }
 
-    pub fn resolve_provider_config(&self, kind: ProviderKind) -> Option<ProviderConfig> {
+    pub fn resolve_provider_config(&self, kind: AiProvider) -> Option<ProviderConfig> {
+        let llm_kind = kind.to_llm_kind()?;
         let api_key = self.get_api_key(kind).unwrap_or_else(|| {
-            if kind == ProviderKind::OpenAiCompatible {
+            if kind == AiProvider::OpenAiCompatible {
                 "ollama".to_string()
             } else {
                 String::new()
             }
         });
 
-        if api_key.is_empty() && kind != ProviderKind::OpenAiCompatible {
+        if api_key.is_empty() && kind != AiProvider::OpenAiCompatible {
             return None;
         }
 
         Some(ProviderConfig {
-            kind,
+            kind: llm_kind,
             api_key,
             base_url: self.get_base_url(kind),
             model: self.get_model(kind),
@@ -215,24 +267,25 @@ mod tests {
     #[test]
     fn test_default_ai_settings() {
         let s = AiSettings::default();
-        assert_eq!(s.default_provider, ProviderKind::Anthropic);
-        assert_eq!(s.get_model(ProviderKind::Anthropic), "claude-3-7-sonnet-20250219");
-        assert_eq!(s.get_model(ProviderKind::OpenAi), "gpt-4o");
-        assert_eq!(s.get_base_url(ProviderKind::OpenAiCompatible), "http://localhost:11434/v1");
+        assert_eq!(s.default_provider, AiProvider::Anthropic);
+        assert_eq!(s.get_model(AiProvider::Anthropic), "claude-3-7-sonnet-20250219");
+        assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-4o");
+        assert_eq!(s.get_base_url(AiProvider::OpenAiCompatible), "http://localhost:11434/v1");
+        assert_eq!(s.get_model(AiProvider::Cursor), "default");
     }
 
     #[test]
     fn test_serialization_round_trip() {
         let mut s = AiSettings::default();
-        s.default_provider = ProviderKind::OpenAi;
-        s.api_keys.insert("openai".to_string(), "sk-test-12345".to_string());
-        s.models.insert("openai".to_string(), "gpt-4.5-preview".to_string());
+        s.default_provider = AiProvider::Cursor;
+        s.api_keys.insert("cursor".to_string(), "cur-test-12345".to_string());
+        s.models.insert("cursor".to_string(), "claude-3.5-sonnet".to_string());
 
         let json = serde_json::to_string(&s).unwrap();
         let deserialized: AiSettings = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.default_provider, ProviderKind::OpenAi);
-        assert_eq!(deserialized.get_api_key(ProviderKind::OpenAi).as_deref(), Some("sk-test-12345"));
-        assert_eq!(deserialized.get_model(ProviderKind::OpenAi), "gpt-4.5-preview");
+        assert_eq!(deserialized.default_provider, AiProvider::Cursor);
+        assert_eq!(deserialized.get_api_key(AiProvider::Cursor).as_deref(), Some("cur-test-12345"));
+        assert_eq!(deserialized.get_model(AiProvider::Cursor), "claude-3.5-sonnet");
     }
 }

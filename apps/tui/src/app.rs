@@ -1173,7 +1173,75 @@ impl App {
                             let query = ai.input.clone();
                             ai.add_user_message(query.clone());
                             let provider = self.ai_settings.default_provider;
-                            if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
+                            if provider == crate::ai_config::AiProvider::Cursor {
+                                if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
+                                    let event_tx = self.event_tx.clone();
+                                    let model = self.ai_settings.get_model(provider);
+                                    let api_key = self.ai_settings.get_api_key(provider);
+                                    tokio::spawn(async move {
+                                        use tokio::io::{AsyncBufReadExt, BufReader};
+                                        let mut cmd = tokio::process::Command::new(&cursor_bin);
+                                        cmd.arg("-p")
+                                            .arg("--output-format")
+                                            .arg("stream-json")
+                                            .arg("--trust");
+                                        if !model.is_empty() && model != "default" {
+                                            cmd.arg("--model").arg(&model);
+                                        }
+                                        if let Some(key) = api_key {
+                                            cmd.env("CURSOR_API_KEY", key);
+                                        }
+                                        cmd.arg("--").arg(&query);
+                                        cmd.stdout(std::process::Stdio::piped());
+                                        cmd.stderr(std::process::Stdio::piped());
+
+                                        match cmd.spawn() {
+                                            Ok(mut child) => {
+                                                let mut accumulated = String::new();
+                                                if let Some(stdout) = child.stdout.take() {
+                                                    let mut reader = BufReader::new(stdout).lines();
+                                                    while let Ok(Some(line)) = reader.next_line().await {
+                                                        let events = srelens_agent::cursor::parse_line(&line);
+                                                        for ev in events {
+                                                            match ev {
+                                                                srelens_agent::event::AgentEvent::TextDelta { text } => {
+                                                                    accumulated.push_str(&text);
+                                                                }
+                                                                srelens_agent::event::AgentEvent::Error { message } => {
+                                                                    accumulated.push_str(&format!("\n[Error: {}]", message));
+                                                                }
+                                                                _ => {}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                let status = child.wait().await;
+                                                if accumulated.trim().is_empty() {
+                                                    if let Ok(st) = status {
+                                                        if !st.success() {
+                                                            accumulated = format!("cursor-agent exited with status: {}", st);
+                                                        } else {
+                                                            accumulated = "(completed with no text output)".to_string();
+                                                        }
+                                                    }
+                                                }
+                                                let _ = event_tx.send(AppEvent::ActionResult {
+                                                    title: "ai_reply".to_string(),
+                                                    result: Ok(accumulated),
+                                                });
+                                            }
+                                            Err(err) => {
+                                                let _ = event_tx.send(AppEvent::ActionResult {
+                                                    title: "ai_reply".to_string(),
+                                                    result: Err(format!("Failed to launch cursor-agent: {}", err)),
+                                                });
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
+                                }
+                            } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
                                 let event_tx = self.event_tx.clone();
                                 tokio::spawn(async move {
                                     use srelens_llm::Provider;

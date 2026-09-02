@@ -301,7 +301,7 @@ mod tests {
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use srelens_tui::views::SettingField;
-        use srelens_llm::types::ProviderKind;
+        use srelens_tui::ai_config::AiProvider;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -355,11 +355,15 @@ mod tests {
         // 1. Switch to settings view via :settings command
         app.execute_colon_command("settings").await;
         assert!(matches!(app.active_view, ActiveView::Settings(_)));
+        if let ActiveView::Settings(s) = &mut app.active_view {
+            s.settings = srelens_tui::AiSettings::default();
+            s.selected_provider_idx = 0; // Anthropic (index 0)
+        }
 
         // 2. Select next provider (OpenAI)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.current_provider(), ProviderKind::OpenAi);
+            assert_eq!(s.current_provider(), AiProvider::OpenAi);
         } else {
             panic!("Expected ActiveView::Settings");
         }
@@ -367,7 +371,7 @@ mod tests {
         // 3. Toggle OpenAI as active provider with [Space]
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).await;
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.settings.default_provider, ProviderKind::OpenAi);
+            assert_eq!(s.settings.default_provider, AiProvider::OpenAi);
         }
 
         // 4. Tab to API Key field
@@ -391,12 +395,27 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, false);
-            assert_eq!(s.settings.get_api_key(ProviderKind::OpenAi).as_deref(), Some("sk-test-openai-key"));
+            assert_eq!(s.settings.get_api_key(AiProvider::OpenAi).as_deref(), Some("sk-test-openai-key"));
         }
 
         // 6. Press 's' to save settings to memory/disk
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
-        assert_eq!(app.ai_settings.default_provider, ProviderKind::OpenAi);
-        assert_eq!(app.ai_settings.get_api_key(ProviderKind::OpenAi).as_deref(), Some("sk-test-openai-key"));
+        assert_eq!(app.ai_settings.default_provider, AiProvider::OpenAi);
+        assert_eq!(app.ai_settings.get_api_key(AiProvider::OpenAi).as_deref(), Some("sk-test-openai-key"));
+
+        // 7. Test navigating all the way to Cursor Agent
+        // Currently at OpenAi (index 1), press 'j' 3 times to get to Cursor (index 4)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await; // Gemini (2)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await; // OpenAICompatible (3)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await; // Cursor (4)
+
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.current_provider(), AiProvider::Cursor);
+        }
+
+        // Select Cursor as active provider
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        assert_eq!(app.ai_settings.default_provider, AiProvider::Cursor);
     }
 }

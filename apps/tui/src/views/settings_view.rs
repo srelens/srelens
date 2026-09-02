@@ -5,11 +5,11 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use srelens_llm::types::ProviderKind;
 
 use crate::ai_config::{
     default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
-    provider_display_name, provider_slug, AiSettings, ALL_PROVIDERS,
+    find_cursor_binary, provider_display_name, provider_slug, AiProvider, AiSettings,
+    ALL_PROVIDERS,
 };
 use crate::theme::Theme;
 
@@ -48,7 +48,7 @@ impl SettingsViewState {
         }
     }
 
-    pub fn current_provider(&self) -> ProviderKind {
+    pub fn current_provider(&self) -> AiProvider {
         ALL_PROVIDERS[self.selected_provider_idx % ALL_PROVIDERS.len()]
     }
 
@@ -72,7 +72,7 @@ impl SettingsViewState {
         if self.is_editing {
             return;
         }
-        let is_custom = self.current_provider() == ProviderKind::OpenAiCompatible;
+        let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
             SettingField::ProviderToggle => SettingField::ApiKey,
             SettingField::ApiKey => SettingField::Model,
@@ -91,7 +91,7 @@ impl SettingsViewState {
         if self.is_editing {
             return;
         }
-        let is_custom = self.current_provider() == ProviderKind::OpenAiCompatible;
+        let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
             SettingField::ProviderToggle => {
                 if is_custom {
@@ -204,20 +204,21 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             ),
         ]),
         Line::from(vec![Span::styled(
-            "Configure default provider, API keys, models, and local endpoints. Destructive actions still require confirmation.",
+            "Configure default provider, API keys, models, and local/CLI agents (including Cursor).",
             Style::default().fg(Theme::DIM),
         )]),
     ];
     f.render_widget(Paragraph::new(desc_lines), chunks[0]);
 
-    // 2. Providers List
+    // 2. Providers List (5 providers now!)
     let provider_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5), // Anthropic
             Constraint::Length(5), // OpenAI
             Constraint::Length(5), // Gemini
-            Constraint::Length(6), // OpenAICompatible / Ollama
+            Constraint::Length(5), // OpenAICompatible / Ollama
+            Constraint::Length(5), // Cursor Agent
         ])
         .split(chunks[1]);
 
@@ -271,7 +272,23 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             ));
         }
 
-        // Field 1: API Key Display
+        if provider == AiProvider::Cursor {
+            if let Some(bin_path) = find_cursor_binary() {
+                header_spans.push(Span::raw("  "));
+                header_spans.push(Span::styled(
+                    format!("[installed: {}]", bin_path),
+                    Style::default().fg(Theme::GREEN),
+                ));
+            } else {
+                header_spans.push(Span::raw("  "));
+                header_spans.push(Span::styled(
+                    "[not found on PATH]",
+                    Style::default().fg(Theme::RED),
+                ));
+            }
+        }
+
+        // Field 1: API Key / Auth Display
         let key_focus = is_selected_provider && state.selected_field == SettingField::ApiKey;
         let key_label_style = if key_focus {
             Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
@@ -294,7 +311,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
                 format!("[env: {} set]", env_var_for_provider(provider)),
                 Style::default().fg(Theme::CYAN),
             )
-        } else if provider == ProviderKind::OpenAiCompatible {
+        } else if provider == AiProvider::Cursor {
+            Span::styled("auto (uses logged-in cursor auth or CURSOR_API_KEY)", Style::default().fg(Theme::CYAN))
+        } else if provider == AiProvider::OpenAiCompatible {
             Span::styled("optional (local Ollama)", Style::default().fg(Theme::DIM))
         } else {
             Span::styled(
@@ -315,7 +334,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         let mut lines = vec![
             Line::from(header_spans),
             Line::from(vec![
-                Span::styled("   API Key: ", key_label_style),
+                Span::styled(if provider == AiProvider::Cursor { "   Auth:    " } else { "   API Key: " }, key_label_style),
                 key_value_display,
             ]),
             Line::from(vec![
@@ -325,7 +344,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         ];
 
         // Field 3: Base URL (for OpenAICompatible)
-        if provider == ProviderKind::OpenAiCompatible {
+        if provider == AiProvider::OpenAiCompatible {
             let url_focus = is_selected_provider && state.selected_field == SettingField::BaseUrl;
             let url_label_style = if url_focus {
                 Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
@@ -364,7 +383,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         f.render_widget(Clear, edit_area);
 
         let field_name = match state.selected_field {
-            SettingField::ApiKey => "API Key",
+            SettingField::ApiKey => if state.current_provider() == AiProvider::Cursor { "API Key (or leave blank for cursor login)" } else { "API Key" },
             SettingField::Model => "Model ID",
             SettingField::BaseUrl => "Base URL (e.g. http://localhost:11434/v1)",
             SettingField::ProviderToggle => "Provider",
