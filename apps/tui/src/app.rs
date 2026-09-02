@@ -654,7 +654,11 @@ impl App {
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
                         }
                         KeyCode::Enter => {
-                            let target_ns = all_filtered.get(selected_idx).cloned();
+                            let target_ns = if !filter.is_empty() && selected_idx == 0 && all_filtered.len() == 2 {
+                                all_filtered.get(1).cloned()
+                            } else {
+                                all_filtered.get(selected_idx).cloned()
+                            };
                             self.modal = None;
                             if let Some(ns) = target_ns {
                                 self.switch_namespace(ns).await;
@@ -776,6 +780,15 @@ impl App {
                 }
                 KeyCode::Enter => {
                     self.input_mode = InputMode::Normal;
+                    let only_one = if let ActiveView::Table(table) = &self.active_view {
+                        table.filtered_indices.len() == 1
+                    } else {
+                        false
+                    };
+
+                    if only_one {
+                        self.handle_view_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+                    }
                 }
                 _ if is_word_delete_key(&key) => {
                     delete_prev_word(&mut self.filter_buffer);
@@ -1037,11 +1050,59 @@ impl App {
                         }
                     }
                     KeyCode::Enter => {
-                        // Drill-down
+                        // Drill-down / Activate resource
                         if table_kind == ResourceKind::Namespaces {
                             if let Some(ns_name) = sel_name {
                                 self.switch_namespace(ns_name).await;
                                 self.switch_view_to_kind(ResourceKind::Pods).await;
+                            }
+                        } else if table_kind == ResourceKind::CustomResourceDefinitions {
+                            if let Some(crd_name) = sel_name {
+                                if let Some(crd) = self.crds.iter().find(|c| c.crd_name == crd_name || c.kind.eq_ignore_ascii_case(&crd_name) || c.plural.eq_ignore_ascii_case(&crd_name)).cloned() {
+                                    self.switch_view_to_crd(crd).await;
+                                }
+                            }
+                        } else if table_kind == ResourceKind::Pods {
+                            if let Some(pod_name) = sel_name {
+                                let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                                let query_ns = target_ns.clone().unwrap_or_else(|| "default".to_string());
+                                let ctx = self.active_context.clone();
+                                let cache = self.client_cache.clone();
+
+                                let containers: Vec<String> = if let Ok(client) = cache.get(&ctx).await {
+                                    let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &query_ns);
+                                    if let Ok(pod) = api.get(&pod_name).await {
+                                        pod.spec.map(|s| s.containers.into_iter().map(|c| c.name).collect()).unwrap_or_default()
+                                    } else {
+                                        Vec::new()
+                                    }
+                                } else {
+                                    Vec::new()
+                                };
+
+                                if containers.len() > 1 {
+                                    self.modal = Some(Modal::ContainerPicker {
+                                        pod_name,
+                                        namespace: target_ns,
+                                        containers,
+                                        selected_idx: 0,
+                                        action: ContainerAction::Logs,
+                                    });
+                                } else {
+                                    self.open_logs_view(pod_name, target_ns, containers.into_iter().next()).await;
+                                }
+                            }
+                        } else if matches!(table_kind, ResourceKind::Deployments | ResourceKind::DaemonSets | ResourceKind::StatefulSets) {
+                            if let Some(name) = sel_name {
+                                self.switch_view_to_kind(ResourceKind::Pods).await;
+                                if let ActiveView::Table(t) = &mut self.active_view {
+                                    t.apply_filter(&name);
+                                }
+                                self.filter_buffer = name;
+                            }
+                        } else {
+                            if let Some(name) = sel_name {
+                                self.open_describe_view(name, kind_str, sel_ns).await;
                             }
                         }
                     }

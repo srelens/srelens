@@ -56,17 +56,39 @@ impl ResourceTableState {
     }
 
     pub fn apply_filter(&mut self, filter_query: &str) {
-        let q = filter_query.trim().to_lowercase();
+        let q = filter_query.trim();
         self.filtered_indices = if q.is_empty() {
             (0..self.raw_items.len()).collect()
         } else {
+            let re = regex::RegexBuilder::new(q)
+                .case_insensitive(true)
+                .build()
+                .ok();
+
+            let q_lower = q.to_lowercase();
             self.raw_items
                 .iter()
                 .enumerate()
                 .filter(|(_, item)| {
-                    // Match against JSON representation or row fields
-                    let s = item.to_string().to_lowercase();
-                    s.contains(&q)
+                    let name = item.get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    let ns = item.get("namespace")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("metadata").and_then(|m| m.get("namespace")).and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    let full_str = item.to_string();
+
+                    if let Some(ref regex) = re {
+                        if regex.is_match(name) || regex.is_match(ns) || regex.is_match(&full_str) {
+                            return true;
+                        }
+                    }
+
+                    name.to_lowercase().contains(&q_lower)
+                        || ns.to_lowercase().contains(&q_lower)
+                        || full_str.to_lowercase().contains(&q_lower)
                 })
                 .map(|(i, _)| i)
                 .collect()

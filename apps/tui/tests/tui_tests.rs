@@ -791,4 +791,121 @@ mod tests {
         let extracted_hook = extract_tool_call_start_info(&v_hook);
         assert!(extracted_hook.is_none(), "hookAdditionalContexts without a ToolCall key should be ignored");
     }
+
+    #[tokio::test]
+    async fn test_regex_search_single_item_combines_enter_to_go_to_resource() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut table = ResourceTableState::new(ResourceKind::Namespaces);
+        table.set_items(vec![
+            serde_json::json!({ "name": "default" }),
+            serde_json::json!({ "name": "kube-system" }),
+            serde_json::json!({ "name": "production" }),
+        ], "");
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string(), "kube-system".to_string(), "production".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+        };
+
+        // 1. Enter filter mode with '/'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Filter);
+
+        // 2. Type regex "prod.*" -> filters down to exactly 1 item: "production"
+        for c in "prod.*".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.filtered_indices.len(), 1);
+            assert_eq!(t.selected_resource_name().as_deref(), Some("production"));
+        }
+
+        // 3. Press Enter ONCE.
+        // Because only 1 item remained in search, it should immediately exit filter mode
+        // AND drill-down to that resource (switching namespace to 'production' and view to Pods)!
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.active_namespace, "production");
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.kind, ResourceKind::Pods);
+        } else {
+            panic!("Expected active_view to switch to Pods table");
+        }
+    }
+
+    #[test]
+    fn test_regex_filtering_supports_regex_syntax() {
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![
+            serde_json::json!({ "name": "api-gateway-7f89d", "namespace": "prod" }),
+            serde_json::json!({ "name": "auth-service-5d6b", "namespace": "prod" }),
+            serde_json::json!({ "name": "db-postgres-0", "namespace": "database" }),
+            serde_json::json!({ "name": "frontend-webapp-1", "namespace": "staging" }),
+        ], "");
+
+        // Pattern matching start of string ^api
+        table.apply_filter("^api");
+        assert_eq!(table.filtered_indices.len(), 1);
+        assert_eq!(table.selected_resource_name().as_deref(), Some("api-gateway-7f89d"));
+
+        // Alternation regex api|frontend
+        table.apply_filter("api|frontend");
+        assert_eq!(table.filtered_indices.len(), 2);
+
+        // Character class with digit
+        table.apply_filter(r"postgres-\d");
+        assert_eq!(table.filtered_indices.len(), 1);
+        assert_eq!(table.selected_resource_name().as_deref(), Some("db-postgres-0"));
+    }
 }
