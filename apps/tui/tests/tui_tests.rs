@@ -1,0 +1,211 @@
+#[cfg(test)]
+mod tests {
+    use srelens_tui::commands::{command_suggestions, resolve_command, CommandTarget, ResourceKind};
+    use srelens_tui::views::ResourceTableState;
+    use serde_json::json;
+
+    #[test]
+    fn test_resolve_command_aliases() {
+        assert!(matches!(
+            resolve_command(":po"),
+            Some(CommandTarget::Resource(ResourceKind::Pods))
+        ));
+        assert!(matches!(
+            resolve_command("pod"),
+            Some(CommandTarget::Resource(ResourceKind::Pods))
+        ));
+        assert!(matches!(
+            resolve_command(":deploy"),
+            Some(CommandTarget::Resource(ResourceKind::Deployments))
+        ));
+        assert!(matches!(
+            resolve_command(":svc"),
+            Some(CommandTarget::Resource(ResourceKind::Services))
+        ));
+        assert!(matches!(
+            resolve_command(":no"),
+            Some(CommandTarget::Resource(ResourceKind::Nodes))
+        ));
+        assert!(matches!(
+            resolve_command(":ns"),
+            Some(CommandTarget::Namespaces)
+        ));
+        assert!(matches!(
+            resolve_command(":helm"),
+            Some(CommandTarget::Resource(ResourceKind::HelmReleases))
+        ));
+        assert!(matches!(
+            resolve_command(":pf"),
+            Some(CommandTarget::Resource(ResourceKind::PortForwards))
+        ));
+        assert!(matches!(
+            resolve_command(":ctx"),
+            Some(CommandTarget::Contexts)
+        ));
+        assert!(matches!(
+            resolve_command(":ai"),
+            Some(CommandTarget::Resource(ResourceKind::Assistant))
+        ));
+        assert!(matches!(
+            resolve_command(":q"),
+            Some(CommandTarget::Quit)
+        ));
+    }
+
+    #[test]
+    fn test_command_suggestions() {
+        let matches = command_suggestions("po");
+        assert!(!matches.is_empty());
+        assert_eq!(matches[0].0.name, "pods");
+
+        let dep_matches = command_suggestions("dp");
+        assert!(!dep_matches.is_empty());
+        assert_eq!(dep_matches[0].0.name, "deployments");
+
+        let deplo_matches = command_suggestions("deplo");
+        assert!(!deplo_matches.is_empty());
+        assert_eq!(deplo_matches[0].0.name, "deployments");
+    }
+
+    #[test]
+    fn test_crd_resolution_and_matching() {
+        use srelens_tui::commands::{command_suggestions_with_crds, resolve_command_with_crds, CrdMeta};
+
+        let cilium_crd = CrdMeta {
+            crd_name: "ciliumloadbalancerippools.cilium.io".to_string(),
+            group: "cilium.io".to_string(),
+            version: "v2".to_string(),
+            kind: "CiliumLoadBalancerIPPool".to_string(),
+            plural: "ciliumloadbalancerippools".to_string(),
+            singular: "ciliumloadbalancerippool".to_string(),
+            namespaced: false,
+            short_names: vec!["ippool".to_string(), "lbippool".to_string()],
+        };
+        let crds = vec![cilium_crd];
+
+        // 1. Direct plural resolution
+        let res1 = resolve_command_with_crds(":ciliumloadbalancerippools", &crds);
+        assert!(matches!(res1, Some(CommandTarget::CustomResource(_))));
+
+        // 2. Acronym/abbreviation resolution (:ciliumlbippool)
+        let res2 = resolve_command_with_crds(":ciliumlbippool", &crds);
+        assert!(matches!(res2, Some(CommandTarget::CustomResource(_))));
+
+        // 3. Short name resolution (:ippool)
+        let res3 = resolve_command_with_crds(":ippool", &crds);
+        assert!(matches!(res3, Some(CommandTarget::CustomResource(_))));
+
+        // 4. Prefix suggestions for "cilium"
+        let suggs = command_suggestions_with_crds("cilium", &crds);
+        assert!(!suggs.is_empty());
+        assert_eq!(suggs[0].0.name, "ciliumloadbalancerippools");
+
+        // 5. Prefix suggestions for "ciliumlbippool"
+        let suggs2 = command_suggestions_with_crds("ciliumlbippool", &crds);
+        assert!(!suggs2.is_empty());
+        assert_eq!(suggs2[0].0.name, "ciliumloadbalancerippools");
+    }
+
+    #[test]
+    fn test_table_filtering_and_navigation() {
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        let items = vec![
+            json!({ "name": "nginx-auth", "namespace": "default", "status": "Running" }),
+            json!({ "name": "postgres-db", "namespace": "default", "status": "Running" }),
+            json!({ "name": "redis-cache", "namespace": "cache", "status": "Pending" }),
+        ];
+
+        table.set_items(items, "");
+        assert_eq!(table.filtered_indices.len(), 3);
+        assert_eq!(table.selected_resource_name().as_deref(), Some("nginx-auth"));
+
+        // Navigate down
+        table.select_next();
+        assert_eq!(table.selected_resource_name().as_deref(), Some("postgres-db"));
+
+        // Filter by "redis"
+        table.apply_filter("redis");
+        assert_eq!(table.filtered_indices.len(), 1);
+        assert_eq!(table.selected_resource_name().as_deref(), Some("redis-cache"));
+
+        // Clear filter
+        table.apply_filter("");
+        assert_eq!(table.filtered_indices.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_informer_cache_instant_screen_switching() {
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: Vec::new(),
+            contexts: Vec::new(),
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Namespaces)),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: Some("watch:prod-cluster:default:namespaces".to_string()),
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+        };
+
+        // 1. Simulate streaming snapshot arrival for pods
+        let pod_payload = json!([
+            { "name": "pod-1", "namespace": "default", "status": "Running" },
+            { "name": "pod-2", "namespace": "default", "status": "Running" },
+        ]);
+        app.handle_stream_event("watch:prod-cluster:default:pods".to_string(), pod_payload);
+
+        // Verify cache ingested the snapshot
+        let cached = app.resource_cache.get(&("prod-cluster".to_string(), "default".to_string(), "pods".to_string()));
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().len(), 2);
+
+        // 2. Switch view to Pods -> table should prime immediately from cache (0ms, is_loading = false)
+        app.switch_view_to_kind(ResourceKind::Pods).await;
+
+        if let ActiveView::Table(table) = &app.active_view {
+            assert_eq!(table.is_loading, false);
+            assert_eq!(table.raw_items.len(), 2);
+            assert_eq!(table.selected_resource_name().as_deref(), Some("pod-1"));
+        } else {
+            panic!("Expected ActiveView::Table");
+        }
+    }
+}

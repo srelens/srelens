@@ -11,7 +11,7 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Event as CoreEvent, LimitRange, PersistentVolume, PersistentVolumeClaim, Pod,
+    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
     ResourceQuota, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -28,6 +28,7 @@ use crate::cronjobs::{summarise as summarise_cronjob, CronJobSummary};
 use crate::daemonsets::{summarise as summarise_daemonset, DaemonSetSummary};
 use crate::endpointslices::{summarise as summarise_endpointslice, EndpointSliceSummary};
 use crate::ingresses::{summarise as summarise_ingress, IngressSummary};
+use crate::nodes::{summarise as summarise_node, NodeSummary};
 use crate::limitranges::{summarise as summarise_limitrange, LimitRangeSummary};
 use crate::networkpolicies::{summarise as summarise_networkpolicy, NetworkPolicySummary};
 use crate::persistentvolumes::{summarise as summarise_pv, PvSummary};
@@ -716,6 +717,72 @@ where
         api,
         summarise_clusterrolebinding,
         |r: &ClusterRoleBindingSummary| r.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
+pub struct NamespaceSummary {
+    pub name: String,
+    pub status: String,
+    pub age: String,
+}
+
+pub fn summarise_namespace(ns: Namespace) -> NamespaceSummary {
+    let name = ns.metadata.name.clone().unwrap_or_default();
+    let status = ns
+        .status
+        .as_ref()
+        .and_then(|s| s.phase.clone())
+        .unwrap_or_else(|| "Active".to_string());
+    let age = crate::humanize_age(ns.metadata.creation_timestamp.as_ref());
+    NamespaceSummary { name, status, age }
+}
+
+/// Watch cluster Nodes (cluster-scoped; namespace ignored).
+pub async fn watch_nodes<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    _namespace: String,
+    on_update: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<NodeSummary>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let api: Api<Node> = Api::all(client);
+    watch_typed(
+        api,
+        summarise_node,
+        |n: &NodeSummary| n.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
+}
+
+/// Watch cluster Namespaces (cluster-scoped; namespace ignored).
+pub async fn watch_namespaces<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    _namespace: String,
+    on_update: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<NamespaceSummary>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let api: Api<Namespace> = Api::all(client);
+    watch_typed(
+        api,
+        summarise_namespace,
+        |n: &NamespaceSummary| n.name.clone(),
         on_update,
         on_status,
     )

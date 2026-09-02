@@ -76,7 +76,7 @@ pub struct ListNodesOut {
     pub nodes: Vec<NodeSummary>,
 }
 
-fn summarise(node: Node) -> NodeSummary {
+pub fn summarise(node: Node) -> NodeSummary {
     let name = node.metadata.name.clone().unwrap_or_default();
     let status = node
         .status

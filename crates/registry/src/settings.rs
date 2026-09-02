@@ -141,8 +141,14 @@ fn write_lock(path: &Path) -> Result<fs::File, String> {
     let lock_path = parent.join(format!("{file_name}.lock"));
     let lock = fs::File::create(&lock_path)
         .map_err(|error| format!("create {}: {error}", lock_path.display()))?;
-    lock.lock()
-        .map_err(|error| format!("lock {}: {error}", lock_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let res = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+        if res != 0 {
+            return Err(format!("lock {}: error", lock_path.display()));
+        }
+    }
     Ok(lock)
 }
 

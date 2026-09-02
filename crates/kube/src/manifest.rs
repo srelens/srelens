@@ -236,49 +236,44 @@ fn apply_doc_from_result(kind: String, name: String, result: Result<(), kube::Er
 
 /// Map a supported Kind to its GroupVersionKind and whether it is namespaced.
 pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
-    let (group, version, k, namespaced) = match kind {
-        "Pod" => ("", "v1", "Pod", true),
-        "Service" => ("", "v1", "Service", true),
-        "ConfigMap" => ("", "v1", "ConfigMap", true),
-        "Secret" => ("", "v1", "Secret", true),
-        "Namespace" => ("", "v1", "Namespace", false),
-        "Node" => ("", "v1", "Node", false),
-        "Deployment" => ("apps", "v1", "Deployment", true),
-        "StatefulSet" => ("apps", "v1", "StatefulSet", true),
-        "DaemonSet" => ("apps", "v1", "DaemonSet", true),
-        "ReplicaSet" => ("apps", "v1", "ReplicaSet", true),
-        "Job" => ("batch", "v1", "Job", true),
-        "CronJob" => ("batch", "v1", "CronJob", true),
-        "Ingress" => ("networking.k8s.io", "v1", "Ingress", true),
-        "NetworkPolicy" => ("networking.k8s.io", "v1", "NetworkPolicy", true),
-        "Endpoints" => ("", "v1", "Endpoints", true),
-        "Event" => ("", "v1", "Event", true),
-        "ServiceAccount" => ("", "v1", "ServiceAccount", true),
-        "PersistentVolumeClaim" => ("", "v1", "PersistentVolumeClaim", true),
-        "PersistentVolume" => ("", "v1", "PersistentVolume", false),
-        "Role" => ("rbac.authorization.k8s.io", "v1", "Role", true),
-        "RoleBinding" => ("rbac.authorization.k8s.io", "v1", "RoleBinding", true),
-        "ClusterRole" => ("rbac.authorization.k8s.io", "v1", "ClusterRole", false),
-        "ClusterRoleBinding" => ("rbac.authorization.k8s.io", "v1", "ClusterRoleBinding", false),
-        // Config
-        "ResourceQuota" => ("", "v1", "ResourceQuota", true),
-        "LimitRange" => ("", "v1", "LimitRange", true),
-        "HorizontalPodAutoscaler" => ("autoscaling", "v2", "HorizontalPodAutoscaler", true),
-        "PodDisruptionBudget" => ("policy", "v1", "PodDisruptionBudget", true),
-        "PriorityClass" => ("scheduling.k8s.io", "v1", "PriorityClass", false),
-        "RuntimeClass" => ("node.k8s.io", "v1", "RuntimeClass", false),
-        "Lease" => ("coordination.k8s.io", "v1", "Lease", true),
-        "MutatingWebhookConfiguration" => {
-            ("admissionregistration.k8s.io", "v1", "MutatingWebhookConfiguration", false)
-        }
-        "ValidatingWebhookConfiguration" => {
-            ("admissionregistration.k8s.io", "v1", "ValidatingWebhookConfiguration", false)
-        }
-        // Network
-        "EndpointSlice" => ("discovery.k8s.io", "v1", "EndpointSlice", true),
-        "IngressClass" => ("networking.k8s.io", "v1", "IngressClass", false),
-        // Storage
-        "StorageClass" => ("storage.k8s.io", "v1", "StorageClass", false),
+    let normalized = kind.trim().to_lowercase();
+    let (group, version, k, namespaced) = match normalized.as_str() {
+        "pod" | "pods" => ("", "v1", "Pod", true),
+        "service" | "services" | "svc" => ("", "v1", "Service", true),
+        "configmap" | "configmaps" | "cm" => ("", "v1", "ConfigMap", true),
+        "secret" | "secrets" | "sec" => ("", "v1", "Secret", true),
+        "namespace" | "namespaces" | "ns" => ("", "v1", "Namespace", false),
+        "node" | "nodes" | "no" => ("", "v1", "Node", false),
+        "deployment" | "deployments" | "deploy" | "dp" => ("apps", "v1", "Deployment", true),
+        "statefulset" | "statefulsets" | "sts" => ("apps", "v1", "StatefulSet", true),
+        "daemonset" | "daemonsets" | "ds" => ("apps", "v1", "DaemonSet", true),
+        "replicaset" | "replicasets" | "rs" => ("apps", "v1", "ReplicaSet", true),
+        "job" | "jobs" => ("batch", "v1", "Job", true),
+        "cronjob" | "cronjobs" | "cj" => ("batch", "v1", "CronJob", true),
+        "ingress" | "ingresses" | "ing" => ("networking.k8s.io", "v1", "Ingress", true),
+        "networkpolicy" | "networkpolicies" | "netpol" | "np" => ("networking.k8s.io", "v1", "NetworkPolicy", true),
+        "endpoints" | "endpoint" | "ep" => ("", "v1", "Endpoints", true),
+        "event" | "events" | "ev" => ("", "v1", "Event", true),
+        "serviceaccount" | "serviceaccounts" | "sa" => ("", "v1", "ServiceAccount", true),
+        "persistentvolumeclaim" | "persistentvolumeclaims" | "pvc" | "pvcs" => ("", "v1", "PersistentVolumeClaim", true),
+        "persistentvolume" | "persistentvolumes" | "pv" | "pvs" => ("", "v1", "PersistentVolume", false),
+        "role" | "roles" => ("rbac.authorization.k8s.io", "v1", "Role", true),
+        "rolebinding" | "rolebindings" | "rb" => ("rbac.authorization.k8s.io", "v1", "RoleBinding", true),
+        "clusterrole" | "clusterroles" | "cr" => ("rbac.authorization.k8s.io", "v1", "ClusterRole", false),
+        "clusterrolebinding" | "clusterrolebindings" | "crb" => ("rbac.authorization.k8s.io", "v1", "ClusterRoleBinding", false),
+        "resourcequota" | "resourcequotas" | "quota" => ("", "v1", "ResourceQuota", true),
+        "limitrange" | "limitranges" | "limits" => ("", "v1", "LimitRange", true),
+        "horizontalpodautoscaler" | "hpa" => ("autoscaling", "v2", "HorizontalPodAutoscaler", true),
+        "poddisruptionbudget" | "pdb" => ("policy", "v1", "PodDisruptionBudget", true),
+        "priorityclass" => ("scheduling.k8s.io", "v1", "PriorityClass", false),
+        "runtimeclass" => ("node.k8s.io", "v1", "RuntimeClass", false),
+        "lease" | "leases" => ("coordination.k8s.io", "v1", "Lease", true),
+        "mutatingwebhookconfiguration" => ("admissionregistration.k8s.io", "v1", "MutatingWebhookConfiguration", false),
+        "validatingwebhookconfiguration" => ("admissionregistration.k8s.io", "v1", "ValidatingWebhookConfiguration", false),
+        "endpointslice" | "endpointslices" => ("discovery.k8s.io", "v1", "EndpointSlice", true),
+        "ingressclass" | "ingressclasses" => ("networking.k8s.io", "v1", "IngressClass", false),
+        "storageclass" | "storageclasses" | "sc" => ("storage.k8s.io", "v1", "StorageClass", false),
+        "customresourcedefinition" | "customresourcedefinitions" | "crd" | "crds" => ("apiextensions.k8s.io", "v1", "CustomResourceDefinition", false),
         _ => return None,
     };
     Some((GroupVersionKind::gvk(group, version, k), namespaced))

@@ -64,6 +64,16 @@ impl WatchManager {
         }
     }
 
+    /// Check whether a watch task is currently running on `channel`.
+    pub fn has_channel(&self, channel: &str) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        if let Some(handle) = tasks.get(channel) {
+            !handle.is_finished()
+        } else {
+            false
+        }
+    }
+
     /// Start watching a watchable resource kind in a namespace, emitting each
     /// full sorted snapshot on `channel`. The subscriber attaches to `channel`
     /// first, then calls this, so the initial snapshot can't race the listener.
@@ -115,6 +125,8 @@ impl WatchManager {
                 "clusterroles" => srelens_kube::watch::watch_clusterroles,
                 "rolebindings" => srelens_kube::watch::watch_rolebindings,
                 "clusterrolebindings" => srelens_kube::watch::watch_clusterrolebindings,
+                "nodes" => srelens_kube::watch::watch_nodes,
+                "namespaces" => srelens_kube::watch::watch_namespaces,
                 "events" => srelens_kube::watch::watch_events,
             );
             if let Err(msg) = result {

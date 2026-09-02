@@ -1,5 +1,5 @@
-//! Kubernetes integration for the srelens core: kubeconfig discovery, the
-//! cluster model, and kube-related capabilities.
+pub use k8s_openapi;
+pub use kube;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
@@ -24,7 +24,7 @@ pub(crate) fn format_age(secs: i64) -> String {
 }
 
 /// Compact age of a resource from its `creationTimestamp` ("-" if unset).
-pub(crate) fn humanize_age(creation: Option<&Time>) -> String {
+pub fn humanize_age(creation: Option<&Time>) -> String {
     match creation {
         Some(t) => format_age(Timestamp::now().duration_since(t.0).as_secs()),
         None => "-".to_string(),
