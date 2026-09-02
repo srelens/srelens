@@ -66,6 +66,9 @@ export interface TopologyEdge {
   to: string;
   kind: TopologyEdgeKind;
   provenance: TopologyProvenance;
+  /** What to write along the edge — a measured rate, and empty for an edge
+   *  nobody measured. Only `observed` can fill it. */
+  detail: string;
   /** The health of the node this edge points at, so a path can be coloured
    *  without walking back to the node table. */
   health: TopologyHealth;
@@ -89,11 +92,49 @@ export interface TopologyGraph {
 export async function topologyGraph(
   context: string,
   namespaces: string[],
+  /** Where to read measured traffic from. Without it the graph is built from
+   *  the API alone — telemetry only ever adds observed edges and rates. */
+  prometheus?: PrometheusSource,
   invoke: Invoker = invokeCapability,
 ): Promise<{ graph?: TopologyGraph; error?: string }> {
   try {
-    const out = await invoke<TopologyGraph>("k8s.topologyGraph", { context, namespaces });
+    const out = await invoke<TopologyGraph>("k8s.topologyGraph", {
+      context,
+      namespaces,
+      prometheus,
+    });
     return { graph: { nodes: out.nodes, edges: out.edges } };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+/** Where a Prometheus-compatible query API lives. */
+export interface PrometheusSource {
+  namespace: string;
+  service: string;
+  port: number;
+}
+
+export interface PrometheusCandidate extends PrometheusSource {
+  flavour: "prometheus" | "thanos" | "mimir" | "victoria-metrics";
+}
+
+/**
+ * Metrics backends the cluster already runs, via `k8s.prometheusDiscover`.
+ *
+ * An empty list is the ordinary answer — most clusters run none — and every
+ * caller works without one. Nothing here installs anything.
+ */
+export async function prometheusDiscover(
+  context: string,
+  invoke: Invoker = invokeCapability,
+): Promise<{ candidates?: PrometheusCandidate[]; error?: string }> {
+  try {
+    const out = await invoke<{ candidates: PrometheusCandidate[] }>("k8s.prometheusDiscover", {
+      context,
+    });
+    return { candidates: out.candidates };
   } catch (e) {
     return { error: String(e) };
   }

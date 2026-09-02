@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  prometheusDiscover,
   topologyGraph,
   type TopologyEdge,
   type TopologyHealth,
@@ -40,14 +41,15 @@ import {
  * server's own word. The flow half is read out of configuration: environment
  * variables, arguments and ConfigMaps, which say a workload was BUILT to talk
  * to something, not that it ever has. Those two must not look alike, or a
- * reader trusts them equally; {@link dashFor} is where that is decided.
+ * reader trusts them equally; {@link strokeForEdge} and {@link dashFor} are
+ * where that is decided.
  *
- * What is still missing is the RATE — the design's `41.2k rpm` and
- * `12.4% 5xx`. That needs measured telemetry (Istio, Linkerd, Hubble, or any
- * Prometheus scraping them), and srelens has no source for it yet:
- * `k8s.podMetrics` is CPU millicores and memory MiB. The `observed`
- * provenance is already defined for it, so that source is an addition rather
- * than a reshaping of this.
+ * When the cluster already runs a Prometheus, `k8s.prometheusDiscover` finds
+ * it and measured traffic joins the same graph: those edges are accented and
+ * solid, and carry a rate. A measurement UPGRADES the declared edge rather
+ * than sitting beside it — one dependency now known better, not two. A
+ * cluster with no metrics backend is the ordinary case and loses nothing but
+ * the rates.
  *
  * Read once per selection rather than polled. A topology changes on deploys,
  * not continuously, and a picture that rearranged itself under a reader
@@ -113,6 +115,19 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
    * guess would silently narrow every other screen on behalf of a reader who
    * chose nothing.
    */
+  /**
+   * A metrics backend, if the cluster already runs one.
+   *
+   * Read once per cluster and never blocking: the graph is built from the
+   * API either way, and telemetry only adds observed edges and rates on top.
+   * A cluster with no Prometheus is the ordinary case, not a failure.
+   */
+  const metrics = useResource(async () => {
+    const out = await prometheusDiscover(context.name);
+    return out.candidates ?? [];
+  }, [context.name]);
+  const source = metrics.data?.[0];
+
   const all = namespaces ?? [];
   const chosen = scoped.length > 0 ? scoped : all.slice(0, NAMESPACE_LIMIT);
   const cut = scoped.length === 0 && all.length > NAMESPACE_LIMIT;
@@ -123,11 +138,14 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   const graph = useResource(
     async () => {
       if (!cluster || chosen.length === 0) return { nodes: [], edges: [] };
-      const out = await topologyGraph(cluster.name, chosen);
+      const out = await topologyGraph(cluster.name, chosen, source);
       if (out.error) throw new Error(out.error);
       return out.graph ?? { nodes: [], edges: [] };
     },
-    [cluster?.name, key],
+    // Re-read when a metrics source appears: discovery resolves after the
+    // first draw, and the graph would otherwise stay structural until
+    // something else moved.
+    [cluster?.name, key, source?.service, source?.namespace],
     (g) => g.nodes.length === 0,
   );
 
@@ -289,13 +307,29 @@ function Canvas({
               key={`${edge.kind}:${edge.from}->${edge.to}`}
               d={edge.path}
               fill="none"
-              className={edge.provenance === "declared" ? "stroke-faint" : strokeFor(edge.health)}
+              className={strokeForEdge(edge)}
               strokeWidth={edge.health === "failing" ? 2 : 1}
               strokeDasharray={dashFor(edge)}
               opacity={related ? 1 : 0.12}
             />
           );
         })}
+        {/* Measured rates, drawn after the lines so a label is never under
+            one. Only an observed edge has one. */}
+        {layout.edges.map((edge) =>
+          edge.detail ? (
+            <text
+              key={`label:${edge.from}->${edge.to}`}
+              x={edge.labelX}
+              y={edge.labelY}
+              textAnchor="middle"
+              className="fill-muted text-[9px]"
+              opacity={focus === null || edge.from === selectedId || edge.to === selectedId ? 1 : 0.12}
+            >
+              {edge.detail}
+            </text>
+          ) : null,
+        )}
         {layout.nodes.map((node) => (
           <Node
             key={node.id}
@@ -391,7 +425,19 @@ function Node({
  * stays dotted beneath it, so a reader can always tell a measurement from a
  * string in an environment variable.
  */
+/**
+ * An observed edge is accented and solid; a declared one is faint and dotted.
+ * A measurement and a string found in an environment variable must never be
+ * the same line.
+ */
+function strokeForEdge(edge: { provenance: string; health: TopologyHealth }): string {
+  if (edge.provenance === "observed") return "stroke-accent";
+  if (edge.provenance === "declared") return "stroke-faint";
+  return strokeFor(edge.health);
+}
+
 function dashFor(edge: { kind: string; provenance: string }): string | undefined {
+  if (edge.provenance === "observed") return undefined;
   if (edge.provenance === "declared") return "2 4";
   if (edge.kind === "owns") return "4 3";
   return undefined;
@@ -429,6 +475,7 @@ function Legend() {
       <Key dash="2 4" className="stroke-faint">
         Declared in config
       </Key>
+      <Key className="stroke-accent">Observed traffic</Key>
       <Key className="stroke-warn">Degraded</Key>
       <Key className="stroke-sev">Failing</Key>
     </ul>

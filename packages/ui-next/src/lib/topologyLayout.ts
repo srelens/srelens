@@ -42,6 +42,11 @@ export interface PlacedNode extends TopologyNode {
 export interface PlacedEdge extends TopologyEdge {
   /** An SVG cubic path from the source's right edge to the target's left. */
   path: string;
+  /** Where to write the edge's own label, for the edges that have one. Near
+   *  the middle of the run, and below it for a back-reference so the text
+   *  sits in the bow rather than across the rows it passes. */
+  labelX: number;
+  labelY: number;
 }
 
 export interface LaneHeading {
@@ -223,7 +228,15 @@ export function layoutGraph(graph: TopologyGraph): TopologyLayout {
     // backend does not emit these, and drawing a line into empty space if it
     // ever did would be worse than dropping it.
     if (!from || !to) continue;
-    edges.push({ ...edge, path: edgePath(from, to) });
+    const forward = to.x > from.x;
+    edges.push({
+      ...edge,
+      path: edgePath(from, to),
+      labelX: (from.x + NODE_WIDTH + to.x) / 2,
+      labelY: forward
+        ? (from.y + to.y) / 2 + NODE_HEIGHT / 2 - 4
+        : Math.max(from.y, to.y) + NODE_HEIGHT + ROW_GAP + 12,
+    });
   }
 
   // A back-reference bows below the last row, so the box has to leave room for

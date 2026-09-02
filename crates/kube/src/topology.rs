@@ -138,6 +138,12 @@ pub struct TopologyGraphIn {
     /// An empty list draws nothing rather than everything — the safe reading of
     /// an unset field, and the opposite of what `listResource` does with one.
     pub namespaces: Vec<String>,
+    /// Where to read measured traffic from, when the cluster has a metrics
+    /// backend and the reader has pointed at it. Absent is the ordinary case:
+    /// most clusters run none, and the graph is built from the API either way
+    /// — telemetry only ever ADDS observed edges and rates on top.
+    #[serde(default)]
+    pub prometheus: Option<PrometheusSource>,
 }
 
 /// Which column a node stands in. The screen lays these out left to right;
@@ -242,6 +248,11 @@ pub struct TopologyEdge {
     pub to: String,
     pub kind: EdgeKind,
     pub provenance: Provenance,
+    /// What to write along the edge — a measured rate, and nothing at all for
+    /// an edge nobody measured. The design shows `41.2k rpm` here; only
+    /// [`Provenance::Observed`] can fill it, which is why it is empty until a
+    /// metrics source is configured.
+    pub detail: String,
     /// The health of the node this edge points AT, copied here so the screen
     /// can colour a path without walking back to the node table.
     pub health: Health,
@@ -368,10 +379,31 @@ fn push_edge(
     kind: EdgeKind,
     provenance: Provenance,
 ) {
-    if edges
-        .iter()
-        .any(|e| e.from == from && e.to == to && e.kind == kind)
+    push_edge_labelled(edges, from, to, kind, provenance, String::new())
+}
+
+/// As [`push_edge`], with something to write along the line.
+///
+/// A measurement UPGRADES an edge rather than joining it: when telemetry has
+/// seen the same call that configuration declared, that is one dependency now
+/// known better, and drawing two lines between the same pair would say the
+/// opposite. The observed provenance and its rate replace the declared ones.
+fn push_edge_labelled(
+    edges: &mut Vec<TopologyEdge>,
+    from: String,
+    to: String,
+    kind: EdgeKind,
+    provenance: Provenance,
+    detail: String,
+) {
+    if let Some(existing) = edges
+        .iter_mut()
+        .find(|e| e.from == from && e.to == to && e.kind == kind)
     {
+        if provenance == Provenance::Observed {
+            existing.provenance = provenance;
+            existing.detail = detail;
+        }
         return;
     }
     edges.push(TopologyEdge {
@@ -379,6 +411,7 @@ fn push_edge(
         to,
         kind,
         provenance,
+        detail,
         // A declared dependency says nothing about how the target is doing —
         // the target's own node carries that, and copying an unrelated health
         // onto the edge would colour a line with a fact it does not hold.
@@ -844,6 +877,7 @@ pub fn build_graph(
                 to: node_id(w.kind, &w.namespace, &w.name),
                 kind: EdgeKind::Routes,
                 provenance: Provenance::Topology,
+                detail: String::new(),
                 health: health_of(w.ready, w.desired),
             });
         }
@@ -882,6 +916,7 @@ pub fn build_graph(
                 to: target.id.clone(),
                 kind: EdgeKind::Routes,
                 provenance: Provenance::Topology,
+                detail: String::new(),
                 health: target.health,
             });
         }
@@ -923,6 +958,7 @@ pub fn build_graph(
                 to: id,
                 kind: EdgeKind::Owns,
                 provenance: Provenance::Topology,
+                detail: String::new(),
                 health: health_of(ready, desired),
             });
         }
@@ -1072,6 +1108,95 @@ pub fn build_graph(
     TopologyGraphOut { nodes, edges }
 }
 
+/// The PromQL that turns a mesh's counters into a call graph.
+///
+/// Istio first because it is the most widely deployed and the best documented,
+/// and because `istio_requests_total` already carries exactly the four labels
+/// an edge needs — who called, from where, what they called, and where that
+/// lives. `rate(...[5m])` over five minutes rather than one: a minute of a
+/// low-traffic service is mostly zero, and an edge that blinks in and out is
+/// worse than one that lags a rollout by a few minutes.
+///
+/// Linkerd's `response_total` and Hubble's `hubble_flows_processed_total` are
+/// the same shape with different label names, and belong here beside this one
+/// when they are added. Nothing about the plumbing changes for them — which is
+/// the point of routing all of it through one query capability.
+pub const ISTIO_CALL_GRAPH: &str = "sum by (source_workload, source_workload_namespace, destination_service_name, destination_service_namespace) (rate(istio_requests_total[5m]))";
+
+/// Where a metrics backend lives, as `k8s.prometheusDiscover` reported it.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct PrometheusSource {
+    pub namespace: String,
+    pub service: String,
+    pub port: i32,
+}
+
+/// Per-minute, because per-second is what PromQL returns and not what anybody
+/// reads. Below a tenth of a request per minute there is nothing worth a label
+/// — the edge still draws, it just does not claim a number.
+pub fn rate_label(per_second: f64) -> String {
+    let per_minute = per_second * 60.0;
+    if per_minute < 0.1 {
+        String::new()
+    } else if per_minute < 10.0 {
+        format!("{per_minute:.1} rpm")
+    } else if per_minute < 1000.0 {
+        format!("{per_minute:.0} rpm")
+    } else {
+        format!("{:.1}k rpm", per_minute / 1000.0)
+    }
+}
+
+/// Turn one measured call into an edge between nodes that are actually drawn.
+///
+/// Both ends must already be in the graph. Telemetry sees the whole mesh, and
+/// most of what it reports is between namespaces nobody asked to look at;
+/// adding nodes for those would grow the picture behind the reader's back every
+/// time a service they do not care about took traffic.
+fn observed_edge(
+    sample: &crate::prometheus::Sample,
+    nodes: &[TopologyNode],
+) -> Option<(String, String, String)> {
+    let label = |key: &str| sample.labels.get(key).cloned().unwrap_or_default();
+    let source_ns = label("source_workload_namespace");
+    let source = label("source_workload");
+    let dest_ns = label("destination_service_namespace");
+    let dest = label("destination_service_name");
+    if source.is_empty() || dest.is_empty() {
+        return None;
+    }
+    // The workload's kind is not in the metric, so it is found rather than
+    // assumed: Istio reports `source_workload` for a Deployment, a StatefulSet
+    // and a DaemonSet alike.
+    let from = nodes
+        .iter()
+        .find(|n| n.lane == Lane::Workload && n.name == source && n.namespace == source_ns)?;
+    let to = nodes
+        .iter()
+        .find(|n| n.lane == Lane::Service && n.name == dest && n.namespace == dest_ns)?;
+    Some((from.id.clone(), to.id.clone(), rate_label(sample.value)))
+}
+
+/// Fold measured traffic into a graph already built from the API.
+///
+/// Separated and public so the merge is testable without a cluster or a
+/// Prometheus — it is the part that can be wrong, and the query is not.
+pub fn apply_observed(graph: &mut TopologyGraphOut, samples: &[crate::prometheus::Sample]) {
+    for sample in samples {
+        let Some((from, to, detail)) = observed_edge(sample, &graph.nodes) else {
+            continue;
+        };
+        push_edge_labelled(
+            &mut graph.edges,
+            from,
+            to,
+            EdgeKind::Calls,
+            Provenance::Observed,
+            detail,
+        );
+    }
+}
+
 /// Everything the graph is built from, accumulated across the namespaces asked
 /// for.
 #[derive(Default)]
@@ -1130,7 +1255,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 // a `checkout` that calls `payments-api.payments.svc` only
                 // resolves to the real Service when both namespaces are in the
                 // same pass.
-                Ok(build_graph(
+                let mut graph = build_graph(
                     all.ingresses,
                     all.services,
                     all.deployments,
@@ -1139,7 +1264,26 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     all.replicasets,
                     all.config_maps,
                     all.endpointslices,
-                ))
+                );
+                // Measured traffic, when there is somewhere to read it from.
+                // A metrics backend that cannot be reached must NOT take the
+                // graph down with it: the structural half is still true and
+                // still worth drawing, so a failure here leaves the edges
+                // declared rather than observed.
+                if let Some(source) = input.prometheus.as_ref() {
+                    if let Ok(samples) = crate::prometheus::instant_query(
+                        &client,
+                        &source.namespace,
+                        &source.service,
+                        source.port,
+                        ISTIO_CALL_GRAPH,
+                    )
+                    .await
+                    {
+                        apply_observed(&mut graph, &samples);
+                    }
+                }
+                Ok(graph)
             }
         },
     )
@@ -1584,6 +1728,126 @@ mod tests {
         for e in &g.edges {
             assert_eq!(e.provenance, Provenance::Topology, "{e:?}");
         }
+    }
+
+    // ---- observed traffic: what telemetry measured ----
+
+    fn sample(source_ns: &str, source: &str, dest_ns: &str, dest: &str, per_second: f64) -> crate::prometheus::Sample {
+        crate::prometheus::Sample {
+            labels: labels(&[
+                ("source_workload_namespace", source_ns),
+                ("source_workload", source),
+                ("destination_service_namespace", dest_ns),
+                ("destination_service_name", dest),
+            ]),
+            value: per_second,
+        }
+    }
+
+    fn demo_graph() -> TopologyGraphOut {
+        build_graph(
+            vec![],
+            vec![service("payments", &[("app", "payments")], 8080)],
+            vec![
+                deployment("checkout", 1, 1, &[("app", "checkout")]),
+                deployment("payments", 1, 1, &[("app", "payments")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn a_rate_reads_per_minute_because_per_second_is_not_what_anyone_reads() {
+        assert_eq!(rate_label(0.6867), "41 rpm");
+        assert_eq!(rate_label(0.05), "3.0 rpm");
+        assert_eq!(rate_label(686.7), "41.2k rpm");
+        // Below a tenth of a request a minute there is no number worth
+        // claiming — the edge still draws, it just says nothing.
+        assert_eq!(rate_label(0.0), "");
+        assert_eq!(rate_label(0.001), "");
+    }
+
+    #[test]
+    fn measured_traffic_becomes_an_observed_edge_with_its_rate() {
+        let mut g = demo_graph();
+        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 0.6867)]);
+        let edge = g
+            .edges
+            .iter()
+            .find(|e| e.kind == EdgeKind::Calls)
+            .expect("an observed call");
+        assert_eq!(edge.from, "Deployment/checkout/checkout");
+        assert_eq!(edge.to, "Service/checkout/payments");
+        assert_eq!(edge.provenance, Provenance::Observed);
+        assert_eq!(edge.detail, "41 rpm");
+    }
+
+    #[test]
+    fn a_measurement_upgrades_the_declared_edge_rather_than_joining_it() {
+        // Telemetry seeing the call configuration already declared is ONE
+        // dependency now known better. Two lines between the same pair would
+        // say the opposite.
+        let mut d = deployment("checkout", 1, 1, &[("app", "checkout")]);
+        d.spec.as_mut().unwrap().template.spec = Some(k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "app".into(),
+                env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
+                    name: "PAYMENTS_URL".into(),
+                    value: Some("http://payments.checkout.svc.cluster.local:8080".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut g = build_graph(
+            vec![],
+            vec![service("payments", &[("app", "payments")], 8080)],
+            vec![d, deployment("payments", 1, 1, &[("app", "payments")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let declared = g.edges.iter().filter(|e| e.kind == EdgeKind::Calls).count();
+        assert_eq!(declared, 1, "the config reference alone");
+
+        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 1.0)]);
+        let calls: Vec<&TopologyEdge> = g.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        assert_eq!(calls.len(), 1, "still one dependency: {calls:?}");
+        assert_eq!(calls[0].provenance, Provenance::Observed);
+        assert_eq!(calls[0].detail, "60 rpm");
+    }
+
+    #[test]
+    fn traffic_between_things_not_drawn_is_left_out() {
+        // Telemetry sees the whole mesh, and most of it is between namespaces
+        // nobody asked to look at. Adding nodes for those would grow the
+        // picture behind the reader every time some unrelated service took
+        // traffic.
+        let mut g = demo_graph();
+        apply_observed(
+            &mut g,
+            &[
+                sample("other", "stranger", "checkout", "payments", 5.0),
+                sample("checkout", "checkout", "elsewhere", "unknown-svc", 5.0),
+            ],
+        );
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
+    }
+
+    #[test]
+    fn a_sample_missing_either_end_is_ignored() {
+        let mut g = demo_graph();
+        let mut half = sample("checkout", "checkout", "checkout", "payments", 5.0);
+        half.labels.remove("destination_service_name");
+        apply_observed(&mut g, &[half]);
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls));
     }
 
     #[test]

@@ -10,16 +10,17 @@ import type { TopologyGraph } from "@srelens/core";
  * that the screen calls a stub rather than that a reader sees a Deployment
  * beside the Service that fronts it.
  */
-const core = vi.hoisted(() => ({ topologyGraph: vi.fn() }));
+const core = vi.hoisted(() => ({ topologyGraph: vi.fn(), prometheusDiscover: vi.fn() }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   topologyGraph: core.topologyGraph,
+  prometheusDiscover: core.prometheusDiscover,
 }));
 
 /**
  * The namespace list comes from the app's shared hook, the same one the
  * resource lists and the events screen read, so it is supplied at that seam
- * rather than at .
+ * rather than at core's listNamespaces.
  */
 const options = vi.hoisted(() => ({ namespaces: [] as string[] | null, error: "" }));
 vi.mock("@srelens/core/react", async (orig) => ({
@@ -110,6 +111,7 @@ function graph(): TopologyGraph {
         to: "Service/checkout/checkout-api",
         kind: "routes",
         provenance: "topology",
+        detail: "",
         health: "degraded",
       },
       {
@@ -117,6 +119,7 @@ function graph(): TopologyGraph {
         to: "Deployment/checkout/checkout-api",
         kind: "routes",
         provenance: "topology",
+        detail: "",
         health: "degraded",
       },
     ],
@@ -129,6 +132,8 @@ beforeEach(() => {
   options.namespaces = ["checkout", "default", "payments"];
   options.error = "";
   core.topologyGraph.mockReset().mockResolvedValue({ graph: graph() });
+  // Most clusters run no metrics backend; that is the ordinary case.
+  core.prometheusDiscover.mockReset().mockResolvedValue({ candidates: [] });
 });
 
 describe("Topology", () => {
@@ -158,7 +163,7 @@ describe("Topology", () => {
     // screen honours it rather than quietly picking one for them.
     render(<Topology />);
     await waitFor(() =>
-      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["checkout", "default", "payments"]),
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["checkout", "default", "payments"], undefined),
     );
   });
 
@@ -167,7 +172,7 @@ describe("Topology", () => {
     // reader who narrowed to `payments` elsewhere lands there here too.
     workspace.scoped = ["payments"];
     render(<Topology />);
-    await waitFor(() => expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["payments"]));
+    await waitFor(() => expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["payments"], undefined));
   });
 
   it("caps `All namespaces` on a big cluster, and says that it did", async () => {
@@ -226,6 +231,7 @@ describe("Topology", () => {
             to: "External/default/db.example.com",
             kind: "calls",
             provenance: "declared",
+            detail: "",
             health: "unknown",
           },
         ],
@@ -239,6 +245,67 @@ describe("Topology", () => {
     // sample, which is the point of the legend and not an edge.
     const canvas = screen.getByRole("img", { name: "Namespace topology" });
     expect(canvas.querySelectorAll('path[stroke-dasharray="2 4"]')).toHaveLength(1);
+  });
+
+  it("feeds a discovered metrics backend to the graph, and draws its rates", async () => {
+    // A measured edge is accented and solid where a declared one is faint and
+    // dotted, and it is the only kind that carries a number.
+    core.prometheusDiscover.mockResolvedValue({
+      candidates: [{ namespace: "monitoring", service: "prometheus", port: 9090, flavour: "prometheus" }],
+    });
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          {
+            id: "Deployment/default/storefront",
+            kind: "Deployment",
+            name: "storefront",
+            namespace: "default",
+            lane: "workload",
+            detail: "1/1",
+            ready: 1,
+            desired: 1,
+            health: "ok",
+          },
+          {
+            id: "Service/default/checkout",
+            kind: "Service",
+            name: "checkout",
+            namespace: "default",
+            lane: "service",
+            detail: ":80",
+            ready: null,
+            desired: null,
+            health: "ok",
+          },
+        ],
+        edges: [
+          {
+            from: "Deployment/default/storefront",
+            to: "Service/default/checkout",
+            kind: "calls",
+            provenance: "observed",
+            detail: "41 rpm",
+            health: "unknown",
+          },
+        ],
+      },
+    });
+    render(<Topology />);
+
+    await waitFor(() =>
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), {
+        namespace: "monitoring",
+        service: "prometheus",
+        port: 9090,
+        flavour: "prometheus",
+      }),
+    );
+    expect(await screen.findByText("41 rpm")).toBeDefined();
+    const canvas = screen.getByRole("img", { name: "Namespace topology" });
+    // Solid: a measurement is not a guess, and must not wear the dotted line
+    // that says "someone wrote this in a config file".
+    expect(canvas.querySelectorAll("path[stroke-dasharray]")).toHaveLength(0);
   });
 
   it("says in words that an external node is config, not observed traffic", async () => {
