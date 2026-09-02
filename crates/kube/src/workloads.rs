@@ -43,6 +43,10 @@ pub struct PodSummary {
     /// stale (#405). Prefer this; `age` stays for callers that have no clock.
     pub created: Option<String>,
     pub age: String,
+    /// RFC 3339 creation time, so frontend surfaces can render an age that
+    /// continues to tick instead of freezing this summary's `age` string.
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     /// Container image(s) the pod runs, e.g. `acme/checkout-api:118a7e`.
     /// A pod with several containers joins them as `"img-a, img-b"`; a pod
     /// with no containers (or no status yet) is `""`.
@@ -152,6 +156,11 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         })
         .unwrap_or_default();
 
+    let created_at = pod
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|created| created.0.to_string());
     PodSummary {
         name,
         namespace,
@@ -161,9 +170,53 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         node,
         created: crate::creation_rfc3339(pod.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(pod.metadata.creation_timestamp.as_ref()),
+        created_at,
         image,
         waiting_reason,
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PodsOnNodeIn {
+    pub context: String,
+    pub node: String,
+}
+
+fn pods_on_node_params(node: &str) -> Result<ListParams, CapabilityError> {
+    if node.trim().is_empty() {
+        return Err(CapabilityError::InvalidInput(
+            "node must not be empty".into(),
+        ));
+    }
+    Ok(ListParams::default().fields(&format!("spec.nodeName={node}")))
+}
+
+/// `k8s.podsOnNode` — list pods scheduled on one node, across namespaces.
+pub fn pods_on_node_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<PodsOnNodeIn, ListPodsOut, _, _>(
+        "k8s.podsOnNode",
+        "list pods scheduled on a node across all namespaces",
+        Annotations::READ_ONLY,
+        move |input: PodsOnNodeIn| {
+            let cache = cache.clone();
+            async move {
+                let params = pods_on_node_params(&input.node)?;
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                // A node is cluster-scoped and can host pods from every
+                // namespace, so this query must use the all-namespaces API.
+                let api: Api<Pod> = Api::all(client);
+                let list = tokio::time::timeout(request_timeout(), api.list(&params))
+                    .await
+                    .map_err(|_| CapabilityError::Handler("list pods on node timed out".into()))?
+                    .map_err(handler_err)?;
+                let pods = list.items.into_iter().map(summarise_pod).collect();
+                Ok(ListPodsOut { pods })
+            }
+        },
+    )
 }
 
 /// `k8s.listPods` — list pods in a namespace of a connected context.
@@ -411,7 +464,46 @@ mod tests {
             "k8s.listNamespaces"
         );
         assert_eq!(list_pods_capability(cache.clone()).id, "k8s.listPods");
-        assert_eq!(pods_for_selector_capability(cache).id, "k8s.podsForSelector");
+        assert_eq!(
+            pods_for_selector_capability(cache.clone()).id,
+            "k8s.podsForSelector"
+        );
+        assert_eq!(pods_on_node_capability(cache).id, "k8s.podsOnNode");
+    }
+
+    #[test]
+    fn pods_on_node_uses_the_supported_node_field_selector() {
+        let params = pods_on_node_params("worker-2").unwrap();
+        assert_eq!(
+            params.field_selector.as_deref(),
+            Some("spec.nodeName=worker-2")
+        );
+        assert!(pods_on_node_params("").is_err());
+        assert!(pods_on_node_params("   ").is_err());
+    }
+
+    #[test]
+    fn pod_summary_carries_the_creation_timestamp_for_live_ages() {
+        let pod = Pod {
+            metadata: kube::core::ObjectMeta {
+                name: Some("web-1".into()),
+                namespace: Some("default".into()),
+                creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    "2026-08-20T00:00:00Z".parse().unwrap(),
+                )),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let summary = summarise_pod(pod);
+        assert_eq!(summary.created_at.as_deref(), Some("2026-08-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn pod_summary_omits_an_unknown_creation_timestamp() {
+        let summary = summarise_pod(Pod::default());
+        let json = serde_json::to_value(summary).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("createdAt"));
     }
 
     #[test]

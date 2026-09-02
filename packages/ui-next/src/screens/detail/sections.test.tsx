@@ -305,6 +305,7 @@ describe("one definition each, across every detail body", () => {
     "AnnotationsToggle",
     "AnnotationLines",
     "RelatedPodsSection",
+    "NodePodsSection",
     "ConditionsSection",
   ];
 

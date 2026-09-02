@@ -237,6 +237,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
         {subject.body}
         {subject.labels}
         {subject.annotations}
+        {subject.afterMetadata}
       </>
     ) : null;
   if (active === PANE_CONTAINERS) pane = subject.containersPane;

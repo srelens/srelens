@@ -256,6 +256,9 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::workloads::pods_for_selector_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::workloads::pods_on_node_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::logs::pod_logs_capability(cache.clone()));
     reg.register(srelens_kube::deployments::list_deployments_capability(
         cache.clone(),

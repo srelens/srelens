@@ -414,6 +414,12 @@
     "requiresConfirm": false
   },
   {
+    "id": "k8s.podsOnNode",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.rolloutRestart",
     "readOnly": false,
     "destructive": false,

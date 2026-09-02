@@ -1296,6 +1296,38 @@ async fn run_suite() {
         2,
         "expected the 2 Deployment pods: {out}"
     );
+    let deployment_node = out["pods"][0]["node"]
+        .as_str()
+        .filter(|node| !node.is_empty())
+        .expect("a scheduled Deployment pod must name its node")
+        .to_string();
+
+    let on_node = h
+        .ok(
+            "k8s.podsOnNode",
+            json!({ "context": ctx, "node": deployment_node }),
+        )
+        .await;
+    let scheduled = on_node["pods"].as_array().expect("podsOnNode pods array");
+    assert!(
+        scheduled
+            .iter()
+            .all(|pod| { pod["node"].as_str() == Some(deployment_node.as_str()) }),
+        "podsOnNode returned a pod from another node: {on_node}"
+    );
+    assert_eq!(
+        scheduled
+            .iter()
+            .filter(|pod| {
+                pod["namespace"] == NS
+                    && pod["name"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with(DEPLOY))
+            })
+            .count(),
+        2,
+        "both Deployment pods should be found on their node: {on_node}"
+    );
 
     let out = h
         .ok(

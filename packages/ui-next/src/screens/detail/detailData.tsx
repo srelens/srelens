@@ -31,7 +31,7 @@ import { GenericBody, identityFacts } from "./GenericBody";
 import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
-import { AnnotationsSection, LabelsSection } from "./sections";
+import { AnnotationsSection, LabelsSection, NodePodsSection } from "./sections";
 import { SecretDetailsBody } from "./SecretBody";
 import { ServiceDetailsBody } from "./ServiceBody";
 import { useDeployRevisions, WorkloadDetailsBody, workloadFacts, type RevisionsState } from "./WorkloadBody";
@@ -371,6 +371,8 @@ export interface DetailSubject {
    *  comment gives: a Secret's annotation can be the secret. */
   labels: ReactNode;
   annotations: ReactNode;
+  /** A kind-specific block that both hosts place after their metadata layout. */
+  afterMetadata: ReactNode;
   /** This kind's manifest goes through `redactSecretManifest`. */
   isSecret: boolean;
 }
@@ -444,6 +446,8 @@ export function useDetailSubject({
     metricsPane: bodyProps && MetricsBody ? createElement(MetricsBody, bodyProps) : null,
     labels: <LabelsSection labels={meta.labels ?? {}} />,
     annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,
+    afterMetadata:
+      object && kind === "Node" ? <NodePodsSection context={context} node={name} /> : null,
     isSecret: kind === "Secret",
   };
 }

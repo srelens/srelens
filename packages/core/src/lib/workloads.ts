@@ -13,6 +13,8 @@ export interface PodSummary {
    *  carries no timestamp. */
   created?: string | null;
   age: string;
+  /** RFC 3339 creation time for frontend surfaces whose age must keep ticking. */
+  createdAt?: string;
   /** Container image(s) the pod runs; multiple containers are comma-joined,
    *  e.g. "acme/checkout-api:118a7e, envoyproxy/envoy:v1.30". Empty when the
    *  pod has no containers. */
@@ -207,6 +209,20 @@ export async function podsForSelector(
       selector,
       ...(expressions.length === 0 ? {} : { matchExpressions: expressions }),
     });
+    return { pods: out.pods };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+/** Pods scheduled on one node across all namespaces via `k8s.podsOnNode`. */
+export async function podsOnNode(
+  context: string,
+  node: string,
+  invoke: Invoker = invokeCapability,
+): Promise<PodsOutcome> {
+  try {
+    const out = await invoke<{ pods: PodSummary[] }>("k8s.podsOnNode", { context, node });
     return { pods: out.pods };
   } catch (e) {
     return { error: String(e) };
