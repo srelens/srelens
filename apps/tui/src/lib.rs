@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+pub mod agent;
 pub mod ai_config;
 pub mod app;
 pub mod commands;

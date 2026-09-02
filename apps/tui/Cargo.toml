@@ -31,6 +31,8 @@ srelens-streams = { path = "../../crates/streams" }
 srelens-registry = { path = "../../crates/registry" }
 srelens-agent = { path = "../../crates/agent" }
 srelens-llm = { path = "../../crates/llm" }
+srelens-mcp = { path = "../../crates/mcp" }
+async-trait = "0.1"
 log = "0.4"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }

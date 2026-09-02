@@ -1513,50 +1513,24 @@ impl App {
                                 }
                             } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
                                 let event_tx = self.event_tx.clone();
-                                let start_time = std::time::Instant::now();
+                                let cache = self.client_cache.clone();
+                                let kubeconfig_paths = self.kubeconfig_paths.clone();
+                                let active_ctx = self.active_context.clone();
+                                let active_ns = self.active_namespace.clone();
+                                let history = ai.native_history.clone();
+
                                 tokio::spawn(async move {
-                                    use srelens_llm::Provider;
-                                    let http = srelens_llm::HttpProvider::new(config);
-                                    let turn = srelens_llm::types::Turn::User(query.clone());
-                                    let event_tx_clone = event_tx.clone();
-                                    let out_chars = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                                    let out_chars_clone = out_chars.clone();
-                                    let mut on_item = move |item: srelens_llm::StreamItem| {
-                                        if let srelens_llm::StreamItem::Text(t) = item {
-                                            out_chars_clone.fetch_add(t.len(), std::sync::atomic::Ordering::Relaxed);
-                                            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                                title: "ai_chunk".to_string(),
-                                                result: Ok(t),
-                                            });
-                                        }
-                                    };
-                                    match http.stream_turn(&[turn], &[], &mut on_item).await {
-                                        Ok(()) => {
-                                            let duration_ms = start_time.elapsed().as_millis() as u64;
-                                            let prompt_est = (query.len() + 200) / 4;
-                                            let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
-                                            let total_est = prompt_est + comp_est;
-                                            let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, duration_ms);
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "ai_usage".to_string(),
-                                                result: Ok(payload),
-                                            });
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "ai_done".to_string(),
-                                                result: Ok(String::new()),
-                                            });
-                                        }
-                                        Err(err) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "ai_chunk".to_string(),
-                                                result: Err(format!("AI Provider Error: {}", err)),
-                                            });
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "ai_done".to_string(),
-                                                result: Ok(String::new()),
-                                            });
-                                        }
-                                    }
+                                    let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
+                                    let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
+                                    crate::agent::run_native_agent_turn(
+                                        config,
+                                        invoker,
+                                        history,
+                                        query,
+                                        active_ctx,
+                                        active_ns,
+                                        event_tx,
+                                    ).await;
                                 });
                             } else {
                                 let env_var = crate::ai_config::env_var_for_provider(provider);

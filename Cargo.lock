@@ -6404,6 +6404,7 @@ dependencies = [
 name = "srelens-tui"
 version = "0.8.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "clap",
  "crossterm",
@@ -6420,6 +6421,7 @@ dependencies = [
  "srelens-capability",
  "srelens-kube",
  "srelens-llm",
+ "srelens-mcp",
  "srelens-registry",
  "srelens-streams",
  "tempfile",

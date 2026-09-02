@@ -1096,4 +1096,32 @@ mod tests {
             panic!("Expected active_view to be Table");
         }
     }
+
+    #[tokio::test]
+    async fn test_native_mcp_agent_invoker_and_tool_execution() {
+        use srelens_llm::ToolInvoker;
+        use srelens_tui::agent::{build_mcp_server, McpToolInvoker};
+        use srelens_kube::client_cache::ClientCache;
+        use std::path::PathBuf;
+
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let server = build_mcp_server(client_cache, vec![]);
+        let invoker = McpToolInvoker::new(server);
+
+        // 1. Tool listing returns all k8s capabilities with provider-safe names
+        let tools = invoker.list_tools().await.expect("tools list succeeds");
+        assert!(tools.len() >= 30, "expected at least 30 K8s tools, got {}", tools.len());
+
+        let list_pods_tool = tools.iter().find(|t| t.name == "k8s_listPods").expect("k8s_listPods tool exists");
+        assert!(list_pods_tool.read_only, "k8s_listPods should be marked read-only");
+
+        // 2. Tool invocation executes through srelens_mcp in-process
+        let res = invoker.call_tool("k8s_listPods", &serde_json::json!({
+            "context": "nonexistent-cluster",
+            "namespace": "default"
+        })).await.expect("call_tool returns result");
+
+        // Should return a response without panicking (even on nonexistent cluster it surfaces error message)
+        assert!(!res.content.is_empty(), "result content should not be empty");
+    }
 }

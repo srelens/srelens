@@ -71,6 +71,7 @@ pub struct AssistantViewState {
     pub auto_scroll: bool,
     pub last_max_scroll: Cell<usize>,
     pub last_total_lines: Cell<usize>,
+    pub native_history: std::sync::Arc<tokio::sync::Mutex<Vec<srelens_llm::types::Turn>>>,
 }
 
 impl AssistantViewState {
@@ -92,6 +93,7 @@ impl AssistantViewState {
             auto_scroll: true,
             last_max_scroll: Cell::new(0),
             last_total_lines: Cell::new(0),
+            native_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -224,6 +226,9 @@ impl AssistantViewState {
         self.busy_start = None;
         self.scroll_offset = 0;
         self.auto_scroll = true;
+        if let Ok(mut hist) = self.native_history.try_lock() {
+            hist.clear();
+        }
     }
 
     pub fn export_to_markdown(&self, provider_name: &str, model_name: &str) -> String {
