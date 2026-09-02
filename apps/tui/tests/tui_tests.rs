@@ -276,22 +276,22 @@ mod tests {
         }
         assert_eq!(app.command_buffer, "pods -n default");
 
-        // 3. Press Ctrl+W -> should rubout "default" to "pods -n "
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+        // 3. Press Option+Backspace (macOS) -> should rubout "default" to "pods -n "
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
         assert_eq!(app.command_buffer, "pods -n ");
         assert_eq!(app.input_mode, InputMode::Command);
 
-        // 4. Press Ctrl+W again -> should rubout "-n" to "pods "
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+        // 4. Press Ctrl+Backspace (Windows/Linux) -> should rubout "-n" to "pods "
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)).await;
         assert_eq!(app.command_buffer, "pods ");
 
-        // 5. Press Ctrl+W again -> should rubout "pods" to ""
+        // 5. Press Ctrl+W (Unix/Vim) -> should rubout "pods" to ""
         app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
         assert_eq!(app.command_buffer, "");
         assert_eq!(app.input_mode, InputMode::Command); // still in command mode!
 
-        // 6. Press Ctrl+W on empty buffer -> should exit command mode to Normal!
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+        // 6. Press Option+Backspace on empty buffer -> should exit command mode to Normal!
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 
@@ -489,7 +489,26 @@ mod tests {
             assert_eq!(ai.input, "show me pods");
         }
 
-        // 2. Pressing Ctrl+s should open Settings!
+        // 2. Test word deletion in Assistant view:
+        // Option + Backspace (macOS) -> rubs out "pods" -> "show me "
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
+        if let ActiveView::Assistant(ai) = &app.active_view {
+            assert_eq!(ai.input, "show me ");
+        }
+
+        // Ctrl + Backspace (Windows/Linux) -> rubs out "me" -> "show "
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)).await;
+        if let ActiveView::Assistant(ai) = &app.active_view {
+            assert_eq!(ai.input, "show ");
+        }
+
+        // Ctrl + w (Unix/Vim) -> rubs out "show" -> ""
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+        if let ActiveView::Assistant(ai) = &app.active_view {
+            assert_eq!(ai.input, "");
+        }
+
+        // 3. Pressing Ctrl+s should open Settings!
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
         assert!(matches!(app.active_view, ActiveView::Settings(_)));
     }

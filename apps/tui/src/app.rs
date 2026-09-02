@@ -110,6 +110,17 @@ pub fn delete_prev_word(s: &mut String) {
     }
 }
 
+/// Returns true if the key event represents a word deletion command:
+/// - Unix / Readline / Vim: `<Ctrl+w>`
+/// - macOS: `<Option+Backspace>` (Alt+Backspace)
+/// - Windows / Linux: `<Ctrl+Backspace>`
+/// - Terminal fallback: `<Ctrl+h>`
+pub fn is_word_delete_key(key: &KeyEvent) -> bool {
+    (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W')) && key.modifiers.contains(KeyModifiers::CONTROL)
+        || (key.code == KeyCode::Backspace && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT)))
+        || (key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 impl App {
     pub async fn new(
         initial_context: Option<String>,
@@ -626,16 +637,12 @@ impl App {
                             self.modal = None;
                             self.switch_namespace(String::new()).await;
                         }
-                        KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut filter);
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
                         }
                         KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             filter.clear();
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
-                        }
-                        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
-                            delete_prev_word(&mut filter);
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
                         }
                         KeyCode::Backspace => {
@@ -729,7 +736,7 @@ impl App {
                         self.command_suggestion_idx = idx;
                     }
                 }
-                KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                _ if is_word_delete_key(&key) => {
                     if self.command_buffer.is_empty() {
                         self.input_mode = InputMode::Normal;
                     } else {
@@ -740,14 +747,6 @@ impl App {
                 KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
-                }
-                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
-                    if self.command_buffer.is_empty() {
-                        self.input_mode = InputMode::Normal;
-                    } else {
-                        delete_prev_word(&mut self.command_buffer);
-                        self.command_suggestion_idx = 0;
-                    }
                 }
                 KeyCode::Backspace => {
                     self.command_buffer.pop();
@@ -778,7 +777,7 @@ impl App {
                 KeyCode::Enter => {
                     self.input_mode = InputMode::Normal;
                 }
-                KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                _ if is_word_delete_key(&key) => {
                     delete_prev_word(&mut self.filter_buffer);
                     let filter = self.filter_buffer.clone();
                     if let ActiveView::Table(table) = &mut self.active_view {
@@ -789,13 +788,6 @@ impl App {
                     self.filter_buffer.clear();
                     if let ActiveView::Table(table) = &mut self.active_view {
                         table.apply_filter("");
-                    }
-                }
-                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
-                    delete_prev_word(&mut self.filter_buffer);
-                    let filter = self.filter_buffer.clone();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter(&filter);
                     }
                 }
                 KeyCode::Backspace => {
@@ -1178,10 +1170,10 @@ impl App {
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(10),
 
                     // Editing & Input
-                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    _ if is_word_delete_key(&key) => {
                         delete_prev_word(&mut ai.input);
                     }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) => {
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
                         ai.input.clear();
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
@@ -1378,7 +1370,7 @@ impl App {
                     match key.code {
                         KeyCode::Esc => settings.cancel_editing(),
                         KeyCode::Enter => settings.finish_editing(),
-                        KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut settings.edit_buffer);
                         }
                         KeyCode::Backspace => {
@@ -2186,5 +2178,37 @@ mod tests {
         let mut s = String::from("crds cilium.io");
         delete_prev_word(&mut s);
         assert_eq!(s, "crds ");
+    }
+
+    #[test]
+    fn test_is_word_delete_key_variants() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // macOS: Option + Backspace (Alt modifier)
+        let opt_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        assert!(is_word_delete_key(&opt_backspace));
+
+        // Windows / Linux: Ctrl + Backspace
+        let ctrl_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL);
+        assert!(is_word_delete_key(&ctrl_backspace));
+
+        // Unix / Readline: Ctrl + w
+        let ctrl_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(is_word_delete_key(&ctrl_w));
+
+        let ctrl_upper_w = KeyEvent::new(KeyCode::Char('W'), KeyModifiers::CONTROL);
+        assert!(is_word_delete_key(&ctrl_upper_w));
+
+        // Terminal fallback: Ctrl + h
+        let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert!(is_word_delete_key(&ctrl_h));
+
+        // Regular Backspace should NOT trigger word deletion
+        let regular_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(!is_word_delete_key(&regular_backspace));
+
+        // Regular 'w' key should NOT trigger word deletion
+        let regular_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert!(!is_word_delete_key(&regular_w));
     }
 }

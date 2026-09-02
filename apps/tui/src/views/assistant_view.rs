@@ -413,7 +413,7 @@ pub fn render_assistant_view(
     let input_title = if !state.auto_scroll && effective_scroll < max_scroll {
         format!(" Ask Assistant (<End> Follow bottom, ↑/↓ Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
     } else {
-        " Ask Assistant (<Ctrl+w> Rubout, <Ctrl+s> Settings, ↑/↓ Scroll) ".to_string()
+        " Ask Assistant (<Option+⌫>/<Ctrl+⌫> Rubout, <Ctrl+s> Settings, ↑/↓ Scroll) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
