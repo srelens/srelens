@@ -668,7 +668,7 @@ async fn run_suite() {
             .reg
             .invoke(
                 "k8s.listPersistentVolumeClaims",
-                json!({ "context": ctx, "namespace": NS }),
+                json!({ "context": ctx, "namespaces": [NS] }),
             )
             .await
             .unwrap();
@@ -1332,6 +1332,59 @@ async fn run_suite() {
         .unwrap()
         .iter()
         .any(|p| p["name"] == PVC_POD));
+
+    // --- topologyGraph: the three joins, against objects the fixtures made ---
+    // The unit tests in `crates/kube/src/topology.rs` prove the join rules on
+    // hand-built objects. What only a cluster can prove is that the fields
+    // those rules read are the fields a real API server fills in — the
+    // Service selector, the Deployment template labels the controller copies
+    // onto its pods, and the ownerReference the Deployment controller writes
+    // on the ReplicaSet it makes.
+    let out = h
+        .ok(
+            "k8s.topologyGraph",
+            json!({ "context": ctx, "namespace": NS }),
+        )
+        .await;
+    let nodes = out["nodes"].as_array().unwrap();
+    let edges = out["edges"].as_array().unwrap();
+    let node_id = |kind: &str, name: &str| format!("{kind}/{NS}/{name}");
+    let deploy_id = node_id("Deployment", DEPLOY);
+    let svc_id = node_id("Service", SVC);
+
+    assert!(
+        nodes.iter().any(|n| n["id"] == json!(deploy_id)),
+        "the fixture Deployment must be a node: {out}"
+    );
+    assert!(
+        nodes.iter().any(|n| n["id"] == json!(svc_id)),
+        "the fixture Service must be a node: {out}"
+    );
+    // Service -> workload, which is the selector subset test against labels a
+    // real controller wrote.
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["from"] == json!(svc_id) && e["to"] == json!(deploy_id) && e["kind"] == json!("routes")),
+        "the Service must route to the Deployment it selects: {out}"
+    );
+    // Deployment -> ReplicaSet, from the ownerReference. The ReplicaSet's name
+    // is generated, so this asserts the SHAPE of the edge rather than an id
+    // the test cannot know.
+    assert!(
+        edges.iter().any(|e| {
+            e["from"] == json!(deploy_id)
+                && e["kind"] == json!("owns")
+                && e["to"].as_str().is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
+        }),
+        "the Deployment must own a ReplicaSet: {out}"
+    );
+    // Both fixture replicas are up by now, so the node reads healthy — the one
+    // assertion here that would catch ready/desired being read off the wrong
+    // field, which no hand-built object can.
+    let deploy = nodes.iter().find(|n| n["id"] == json!(deploy_id)).unwrap();
+    assert_eq!(deploy["desired"], json!(2), "{out}");
+    assert_eq!(deploy["health"], json!("ok"), "{out}");
 
     // === 4. Access =============================================================
     println!("=== access ===");

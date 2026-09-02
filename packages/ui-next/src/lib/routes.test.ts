@@ -21,6 +21,7 @@ import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
 import { Settings } from "../screens/Settings";
+import { Topology } from "../screens/Topology";
 import { Terminals } from "../screens/Terminals";
 import { Helm } from "../screens/Helm";
 import { Toolbox } from "../screens/Toolbox";
@@ -336,8 +337,14 @@ suite("screenFor", () => {
     expect(screenFor("/settings")).toBe(Settings);
   });
 
+  it("resolves the topology screen", () => {
+    // Registered in the PR that built it. Until then the sidebar entry and
+    // the tab title both existed and opened the Placeholder.
+    expect(screenFor("/topology")).toBe(Topology);
+  });
+
   it("gives a route with no screen a placeholder", () => {
-    for (const route of ["/", "/incidents", "/topology"]) {
+    for (const route of ["/", "/incidents"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
@@ -380,7 +387,7 @@ suite("screenFor", () => {
   it("still refuses a route with no screen", () => {
     // `/k/` on its own names no kind, so it is not a route: a prefix that
     // matched itself would render the list screen with an empty slug.
-    for (const route of ["/topology", "/k/", "/logs/", "constructor"]) {
+    for (const route of ["/k/", "/logs/", "constructor"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
