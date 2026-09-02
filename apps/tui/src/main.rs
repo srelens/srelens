@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -193,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -246,8 +248,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 _ => {}
                             }
                         }
-                        _ => {}
+                        _ => {
+                            app.handle_mouse(mouse);
+                        }
                     }
+                }
+                AppEvent::Paste(text) => {
+                    app.handle_paste(text);
                 }
                 AppEvent::Resize(_, _) => {}
                 AppEvent::Tick => {
@@ -414,7 +421,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 3. Re-enter TUI mode
             enable_raw_mode()?;
-            execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
             terminal.hide_cursor()?;
             terminal.clear()?;
         }
@@ -422,7 +429,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Clean exit
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
 
     Ok(())

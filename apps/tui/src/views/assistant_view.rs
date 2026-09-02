@@ -58,7 +58,44 @@ fn format_number(n: usize) -> String {
     result
 }
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextPosition {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl PartialOrd for TextPosition {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TextPosition {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.line.cmp(&other.line) {
+            std::cmp::Ordering::Equal => self.col.cmp(&other.col),
+            ord => ord,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub start: TextPosition,
+    pub end: TextPosition,
+}
+
+impl SelectionRange {
+    pub fn normalized(&self) -> (TextPosition, TextPosition) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
 
 pub struct AssistantViewState {
     pub messages: Vec<ChatMessage>,
@@ -76,6 +113,10 @@ pub struct AssistantViewState {
     pub history_cursor: Option<usize>,
     pub history_draft: String,
     pub expand_tools: bool,
+    pub selection: Option<SelectionRange>,
+    pub is_selecting: bool,
+    pub last_viewport_rect: Cell<Rect>,
+    pub plain_lines: RefCell<Vec<String>>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -109,6 +150,93 @@ impl AssistantViewState {
             history_cursor: None,
             history_draft: String::new(),
             expand_tools: false,
+            selection: None,
+            is_selecting: false,
+            last_viewport_rect: Cell::new(Rect::default()),
+            plain_lines: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn start_selection(&mut self, line: usize, col: usize) {
+        self.is_selecting = true;
+        self.selection = Some(SelectionRange {
+            start: TextPosition { line, col },
+            end: TextPosition { line, col },
+        });
+    }
+
+    pub fn update_selection(&mut self, line: usize, col: usize) {
+        if self.is_selecting {
+            if let Some(sel) = &mut self.selection {
+                sel.end = TextPosition { line, col };
+            }
+        }
+    }
+
+    pub fn finish_selection(&mut self, line: usize, col: usize) {
+        if self.is_selecting {
+            self.is_selecting = false;
+            if let Some(sel) = &mut self.selection {
+                sel.end = TextPosition { line, col };
+                if sel.start == sel.end {
+                    self.selection = None;
+                }
+            }
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.is_selecting = false;
+        self.selection = None;
+    }
+
+    pub fn get_selected_text(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let (start, end) = sel.normalized();
+        let plain = self.plain_lines.borrow();
+
+        if start == end || plain.is_empty() {
+            return None;
+        }
+
+        let mut extracted = String::new();
+        let end_line = end.line.min(plain.len().saturating_sub(1));
+        let start_line = start.line.min(end_line);
+
+        for l in start_line..=end_line {
+            if let Some(line) = plain.get(l) {
+                let char_indices: Vec<(usize, char)> = line.char_indices().collect();
+                let char_count = char_indices.len();
+
+                let (col_s, col_e) = if start_line == end_line {
+                    (start.col.min(char_count), end.col.min(char_count))
+                } else if l == start_line {
+                    (start.col.min(char_count), char_count)
+                } else if l == end_line {
+                    (0, end.col.min(char_count))
+                } else {
+                    (0, char_count)
+                };
+
+                if col_s < col_e {
+                    let byte_start = char_indices[col_s].0;
+                    let byte_end = if col_e < char_count {
+                        char_indices[col_e].0
+                    } else {
+                        line.len()
+                    };
+                    extracted.push_str(&line[byte_start..byte_end]);
+                }
+                if l < end_line {
+                    extracted.push('\n');
+                }
+            }
+        }
+
+        if extracted.is_empty() {
+            None
+        } else {
+            Some(extracted)
         }
     }
 
@@ -433,6 +561,41 @@ impl AssistantViewState {
     }
 }
 
+fn highlight_line_selection<'a>(line: &Line<'a>, c_start: usize, c_end: usize) -> Line<'a> {
+    let sel_style = Style::default().bg(Theme::CYAN).fg(Color::Black).add_modifier(Modifier::BOLD);
+    let mut new_spans = Vec::new();
+    let mut current_col = 0;
+
+    for span in &line.spans {
+        let span_len = span.content.chars().count();
+        let span_end = current_col + span_len;
+
+        if span_end <= c_start || current_col >= c_end {
+            new_spans.push(span.clone());
+        } else {
+            let chars: Vec<char> = span.content.chars().collect();
+            let sel_s = c_start.saturating_sub(current_col).min(span_len);
+            let sel_e = c_end.saturating_sub(current_col).min(span_len);
+
+            if sel_s > 0 {
+                let before: String = chars[0..sel_s].iter().collect();
+                new_spans.push(Span::styled(before, span.style));
+            }
+            if sel_s < sel_e {
+                let middle: String = chars[sel_s..sel_e].iter().collect();
+                new_spans.push(Span::styled(middle, sel_style));
+            }
+            if sel_e < span_len {
+                let after: String = chars[sel_e..span_len].iter().collect();
+                new_spans.push(Span::styled(after, span.style));
+            }
+        }
+        current_col = span_end;
+    }
+
+    Line::from(new_spans)
+}
+
 pub fn render_assistant_view(
     f: &mut Frame,
     area: Rect,
@@ -443,9 +606,10 @@ pub fn render_assistant_view(
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
     let tools_hint = if state.expand_tools { "<Tab> Fold Tools" } else { "<Tab> Tools" };
+    let copy_hint = if state.selection.is_some() { "<c> Copy Selection" } else { "<c> Copy" };
     let title = format!(
-        " SRElens AI Assistant [{} - {}] [{}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        prov_name, model, tools_hint
+        " SRElens AI Assistant [{} - {}] [{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
+        prov_name, model, copy_hint, tools_hint
     );
 
     let block = Block::default()
@@ -645,6 +809,28 @@ pub fn render_assistant_view(
     rendered_lines.push(Line::from(""));
     rendered_lines.push(Line::from(""));
 
+    // Cache plain text lines for selection extraction
+    let plain: Vec<String> = rendered_lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    *state.plain_lines.borrow_mut() = plain;
+    state.last_viewport_rect.set(chunks[0]);
+
+    // Apply visual selection highlight if active
+    if let Some(sel) = &state.selection {
+        let (start, end) = sel.normalized();
+        for (l_idx, line) in rendered_lines.iter_mut().enumerate() {
+            if l_idx >= start.line && l_idx <= end.line {
+                let c_start = if l_idx == start.line { start.col } else { 0 };
+                let c_end = if l_idx == end.line { end.col } else { usize::MAX };
+                if c_start < c_end {
+                    *line = highlight_line_selection(line, c_start, c_end);
+                }
+            }
+        }
+    }
+
     let total_lines = rendered_lines.len();
     let viewport_height = chunks[0].height as usize;
     let max_scroll = total_lines.saturating_sub(viewport_height);
@@ -664,9 +850,9 @@ pub fn render_assistant_view(
 
     // 2. Input box
     let input_title = if !state.auto_scroll && effective_scroll < max_scroll {
-        format!(" Ask Assistant (<End> Follow bottom, ↑/↓ Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
+        format!(" Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
     } else {
-        " Ask Assistant (<Option+⌫>/<Ctrl+⌫> Rubout, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings) ".to_string()
+        " Ask Assistant (↑/↓ Prompt History, <c> Copy, <Option+⌫>/<Ctrl+⌫> Rubout, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -1452,5 +1638,41 @@ Done.";
         assert!(state.expand_tools);
         state.toggle_tools_expansion();
         assert!(!state.expand_tools);
+    }
+
+    #[test]
+    fn test_assistant_mouse_selection_and_text_extraction() {
+        let mut state = AssistantViewState::new();
+        *state.plain_lines.borrow_mut() = vec![
+            "Line 0: First line of assistant reply.".to_string(),
+            "Line 1: Second line with important pod error.".to_string(),
+            "Line 2: Third line concluding analysis.".to_string(),
+        ];
+
+        // 1. Single-line selection
+        state.start_selection(0, 8); // start at "First"
+        state.update_selection(0, 18); // select "First line"
+        state.finish_selection(0, 18);
+        assert_eq!(state.get_selected_text().as_deref(), Some("First line"));
+
+        // 2. Inverted selection (dragging backwards from col 18 to col 8)
+        state.start_selection(0, 18);
+        state.update_selection(0, 8);
+        state.finish_selection(0, 8);
+        assert_eq!(state.get_selected_text().as_deref(), Some("First line"));
+
+        // 3. Multi-line selection spanning lines 0 to 1
+        state.start_selection(0, 19); // start at "of assistant reply."
+        state.update_selection(1, 24); // end at "Line 1: Second line with"
+        state.finish_selection(1, 24);
+        let extracted = state.get_selected_text().unwrap();
+        assert_eq!(
+            extracted,
+            "of assistant reply.\nLine 1: Second line with"
+        );
+
+        // 4. Clear selection
+        state.clear_selection();
+        assert_eq!(state.get_selected_text(), None);
     }
 }

@@ -8,6 +8,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 pub enum AppEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Paste(String),
     Resize(u16, u16),
     Tick,
     StreamEvent {
@@ -51,6 +52,7 @@ impl EventHandler {
                                 let app_evt = match evt {
                                     CrosstermEvent::Key(key) => AppEvent::Key(key),
                                     CrosstermEvent::Mouse(mouse) => AppEvent::Mouse(mouse),
+                                    CrosstermEvent::Paste(text) => AppEvent::Paste(text),
                                     CrosstermEvent::Resize(cols, rows) => AppEvent::Resize(cols, rows),
                                     _ => continue,
                                 };

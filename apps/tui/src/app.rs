@@ -970,6 +970,10 @@ impl App {
             }
             // Pop View Stack / Back
             KeyCode::Esc => {
+                if matches!(self.active_view, ActiveView::Assistant) && self.assistant_state.selection.is_some() {
+                    self.assistant_state.clear_selection();
+                    return;
+                }
                 if !self.filter_buffer.is_empty() {
                     self.filter_buffer.clear();
                     if let ActiveView::Table(table) = &mut self.active_view {
@@ -1363,11 +1367,39 @@ impl App {
                     self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
                     return;
                 }
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if let Some(selected) = ai.get_selected_text() {
+                        let _ = copy_to_clipboard(&selected);
+                        self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
+                        return;
+                    } else if let Some(last_asst) = ai.messages.iter().rev().find(|m| m.role == "assistant") {
+                        let _ = copy_to_clipboard(&last_asst.content);
+                        self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
+                        return;
+                    }
+                }
                 if (key.code == KeyCode::Tab || key.code == KeyCode::Char('t')) && (key.modifiers.contains(KeyModifiers::CONTROL) || key.code == KeyCode::Tab) {
                     ai.toggle_tools_expansion();
                     return;
                 }
                 match key.code {
+                    // Copy selection with 'c' (or copy last assistant message if input is empty)
+                    KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        if let Some(selected) = ai.get_selected_text() {
+                            let _ = copy_to_clipboard(&selected);
+                            self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
+                        } else if ai.input.is_empty() {
+                            if let Some(last_asst) = ai.messages.iter().rev().find(|m| m.role == "assistant") {
+                                let _ = copy_to_clipboard(&last_asst.content);
+                                self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
+                            } else {
+                                ai.input.push('c');
+                            }
+                        } else {
+                            ai.input.push('c');
+                        }
+                    }
+
                     // Prompt History Navigation (Up/Down recalls sent prompts)
                     KeyCode::Up => ai.history_up(),
                     KeyCode::Down => ai.history_down(),
@@ -1507,6 +1539,56 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        if let ActiveView::Assistant = &self.active_view {
+            let vp = self.assistant_state.last_viewport_rect.get();
+            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            {
+                let screen_row = mouse.row.saturating_sub(vp.y) as usize;
+                let screen_col = mouse.column.saturating_sub(vp.x) as usize;
+                let line_idx = self.assistant_state.scroll_offset + screen_row;
+
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.assistant_state.start_selection(line_idx, screen_col);
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        self.assistant_state.update_selection(line_idx, screen_col);
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        self.assistant_state.finish_selection(line_idx, screen_col);
+                    }
+                    _ => {}
+                }
+            } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.assistant_state.clear_selection();
+            }
+        }
+    }
+
+    pub fn handle_paste(&mut self, text: String) {
+        if self.input_mode == InputMode::Command {
+            let cleaned = text.replace("\r\n", " ").replace('\n', " ");
+            self.command_buffer.push_str(&cleaned);
+            return;
+        }
+        if self.input_mode == InputMode::Filter {
+            let cleaned = text.replace("\r\n", "").replace('\n', "");
+            self.filter_buffer.push_str(&cleaned);
+            let filter = self.filter_buffer.clone();
+            if let ActiveView::Table(table) = &mut self.active_view {
+                table.apply_filter(&filter);
+            }
+            return;
+        }
+        if let ActiveView::Assistant = &mut self.active_view {
+            let cleaned = text.replace("\r\n", " ").replace('\n', " ");
+            self.assistant_state.input.push_str(&cleaned);
         }
     }
 

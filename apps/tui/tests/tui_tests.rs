@@ -1124,4 +1124,85 @@ mod tests {
         // Should return a response without panicking (even on nonexistent cluster it surfaces error message)
         assert!(!res.content.is_empty(), "result content should not be empty");
     }
+
+    #[tokio::test]
+    async fn test_assistant_mouse_selection_copy_and_bracketed_paste() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "kind-dev".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Assistant,
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // 1. Test paste handling into Assistant input
+        app.handle_paste("paste line 1\npaste line 2".to_string());
+        assert_eq!(app.assistant_state.input, "paste line 1 paste line 2");
+
+        // 2. Test mouse selection and copy with 'c'
+        *app.assistant_state.plain_lines.borrow_mut() = vec![
+            "Pod crash occurred in container backend: OutOfMemory".to_string()
+        ];
+        app.assistant_state.start_selection(0, 41); // start of "OutOfMemory"
+        app.assistant_state.update_selection(0, 52);
+        app.assistant_state.finish_selection(0, 52);
+
+        assert_eq!(app.assistant_state.get_selected_text().as_deref(), Some("OutOfMemory"));
+
+        // Pressing 'c' copies selection and toasts
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied selection"));
+
+        // Pressing Esc clears selection
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.selection, None);
+    }
 }
