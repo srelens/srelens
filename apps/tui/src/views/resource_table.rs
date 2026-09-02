@@ -200,8 +200,8 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
             ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
             ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
             ColumnDef { name: "TYPE", key: "type", width: Constraint::Length(14) },
-            ColumnDef { name: "CLUSTER-IP", key: "clusterIp", width: Constraint::Length(16) },
-            ColumnDef { name: "EXTERNAL-IP", key: "externalIp", width: Constraint::Length(16) },
+            ColumnDef { name: "CLUSTER-IP", key: "clusterIP", width: Constraint::Length(16) },
+            ColumnDef { name: "EXTERNAL-IP", key: "externalIP", width: Constraint::Length(18) },
             ColumnDef { name: "PORTS", key: "ports", width: Constraint::Min(20) },
             ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
         ],
@@ -310,26 +310,125 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
     }
 }
 
-pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
-    if let Some(v) = val.get(key) {
-        if let Some(s) = v.as_str() {
-            return s.to_string();
-        } else if let Some(n) = v.as_i64() {
-            return n.to_string();
-        } else if let Some(b) = v.as_bool() {
-            return b.to_string();
-        } else if let Some(arr) = v.as_array() {
-            return arr.iter().map(|item| item.as_str().unwrap_or("")).collect::<Vec<_>>().join(", ");
+fn raw_value_to_string(v: &Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        Some(s.to_string())
+    } else if let Some(n) = v.as_i64() {
+        Some(n.to_string())
+    } else if let Some(b) = v.as_bool() {
+        Some(b.to_string())
+    } else if let Some(arr) = v.as_array() {
+        let items: Vec<_> = arr.iter().filter_map(|item| item.as_str()).collect();
+        if !items.is_empty() {
+            Some(items.join(", "))
+        } else {
+            None
         }
+    } else {
+        None
     }
-    // Fallback: search in metadata
-    if let Some(meta) = val.get("metadata") {
-        if let Some(v) = meta.get(key) {
-            if let Some(s) = v.as_str() {
-                return s.to_string();
+}
+
+pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
+    let key_lower = key.to_lowercase();
+
+    // 1. Direct key lookup
+    if let Some(v) = val.get(key) {
+        if let Some(s) = raw_value_to_string(v) {
+            if !s.is_empty() {
+                return s;
             }
         }
     }
+
+    // 2. Case-insensitive top-level lookup (e.g. clusterIP vs clusterIp, externalIP vs externalIp)
+    if let Some(obj) = val.as_object() {
+        for (k, v) in obj {
+            if k.to_lowercase() == key_lower {
+                if let Some(s) = raw_value_to_string(v) {
+                    if !s.is_empty() {
+                        return s;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: spec, status, metadata
+    for container in &["spec", "status", "metadata"] {
+        if let Some(sub) = val.get(*container) {
+            if let Some(v) = sub.get(key) {
+                if let Some(s) = raw_value_to_string(v) {
+                    if !s.is_empty() {
+                        return s;
+                    }
+                }
+            }
+            if let Some(obj) = sub.as_object() {
+                for (k, v) in obj {
+                    if k.to_lowercase() == key_lower {
+                        if let Some(s) = raw_value_to_string(v) {
+                            if !s.is_empty() {
+                                return s;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Kubernetes Service specific lookups
+    if key_lower == "clusterip" {
+        if let Some(cip) = val.pointer("/spec/clusterIP").and_then(|v| v.as_str()) {
+            return cip.to_string();
+        }
+    }
+
+    if key_lower == "externalip" {
+        // Check load-balancer ingress (IP or Hostname)
+        if let Some(ingresses) = val.pointer("/status/loadBalancer/ingress").and_then(|v| v.as_array()) {
+            let ips: Vec<_> = ingresses
+                .iter()
+                .filter_map(|ing| ing.get("ip").or_else(|| ing.get("hostname")).and_then(|v| v.as_str()))
+                .collect();
+            if !ips.is_empty() {
+                return ips.join(", ");
+            }
+        }
+        if let Some(ext_ips) = val.pointer("/spec/externalIPs").and_then(|v| v.as_array()) {
+            let ips: Vec<_> = ext_ips.iter().filter_map(|v| v.as_str()).collect();
+            if !ips.is_empty() {
+                return ips.join(", ");
+            }
+        }
+        // If it's a Service with type LoadBalancer but no ingress yet:
+        let svc_type = val.get("type").or_else(|| val.pointer("/spec/type")).and_then(|v| v.as_str());
+        if svc_type == Some("LoadBalancer") {
+            return "<pending>".to_string();
+        }
+        if svc_type.is_some() {
+            return "<none>".to_string();
+        }
+    }
+
+    // 5. Pod specific lookups (status -> phase, nodeName -> node, podIP)
+    if key_lower == "status" {
+        if let Some(phase) = val.get("phase").or_else(|| val.pointer("/status/phase")).and_then(|v| v.as_str()) {
+            return phase.to_string();
+        }
+    }
+    if key_lower == "nodename" || key_lower == "node" {
+        if let Some(node) = val.get("node").or_else(|| val.pointer("/spec/nodeName")).and_then(|v| v.as_str()) {
+            return node.to_string();
+        }
+    }
+    if key_lower == "podip" || key_lower == "ip" {
+        if let Some(ip) = val.get("podIp").or_else(|| val.get("podIP")).or_else(|| val.pointer("/status/podIP")).and_then(|v| v.as_str()) {
+            return ip.to_string();
+        }
+    }
+
     "-".to_string()
 }
 
@@ -418,4 +517,131 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
     let widths: Vec<Constraint> = state.columns.iter().map(|c| c.width).collect();
     let table = Table::new(rows, widths).header(header);
     f.render_widget(table, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_service_summary_fields() {
+        let svc = json!({
+            "name": "istio-ingress-internal",
+            "namespace": "istio-system",
+            "type": "LoadBalancer",
+            "clusterIP": "10.255.45.10",
+            "externalIP": "10.240.0.12",
+            "ports": "80/TCP,443/TCP",
+            "age": "12d"
+        });
+
+        // Exact keys
+        assert_eq!(extract_field_str(&svc, "clusterIP"), "10.255.45.10");
+        assert_eq!(extract_field_str(&svc, "externalIP"), "10.240.0.12");
+
+        // Case-insensitive keys
+        assert_eq!(extract_field_str(&svc, "clusterIp"), "10.255.45.10");
+        assert_eq!(extract_field_str(&svc, "externalIp"), "10.240.0.12");
+        assert_eq!(extract_field_str(&svc, "name"), "istio-ingress-internal");
+        assert_eq!(extract_field_str(&svc, "namespace"), "istio-system");
+        assert_eq!(extract_field_str(&svc, "type"), "LoadBalancer");
+        assert_eq!(extract_field_str(&svc, "ports"), "80/TCP,443/TCP");
+    }
+
+    #[test]
+    fn handles_cluster_ip_service_with_no_external_ip() {
+        let svc = json!({
+            "name": "kubernetes",
+            "namespace": "default",
+            "type": "ClusterIP",
+            "clusterIP": "10.96.0.1",
+            "externalIP": "",
+            "ports": "443/TCP",
+            "age": "30d"
+        });
+
+        assert_eq!(extract_field_str(&svc, "clusterIP"), "10.96.0.1");
+        assert_eq!(extract_field_str(&svc, "clusterIp"), "10.96.0.1");
+        assert_eq!(extract_field_str(&svc, "externalIP"), "<none>");
+        assert_eq!(extract_field_str(&svc, "externalIp"), "<none>");
+    }
+
+    #[test]
+    fn handles_load_balancer_pending_external_ip() {
+        let svc = json!({
+            "name": "my-lb",
+            "namespace": "default",
+            "type": "LoadBalancer",
+            "clusterIP": "10.96.0.50",
+            "externalIP": "<pending>",
+            "ports": "80/TCP",
+            "age": "1m"
+        });
+
+        assert_eq!(extract_field_str(&svc, "clusterIP"), "10.96.0.50");
+        assert_eq!(extract_field_str(&svc, "externalIP"), "<pending>");
+    }
+
+    #[test]
+    fn handles_raw_kubernetes_service_json() {
+        let raw_svc = json!({
+            "metadata": {
+                "name": "raw-service",
+                "namespace": "prod"
+            },
+            "spec": {
+                "type": "LoadBalancer",
+                "clusterIP": "10.100.1.20",
+                "ports": [{"port": 80, "protocol": "TCP"}]
+            },
+            "status": {
+                "loadBalancer": {
+                    "ingress": [
+                        {"ip": "35.200.10.5"}
+                    ]
+                }
+            }
+        });
+
+        assert_eq!(extract_field_str(&raw_svc, "name"), "raw-service");
+        assert_eq!(extract_field_str(&raw_svc, "namespace"), "prod");
+        assert_eq!(extract_field_str(&raw_svc, "clusterIP"), "10.100.1.20");
+        assert_eq!(extract_field_str(&raw_svc, "clusterIp"), "10.100.1.20");
+        assert_eq!(extract_field_str(&raw_svc, "externalIP"), "35.200.10.5");
+        assert_eq!(extract_field_str(&raw_svc, "externalIp"), "35.200.10.5");
+    }
+
+    #[test]
+    fn handles_pod_summary_and_raw_pod() {
+        let pod_summary = json!({
+            "name": "web-pod-1",
+            "namespace": "default",
+            "phase": "Running",
+            "ready": "1/1",
+            "restarts": 0,
+            "node": "node-1",
+            "age": "5m"
+        });
+
+        assert_eq!(extract_field_str(&pod_summary, "status"), "Running");
+        assert_eq!(extract_field_str(&pod_summary, "node"), "node-1");
+        assert_eq!(extract_field_str(&pod_summary, "nodeName"), "node-1");
+
+        let raw_pod = json!({
+            "metadata": {"name": "raw-pod"},
+            "status": {
+                "phase": "Running",
+                "podIP": "10.244.0.5"
+            },
+            "spec": {
+                "nodeName": "worker-pool-1"
+            }
+        });
+
+        assert_eq!(extract_field_str(&raw_pod, "status"), "Running");
+        assert_eq!(extract_field_str(&raw_pod, "podIP"), "10.244.0.5");
+        assert_eq!(extract_field_str(&raw_pod, "podIp"), "10.244.0.5");
+        assert_eq!(extract_field_str(&raw_pod, "node"), "worker-pool-1");
+    }
 }
