@@ -22,7 +22,9 @@ describe("Field", () => {
         <input />
       </Field>,
     );
-    expect(screen.getByText("Lowercase letters only")).toBeDefined();
+    const control = screen.getByRole("textbox", { name: "Name" });
+    const hint = screen.getByText("Lowercase letters only");
+    expect(control.getAttribute("aria-describedby")).toBe(hint.id);
   });
 
   it("shows the error instead of the hint, never both", () => {
@@ -33,8 +35,24 @@ describe("Field", () => {
         <input />
       </Field>,
     );
-    expect(screen.getByText("Already taken")).toBeDefined();
+    const control = screen.getByRole("textbox", { name: "Name" });
+    const error = screen.getByText("Already taken");
+    expect(control.getAttribute("aria-describedby")).toBe(error.id);
     expect(screen.queryByText("Lowercase letters only")).toBeNull();
+  });
+
+  it("keeps a control's existing description when it adds the field note", () => {
+    render(
+      <Field label="Name" hint="Lowercase letters only">
+        <input aria-describedby="server-rule" />
+      </Field>,
+    );
+    const control = screen.getByRole("textbox", { name: "Name" });
+    const hint = screen.getByText("Lowercase letters only");
+    expect(control.getAttribute("aria-describedby")?.split(/\s+/)).toEqual([
+      "server-rule",
+      hint.id,
+    ]);
   });
 
   it("keeps an action outside the label element", () => {
@@ -49,6 +67,7 @@ describe("Field", () => {
     );
     const action = screen.getByRole("button", { name: "Preview" });
     expect(action.closest("label")).toBeNull();
+    expect(screen.getByLabelText("Manifest")).toBe(screen.getByRole("textbox"));
   });
 
   it("forwards className", () => {

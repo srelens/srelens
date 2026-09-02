@@ -84,6 +84,7 @@ export * from "./lib/skills";
 export * from "./lib/storage";
 export * from "./lib/tabs";
 export * from "./lib/tabView";
+export * from "./lib/taints";
 export * from "./lib/terminal";
 export * from "./lib/terminalDriver";
 export * from "./lib/terminalReconnect";

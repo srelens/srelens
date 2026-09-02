@@ -1,6 +1,7 @@
+import { CopyIconButton } from "./CopyIconButton";
 import { cx } from "./cx";
 import { filled } from "./slot";
-import { IconButton, type IconComponent } from "./IconButton";
+import type { IconComponent } from "./IconButton";
 
 export interface KubectlPreviewProps {
   /** The kubectl-equivalent command. Omit (and pass `note` instead) when there's no faithful one-liner. */
@@ -53,7 +54,7 @@ export function KubectlPreview({ command, note, onCopy, className }: KubectlPrev
     <p className={cx("mt-2 flex flex-wrap items-center gap-1 text-xs text-muted", className)}>
       <span>Equivalent kubectl:</span>
       <code className="code min-w-0 break-words">{command}</code>
-      {onCopy && <IconButton icon={CopyGlyph} label="Copy kubectl command" onClick={onCopy} />}
+      {onCopy && <CopyIconButton icon={CopyGlyph} label="Copy kubectl command" onCopy={onCopy} />}
     </p>
   );
 }

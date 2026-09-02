@@ -31,6 +31,12 @@ import {
   type StatefulSetSummary,
   type StatusVerdict,
   type StorageClassSummary,
+  TAINT_COLUMN_HINT,
+  taintBadgeLabel,
+  taintBadgeText,
+  taintSortValue,
+  taintTallyText,
+  taintTooltip,
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
 import { Badge, StatusPill, type Column, type Tone } from "@srelens/ui-kit";
@@ -257,6 +263,37 @@ export const nodeVerdict = (row: NodeRow): StatusVerdict => nodeStatus(row.statu
 
 export const nodeFlagged = (row: NodeRow): boolean => nodeVerdict(row).flagged;
 
+/**
+ * The Tainted badge, carrying the count. A node with no taints renders no
+ * badge at all, exactly as before — the caller guards on that.
+ *
+ * The wrapper, not the Badge, holds the hint and the accessible name: `Badge`
+ * is a presentational span shared with five other callers, and widening its
+ * props for one of them is how a kit component turns into a grab bag. `title`
+ * is the tooltip host here rather than the kit's `Tooltip` because the content
+ * is several lines and `Tooltip` renders a single nowrap line; `tabIndex`
+ * keeps it reachable by keyboard rather than hover alone. (#426)
+ */
+function TaintBadge({ row }: { row: NodeRow }) {
+  const taints = row.taintDetails ?? [];
+  return (
+    <span tabIndex={0} title={taintTooltip(taints)} aria-label={taintBadgeLabel(row.taints)}>
+      <Badge tone={BADGE_TONE.neutral}>{taintBadgeText(row.taints)}</Badge>
+    </span>
+  );
+}
+
+/** The optional Taints column's cell: the per-effect tally, `0 / 0 / 0` for a
+ *  node with none — a number, not a blank, so the column reads as a column. */
+function TaintTally({ row }: { row: NodeRow }) {
+  const taints = row.taintDetails ?? [];
+  return (
+    <span title={taints.length > 0 ? taintTooltip(taints) : TAINT_COLUMN_HINT}>
+      {taintTallyText(taints)}
+    </span>
+  );
+}
+
 export const nodeColumns: Column<NodeRow>[] = [
   { key: "name", header: "Name", sortable: true },
   {
@@ -274,9 +311,7 @@ export const nodeColumns: Column<NodeRow>[] = [
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
         <StatusPill status={n.status} kind={nodeVerdict(n).health} />
         {n.unschedulable && <Badge tone={BADGE_TONE.warning}>SchedulingDisabled</Badge>}
-        {n.taints > 0 && (
-          <Badge tone={BADGE_TONE.neutral}>{n.taints > 1 ? `Tainted (${n.taints})` : "Tainted"}</Badge>
-        )}
+        {n.taints > 0 && <TaintBadge row={n} />}
       </span>
     ),
   },
@@ -284,6 +319,18 @@ export const nodeColumns: Column<NodeRow>[] = [
   { key: "cpu", header: "CPU", sortable: true, align: "end", render: (n) => metric(n.cpu, formatCpu), getSortValue: (n) => metricSort(n.cpu) },
   { key: "memory", header: "Memory", sortable: true, align: "end", render: (n) => metric(n.memory, formatMemory), getSortValue: (n) => metricSort(n.memory) },
   { key: "version", header: "Version" },
+  {
+    key: "taints",
+    header: "Taints",
+    sortable: true,
+    align: "end",
+    // Off until asked for: a tally is what you go looking for when a pod will
+    // not schedule, and noise on every other day. #411's Namespace columns are
+    // the same bargain.
+    defaultHidden: true,
+    render: (n) => <TaintTally row={n} />,
+    getSortValue: (n) => taintSortValue(n.taintDetails),
+  },
   // #405: live age, derived against a ticking clock from `created`.
   { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];

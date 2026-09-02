@@ -50,3 +50,12 @@ export function formatBytes(bytes: number | null | undefined): string {
   if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
   return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
+
+/** Zero-padded to two digits — `"05"`, `"14"` — the one shape `HH:MM` clocks
+ *  in this design need, whether that clock is a gate's resolution time
+ *  (`screens/agent/Transcript.tsx`) or a run's start (`screens/Agent.tsx`).
+ *  One copy rather than two identical ones, the same reason `groupNumber`
+ *  above is one function and not a copy per caller. */
+export function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}

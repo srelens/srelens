@@ -383,7 +383,9 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     list.push({
       label: ROW_ACTION_LABEL.copy,
       icon: Icons.copy,
-      onPick: () => void copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
+      confirmLabel: "Copied",
+      // No `void`: the boolean is what tells the bar whether to say "Copied".
+      onPick: () => copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
     });
 
     if (actions.suspend) {
@@ -648,7 +650,7 @@ function PendingDialog({
               autoFocus
             />
           )}
-          <KubectlPreview command={command} note={note} onCopy={command ? () => void copyKubectlCommand(command) : undefined} />
+          <KubectlPreview command={command} note={note} onCopy={command ? () => copyKubectlCommand(command) : undefined} />
           {/* The dialog stays open on a refusal rather than closing as if the
               write had happened, so this line is the whole of what the reader
               is told about why. A validation message this component wrote

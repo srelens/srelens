@@ -27,6 +27,13 @@ const core = vi.hoisted(() => ({
   vaultBiometricStatus: vi.fn(),
   vaultBiometricEnable: vi.fn(),
   vaultBiometricDisable: vi.fn(),
+  llmGetSettings: vi.fn(),
+  llmSetSettings: vi.fn(),
+  llmSetKey: vi.fn(),
+  llmClearKey: vi.fn(),
+  llmKeyStatus: vi.fn(),
+  llmListModels: vi.fn(),
+  listAgents: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -98,6 +105,18 @@ describe("Settings", () => {
     core.auditTail.mockResolvedValue([]);
     core.vaultLock.mockResolvedValue(undefined);
     core.vaultBiometricStatus.mockResolvedValue(SENSOR_OFF);
+    core.llmGetSettings.mockResolvedValue({
+      defaultProvider: "anthropic",
+      models: {},
+      baseUrls: {},
+      maxTokens: 4096,
+    });
+    core.llmSetSettings.mockResolvedValue(undefined);
+    core.llmSetKey.mockResolvedValue(undefined);
+    core.llmClearKey.mockResolvedValue(undefined);
+    core.llmKeyStatus.mockResolvedValue([]);
+    core.llmListModels.mockResolvedValue([]);
+    core.listAgents.mockResolvedValue([]);
   });
 
   it("titles itself the way the design does, and takes no header action", () => {
@@ -347,6 +366,32 @@ describe("Settings", () => {
       // agent may do without asking.
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
       expect(screen.getAllByTestId("gated-capability").length).toBeGreaterThan(0);
+    });
+
+    /**
+     * P2 (#392 review round 7). `AgentPane` was mounted on the web with a
+     * comment saying it was safe because its calls "go through
+     * `invokeCommand`, the transport that has a web half". A transport is not
+     * a handler: `api_command.rs`'s match has no `llm_*` or `agent_list` arm,
+     * so every read answered `404 unknown command` and the section opened on
+     * four failure alerts with no control that could work.
+     */
+    it("does not mount the provider-key pane, whose commands the server does not answer", async () => {
+      paint();
+      // The pane's own controls are the tell — a Save that cannot reach a
+      // handler is worse than an honest sentence.
+      expect(screen.queryByRole("button", { name: /save settings/i })).toBeNull();
+      expect(screen.queryByRole("button", { name: /save key/i })).toBeNull();
+      expect(screen.queryByText(/^Providers$/)).toBeNull();
+      // And nothing dressed as a failure, because nothing was asked.
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("names the agent among what lives on the desktop, not only the server and audit log", async () => {
+      paint();
+      const note = screen.getByTestId("no-agent-server");
+      expect(note.textContent).toMatch(/agent/i);
+      expect(note.textContent).toMatch(/provider keys/i);
     });
 
     it("says why the two panels are missing, once, inside the section that lost them", async () => {

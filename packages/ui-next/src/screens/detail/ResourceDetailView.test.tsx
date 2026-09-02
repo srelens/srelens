@@ -1418,6 +1418,34 @@ describe("ResourceDetailView", () => {
       expect(deleteResource).not.toHaveBeenCalled();
     });
 
+    // The click #410 actually reports, on the kind it reports it on. A Pod's
+    // peek footer keeps two actions on the bar and Copy as kubectl is fifth in
+    // the row menu's order, so it is behind the overflow — where a
+    // confirmation the bar alone could draw never reached it. It confirmed on a
+    // ConfigMap (no logs, no shell, no forward ahead of it) and not on a Pod,
+    // in the same footer. (#413 review)
+    it("confirms Copy as kubectl in the peek footer, where a Pod keeps it behind the overflow", async () => {
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText: vi.fn().mockResolvedValue(undefined) },
+        configurable: true,
+      });
+      getObject.mockResolvedValue({ object: RUNNING_POD });
+      descriptorFor.mockReturnValue(podDescriptor());
+      const { getByRole } = render(
+        <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
+      );
+      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
+
+      await userEvent.click(getByRole("button", { name: "More actions" }));
+      const menu = await screen.findByRole("dialog");
+      await userEvent.click(within(menu).getByRole("button", { name: "Copy as kubectl" }));
+
+      expect(navigator.clipboard.writeText).toHaveBeenCalled();
+      // The row itself says so, and the menu is still there to say it on.
+      expect(await within(menu).findByRole("button", { name: "Copied" })).toBeDefined();
+    });
+
     it("withholds Delete from a custom resource, whose GVK the backend cannot resolve", async () => {
       getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
       // No descriptor is exactly what a kind outside `K8S_KIND` gets, and it is

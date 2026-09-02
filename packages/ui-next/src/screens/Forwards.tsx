@@ -19,6 +19,7 @@ import {
 import {
   Badge,
   Button,
+  CopyIconButton,
   EmptyState,
   IconButton,
   Screen,
@@ -347,14 +348,17 @@ export function Forwards(_props: { route: string }) {
     }
   }
 
-  async function copyAddress(row: ForwardRow) {
+  // Reports whether it worked so the button can say so — the toast alone
+  // reaches nobody in this design (#374 item 2), which is what left this copy
+  // silent. The address is still rendered in full in the row's own Local cell,
+  // so a refusal costs the reader nothing but a selection. (#410)
+  async function copyAddress(row: ForwardRow): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(row.address);
       notify.success("Copied the forward's address");
+      return true;
     } catch {
-      // No clipboard on a non-secure origin, and nothing to recover: the
-      // address is rendered in full in the row's own Local cell and can be
-      // selected. Saying "Copied" when nothing was copied is the only real harm.
+      return false;
     }
   }
 
@@ -376,18 +380,18 @@ export function Forwards(_props: { route: string }) {
       minWidth: 128,
       render: (row) => (
         <div className="flex items-center justify-end gap-0.5">
-          <IconButton
+          <CopyIconButton
             icon={Icons.terminal}
             // Named per row: four rows all offering "Copy" name nothing at all.
             // The name carries the TARGET, which the row already shows — never
             // the command or the address, which it must not hide in a title.
             label={`Copy kubectl command for ${row.target}`}
-            onClick={() => void copyKubectlCommand(row.command)}
+            onCopy={() => copyKubectlCommand(row.command)}
           />
-          <IconButton
+          <CopyIconButton
             icon={Icons.copy}
             label={`Copy address for ${row.target}`}
-            onClick={() => void copyAddress(row)}
+            onCopy={() => copyAddress(row)}
           />
           {/* A tunnel that died has nothing left to stop, and a Stop that
               stops nothing is the kind of control this migration keeps

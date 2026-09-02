@@ -69,16 +69,8 @@ function field(label: string): HTMLElement {
   return screen.getByLabelText(label) as HTMLElement;
 }
 
-/**
- * A field whose `Field` carries a hint.
- *
- * The kit renders the hint INSIDE the `<label>`, so the control's accessible
- * name is the label followed by the hint; an exact match would never find it.
- */
 function hintedField(label: string): HTMLElement {
-  // No word boundary: the label and the hint are adjacent spans, so the
-  // computed name runs the two together with nothing between them.
-  return screen.getByLabelText(new RegExp(`^${label}`)) as HTMLElement;
+  return screen.getByLabelText(label) as HTMLElement;
 }
 
 describe("HelmOpDialog — §A.5's frame", () => {
@@ -88,7 +80,9 @@ describe("HelmOpDialog — §A.5's frame", () => {
     expect(within(dialog).getByText(`Install ${RELEASE}`)).toBeTruthy();
     expect((dialog as HTMLElement).style.maxWidth).toBe("620px");
     expect(field("Chart")).toBeTruthy();
-    expect(field("Chart version")).toBeTruthy();
+    const chartVersion = field("Chart version");
+    const chartVersionHint = screen.getByText("Leave empty to use the latest chart version.");
+    expect(chartVersion.getAttribute("aria-describedby")).toBe(chartVersionHint.id);
     expect(screen.getByRole("tablist", { name: "Panel" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Values" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Rendered diff" })).toBeTruthy();

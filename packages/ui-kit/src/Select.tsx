@@ -17,7 +17,9 @@ export interface SelectProps {
    * permission to use, which wants an explanation instead of a dead control.
    */
   disabled?: boolean;
+  id?: string;
   "aria-label"?: string;
+  "aria-describedby"?: string;
 }
 
 /**
@@ -41,7 +43,9 @@ export function Select({
   className,
   placeholder,
   disabled,
+  id,
   "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy,
 }: SelectProps) {
   const unmatched = !options.some((o) => o.value === value);
   // A controlled value matching no option leaves the browser free to choose,
@@ -54,9 +58,11 @@ export function Select({
     <div className="relative inline-flex items-center">
       <select
         value={rendered}
+        id={id}
         disabled={disabled}
         onChange={(e) => onValueChange(e.target.value)}
         aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
         className={cx(
           "appearance-none rounded-md border py-1 pl-2 pr-6 text-[0.8125rem] outline-none",
           className,

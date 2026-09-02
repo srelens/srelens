@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 import { parseDetailRoute, parseEditRoute } from "./detailRoute";
+import { Agent } from "../screens/Agent";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
 import { Connections } from "../screens/Connections";
@@ -258,6 +259,10 @@ export type ScreenComponent = ComponentType<RoutedScreenProps>;
 const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(null), {
   "/applog": AppLog,
   "/notes": ReleaseNotes,
+  // The full view of the one agent run this window holds — the console dock
+  // (`shell/Console.tsx`) is a second, compact renderer over the SAME store,
+  // never a second conversation.
+  "/agent": Agent,
   "/resources": Workloads,
   "/events": Events,
   "/overview": Overview,

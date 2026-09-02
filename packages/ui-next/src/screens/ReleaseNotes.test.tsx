@@ -183,6 +183,26 @@ describe("ReleaseNotes", () => {
     expect(within(alert).getByText("Could not check for updates")).toBeTruthy();
   });
 
+  it("describes updater timeouts as HTTP failures, not cluster failures", async () => {
+    checkForUpdate.mockRejectedValueOnce(new Error("request timed out"));
+    render(<ReleaseNotes route="/release-notes" />);
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/network connection/i)).toBeTruthy();
+    expect(alert.textContent).not.toMatch(/Kubernetes|cluster|kubeconfig/);
+  });
+
+  it("does not blame kubeconfig when the update server's TLS check fails", async () => {
+    checkForUpdate.mockResolvedValue(update());
+    installUpdate.mockRejectedValue(new Error("x509: certificate signed by unknown authority"));
+    render(<ReleaseNotes route="/release-notes" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /install/i }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/server's TLS certificate/i)).toBeTruthy();
+    expect(alert.textContent).not.toMatch(/cluster|kubeconfig|certificate-authority/);
+  });
+
   it("leaves updates to the server in web mode", async () => {
     isTauri.mockReturnValue(false);
     render(<ReleaseNotes route="/release-notes" />);
