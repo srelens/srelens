@@ -249,6 +249,22 @@ pub enum Provenance {
     Observed,
 }
 
+/// What a measurement counted.
+///
+/// Carried beside the number because the two sources do not measure the same
+/// thing and must never be put on one scale: a metrics backend reports a RATE,
+/// and a socket table reports how many connections are OPEN. Five idle pooled
+/// connections and five requests a second are not comparable quantities, and a
+/// screen scaling both against one maximum would draw that lie as a thickness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Unit {
+    /// Requests per second, as PromQL returned it.
+    Rps,
+    /// Established TCP connections, counted in `/proc/net/tcp`.
+    Connections,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct TopologyEdge {
     pub from: String,
@@ -260,6 +276,16 @@ pub struct TopologyEdge {
     /// [`Provenance::Observed`] can fill it, which is why it is empty until a
     /// metrics source is configured.
     pub detail: String,
+    /// The raw number behind {@link detail}, so the screen can draw volume
+    /// rather than only write it.
+    ///
+    /// Sent separately rather than left for the frontend to read back out of
+    /// `"41.2k rpm"`: a label is rounded, abbreviated and written for a human,
+    /// and parsing one to recover a quantity we already had is a bug waiting
+    /// for the day the wording changes.
+    pub weight: Option<f64>,
+    /// What {@link weight} counts. `None` exactly when `weight` is.
+    pub unit: Option<Unit>,
     /// The health of the node this edge points AT, copied here so the screen
     /// can colour a path without walking back to the node table.
     pub health: Health,
@@ -386,15 +412,18 @@ fn push_edge(
     kind: EdgeKind,
     provenance: Provenance,
 ) {
-    push_edge_labelled(edges, from, to, kind, provenance, String::new())
+    push_edge_labelled(edges, from, to, kind, provenance, String::new(), None)
 }
 
-/// As [`push_edge`], with something to write along the line.
+/// As [`push_edge`], with something to write along the line and the quantity
+/// behind it.
 ///
 /// A measurement UPGRADES an edge rather than joining it: when telemetry has
 /// seen the same call that configuration declared, that is one dependency now
 /// known better, and drawing two lines between the same pair would say the
-/// opposite. The observed provenance and its rate replace the declared ones.
+/// opposite. The observed provenance, its rate and its weight replace the
+/// declared ones together — a stale weight left beside a fresh label would be
+/// drawn at the wrong thickness.
 fn push_edge_labelled(
     edges: &mut Vec<TopologyEdge>,
     from: String,
@@ -402,6 +431,7 @@ fn push_edge_labelled(
     kind: EdgeKind,
     provenance: Provenance,
     detail: String,
+    measure: Option<(f64, Unit)>,
 ) {
     if let Some(existing) = edges
         .iter_mut()
@@ -410,6 +440,8 @@ fn push_edge_labelled(
         if provenance == Provenance::Observed {
             existing.provenance = provenance;
             existing.detail = detail;
+            existing.weight = measure.map(|(w, _)| w);
+            existing.unit = measure.map(|(_, u)| u);
         }
         return;
     }
@@ -419,6 +451,8 @@ fn push_edge_labelled(
         kind,
         provenance,
         detail,
+        weight: measure.map(|(w, _)| w),
+        unit: measure.map(|(_, u)| u),
         // A declared dependency says nothing about how the target is doing —
         // the target's own node carries that, and copying an unrelated health
         // onto the edge would colour a line with a fact it does not hold.
@@ -885,6 +919,8 @@ pub fn build_graph(
                 kind: EdgeKind::Routes,
                 provenance: Provenance::Topology,
                 detail: String::new(),
+                weight: None,
+                unit: None,
                 health: health_of(w.ready, w.desired),
             });
         }
@@ -924,6 +960,8 @@ pub fn build_graph(
                 kind: EdgeKind::Routes,
                 provenance: Provenance::Topology,
                 detail: String::new(),
+                weight: None,
+                unit: None,
                 health: target.health,
             });
         }
@@ -966,6 +1004,8 @@ pub fn build_graph(
                 kind: EdgeKind::Owns,
                 provenance: Provenance::Topology,
                 detail: String::new(),
+                weight: None,
+                unit: None,
                 health: health_of(ready, desired),
             });
         }
@@ -1171,7 +1211,7 @@ pub fn rate_label(per_second: f64) -> String {
 fn observed_edge(
     sample: &crate::prometheus::Sample,
     nodes: &[TopologyNode],
-) -> Option<(String, String, String)> {
+) -> Option<(String, String, String, f64)> {
     let label = |key: &str| sample.labels.get(key).cloned().unwrap_or_default();
     let source_ns = label("source_workload_namespace");
     let source = label("source_workload");
@@ -1189,7 +1229,12 @@ fn observed_edge(
     let to = nodes
         .iter()
         .find(|n| n.lane == Lane::Service && n.name == dest && n.namespace == dest_ns)?;
-    Some((from.id.clone(), to.id.clone(), rate_label(sample.value)))
+    Some((
+        from.id.clone(),
+        to.id.clone(),
+        rate_label(sample.value),
+        sample.value,
+    ))
 }
 
 /// What a pod's socket table says, ready to be mapped onto the graph.
@@ -1300,6 +1345,7 @@ pub fn apply_connections(graph: &mut TopologyGraphOut, book: &AddressBook, pods:
                 EdgeKind::Calls,
                 Provenance::Observed,
                 connection_label(peer.count),
+                Some((f64::from(peer.count), Unit::Connections)),
             );
         }
     }
@@ -1311,7 +1357,7 @@ pub fn apply_connections(graph: &mut TopologyGraphOut, book: &AddressBook, pods:
 /// Prometheus — it is the part that can be wrong, and the query is not.
 pub fn apply_observed(graph: &mut TopologyGraphOut, samples: &[crate::prometheus::Sample]) {
     for sample in samples {
-        let Some((from, to, detail)) = observed_edge(sample, &graph.nodes) else {
+        let Some((from, to, detail, rps)) = observed_edge(sample, &graph.nodes) else {
             continue;
         };
         push_edge_labelled(
@@ -1321,6 +1367,7 @@ pub fn apply_observed(graph: &mut TopologyGraphOut, samples: &[crate::prometheus
             EdgeKind::Calls,
             Provenance::Observed,
             detail,
+            Some((rps, Unit::Rps)),
         );
     }
 }
@@ -2011,6 +2058,12 @@ mod tests {
         assert_eq!(edge.to, "Service/checkout/payments");
         assert_eq!(edge.provenance, Provenance::Observed);
         assert_eq!(edge.detail, "5 conns");
+        // The label is for a reader; the weight is for the screen, which draws
+        // this line as thick as the number is large. Never `Rps`: a socket
+        // table says what is OPEN, and five idle pooled connections look
+        // exactly like five busy ones.
+        assert_eq!(edge.weight, Some(5.0));
+        assert_eq!(edge.unit, Some(Unit::Connections));
     }
 
     #[test]
@@ -2105,6 +2158,11 @@ mod tests {
         assert_eq!(edge.to, "Service/checkout/payments");
         assert_eq!(edge.provenance, Provenance::Observed);
         assert_eq!(edge.detail, "41 rpm");
+        // Per SECOND, as PromQL returned it, rather than the per-minute figure
+        // the label is rounded to. The screen scales thicknesses off this, and
+        // recovering `0.6867` from the string `41 rpm` is not possible.
+        assert_eq!(edge.weight, Some(0.6867));
+        assert_eq!(edge.unit, Some(Unit::Rps));
     }
 
     #[test]

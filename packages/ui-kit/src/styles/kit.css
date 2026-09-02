@@ -1105,6 +1105,19 @@
     animation: flow 900ms linear infinite;
   }
   @keyframes flow { to { stroke-dashoffset: -18; } }
+  /* A reader who asked for less motion still has to tell a MEASURED edge from
+     a DECLARED one, and on the topology graph those are told apart by movement.
+     The global reduce-motion rule freezes the animation, which would leave
+     observed traffic as static dashes — close enough to the dotted line that
+     means "a host named in a config file" to be read as the same thing. So the
+     dashes go too: observed becomes solid, declared stays dotted, and the
+     distinction survives being held still. */
+  @media (prefers-reduced-motion: reduce) {
+    .flow {
+      animation: none;
+      stroke-dasharray: none;
+    }
+  }
 
   /* --- window chrome --------------------------------------------- */
   .titlebar {

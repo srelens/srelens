@@ -113,6 +113,8 @@ function graph(): TopologyGraph {
         provenance: "topology",
         detail: "",
         health: "degraded",
+        weight: null,
+        unit: null,
       },
       {
         from: "Service/checkout/checkout-api",
@@ -121,6 +123,8 @@ function graph(): TopologyGraph {
         provenance: "topology",
         detail: "",
         health: "degraded",
+        weight: null,
+        unit: null,
       },
     ],
   };
@@ -233,6 +237,8 @@ describe("Topology", () => {
             provenance: "declared",
             detail: "",
             health: "unknown",
+            weight: null,
+            unit: null,
           },
         ],
       },
@@ -243,7 +249,7 @@ describe("Topology", () => {
     expect(external).toBeDefined();
     // Scoped to the canvas: the legend draws the same dotted stroke as its own
     // sample, which is the point of the legend and not an edge.
-    const canvas = screen.getByRole("img", { name: "Namespace topology" });
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
     expect(canvas.querySelectorAll('path[stroke-dasharray="2 4"]')).toHaveLength(1);
   });
 
@@ -287,6 +293,8 @@ describe("Topology", () => {
             provenance: "observed",
             detail: "41 rpm",
             health: "unknown",
+            weight: 0.6867,
+            unit: "rps",
           },
         ],
       },
@@ -302,10 +310,81 @@ describe("Topology", () => {
       }, false),
     );
     expect(await screen.findByText("41 rpm")).toBeDefined();
-    const canvas = screen.getByRole("img", { name: "Namespace topology" });
-    // Solid: a measurement is not a guess, and must not wear the dotted line
-    // that says "someone wrote this in a config file".
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    // Not the dotted line that says "someone wrote this in a config file". A
+    // measured edge is accented and it MOVES — the dashes and their animation
+    // both come from the kit's `.flow`, which is also what a reader who has
+    // asked for less motion gets held still.
     expect(canvas.querySelectorAll("path[stroke-dasharray]")).toHaveLength(0);
+    expect(canvas.querySelectorAll("path.flow")).toHaveLength(1);
+  });
+
+  it("draws a measured edge as thick as the rate is large", async () => {
+    // Writing `41 rpm` beside a line is a number a reader has to stop and
+    // read. Thickness is the same fact at a glance, and it is why the
+    // capability sends the quantity beside the label rather than leaving the
+    // screen to parse `41 rpm` back into one.
+    core.prometheusDiscover.mockResolvedValue({
+      candidates: [{ namespace: "monitoring", service: "prometheus", port: 9090, flavour: "prometheus" }],
+    });
+    const workload = (name: string) => ({
+      id: `Deployment/default/${name}`,
+      kind: "Deployment",
+      name,
+      namespace: "default",
+      lane: "workload" as const,
+      detail: "1/1",
+      ready: 1,
+      desired: 1,
+      health: "ok" as const,
+    });
+    const service = (name: string) => ({
+      id: `Service/default/${name}`,
+      kind: "Service",
+      name,
+      namespace: "default",
+      lane: "service" as const,
+      detail: ":80",
+      ready: null,
+      desired: null,
+      health: "ok" as const,
+    });
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [workload("storefront"), service("busy"), service("quiet")],
+        edges: [
+          {
+            from: "Deployment/default/storefront",
+            to: "Service/default/busy",
+            kind: "calls",
+            provenance: "observed",
+            detail: "600 rpm",
+            health: "unknown",
+            weight: 10,
+            unit: "rps",
+          },
+          {
+            from: "Deployment/default/storefront",
+            to: "Service/default/quiet",
+            kind: "calls",
+            provenance: "observed",
+            detail: "6 rpm",
+            health: "unknown",
+            weight: 0.1,
+            unit: "rps",
+          },
+        ],
+      },
+    });
+    render(<Topology />);
+
+    await screen.findByText("600 rpm");
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    const widths = [...canvas.querySelectorAll("path.flow")].map((p) =>
+      Number(p.getAttribute("stroke-width")),
+    );
+    expect(widths).toHaveLength(2);
+    expect(Math.max(...widths)).toBeGreaterThan(Math.min(...widths));
   });
 
   it("probes connections only when asked, and says what it costs", async () => {
@@ -371,18 +450,179 @@ describe("Topology", () => {
     ).toContain("Deployment");
   });
 
-  it("fades everything the selection does not touch", async () => {
-    // No amount of ordering removes every crossing, so selecting a node dims
-    // the rest rather than asking a reader to trace a line through it.
+  it("traces the whole chain from a selection, not one hop from it", async () => {
+    // "If this is broken, what else is" is a transitive question. The version
+    // this replaces lit up immediate neighbours and faded the rest, which
+    // dimmed the far end of the very path a reader was following.
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          ...graph().nodes,
+          {
+            id: "Service/checkout/unrelated",
+            kind: "Service",
+            name: "unrelated",
+            namespace: "checkout",
+            lane: "service",
+            detail: ":80",
+            ready: null,
+            desired: null,
+            health: "ok",
+          },
+        ],
+        edges: graph().edges,
+      },
+    });
     render(<Topology />);
     await userEvent.click(await screen.findByRole("button", { name: "Ingress web" }));
 
-    const canvas = screen.getByRole("img", { name: "Namespace topology" });
-    const faded = canvas.querySelectorAll('g[opacity="0.25"]');
-    // The Deployment is two hops away, so it fades; the Ingress and the Service
-    // it routes to stay bright.
-    expect(faded).toHaveLength(1);
-    expect(faded[0].getAttribute("aria-label")).toBe("Deployment checkout-api");
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    const faded = [...canvas.querySelectorAll("g[opacity='0.13'][aria-label]")];
+    // The Deployment is two hops downstream and stays bright with the rest of
+    // the path. Only the Service on no path at all goes quiet.
+    expect(faded.map((g) => g.getAttribute("aria-label"))).toEqual(["Service unrelated"]);
+  });
+
+  it("counts what a node takes with it, both ways", async () => {
+    render(<Topology />);
+    await userEvent.click(await screen.findByRole("button", { name: "Ingress web" }));
+
+    const panel = screen.getByRole("complementary", { name: "Selected node" });
+    expect(panel.textContent).toContain("Entry point");
+    // The Service and the Deployment behind it, not just the Service.
+    expect(panel.textContent).toContain("2 nodes");
+    expect(panel.textContent).toContain("0 nodes");
+  });
+
+  it("lays a call chain out left to right, by hops rather than by kind", async () => {
+    // The argument this whole layout makes. `payments`' Service is called BY a
+    // Deployment, so it belongs after it; the old kind-per-column layout put
+    // every Service in column two and drew the call backwards.
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          {
+            id: "Deployment/checkout/checkout",
+            kind: "Deployment",
+            name: "checkout",
+            namespace: "checkout",
+            lane: "workload",
+            detail: "1/1",
+            ready: 1,
+            desired: 1,
+            health: "ok",
+          },
+          {
+            id: "Service/payments/payments",
+            kind: "Service",
+            name: "payments",
+            namespace: "payments",
+            lane: "service",
+            detail: ":80",
+            ready: null,
+            desired: null,
+            health: "ok",
+          },
+        ],
+        edges: [
+          {
+            from: "Deployment/checkout/checkout",
+            to: "Service/payments/payments",
+            kind: "calls",
+            provenance: "declared",
+            detail: "",
+            health: "unknown",
+            weight: null,
+            unit: null,
+          },
+        ],
+      },
+    });
+    render(<Topology />);
+
+    const caller = await screen.findByRole("button", { name: "Deployment checkout" });
+    const called = screen.getByRole("button", { name: "Service payments" });
+    const x = (node: Element) => Number(node.querySelector("rect")?.getAttribute("x"));
+    expect(x(called)).toBeGreaterThan(x(caller));
+    // And the arrow says which way it goes, which the version without
+    // arrowheads left the reader to infer from the columns.
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    expect(canvas.querySelectorAll("polygon")).toHaveLength(1);
+  });
+
+  it("folds a ReplicaSet into the workload that owns it", async () => {
+    // A ReplicaSet is not a place traffic goes, so it is a chip on the
+    // workload rather than a dead-end box on every path.
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          ...graph().nodes,
+          {
+            id: "ReplicaSet/checkout/checkout-api-7d9",
+            kind: "ReplicaSet",
+            name: "rev 119",
+            namespace: "checkout",
+            lane: "replicaset",
+            detail: "9/12 ready",
+            ready: 9,
+            desired: 12,
+            health: "degraded",
+          },
+        ],
+        edges: [
+          ...graph().edges,
+          {
+            from: "Deployment/checkout/checkout-api",
+            to: "ReplicaSet/checkout/checkout-api-7d9",
+            kind: "owns",
+            provenance: "topology",
+            detail: "",
+            health: "degraded",
+            weight: null,
+            unit: null,
+          },
+        ],
+      },
+    });
+    render(<Topology />);
+
+    const workload = await screen.findByRole("button", { name: "Deployment checkout-api" });
+    expect(screen.queryByRole("button", { name: "ReplicaSet rev 119" })).toBeNull();
+    // The revision takes the node's top-right slot, which on a graph inside
+    // one namespace is going spare. On a graph spanning several the namespace
+    // wins it: the two ran into each other when both were drawn there.
+    expect([...workload.querySelectorAll("text")].map((t) => t.textContent)).toContain("rev 119");
+
+    await userEvent.click(workload);
+    expect(
+      screen.getByRole("complementary", { name: "Selected node" }).textContent,
+    ).toContain("Revisions");
+  });
+
+  it("draws replicas as squares, so `9/12` needs no arithmetic", async () => {
+    render(<Topology />);
+    const workload = await screen.findByRole("button", { name: "Deployment checkout-api" });
+    // Twelve squares: the node's own outline, the health spine, and one per
+    // desired replica.
+    const pips = [...workload.querySelectorAll("rect")].filter(
+      (rect) => rect.getAttribute("width") === "6",
+    );
+    expect(pips).toHaveLength(12);
+    expect(pips.filter((p) => p.getAttribute("class")?.includes("fill-rule"))).toHaveLength(3);
+  });
+
+  it("opens showing the whole graph, and can be zoomed off it", async () => {
+    // A production namespace does not fit at 1:1, and the version this
+    // replaces gave a reader no way to see the shape of one — only to scroll
+    // around inside it.
+    render(<Topology />);
+    await screen.findByRole("button", { name: "Ingress web" });
+    expect(screen.getByRole("button", { name: "Zoom in" })).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(screen.getByText("125%")).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "Fit" }));
+    // jsdom measures every box as zero, so Fit can only answer 1:1 here.
+    expect(screen.getByText("100%")).toBeDefined();
   });
 
   it("cuts a long name to the box, and keeps the whole of it reachable", async () => {
@@ -410,7 +650,7 @@ describe("Topology", () => {
     const node = await screen.findByRole("button", { name: "External orders-db.internal.example.com" });
     // The DRAWN name is cut — `textContent` would also pick up the title below.
     const drawn = [...node.querySelectorAll("text")].map((t) => t.textContent);
-    expect(drawn).toContain("orders-db.internal.ex…");
+    expect(drawn).toContain("orders-db.internal.exam…");
     expect(drawn).not.toContain("orders-db.internal.example.com");
     // The full name is still there for a pointer, and the panel never cuts it.
     expect(node.querySelector("title")?.textContent).toContain("orders-db.internal.example.com");

@@ -1,11 +1,11 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   prometheusDiscover,
   topologyGraph,
+  type ClusterContext,
   type TopologyEdge,
   type TopologyHealth,
-  type TopologyNode,
-  type ClusterContext,
+  type TopologyLane,
 } from "@srelens/core";
 import { Button, EmptyState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
 import { useNamespaceOptions } from "@srelens/core/react";
@@ -20,36 +20,48 @@ import { FailureAlert } from "../lib/errorCopy";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { useResource } from "../lib/useResource";
 import {
-  LANE_LABELS,
+  MAX_PIPS,
   NODE_HEIGHT,
   NODE_WIDTH,
+  PADDING,
+  clampZoom,
   fit,
-  layoutGraph,
+  fitTransform,
+  layoutFlow,
+  traceFrom,
+  zoomAt,
+  type PlacedEdge,
   type PlacedNode,
   type TopologyLayout,
-} from "../lib/topologyLayout";
+  type Trace,
+  type Transform,
+} from "../lib/topologyFlow";
 
 /**
- * How traffic reaches a workload, across the namespaces a reader picks.
+ * How traffic reaches a workload, and where it goes next, across the
+ * namespaces a reader picks.
  *
- * Five lanes: route, service, workload, revision, and the dependencies a
- * workload was configured to reach — other Services, and systems outside the
- * cluster entirely.
+ * **The picture is laid out by flow, not by kind.** A node's column is how
+ * many hops it stands from where traffic enters — `ingress`, then the Service
+ * it names, then the Deployment behind it, then whatever that Deployment
+ * calls. Kind is a glyph on the box. The version this replaces gave each
+ * Kubernetes kind a fixed column, which meant every call from one service to
+ * another pointed backwards; see {@link ../lib/topologyFlow} for that argument
+ * in full.
  *
  * **Every edge carries its provenance, and is drawn differently for it.** The
  * structural half — selectors, ownerReferences, Ingress rules — is the API
- * server's own word. The flow half is read out of configuration: environment
- * variables, arguments and ConfigMaps, which say a workload was BUILT to talk
- * to something, not that it ever has. Those two must not look alike, or a
- * reader trusts them equally; {@link strokeForEdge} and {@link dashFor} are
- * where that is decided.
+ * server's own word. The declared half is read out of configuration:
+ * environment variables, arguments and ConfigMaps, which say a workload was
+ * BUILT to talk to something, not that it ever has. Those two must not look
+ * alike, or a reader trusts them equally.
  *
  * When the cluster already runs a Prometheus, `k8s.prometheusDiscover` finds
- * it and measured traffic joins the same graph: those edges are accented and
- * solid, and carry a rate. A measurement UPGRADES the declared edge rather
- * than sitting beside it — one dependency now known better, not two. A
- * cluster with no metrics backend is the ordinary case and loses nothing but
- * the rates.
+ * it and measured traffic joins the same graph: those edges are accented, they
+ * carry a rate, they are drawn as thick as that rate is large, and they move.
+ * A measurement UPGRADES the declared edge rather than sitting beside it — one
+ * dependency now known better, not two. A cluster with no metrics backend is
+ * the ordinary case and loses nothing but the rates.
  *
  * Read once per selection rather than polled. A topology changes on deploys,
  * not continuously, and a picture that rearranged itself under a reader
@@ -80,11 +92,9 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
    * Which namespaces there ARE — the same hook, picker and error surface the
    * resource lists and the events screen use.
    *
-   * This screen first grew its own `listNamespaces` call and its own `Select`,
-   * which made it the one place in the app where the namespace control looked
-   * and behaved differently. Not `useNamespaces` either: that store holds the
-   * reader's standing FILTER, and reading it as the list of namespaces gave a
-   * picker with no options on a perfectly healthy cluster.
+   * Not `useNamespaces`: that store holds the reader's standing FILTER, and
+   * reading it as the list of namespaces gives a picker with no options on a
+   * perfectly healthy cluster.
    */
   const { namespaces, error: namespaceError } = useNamespaceOptions(
     context.name,
@@ -94,33 +104,17 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   /**
    * The reader's namespace selection — the workspace's, not this screen's.
    *
-   * One selection per cluster, shared by every screen looking at it, which is
-   * what that store is for: narrowing to `payments` here narrows the resource
-   * lists and the events screen too, and arriving from one of those lands on
-   * what they were already looking at. A picker with private state would have
-   * made this screen the one place the choice did not travel.
+   * One selection per cluster, shared by every screen looking at it: narrowing
+   * to `payments` here narrows the resource lists and the events screen too,
+   * and arriving from one of those lands on what they were already looking at.
    */
   const scoped = useNamespaces(cluster?.stableId);
 
   /**
-   * Which namespaces are drawn.
-   *
-   * Several at once, because a dependency rarely respects a namespace boundary:
-   * a `checkout` that calls `payments-api.payments.svc` is only half a picture
-   * with `payments` left out, and the design's own header reads
-   * `CHECKOUT · PAYMENTS · IDENTITY`.
-   *
-   * An empty selection is the picker's "All namespaces", honoured up to
-   * {@link NAMESPACE_LIMIT}. Nothing is written back for it: persisting a
-   * guess would silently narrow every other screen on behalf of a reader who
-   * chose nothing.
-   */
-  /**
    * A metrics backend, if the cluster already runs one.
    *
-   * Read once per cluster and never blocking: the graph is built from the
-   * API either way, and telemetry only adds observed edges and rates on top.
-   * A cluster with no Prometheus is the ordinary case, not a failure.
+   * Read once per cluster and never blocking: the graph is built from the API
+   * either way, and telemetry only adds observed edges and rates on top.
    */
   const metrics = useResource(async () => {
     const out = await prometheusDiscover(context.name);
@@ -131,10 +125,10 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   /**
    * Whether to read each pod's socket table.
    *
-   * Off until asked, and it stays this screen's own state rather than the
-   * workspace's: it is one `kubectl exec` per pod and an audit-log entry on
-   * each, so it is a thing a reader does once while looking at something,
-   * not a preference that follows them around.
+   * Off until asked, and this screen's own state rather than the workspace's:
+   * it is one `kubectl exec` per pod and an audit-log entry on each, so it is
+   * something a reader does once while looking at something, not a preference
+   * that follows them around.
    */
   const [probeConnections, setProbeConnections] = useState(false);
 
@@ -152,28 +146,36 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
       if (out.error) throw new Error(out.error);
       return out.graph ?? { nodes: [], edges: [] };
     },
-    // Re-read when a metrics source appears: discovery resolves after the
-    // first draw, and the graph would otherwise stay structural until
-    // something else moved.
+    // Re-read when a metrics source appears: discovery resolves after the first
+    // draw, and the graph would otherwise stay structural until something else
+    // moved.
     [cluster?.name, key, source?.service, source?.namespace, probeConnections],
     (g) => g.nodes.length === 0,
   );
 
-  const layout = useMemo(() => layoutGraph(graph.data ?? { nodes: [], edges: [] }), [graph.data]);
+  const layout = useMemo(() => layoutFlow(graph.data ?? { nodes: [], edges: [] }), [graph.data]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Found rather than held, so the panel follows a reload instead of showing
   // the node as it was when it was clicked.
   const selected = layout.nodes.find((n) => n.id === selectedId) ?? null;
 
+  /**
+   * Everything on a path through the selection, in both directions.
+   *
+   * Computed once here and used by both halves of the screen, so the canvas
+   * and the panel can never disagree about what the selection reaches.
+   */
+  const trace = useMemo(
+    () => (selected ? traceFrom(selected.id, layout.edges) : null),
+    [selected, layout.edges],
+  );
+
   return (
     <Screen
       title="Topology"
       eyebrow={cluster?.name}
       actions={
-        // Inherited, not grown here: the same control and the same selection
-        // every list on this cluster uses, so narrowing in one place narrows
-        // the rest.
         <>
           {/* Named for what it COSTS, not for what it shows: a reader has to
               know this runs an exec in every pod before they turn it on. */}
@@ -184,63 +186,79 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
           >
             {probeConnections ? "Probing connections" : "Probe connections"}
           </Button>
-        <NamespacePicker
-          namespaces={namespaces}
-          selection={scoped}
-          onChange={(next) => {
-            setNamespaces(context.stableId, next);
-            // The old selection may name a node in a namespace no longer drawn.
-            setSelectedId(null);
-          }}
-        />
+          {/* Inherited, not grown here: the same control and the same selection
+              every list on this cluster uses. */}
+          <NamespacePicker
+            namespaces={namespaces}
+            selection={scoped}
+            onChange={(next) => {
+              setNamespaces(context.stableId, next);
+              // The old selection may name a node in a namespace no longer drawn.
+              setSelectedId(null);
+            }}
+          />
         </>
       }
       fill
     >
       <div className="flex h-full min-h-0">
-        <div className="scroll min-w-0 flex-1 p-4">
+        <div className="flex min-w-0 flex-1 flex-col">
           {/* Both the app's, so a namespace listing that failed and a selection
               naming namespaces the cluster no longer has read the same here as
-              they do on every list. */}
-          <NamespaceErrorAlert error={namespaceError} />
-          <StaleSelectionAlert
-            selection={scoped}
-            namespaces={namespaces}
-            onReset={() => setNamespaces(context.stableId, [])}
-          />
-          {cut && (
-            // Said rather than done quietly: the picker reads "All namespaces"
-            // and this is not all of them.
-            <p className="mb-3 text-sm text-muted">
-              Showing {NAMESPACE_LIMIT} of {all.length} namespaces. Pick the ones you want to see.
-            </p>
-          )}
-          <div className="grid min-h-0 place-items-center">
-            <>
-              {graph.status === "loading" && (
-                <p className="text-sm text-muted">Reading the cluster…</p>
-              )}
-              {graph.status === "error" && (
+              they do on every list. Collapsed when all three are quiet, rather
+              than holding a band of empty padding above the canvas. */}
+          <div className="px-4 pt-4 empty:hidden">
+            <NamespaceErrorAlert error={namespaceError} />
+            <StaleSelectionAlert
+              selection={scoped}
+              namespaces={namespaces}
+              onReset={() => setNamespaces(context.stableId, [])}
+            />
+            {cut && (
+              // Said rather than done quietly: the picker reads "All
+              // namespaces" and this is not all of them.
+              <p className="text-sm text-muted">
+                Showing {NAMESPACE_LIMIT} of {all.length} namespaces. Pick the ones you want to see.
+              </p>
+            )}
+          </div>
+          <div className="relative min-h-0 flex-1">
+            {graph.status === "loading" && (
+              <p className="grid h-full place-items-center text-sm text-muted">
+                Reading the cluster…
+              </p>
+            )}
+            {graph.status === "error" && (
+              <div className="p-4">
                 <FailureAlert title="Could not draw this topology" error={graph.error} />
-              )}
-              {graph.status === "empty" && (
+              </div>
+            )}
+            {graph.status === "empty" && (
+              <div className="grid h-full place-items-center">
                 <EmptyState
-                  title={chosen.length === 1 ? `Nothing to draw in ${chosen[0]}` : "Nothing to draw here"}
+                  title={
+                    chosen.length === 1 ? `Nothing to draw in ${chosen[0]}` : "Nothing to draw here"
+                  }
                   hint={
                     chosen.length === 1
                       ? "This namespace has no ingresses, services or workloads."
                       : "None of these namespaces has an ingress, service or workload."
                   }
                 />
-              )}
-              {graph.status === "ready" && (
-                <Canvas layout={layout} selectedId={selectedId} onSelect={setSelectedId} />
-              )}
-            </>
+              </div>
+            )}
+            {graph.status === "ready" && (
+              <Canvas
+                layout={layout}
+                selectedId={selectedId}
+                trace={trace}
+                onSelect={setSelectedId}
+              />
+            )}
           </div>
         </div>
-        <aside className="rule-l scroll w-[280px] shrink-0 p-4" aria-label="Selected node">
-          <Inspector node={selected} layout={layout} onSelect={setSelectedId} />
+        <aside className="rule-l scroll w-[300px] shrink-0 p-4" aria-label="Selected node">
+          <Inspector node={selected} layout={layout} trace={trace} onSelect={setSelectedId} />
         </aside>
       </div>
     </Screen>
@@ -275,94 +293,325 @@ function fillFor(health: TopologyHealth): string {
   return "fill-rule";
 }
 
+/**
+ * How an edge is drawn, which encodes HOW IT IS KNOWN rather than what it says.
+ *
+ * A failing path outranks everything else: it takes the severity colour and a
+ * long dash, so it is marked twice and stays legible in the high-contrast
+ * theme and to a reader who cannot separate the colours. Then measurement —
+ * accented, moving, and as thick as the rate is large. Then `declared`, a host
+ * named in configuration, kept faint and dotted because it says only that this
+ * workload was built to reach that. Everything left is the API server's own
+ * word, drawn in the health of what it points at.
+ */
+function edgeTone(edge: TopologyEdge): { stroke: string; fill: string; dash?: string; flow: boolean } {
+  if (edge.health === "failing") {
+    return { stroke: "stroke-sev", fill: "fill-sev", dash: "6 3", flow: false };
+  }
+  if (edge.provenance === "observed") {
+    return { stroke: "stroke-accent", fill: "fill-accent", flow: true };
+  }
+  if (edge.provenance === "declared") {
+    return { stroke: "stroke-faint", fill: "fill-faint", dash: "2 4", flow: false };
+  }
+  return { stroke: strokeFor(edge.health), fill: fillFor(edge.health), flow: false };
+}
+
+/** How far a node outside the trace fades. Legible, but plainly not the subject. */
+const DIM = 0.13;
+
 function Canvas({
   layout,
   selectedId,
+  trace,
   onSelect,
 }: {
   layout: TopologyLayout;
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  trace: Trace | null;
+  onSelect: (id: string | null) => void;
 }) {
-  /**
-   * Everything one hop from the selection, itself included.
-   *
-   * A namespace of any size draws edges that cross, and no amount of ordering
-   * removes them all. Rather than fight that, selecting a node fades everything
-   * it does not touch — which turns "trace this line through the tangle" into
-   * "read the two things still bright". Empty when nothing is selected, and
-   * then nothing is faded.
-   */
-  const focus = useMemo(() => {
-    if (!selectedId) return null;
-    const near = new Set<string>([selectedId]);
-    for (const edge of layout.edges) {
-      if (edge.from === selectedId) near.add(edge.to);
-      if (edge.to === selectedId) near.add(edge.from);
-    }
-    return near;
-  }, [selectedId, layout.edges]);
+  const frame = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState<Transform>({ k: 1, tx: 0, ty: 0 });
 
-  const dimmed = (id: string) => focus !== null && !focus.has(id);
+  const fitToFrame = useCallback(() => {
+    const box = frame.current?.getBoundingClientRect();
+    setView(fitTransform(layout, { width: box?.width ?? 0, height: box?.height ?? 0 }));
+  }, [layout]);
+
+  // Whenever the graph itself changes — a different namespace, a reload that
+  // added nodes — the view goes back to showing all of it. Holding a pan across
+  // a graph that is no longer the same one leaves the reader looking at empty
+  // space and wondering where the cluster went.
+  useLayoutEffect(() => {
+    fitToFrame();
+  }, [fitToFrame]);
+
+  /**
+   * Wheel to zoom, bound by hand rather than through `onWheel`.
+   *
+   * React attaches its wheel listener passively at the root, so a handler
+   * given as a prop cannot call `preventDefault` — and without that the page
+   * behind the canvas scrolls at the same time as the canvas zooms.
+   */
+  useEffect(() => {
+    const node = frame.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const box = node.getBoundingClientRect();
+      const factor = Math.exp(-event.deltaY * 0.0015);
+      setView((current) =>
+        zoomAt(current, factor, event.clientX - box.left, event.clientY - box.top),
+      );
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, []);
+
+  /**
+   * Drag to pan.
+   *
+   * `moved` is the whole reason this is a ref: a drag that starts on a node
+   * would otherwise also select it on release, so the node's own click asks
+   * this first and stands down when the pointer actually travelled.
+   */
+  const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const startPan = (event: React.PointerEvent) => {
+    if (event.button !== 0) return;
+    drag.current = { x: event.clientX, y: event.clientY, moved: false };
+  };
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const at = drag.current;
+      if (!at) return;
+      const dx = event.clientX - at.x;
+      const dy = event.clientY - at.y;
+      if (!at.moved && Math.hypot(dx, dy) < 4) return;
+      at.moved = true;
+      at.x = event.clientX;
+      at.y = event.clientY;
+      setView((current) => ({ ...current, tx: current.tx + dx, ty: current.ty + dy }));
+    };
+    const onUp = () => {
+      window.setTimeout(() => {
+        drag.current = null;
+      }, 0);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, []);
+
+  const dragged = () => drag.current?.moved === true;
+
+  const inTrace = (id: string) => trace === null || trace.nodes.has(id);
+  const edgeShown = (edge: PlacedEdge) => trace === null || trace.edges.has(edge.key);
+  const multi = layout.namespaces.length > 1;
 
   return (
-    <div>
+    <div
+      ref={frame}
+      className="relative h-full w-full touch-none overflow-hidden"
+      onPointerDown={startPan}
+      // Clearing on the backdrop rather than on the frame, so a click that
+      // lands on a node is not first undone by its own container.
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onSelect(null);
+      }}
+    >
       <svg
-        role="img"
+        role="group"
         aria-label="Namespace topology"
-        width={layout.width}
-        height={layout.height}
-        viewBox={`0 0 ${layout.width} ${layout.height}`}
-        className="max-w-none"
+        className="h-full w-full select-none"
+        width="100%"
+        height="100%"
       >
-        {layout.lanes.map((lane) => (
-          <text key={lane.lane} x={lane.x} y={12} className="fill-faint text-[10px] uppercase tracking-wide">
-            {lane.label}
-          </text>
-        ))}
-        {/* Edges first, so a node always sits on top of the lines into it. */}
-        {layout.edges.map((edge) => {
-          const related = focus === null || edge.from === selectedId || edge.to === selectedId;
-          return (
-            <path
-              key={`${edge.kind}:${edge.from}->${edge.to}`}
-              d={edge.path}
-              fill="none"
-              className={strokeForEdge(edge)}
-              strokeWidth={edge.health === "failing" ? 2 : 1}
-              strokeDasharray={dashFor(edge)}
-              opacity={related ? 1 : 0.12}
-            />
-          );
-        })}
-        {/* Measured rates, drawn after the lines so a label is never under
-            one. Only an observed edge has one. */}
-        {layout.edges.map((edge) =>
-          edge.detail ? (
-            <text
-              key={`label:${edge.from}->${edge.to}`}
-              x={edge.labelX}
-              y={edge.labelY}
-              textAnchor="middle"
-              className="fill-muted text-[9px]"
-              opacity={focus === null || edge.from === selectedId || edge.to === selectedId ? 1 : 0.12}
-            >
-              {edge.detail}
-            </text>
-          ) : null,
-        )}
-        {layout.nodes.map((node) => (
-          <Node
-            key={node.id}
-            node={node}
-            selected={node.id === selectedId}
-            dimmed={dimmed(node.id)}
-            onSelect={onSelect}
+        <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
+          {/* A surface to click on. Sized to the drawing rather than the frame,
+              because the frame's own click would fire before a node's. */}
+          <rect
+            x={0}
+            y={0}
+            width={layout.width}
+            height={layout.height}
+            fill="transparent"
+            onClick={() => {
+              if (!dragged()) onSelect(null);
+            }}
           />
-        ))}
+          {layout.columns.map((column) => (
+            <g key={column.rank}>
+              {column.rank > 0 && (
+                // A hairline between hops. The columns are the argument this
+                // layout makes, and unmarked they read as an accident of
+                // spacing.
+                <line
+                  x1={column.x - PADDING}
+                  y1={PADDING}
+                  x2={column.x - PADDING}
+                  y2={layout.height - PADDING}
+                  className="stroke-rule"
+                  strokeDasharray="2 6"
+                  opacity={0.7}
+                />
+              )}
+              <text x={column.x} y={PADDING + 10} className="lane">
+                {column.label}
+              </text>
+            </g>
+          ))}
+          {/* One panel per tier — the address and the pods that answer it,
+              which now share a column and have to read as one thing. Behind
+              everything, and quiet: it groups, it does not decorate. */}
+          {layout.tiers.map((tier) => (
+            <rect
+              key={`${tier.x},${tier.y}`}
+              x={tier.x}
+              y={tier.y}
+              width={tier.width}
+              height={tier.height}
+              rx={12}
+              className="fill-sunk stroke-rule"
+              opacity={0.65}
+            />
+          ))}
+          {/* Edges first, so a node always sits on top of the lines into it. */}
+          {layout.edges.map((edge) => (
+            <Edge key={edge.key} edge={edge} shown={edgeShown(edge)} />
+          ))}
+          {layout.nodes.map((node) => (
+            <Node
+              key={node.id}
+              node={node}
+              selected={node.id === selectedId}
+              dimmed={!inTrace(node.id)}
+              showNamespace={multi}
+              onSelect={(id) => {
+                if (!dragged()) onSelect(id);
+              }}
+            />
+          ))}
+        </g>
       </svg>
+      <Zoom
+        zoom={view.k}
+        onZoom={(factor) => {
+          const box = frame.current?.getBoundingClientRect();
+          setView((current) =>
+            zoomAt(current, factor, (box?.width ?? 0) / 2, (box?.height ?? 0) / 2),
+          );
+        }}
+        onFit={fitToFrame}
+      />
       <Legend />
     </div>
+  );
+}
+
+function Edge({ edge, shown }: { edge: PlacedEdge; shown: boolean }) {
+  const tone = edgeTone(edge);
+  const opacity = shown ? 1 : DIM;
+  return (
+    <g opacity={opacity}>
+      <path
+        d={edge.path}
+        fill="none"
+        className={`${tone.stroke}${tone.flow ? " flow" : ""}`}
+        strokeWidth={edge.width}
+        strokeDasharray={tone.dash}
+        strokeLinecap="round"
+      />
+      {/* Drawn as a polygon rather than an SVG marker, so it takes the same
+          theme colour as the line and fades with it. */}
+      <polygon points={edge.arrow} className={tone.fill} />
+      {edge.detail && (
+        // Stroked in the ground colour and painted underneath, so a rate is
+        // readable where it crosses its own line — which on a steep curve is
+        // most of the time, and a busy edge is drawn five pixels thick.
+        <text
+          x={edge.labelX}
+          y={edge.labelY}
+          className="edge-label fill-muted stroke-canvas"
+          strokeWidth={3}
+          paintOrder="stroke"
+        >
+          {edge.detail}
+        </text>
+      )}
+    </g>
+  );
+}
+
+/**
+ * What kind of thing a node is, as a mark rather than a column.
+ *
+ * Small, monochrome and to one side of the name: kind is the least surprising
+ * thing about any node on this diagram — a reader knows what a Deployment is —
+ * and it earns a glance, not a fifth of the width.
+ */
+function Glyph({ lane, x, y }: { lane: TopologyLane; x: number; y: number }) {
+  const line = { className: "fill-none stroke-faint", strokeWidth: 1.3 } as const;
+  if (lane === "route") {
+    return (
+      <path
+        d={`M ${x} ${y + 5} h 7 m -3 -3 l 3 3 l -3 3`}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        {...line}
+      />
+    );
+  }
+  if (lane === "service") {
+    return <path d={`M ${x + 5} ${y} l 5 5 l -5 5 l -5 -5 z`} {...line} />;
+  }
+  if (lane === "external") {
+    return <circle cx={x + 5} cy={y + 5} r={4.4} strokeDasharray="2 2" {...line} />;
+  }
+  if (lane === "replicaset") {
+    return <path d={`M ${x} ${y + 2} h 10 M ${x} ${y + 5} h 10 M ${x} ${y + 8} h 10`} {...line} />;
+  }
+  return <rect x={x + 0.6} y={y + 0.6} width={8.8} height={8.8} rx={2} {...line} />;
+}
+
+/**
+ * Replicas, one square each.
+ *
+ * `9/12` is a number a reader has to subtract before it means anything. Twelve
+ * squares with three of them hollow is the same fact, read without arithmetic
+ * and from further away. Above {@link MAX_PIPS} the squares stop being
+ * countable and a proportional bar says the same thing honestly.
+ */
+function Replicas({ node, x, y }: { node: PlacedNode; x: number; y: number }) {
+  const desired = node.desired ?? 0;
+  const ready = node.ready ?? 0;
+  if (node.desired === null || desired <= 0) return null;
+  if (desired > MAX_PIPS) {
+    const share = Math.max(0, Math.min(1, ready / desired));
+    return (
+      <g>
+        <rect x={x} y={y} width={92} height={5} rx={2.5} className="fill-rule" />
+        <rect x={x} y={y} width={92 * share} height={5} rx={2.5} className={fillFor(node.health)} />
+      </g>
+    );
+  }
+  return (
+    <g>
+      {Array.from({ length: desired }, (_, i) => (
+        <rect
+          key={i}
+          x={x + i * 8.5}
+          y={y}
+          width={6}
+          height={5}
+          rx={1.5}
+          className={i < ready ? fillFor(node.health) : "fill-rule"}
+        />
+      ))}
+    </g>
   );
 }
 
@@ -370,13 +619,26 @@ function Node({
   node,
   selected,
   dimmed,
+  showNamespace,
   onSelect,
 }: {
   node: PlacedNode;
   selected: boolean;
   dimmed: boolean;
+  showNamespace: boolean;
   onSelect: (id: string) => void;
 }) {
+  /**
+   * The top-right slot: the namespace when there is more than one drawn,
+   * otherwise the current revision.
+   *
+   * Both were tried on that line at once and the first render settled it —
+   * `DEPLOYMENT · REV …` ran straight into `CHECKOUT` and neither could be
+   * read. They also do not compete: a graph spanning namespaces needs the
+   * namespace to be legible above all else, and a graph inside one has the
+   * namespace in its heading already and the space going spare.
+   */
+  const aside = showNamespace ? node.namespace : (node.revisions[0] ?? "");
   return (
     // Given a role and a tab stop rather than left as decoration: selecting a
     // node is an action, and the graph has to be reachable by keyboard like
@@ -387,14 +649,14 @@ function Node({
       aria-label={`${node.kind} ${node.name}`}
       aria-pressed={selected}
       onClick={() => onSelect(node.id)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
           onSelect(node.id);
         }
       }}
       className="cursor-pointer"
-      opacity={dimmed ? 0.25 : 1}
+      opacity={dimmed ? DIM : 1}
     >
       {/* The full name, for a pointer and for anything reading the tree — the
           drawn one is cut to the box. */}
@@ -404,31 +666,44 @@ function Node({
         y={node.y}
         width={NODE_WIDTH}
         height={NODE_HEIGHT}
-        rx={7}
+        rx={8}
         className={`fill-surface ${selected ? "stroke-accent" : strokeFor(node.health)}`}
         strokeWidth={selected ? 2 : 1}
+        // A dependency is drawn as a broken outline because it is not a thing
+        // this cluster runs — srelens knows its name and nothing else about it.
+        strokeDasharray={node.lane === "external" ? "4 3" : undefined}
       />
-      {/* A health bar down the leading edge. The border alone carried this and
-          a 1px outline is not enough to find a failing node by at a glance. */}
+      {/* A health spine down the leading edge. A 1px outline is not enough to
+          find a failing node by at a glance. */}
       {node.health !== "unknown" && (
         <rect
-          x={node.x}
+          x={node.x + 1}
           y={node.y + 8}
-          width={3}
+          width={3.5}
           height={NODE_HEIGHT - 16}
-          rx={1.5}
+          rx={1.75}
           className={fillFor(node.health)}
         />
       )}
-      <text x={node.x + 12} y={node.y + 17} className="fill-faint text-[9px] uppercase">
-        {node.kind}
+      <Glyph lane={node.lane} x={node.x + 14} y={node.y + 12} />
+      <text x={node.x + 30} y={node.y + 20} className="node-kind">
+        {fit(node.kind, 13)}
       </text>
-      <text x={node.x + 12} y={node.y + 32} className="fill-ink text-[12px]">
+      {aside && (
+        <text x={node.x + NODE_WIDTH - 12} y={node.y + 20} className="node-kind" textAnchor="end">
+          {fit(aside, 13)}
+        </text>
+      )}
+      <text x={node.x + 14} y={node.y + 39} className="node-label">
         {fit(node.name)}
       </text>
+      <Replicas node={node} x={node.x + 14} y={node.y + 46} />
       {node.detail && (
-        <text x={node.x + 12} y={node.y + 45} className="fill-muted text-[10px]">
-          {fit(node.detail, 24)}
+        <text x={node.x + NODE_WIDTH - 12} y={node.y + 51} className="node-metric fill-muted">
+          {/* The detail shares its row with the replica squares, so it gets
+              what they leave — which for a workload is `9/12` and for the
+              Ingress and Service that have no replicas is the whole host. */}
+          {fit(node.detail, node.desired === null || node.desired <= 0 ? 22 : 8)}
         </text>
       )}
     </g>
@@ -436,40 +711,73 @@ function Node({
 }
 
 /**
- * How an edge is drawn, which encodes HOW IT IS KNOWN rather than what it says.
+ * Zoom, because a real namespace does not fit.
  *
- * Solid is the API server's own word — a selector, an ownerReference, an
- * Ingress rule. Long-dashed is ownership, which is a fact about who made a
- * thing rather than a path traffic takes. Dotted is `declared`: a host named in
- * configuration, meaning this workload was built to reach that, not that it
- * ever has. When telemetry lands, `observed` takes the solid line and declared
- * stays dotted beneath it, so a reader can always tell a measurement from a
- * string in an environment variable.
+ * The version this replaces drew the graph at 1:1 into a scrolling box, which
+ * is fine for the eight nodes of a demo and useless for the two hundred of a
+ * production namespace: there was no way to see the shape of the thing, only
+ * to scroll around inside it. Fit is the button that matters and is why the
+ * canvas opens on it.
  */
-/**
- * An observed edge is accented and solid; a declared one is faint and dotted.
- * A measurement and a string found in an environment variable must never be
- * the same line.
- */
-function strokeForEdge(edge: { provenance: string; health: TopologyHealth }): string {
-  if (edge.provenance === "observed") return "stroke-accent";
-  if (edge.provenance === "declared") return "stroke-faint";
-  return strokeFor(edge.health);
-}
-
-function dashFor(edge: { kind: string; provenance: string }): string | undefined {
-  if (edge.provenance === "observed") return undefined;
-  if (edge.provenance === "declared") return "2 4";
-  if (edge.kind === "owns") return "4 3";
-  return undefined;
+function Zoom({
+  zoom,
+  onZoom,
+  onFit,
+}: {
+  zoom: number;
+  onZoom: (factor: number) => void;
+  onFit: () => void;
+}) {
+  return (
+    <div className="absolute bottom-3 left-3 flex items-center gap-1 rounded-md border border-rule bg-surface/90 p-1">
+      <button
+        type="button"
+        className="text-btn px-2 py-0.5 text-sm"
+        aria-label="Zoom out"
+        onClick={() => onZoom(1 / 1.25)}
+      >
+        −
+      </button>
+      <span className="num w-10 text-center text-[11px]">{Math.round(zoom * 100)}%</span>
+      <button
+        type="button"
+        className="text-btn px-2 py-0.5 text-sm"
+        aria-label="Zoom in"
+        onClick={() => onZoom(1.25)}
+      >
+        +
+      </button>
+      <button type="button" className="text-btn px-2 py-0.5 text-[11px]" onClick={onFit}>
+        Fit
+      </button>
+    </div>
+  );
 }
 
 /** One legend row: the mark as it is actually drawn, then what it means. */
-function Key({ dash, className, children }: { dash?: string; className?: string; children: string }) {
+function Key({
+  dash,
+  className,
+  width = 1.5,
+  flow = false,
+  children,
+}: {
+  dash?: string;
+  className?: string;
+  width?: number;
+  flow?: boolean;
+  children: string;
+}) {
   return (
     <li className="flex items-center gap-1.5">
       <svg width="22" height="6" aria-hidden="true">
-        <path d="M 0 3 L 22 3" fill="none" strokeWidth={1.5} strokeDasharray={dash} className={className} />
+        <path
+          d="M 0 3 L 22 3"
+          fill="none"
+          strokeWidth={width}
+          strokeDasharray={dash}
+          className={`${className ?? ""}${flow ? " flow" : ""}`}
+        />
       </svg>
       {children}
     </li>
@@ -480,25 +788,29 @@ function Key({ dash, className, children }: { dash?: string; className?: string;
  * The legend draws its own marks.
  *
  * It used to be five words — "OWNS (DASHED)" — which asks the reader to hold a
- * mapping in their head and check it against the canvas. A sample of the actual
- * stroke costs one small `svg` each and removes the translation step.
+ * mapping in their head and check it against the canvas. A sample of the
+ * actual stroke costs one small `svg` each and removes the translation step.
+ *
+ * `Owns` is gone from it because ownership is gone from the canvas: a
+ * ReplicaSet is now a chip on the workload that owns it rather than a node of
+ * its own, so there is no line left to explain.
  */
 function Legend() {
   return (
-    <ul className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] uppercase text-faint">
-      <Key className="stroke-ok">Routes</Key>
-      <Key dash="4 3" className="stroke-rule">
-        Owns
-      </Key>
+    <ul className="absolute right-3 bottom-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-md border border-rule bg-surface/90 px-2.5 py-1.5 text-[10px] uppercase text-faint">
+      <Key className="stroke-rule">Routes</Key>
       {/* Named for what it MEANS, not for how it is drawn: a reader has to know
           this edge is config rather than traffic, or the diagram overstates
           itself. */}
       <Key dash="2 4" className="stroke-faint">
         Declared in config
       </Key>
-      <Key className="stroke-accent">Observed traffic</Key>
-      <Key className="stroke-warn">Degraded</Key>
-      <Key className="stroke-sev">Failing</Key>
+      <Key className="stroke-accent" width={2.5} flow>
+        Observed traffic
+      </Key>
+      <Key dash="6 3" className="stroke-sev" width={2}>
+        Failing
+      </Key>
     </ul>
   );
 }
@@ -514,10 +826,12 @@ function Legend() {
 function Inspector({
   node,
   layout,
+  trace,
   onSelect,
 }: {
-  node: TopologyNode | null;
+  node: PlacedNode | null;
   layout: TopologyLayout;
+  trace: Trace | null;
   onSelect: (id: string) => void;
 }) {
   // Both directions, named from the reader's point of view rather than the
@@ -528,7 +842,13 @@ function Inspector({
   const label = (id: string) => layout.nodes.find((n) => n.id === id)?.name ?? id;
 
   if (!node) {
-    return <EmptyState compact title="No node selected" hint="Pick a node to see what it is." />;
+    return (
+      <EmptyState
+        compact
+        title="No node selected"
+        hint="Pick a node to trace what it reaches, and what reaches it."
+      />
+    );
   }
   return (
     <div>
@@ -545,8 +865,8 @@ function Inspector({
         </div>
       )}
       <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-muted">Lane</dt>
-        <dd>{LANE_LABELS[node.lane]}</dd>
+        <dt className="text-muted">Depth</dt>
+        <dd>{node.rank === 0 ? "Entry point" : `${node.rank} hop${node.rank === 1 ? "" : "s"} in`}</dd>
         {node.ready !== null && node.desired !== null && (
           <>
             <dt className="text-muted">Ready</dt>
@@ -561,19 +881,54 @@ function Inspector({
             <dd>{node.detail}</dd>
           </>
         )}
+        {trace && (
+          <>
+            {/* The question an SRE actually has about a node is not what it
+                touches but what goes with it. That is transitive, and it is
+                what the trace already computed for the canvas. */}
+            <dt className="text-muted">Downstream</dt>
+            <dd>{count(trace.downstream.size, "node")}</dd>
+            <dt className="text-muted">Upstream</dt>
+            <dd>{count(trace.upstream.size, "node")}</dd>
+          </>
+        )}
       </dl>
+      {node.revisions.length > 0 && (
+        // Where the folded ReplicaSets went. Newest first, which is the one
+        // serving.
+        <section className="mt-4">
+          <h3 className="text-[10px] uppercase text-faint">Revisions</h3>
+          <p className="num mt-1 text-sm text-soft">{node.revisions.join(" · ")}</p>
+        </section>
+      )}
       {node.lane === "external" && (
         // Said in words, not just by a dotted line: this node exists because
-        // something named the host in its configuration. srelens has not seen
-        // a byte go to it, and the panel must not imply otherwise.
+        // something named the host in its configuration. srelens has not seen a
+        // byte go to it, and the panel must not imply otherwise.
         <p className="mt-3 text-xs text-faint">
           Named in configuration. srelens has not observed traffic to it.
         </p>
       )}
-      <Connections title="Reaches" edges={reaches} other={(e) => e.to} label={label} onSelect={onSelect} />
-      <Connections title="Reached by" edges={reachedBy} other={(e) => e.from} label={label} onSelect={onSelect} />
+      <Connections
+        title="Reaches"
+        edges={reaches}
+        other={(e) => e.to}
+        label={label}
+        onSelect={onSelect}
+      />
+      <Connections
+        title="Reached by"
+        edges={reachedBy}
+        other={(e) => e.from}
+        label={label}
+        onSelect={onSelect}
+      />
     </div>
   );
+}
+
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 /**
@@ -592,8 +947,8 @@ function Connections({
   onSelect,
 }: {
   title: string;
-  edges: TopologyEdge[];
-  other: (edge: TopologyEdge) => string;
+  edges: PlacedEdge[];
+  other: (edge: PlacedEdge) => string;
   label: (id: string) => string;
   onSelect: (id: string) => void;
 }) {
@@ -603,7 +958,7 @@ function Connections({
       <h3 className="text-[10px] uppercase text-faint">{title}</h3>
       <ul className="mt-1 space-y-0.5">
         {edges.map((edge) => (
-          <li key={`${edge.kind}:${edge.from}->${edge.to}`}>
+          <li key={edge.key}>
             <button
               type="button"
               className="text-btn w-full text-left text-sm"
@@ -613,6 +968,7 @@ function Connections({
               <span className="text-faint">
                 {edge.provenance === "declared" ? "declared" : edge.kind}
               </span>
+              {edge.detail && <span className="num text-muted"> {edge.detail}</span>}
             </button>
           </li>
         ))}

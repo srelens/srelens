@@ -61,6 +61,16 @@ export interface TopologyNode {
   health: TopologyHealth;
 }
 
+/**
+ * What a measurement counted.
+ *
+ * Carried beside the number because the two sources do not measure the same
+ * thing: a metrics backend reports a rate, a socket table reports how many
+ * connections are open. Five idle pooled connections and five requests a
+ * second are not comparable, so a screen drawing volume must scale them apart.
+ */
+export type TopologyEdgeUnit = "rps" | "connections";
+
 export interface TopologyEdge {
   from: string;
   to: string;
@@ -69,6 +79,11 @@ export interface TopologyEdge {
   /** What to write along the edge — a measured rate, and empty for an edge
    *  nobody measured. Only `observed` can fill it. */
   detail: string;
+  /** The number behind {@link detail}, so the screen can draw volume rather
+   *  than only write it. Null on every edge nobody measured. */
+  weight: number | null;
+  /** What {@link weight} counts. Null exactly when `weight` is. */
+  unit: TopologyEdgeUnit | null;
   /** The health of the node this edge points at, so a path can be coloured
    *  without walking back to the node table. */
   health: TopologyHealth;
