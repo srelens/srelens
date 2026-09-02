@@ -12,6 +12,7 @@ use crossterm::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+mod ai_config;
 mod app;
 mod commands;
 mod event;

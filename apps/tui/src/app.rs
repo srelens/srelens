@@ -41,6 +41,7 @@ pub enum ActiveView {
     Overview(OverviewViewState),
     Toolbox(ToolboxViewState),
     Assistant(AssistantViewState),
+    Settings(SettingsViewState),
 }
 
 pub struct App {
@@ -78,6 +79,7 @@ pub struct App {
     pub node_count: usize,
     pub pod_count: usize,
     pub is_connected: bool,
+    pub ai_settings: crate::ai_config::AiSettings,
 }
 
 pub enum SuspendAction {
@@ -208,6 +210,7 @@ impl App {
             node_count: 0,
             pod_count: 0,
             is_connected: true,
+            ai_settings: crate::ai_config::AiSettings::load(),
         };
 
         app.refresh_cluster_info();
@@ -808,7 +811,20 @@ impl App {
             return;
         }
 
-        // 5. Normal Mode - k9s Global & View Keybindings
+        // 5. Settings View Dedicated Key Handling
+        if matches!(self.active_view, ActiveView::Settings(_)) {
+            if let ActiveView::Settings(s) = &self.active_view {
+                if !s.is_editing && key.code == KeyCode::Char(':') {
+                    self.input_mode = InputMode::Command;
+                    self.command_buffer.clear();
+                    return;
+                }
+            }
+            self.handle_view_key_event(key).await;
+            return;
+        }
+
+        // 6. Normal Mode - k9s Global & View Keybindings
         match key.code {
             // Enter Command Mode
             KeyCode::Char(':') => {
@@ -1138,27 +1154,110 @@ impl App {
                 }
             }
             ActiveView::Assistant(ai) => {
+                if key.code == KeyCode::Char('s') && ai.input.is_empty() {
+                    self.switch_view_to_kind(ResourceKind::Settings).await;
+                    return;
+                }
                 match key.code {
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(2),
                     KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(2),
-                    KeyCode::Char(c) => ai.input.push(c),
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        delete_prev_word(&mut ai.input);
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        ai.input.push(c);
+                    }
                     KeyCode::Backspace => { ai.input.pop(); },
                     KeyCode::Enter => {
                         if !ai.input.trim().is_empty() {
                             let query = ai.input.clone();
                             ai.add_user_message(query.clone());
-                            let event_tx = self.event_tx.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_millis(600)).await;
-                                let reply = format!("Analysis for prompt '{}': All components in current namespace are nominal. No CrashLoopBackOff events detected in the last 15 minutes.", query);
-                                let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: "ai_reply".to_string(),
-                                    result: Ok(reply),
+                            let provider = self.ai_settings.default_provider;
+                            if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
+                                let event_tx = self.event_tx.clone();
+                                tokio::spawn(async move {
+                                    use srelens_llm::Provider;
+                                    let http = srelens_llm::HttpProvider::new(config);
+                                    let turn = srelens_llm::types::Turn::User(query);
+                                    let mut full_text = String::new();
+                                    let mut on_item = |item: srelens_llm::StreamItem| {
+                                        if let srelens_llm::StreamItem::Text(t) = item {
+                                            full_text.push_str(&t);
+                                        }
+                                    };
+                                    match http.stream_turn(&[turn], &[], &mut on_item).await {
+                                        Ok(()) => {
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "ai_reply".to_string(),
+                                                result: Ok(full_text),
+                                            });
+                                        }
+                                        Err(err) => {
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "ai_reply".to_string(),
+                                                result: Err(format!("AI Provider Error: {}", err)),
+                                            });
+                                        }
+                                    }
                                 });
-                            });
+                            } else {
+                                let env_var = crate::ai_config::env_var_for_provider(provider);
+                                let prov_name = crate::ai_config::provider_display_name(provider);
+                                let reply = format!(
+                                    "No API key configured for {}. Press 's' to configure settings, or set the {} environment variable.",
+                                    prov_name, env_var
+                                );
+                                ai.add_assistant_message(reply);
+                            }
                         }
                     }
                     _ => {}
+                }
+            }
+            ActiveView::Settings(settings) => {
+                if settings.is_editing {
+                    match key.code {
+                        KeyCode::Esc => settings.cancel_editing(),
+                        KeyCode::Enter => settings.finish_editing(),
+                        KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            delete_prev_word(&mut settings.edit_buffer);
+                        }
+                        KeyCode::Backspace => {
+                            settings.edit_buffer.pop();
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                            settings.edit_buffer.push(c);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            if let Some(prev) = self.nav_stack.pop() {
+                                self.active_view = prev;
+                            } else {
+                                self.switch_view_to_kind(ResourceKind::Pods).await;
+                            }
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => settings.select_next_provider(),
+                        KeyCode::Char('k') | KeyCode::Up => settings.select_prev_provider(),
+                        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => settings.select_next_field(),
+                        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => settings.select_prev_field(),
+                        KeyCode::Char(' ') => settings.set_active_provider(),
+                        KeyCode::Char('e') | KeyCode::Enter => settings.start_editing(),
+                        KeyCode::Char('s') => {
+                            match settings.save() {
+                                Ok(path) => {
+                                    self.ai_settings = settings.settings.clone();
+                                    self.set_toast(format!("Saved AI settings to {}", path.display()), Theme::status_ok());
+                                }
+                                Err(err) => {
+                                    self.set_toast(format!("Failed to save settings: {}", err), Theme::status_error());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -1294,6 +1393,7 @@ impl App {
             ResourceKind::Overview => ActiveView::Overview(OverviewViewState::new()),
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant(AssistantViewState::new()),
+            ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
             _ => {
                 let mut table = ResourceTableState::new(kind.clone());
                 if let Some(watch_kind) = table.kind.watch_kind() {
@@ -1688,6 +1788,7 @@ impl App {
             ActiveView::Overview(_) => "Overview",
             ActiveView::Toolbox(_) => "Toolbox",
             ActiveView::Assistant(_) => "AI Assistant",
+            ActiveView::Settings(_) => "AI Settings",
         };
 
         let active_pods_count = if let ActiveView::Table(t) = &self.active_view {
@@ -1728,7 +1829,8 @@ impl App {
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
-            ActiveView::Assistant(ai) => render_assistant_view(f, chunks[1], ai),
+            ActiveView::Assistant(ai) => render_assistant_view(f, chunks[1], ai, &self.ai_settings),
+            ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
         }
 
         // 3. Render Status Bar

@@ -62,8 +62,19 @@ impl AssistantViewState {
     }
 }
 
-pub fn render_assistant_view(f: &mut Frame, area: Rect, state: &AssistantViewState) {
-    let title = " SRElens AI Assistant (<Enter> Send prompt, <Esc> Back) ";
+pub fn render_assistant_view(
+    f: &mut Frame,
+    area: Rect,
+    state: &AssistantViewState,
+    settings: &crate::ai_config::AiSettings,
+) {
+    let prov = settings.default_provider;
+    let prov_name = crate::ai_config::provider_display_name(prov);
+    let model = settings.get_model(prov);
+    let title = format!(
+        " SRElens AI Assistant [{} - {}] [<s> Settings, <Enter> Send, <Esc> Back] ",
+        prov_name, model
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -102,7 +113,10 @@ pub fn render_assistant_view(f: &mut Frame, area: Rect, state: &AssistantViewSta
 
     if state.is_busy {
         rendered_lines.push(Line::from(vec![
-            Span::styled("⚡ SRElens is analyzing cluster state...", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "⚡ SRElens agent is consulting cluster state and AI provider...",
+                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::ITALIC),
+            ),
         ]));
     }
 
@@ -115,7 +129,7 @@ pub fn render_assistant_view(f: &mut Frame, area: Rect, state: &AssistantViewSta
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::CYAN))
-        .title(" Ask Assistant ");
+        .title(" Ask Assistant (<Ctrl+w> Rubout, <s> Settings) ");
     let input_widget = Paragraph::new(format!("{}█", state.input))
         .block(input_block);
     f.render_widget(input_widget, chunks[1]);

@@ -183,6 +183,7 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -261,6 +262,7 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
         };
 
         // 1. Enter command mode by typing ':'
@@ -291,5 +293,110 @@ mod tests {
         // 6. Press Ctrl+W on empty buffer -> should exit command mode to Normal!
         app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_ai_settings_navigation_and_editing() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::SettingField;
+        use srelens_llm::types::ProviderKind;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+        };
+
+        // 1. Switch to settings view via :settings command
+        app.execute_colon_command("settings").await;
+        assert!(matches!(app.active_view, ActiveView::Settings(_)));
+
+        // 2. Select next provider (OpenAI)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.current_provider(), ProviderKind::OpenAi);
+        } else {
+            panic!("Expected ActiveView::Settings");
+        }
+
+        // 3. Toggle OpenAI as active provider with [Space]
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.settings.default_provider, ProviderKind::OpenAi);
+        }
+
+        // 4. Tab to API Key field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.selected_field, SettingField::ApiKey);
+        }
+
+        // 5. Press 'e' to edit API Key
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.is_editing, true);
+        }
+
+        // Type "sk-test-openai-key"
+        for c in "sk-test-openai-key".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+
+        // Press Enter to confirm edit
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.is_editing, false);
+            assert_eq!(s.settings.get_api_key(ProviderKind::OpenAi).as_deref(), Some("sk-test-openai-key"));
+        }
+
+        // 6. Press 's' to save settings to memory/disk
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        assert_eq!(app.ai_settings.default_provider, ProviderKind::OpenAi);
+        assert_eq!(app.ai_settings.get_api_key(ProviderKind::OpenAi).as_deref(), Some("sk-test-openai-key"));
     }
 }

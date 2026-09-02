@@ -38,6 +38,7 @@ pub enum ResourceKind {
     Overview,
     Toolbox,
     Assistant,
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -88,6 +89,7 @@ impl ResourceKind {
             Self::Overview => "Cluster Overview",
             Self::Toolbox => "Toolbox Diagnostics",
             Self::Assistant => "SRElens Assistant",
+            Self::Settings => "AI & Assistant Settings",
         }
     }
 
@@ -376,6 +378,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         aliases: &["ai", "chat"],
         description: "SRElens AI Assistant Chat",
         target: CommandTarget::Resource(ResourceKind::Assistant),
+    },
+    CommandDef {
+        name: "settings",
+        aliases: &["config", "ai-config", "ai-settings"],
+        description: "AI & Assistant Settings",
+        target: CommandTarget::Resource(ResourceKind::Settings),
     },
     CommandDef {
         name: "help",

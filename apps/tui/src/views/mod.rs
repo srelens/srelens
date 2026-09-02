@@ -6,6 +6,7 @@ pub mod logs_view;
 pub mod overview_view;
 pub mod port_forward_view;
 pub mod resource_table;
+pub mod settings_view;
 pub mod toolbox_view;
 pub mod yaml_view;
 
@@ -17,5 +18,6 @@ pub use logs_view::{render_logs_view, LogsViewState};
 pub use overview_view::{render_overview_view, OverviewViewState};
 pub use port_forward_view::{render_port_forward_view, PortForwardViewState};
 pub use resource_table::{render_resource_table, ResourceTableState};
+pub use settings_view::{render_settings_view, SettingField, SettingsViewState};
 pub use toolbox_view::{render_toolbox_view, ToolboxViewState};
 pub use yaml_view::{render_yaml_view, YamlViewState};
