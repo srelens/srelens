@@ -78,7 +78,7 @@ pub fn render_assistant_view(
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
     let title = format!(
-        " SRElens AI Assistant [{} - {}] [<s> Settings, <Enter> Send, <Esc> Back] ",
+        " SRElens AI Assistant [{} - {}] [<Ctrl+s> Settings, <Enter> Send, <Esc> Back] ",
         prov_name, model
     );
 
@@ -145,7 +145,7 @@ pub fn render_assistant_view(
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::CYAN))
-        .title(" Ask Assistant (<Ctrl+w> Rubout, <s> Settings) ");
+        .title(" Ask Assistant (<Ctrl+w> Rubout, <Ctrl+s> Settings) ");
     let input_widget = Paragraph::new(format!("{}█", state.input))
         .block(input_block);
     f.render_widget(input_widget, chunks[1]);

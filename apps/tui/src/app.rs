@@ -1154,7 +1154,7 @@ impl App {
                 }
             }
             ActiveView::Assistant(ai) => {
-                if key.code == KeyCode::Char('s') && ai.input.is_empty() {
+                if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.switch_view_to_kind(ResourceKind::Settings).await;
                     return;
                 }
