@@ -258,6 +258,268 @@ pub async fn run_native_agent_turn(
     }
 }
 
+pub async fn run_boxed_cursor_turn(
+    cursor_bin: String,
+    model: String,
+    api_key: Option<String>,
+    query: String,
+    active_ctx: String,
+    active_ns: String,
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+) {
+    let start_time = std::time::Instant::now();
+
+    // 1. Bind ephemeral loopback port for MCP HTTP server
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_chunk".to_string(),
+                result: Err(format!("Failed to bind local MCP port: {}", e)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_done".to_string(),
+                result: Ok(String::new()),
+            });
+            return;
+        }
+    };
+    let local_addr = match listener.local_addr() {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_chunk".to_string(),
+                result: Err(format!("Failed to get local MCP address: {}", e)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_done".to_string(),
+                result: Ok(String::new()),
+            });
+            return;
+        }
+    };
+    let url = format!("http://127.0.0.1:{}/mcp", local_addr.port());
+    let token = srelens_mcp::auth::Token::generate();
+    let token_str = token.as_str().to_string();
+
+    // 2. Build MCP server
+    let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
+    let server = McpServer::new(Arc::new(registry))
+        .with_policy(policy)
+        .with_kind_resolver(srelens_registry::kind_resolver());
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = srelens_mcp::http::serve_http_with_shutdown(
+            server,
+            listener,
+            async {
+                let _ = shutdown_rx.await;
+            },
+            token,
+        )
+        .await;
+    });
+
+    // 3. Create isolated temp directories for cursor-agent
+    let temp_cfg = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = shutdown_tx.send(());
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_chunk".to_string(),
+                result: Err(format!("Failed to create config dir: {}", e)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_done".to_string(),
+                result: Ok(String::new()),
+            });
+            return;
+        }
+    };
+    let temp_workspace = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = shutdown_tx.send(());
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_chunk".to_string(),
+                result: Err(format!("Failed to create workspace dir: {}", e)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_done".to_string(),
+                result: Ok(String::new()),
+            });
+            return;
+        }
+    };
+
+    // Write cli-config.json to block shell/kubectl
+    let cfg_path = temp_cfg.path().join("cli-config.json");
+    if let Err(e) = std::fs::write(&cfg_path, srelens_agent::adapter::cursor_cli_config_json()) {
+        let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: "ai_chunk".to_string(),
+            result: Err(format!("Failed to write cli-config.json: {}", e)),
+        });
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: "ai_done".to_string(),
+            result: Ok(String::new()),
+        });
+        return;
+    }
+
+    // Write .cursor/mcp.json to configure srelens MCP server
+    let cursor_dir = temp_workspace.path().join(".cursor");
+    if let Err(e) = std::fs::create_dir_all(&cursor_dir) {
+        let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: "ai_chunk".to_string(),
+            result: Err(format!("Failed to create .cursor dir: {}", e)),
+        });
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: "ai_done".to_string(),
+            result: Ok(String::new()),
+        });
+        return;
+    }
+    if let Err(e) = std::fs::write(
+        cursor_dir.join("mcp.json"),
+        srelens_agent::adapter::cursor_mcp_json(&url, &token_str),
+    ) {
+        let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: "ai_chunk".to_string(),
+            result: Err(format!("Failed to write mcp.json: {}", e)),
+        });
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: "ai_done".to_string(),
+            result: Ok(String::new()),
+        });
+        return;
+    }
+
+    // 4. Construct cursor command with boxing flags
+    let prompt_with_context = format!(
+        "[Active Kubernetes Context: \"{}\", Namespace: \"{}\"]\n\n{}",
+        active_ctx, active_ns, query
+    );
+    let cmd_spec = srelens_agent::adapter::cursor_command(
+        &cursor_bin,
+        &prompt_with_context,
+        &temp_cfg.path().to_string_lossy(),
+        &temp_workspace.path().to_string_lossy(),
+        None,
+    );
+
+    let mut cmd = tokio::process::Command::new(&cmd_spec.program);
+    cmd.args(&cmd_spec.args);
+    for (k, v) in &cmd_spec.env {
+        cmd.env(k, v);
+    }
+    cmd.current_dir(temp_workspace.path());
+    if !model.is_empty() && model != "default" {
+        cmd.arg("--model").arg(&model);
+    }
+    if let Some(key) = api_key {
+        cmd.env("CURSOR_API_KEY", key);
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    // 5. Spawn and stream results
+    match cmd.spawn() {
+        Ok(mut child) => {
+            if let Some(stdout) = child.stdout.take() {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let trimmed = line.trim();
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
+                            if t == "thinking" {
+                                let _ = event_tx.send(AppEvent::ActionResult {
+                                    title: "ai_status".to_string(),
+                                    result: Ok("Thinking & analyzing cluster query...".to_string()),
+                                });
+                            } else if t == "tool_call" {
+                                let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                                if subtype == "started" {
+                                    if let Some((id, tool, args)) = crate::app::extract_tool_call_start_info(&v) {
+                                        let _ = event_tx.send(AppEvent::ActionResult {
+                                            title: "ai_status".to_string(),
+                                            result: Ok(format!("Executing {} query on cluster...", tool)),
+                                        });
+                                        let _ = event_tx.send(AppEvent::ActionResult {
+                                            title: "ai_tool_start".to_string(),
+                                            result: Ok(format!("{}|{}|{}", id, tool, args)),
+                                        });
+                                    }
+                                } else if subtype == "completed" {
+                                    if let Some((id, is_err)) = crate::app::extract_tool_call_completed_info(&v) {
+                                        let status_str = if is_err { "error" } else { "ok" };
+                                        let _ = event_tx.send(AppEvent::ActionResult {
+                                            title: "ai_tool_done".to_string(),
+                                            result: Ok(format!("{}|{}", id, status_str)),
+                                        });
+                                    }
+                                }
+                            } else if t == "result" {
+                                if let Some((prompt, comp, cached, total, dur)) = crate::app::extract_usage_metrics(&v) {
+                                    let dur_val = dur.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
+                                    let payload = format!("{}|{}|{}|{}|{}", prompt, comp, cached, total, dur_val);
+                                    let _ = event_tx.send(AppEvent::ActionResult {
+                                        title: "ai_usage".to_string(),
+                                        result: Ok(payload),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    let events = srelens_agent::cursor::parse_line(&line);
+                    for ev in events {
+                        match ev {
+                            srelens_agent::event::AgentEvent::TextDelta { text } => {
+                                let _ = event_tx.send(AppEvent::ActionResult {
+                                    title: "ai_chunk".to_string(),
+                                    result: Ok(text),
+                                });
+                            }
+                            srelens_agent::event::AgentEvent::Error { message } => {
+                                let _ = event_tx.send(AppEvent::ActionResult {
+                                    title: "ai_chunk".to_string(),
+                                    result: Ok(format!("\n[Error: {}]", message)),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let _ = child.wait().await;
+            let _ = shutdown_tx.send(());
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_done".to_string(),
+                result: Ok(String::new()),
+            });
+        }
+        Err(err) => {
+            let _ = shutdown_tx.send(());
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_chunk".to_string(),
+                result: Err(format!("Failed to launch cursor-agent: {}", err)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: "ai_done".to_string(),
+                result: Ok(String::new()),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1400,113 +1400,21 @@ impl App {
                                     let event_tx = self.event_tx.clone();
                                     let model = self.ai_settings.get_model(provider);
                                     let api_key = self.ai_settings.get_api_key(provider);
-                                    let targeted_prompt = format!(
-                                        "You are an SRE assistant inside SRElens TUI. Active Kubernetes context: '{}', namespace: '{}'.\nAnswer the user request directly (use kubectl commands to query the cluster if needed, rather than scanning the local workspace repo files):\n\n{}",
-                                        active_ctx, active_ns, query
-                                    );
-                                    let start_time = std::time::Instant::now();
+                                    let cache = self.client_cache.clone();
+                                    let kubeconfig_paths = self.kubeconfig_paths.clone();
+
                                     tokio::spawn(async move {
-                                        use tokio::io::{AsyncBufReadExt, BufReader};
-                                        let mut cmd = tokio::process::Command::new(&cursor_bin);
-                                        cmd.arg("-p")
-                                            .arg("--output-format")
-                                            .arg("stream-json")
-                                            .arg("--trust");
-                                        if !model.is_empty() && model != "default" {
-                                            cmd.arg("--model").arg(&model);
-                                        }
-                                        if let Some(key) = api_key {
-                                            cmd.env("CURSOR_API_KEY", key);
-                                        }
-                                        cmd.arg("--").arg(&targeted_prompt);
-                                        cmd.stdout(std::process::Stdio::piped());
-                                        cmd.stderr(std::process::Stdio::piped());
-
-                                        match cmd.spawn() {
-                                            Ok(mut child) => {
-                                                if let Some(stdout) = child.stdout.take() {
-                                                    let mut reader = BufReader::new(stdout).lines();
-                                                    while let Ok(Some(line)) = reader.next_line().await {
-                                                        let trimmed = line.trim();
-                                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                                            if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
-                                                                if t == "thinking" {
-                                                                    let _ = event_tx.send(AppEvent::ActionResult {
-                                                                        title: "ai_status".to_string(),
-                                                                        result: Ok("Thinking & analyzing cluster query...".to_string()),
-                                                                    });
-                                                                } else if t == "tool_call" {
-                                                                    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                                                                    if subtype == "started" {
-                                                                        if let Some((id, tool, args)) = extract_tool_call_start_info(&v) {
-                                                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                                                title: "ai_status".to_string(),
-                                                                                result: Ok(format!("Executing {} query on cluster...", tool)),
-                                                                            });
-                                                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                                                title: "ai_tool_start".to_string(),
-                                                                                result: Ok(format!("{}|{}|{}", id, tool, args)),
-                                                                            });
-                                                                        }
-                                                                    } else if subtype == "completed" {
-                                                                        if let Some((id, is_err)) = extract_tool_call_completed_info(&v) {
-                                                                            let status_str = if is_err { "error" } else { "ok" };
-                                                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                                                title: "ai_tool_done".to_string(),
-                                                                                result: Ok(format!("{}|{}", id, status_str)),
-                                                                            });
-                                                                        }
-                                                                    }
-                                                                } else if t == "result" {
-                                                                    if let Some((prompt, comp, cached, total, dur)) = extract_usage_metrics(&v) {
-                                                                        let dur_val = dur.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
-                                                                        let payload = format!("{}|{}|{}|{}|{}", prompt, comp, cached, total, dur_val);
-                                                                        let _ = event_tx.send(AppEvent::ActionResult {
-                                                                            title: "ai_usage".to_string(),
-                                                                            result: Ok(payload),
-                                                                        });
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-
-                                                        let events = srelens_agent::cursor::parse_line(&line);
-                                                        for ev in events {
-                                                            match ev {
-                                                                srelens_agent::event::AgentEvent::TextDelta { text } => {
-                                                                    let _ = event_tx.send(AppEvent::ActionResult {
-                                                                        title: "ai_chunk".to_string(),
-                                                                        result: Ok(text),
-                                                                    });
-                                                                }
-                                                                srelens_agent::event::AgentEvent::Error { message } => {
-                                                                    let _ = event_tx.send(AppEvent::ActionResult {
-                                                                        title: "ai_chunk".to_string(),
-                                                                        result: Ok(format!("\n[Error: {}]", message)),
-                                                                    });
-                                                                }
-                                                                _ => {}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                let _ = child.wait().await;
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "ai_done".to_string(),
-                                                    result: Ok(String::new()),
-                                                });
-                                            }
-                                            Err(err) => {
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "ai_chunk".to_string(),
-                                                    result: Err(format!("Failed to launch cursor-agent: {}", err)),
-                                                });
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "ai_done".to_string(),
-                                                    result: Ok(String::new()),
-                                                });
-                                            }
-                                        }
+                                        crate::agent::run_boxed_cursor_turn(
+                                            cursor_bin,
+                                            model,
+                                            api_key,
+                                            query,
+                                            active_ctx,
+                                            active_ns,
+                                            cache,
+                                            kubeconfig_paths,
+                                            event_tx,
+                                        ).await;
                                     });
                                 } else {
                                     ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
@@ -2346,15 +2254,27 @@ pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, St
     // Strictly find the payload key ending with "ToolCall" (e.g. bashToolCall, readToolCall),
     // ignoring metadata siblings like hookAdditionalContexts, toolCallId, startedAtMs, completedAtMs.
     let (key, inner) = inner_map.iter().find(|(k, _)| k.ends_with("ToolCall"))?;
-    let tool_name = key.strip_suffix("ToolCall").unwrap_or(key).to_string();
+    let mut tool_name = key.strip_suffix("ToolCall").unwrap_or(key).to_string();
 
     // Skip internal hooks that are not executable tools
     if tool_name == "hookAdditionalContexts" {
         return None;
     }
 
+    if tool_name == "callMcpTool" || tool_name == "mcp" {
+        if let Some(t) = inner.pointer("/args/tool").or_else(|| inner.pointer("/args/name")).and_then(|s| s.as_str()) {
+            tool_name = t.to_string();
+        }
+    }
+
     let mut args_summary = String::new();
-    if let Some(args) = inner.get("args") {
+    if let Some(sub_args) = inner.pointer("/args/arguments") {
+        if let Some(obj) = sub_args.as_object() {
+            args_summary = serde_json::to_string(obj).unwrap_or_default();
+        } else {
+            args_summary = sub_args.to_string();
+        }
+    } else if let Some(args) = inner.get("args") {
         if let Some(cmd) = args.get("command").and_then(|s| s.as_str()) {
             args_summary = cmd.to_string();
         } else if let Some(path) = args.get("path").and_then(|s| s.as_str()) {
