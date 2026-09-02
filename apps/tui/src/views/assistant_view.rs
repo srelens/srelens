@@ -122,7 +122,7 @@ pub fn render_assistant_view(
 
         rendered_lines.push(Line::from(header_spans));
 
-        // Format message body (with markdown table detection)
+        // Format message body (rich rendered markdown)
         format_message_content(&mut rendered_lines, &msg.content);
         rendered_lines.push(Line::from(""));
     }
@@ -151,29 +151,228 @@ pub fn render_assistant_view(
     f.render_widget(input_widget, chunks[1]);
 }
 
-/// Formats message text lines, detecting and rendering Markdown tables as aligned box-drawing tables.
+/// Formats message text lines, detecting and rendering Markdown structures:
+/// - Aligned box-drawing tables
+/// - Framed code blocks (```lang ... ```)
+/// - Bold colored headings (#, ##, ###, ####)
+/// - Bullet and numbered lists (•, ◦, 1.)
+/// - Blockquotes (▎)
+/// - Horizontal dividers (───)
+/// - Inline markdown: `code`, **bold**, *italic*, [link](url), ~~strikethrough~~
 pub fn format_message_content(out: &mut Vec<Line<'static>>, content: &str) {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {
         let line = lines[i];
+        let trimmed = line.trim();
 
-        // Check if this line begins a Markdown table
+        // 1. Fenced Code Block: ```lang
+        if trimmed.starts_with("```") {
+            let lang = trimmed.trim_start_matches('`').trim();
+            i += 1;
+            let mut code_lines = Vec::new();
+            while i < lines.len() && !lines[i].trim().starts_with("```") {
+                code_lines.push(lines[i]);
+                i += 1;
+            }
+            if i < lines.len() && lines[i].trim().starts_with("```") {
+                i += 1; // skip closing ```
+            }
+            render_code_block(out, lang, &code_lines);
+            continue;
+        }
+
+        // 2. Markdown Table
         if is_table_row(line) && i + 1 < lines.len() && is_table_separator(lines[i + 1]) {
             let header_line = lines[i];
-            i += 2; // skip header and separator line
+            i += 2; // skip header and separator
             let mut row_lines = Vec::new();
             while i < lines.len() && is_table_row(lines[i]) && !is_table_separator(lines[i]) {
                 row_lines.push(lines[i]);
                 i += 1;
             }
             render_markdown_table(out, header_line, &row_lines);
-        } else {
-            render_text_line(out, line);
-            i += 1;
+            continue;
         }
+
+        // 3. Horizontal Rule: --- or *** or ___
+        if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
+            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c.is_whitespace())
+            && trimmed.len() >= 3
+        {
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "────────────────────────────────────────────────────────────────────────",
+                    Style::default().fg(Theme::BORDER),
+                ),
+            ]));
+            i += 1;
+            continue;
+        }
+
+        // 4. Headings: #, ##, ###, ####
+        if trimmed.starts_with("# ") {
+            let heading_text = trimmed[2..].trim();
+            out.push(Line::from(""));
+            let mut spans = vec![Span::styled(
+                "  ▌ ",
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(parse_inline_markdown_with_base_style(
+                heading_text,
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            ));
+            out.push(Line::from(spans));
+            i += 1;
+            continue;
+        } else if trimmed.starts_with("## ") {
+            let heading_text = trimmed[3..].trim();
+            out.push(Line::from(""));
+            let mut spans = vec![Span::styled(
+                "  ▌ ",
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(parse_inline_markdown_with_base_style(
+                heading_text,
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+            ));
+            out.push(Line::from(spans));
+            i += 1;
+            continue;
+        } else if trimmed.starts_with("### ") {
+            let heading_text = trimmed[4..].trim();
+            let mut spans = vec![Span::styled(
+                "  ● ",
+                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(parse_inline_markdown_with_base_style(
+                heading_text,
+                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+            ));
+            out.push(Line::from(spans));
+            i += 1;
+            continue;
+        } else if trimmed.starts_with("#### ") {
+            let heading_text = trimmed[5..].trim();
+            let mut spans = vec![Span::styled(
+                "    ",
+                Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(parse_inline_markdown_with_base_style(
+                heading_text,
+                Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+            ));
+            out.push(Line::from(spans));
+            i += 1;
+            continue;
+        }
+
+        // 5. Blockquote: > text
+        if trimmed.starts_with('>') {
+            let quote_text = trimmed.trim_start_matches('>').trim();
+            let mut spans = vec![
+                Span::raw("  "),
+                Span::styled("▎ ", Style::default().fg(Theme::YELLOW)),
+            ];
+            spans.extend(parse_inline_markdown_with_base_style(
+                quote_text,
+                Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
+            ));
+            out.push(Line::from(spans));
+            i += 1;
+            continue;
+        }
+
+        // 6. Bullet lists: - , * , + 
+        let leading_spaces = line.len() - line.trim_start().len();
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            let item_text = &trimmed[2..];
+            let bullet_symbol = if leading_spaces >= 2 { "◦ " } else { "• " };
+            let bullet_color = if leading_spaces >= 2 { Theme::YELLOW } else { Theme::CYAN };
+            let indent = " ".repeat(leading_spaces + 2);
+            let mut spans = vec![
+                Span::raw(indent),
+                Span::styled(bullet_symbol, Style::default().fg(bullet_color).add_modifier(Modifier::BOLD)),
+            ];
+            spans.extend(parse_inline_markdown(item_text));
+            out.push(Line::from(spans));
+            i += 1;
+            continue;
+        }
+
+        // 7. Numbered lists: 1. , 2. 
+        if let Some(dot_pos) = trimmed.find(". ") {
+            let prefix = &trimmed[..dot_pos];
+            if !prefix.is_empty() && prefix.chars().all(|c| c.is_numeric()) {
+                let item_text = &trimmed[dot_pos + 2..];
+                let indent = " ".repeat(leading_spaces + 2);
+                let mut spans = vec![
+                    Span::raw(indent),
+                    Span::styled(format!("{}. ", prefix), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                ];
+                spans.extend(parse_inline_markdown(item_text));
+                out.push(Line::from(spans));
+                i += 1;
+                continue;
+            }
+        }
+
+        // 8. Normal text paragraph
+        render_text_line(out, line);
+        i += 1;
     }
+}
+
+fn render_code_block(out: &mut Vec<Line<'static>>, lang: &str, code_lines: &[&str]) {
+    let border_style = Style::default().fg(Theme::BORDER);
+    let lang_display = if lang.is_empty() { "code" } else { lang };
+
+    // Header border: ┌── lang ────────────────────────────────────────
+    let header_prefix = format!("── {} ", lang_display);
+    let bar_len = 65usize.saturating_sub(header_prefix.len());
+    let top_line = format!("┌{}{}", header_prefix, "─".repeat(bar_len));
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(top_line, border_style),
+    ]));
+
+    // Code lines with prefix "│ "
+    for code_line in code_lines {
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled("│ ", border_style),
+        ];
+
+        let trimmed_code = code_line.trim_start();
+        if trimmed_code.starts_with('#') || trimmed_code.starts_with("//") {
+            // Comment
+            spans.push(Span::styled(
+                code_line.to_string(),
+                Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
+            ));
+        } else if trimmed_code.contains(':') && !trimmed_code.starts_with("http") {
+            // YAML / Key-value
+            if let Some(colon_idx) = code_line.find(':') {
+                let key = &code_line[..=colon_idx];
+                let val = &code_line[colon_idx + 1..];
+                spans.push(Span::styled(key.to_string(), Style::default().fg(Theme::CYAN)));
+                spans.push(Span::styled(val.to_string(), Style::default().fg(Theme::FG)));
+            } else {
+                spans.push(Span::styled(code_line.to_string(), Style::default().fg(Theme::FG)));
+            }
+        } else {
+            spans.push(Span::styled(code_line.to_string(), Style::default().fg(Theme::FG)));
+        }
+        out.push(Line::from(spans));
+    }
+
+    // Bottom border: └────────────────────────────────────────────────
+    out.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("└{}", "─".repeat(66)), border_style),
+    ]));
 }
 
 fn is_table_row(line: &str) -> bool {
@@ -326,56 +525,148 @@ fn render_text_line(out: &mut Vec<Line<'static>>, line: &str) {
     out.push(Line::from(spans));
 }
 
-fn parse_inline_markdown(line: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut rest = line;
-
-    while !rest.is_empty() {
-        if let Some(code_start) = rest.find('`') {
-            if let Some(code_end) = rest[code_start + 1..].find('`') {
-                let end_idx = code_start + 1 + code_end;
-                let before = &rest[..code_start];
-                if !before.is_empty() {
-                    spans.extend(parse_bold(before));
-                }
-                let code_content = &rest[code_start + 1..end_idx];
-                spans.push(Span::styled(
-                    code_content.to_string(),
-                    Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
-                ));
-                rest = &rest[end_idx + 1..];
-                continue;
-            }
-        }
-        spans.extend(parse_bold(rest));
-        break;
-    }
-    spans
+pub fn parse_inline_markdown(line: &str) -> Vec<Span<'static>> {
+    parse_inline_markdown_with_base_style(line, Style::default().fg(Theme::FG))
 }
 
-fn parse_bold(text: &str) -> Vec<Span<'static>> {
+pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    let mut rest = text;
-    while let Some(b_start) = rest.find("**") {
-        if let Some(b_end) = rest[b_start + 2..].find("**") {
-            let end_idx = b_start + 2 + b_end;
-            let before = &rest[..b_start];
-            if !before.is_empty() {
-                spans.push(Span::styled(before.to_string(), Style::default().fg(Theme::FG)));
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut text_buf = String::new();
+
+    let flush_buf = |buf: &mut String, out: &mut Vec<Span<'static>>, style: Style| {
+        if !buf.is_empty() {
+            out.push(Span::styled(std::mem::take(buf), style));
+        }
+    };
+
+    while i < chars.len() {
+        // 1. Inline Code: `code`
+        if chars[i] == '`' {
+            flush_buf(&mut text_buf, &mut spans, base);
+            i += 1;
+            let mut code_buf = String::new();
+            while i < chars.len() && chars[i] != '`' {
+                code_buf.push(chars[i]);
+                i += 1;
             }
-            let bold_content = &rest[b_start + 2..end_idx];
+            if i < chars.len() && chars[i] == '`' {
+                i += 1; // skip closing `
+            }
             spans.push(Span::styled(
-                bold_content.to_string(),
-                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+                code_buf,
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
             ));
-            rest = &rest[end_idx + 2..];
             continue;
         }
-        break;
+
+        // 2. Bold + Italic: ***text***
+        if i + 2 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*' {
+            flush_buf(&mut text_buf, &mut spans, base);
+            i += 3;
+            let mut inner = String::new();
+            while i + 2 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*') {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i + 2 < chars.len() {
+                i += 3; // skip closing ***
+            }
+            spans.push(Span::styled(
+                inner,
+                base.add_modifier(Modifier::BOLD | Modifier::ITALIC).fg(Theme::YELLOW),
+            ));
+            continue;
+        }
+
+        // 3. Bold: **text**
+        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
+            flush_buf(&mut text_buf, &mut spans, base);
+            i += 2;
+            let mut inner = String::new();
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '*') {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i + 1 < chars.len() {
+                i += 2; // skip closing **
+            }
+            spans.push(Span::styled(
+                inner,
+                base.add_modifier(Modifier::BOLD).fg(Theme::YELLOW),
+            ));
+            continue;
+        }
+
+        // 4. Italic: *text* (single asterisk)
+        if chars[i] == '*' && (i == 0 || chars[i - 1] != '\\') {
+            flush_buf(&mut text_buf, &mut spans, base);
+            i += 1;
+            let mut inner = String::new();
+            while i < chars.len() && chars[i] != '*' {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '*' {
+                i += 1; // skip closing *
+            }
+            spans.push(Span::styled(
+                inner,
+                base.add_modifier(Modifier::ITALIC),
+            ));
+            continue;
+        }
+
+        // 5. Link: [label](url)
+        if chars[i] == '[' {
+            if let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let bracket_end = i + 1 + close_bracket;
+                if bracket_end + 1 < chars.len() && chars[bracket_end + 1] == '(' {
+                    if let Some(close_paren) = chars[bracket_end + 2..].iter().position(|&c| c == ')') {
+                        let paren_end = bracket_end + 2 + close_paren;
+                        flush_buf(&mut text_buf, &mut spans, base);
+                        let label: String = chars[i + 1..bracket_end].iter().collect();
+                        let url: String = chars[bracket_end + 2..paren_end].iter().collect();
+                        spans.push(Span::styled(
+                            label,
+                            Style::default().fg(Theme::CYAN).add_modifier(Modifier::UNDERLINED),
+                        ));
+                        spans.push(Span::styled(
+                            format!(" ({})", url),
+                            Style::default().fg(Theme::DIM),
+                        ));
+                        i = paren_end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 6. Strikethrough: ~~text~~
+        if i + 1 < chars.len() && chars[i] == '~' && chars[i + 1] == '~' {
+            flush_buf(&mut text_buf, &mut spans, base);
+            i += 2;
+            let mut inner = String::new();
+            while i + 1 < chars.len() && !(chars[i] == '~' && chars[i + 1] == '~') {
+                inner.push(chars[i]);
+                i += 1;
+            }
+            if i + 1 < chars.len() {
+                i += 2; // skip closing ~~
+            }
+            spans.push(Span::styled(
+                inner,
+                base.add_modifier(Modifier::CROSSED_OUT).fg(Theme::DIM),
+            ));
+            continue;
+        }
+
+        text_buf.push(chars[i]);
+        i += 1;
     }
-    if !rest.is_empty() {
-        spans.push(Span::styled(rest.to_string(), Style::default().fg(Theme::FG)));
-    }
+
+    flush_buf(&mut text_buf, &mut spans, base);
     spans
 }
 
@@ -398,7 +689,6 @@ All nodes nominal.";
         let mut lines = Vec::new();
         format_message_content(&mut lines, content);
 
-        // Verify that box-drawing table rows were generated
         let text_dump: String = lines
             .iter()
             .map(|l| {
@@ -418,6 +708,84 @@ All nodes nominal.";
         assert!(text_dump.contains("│ gpu-node-1"));
         assert!(text_dump.contains("15 GiB"));
         assert!(text_dump.contains("└"));
+    }
+
+    #[test]
+    fn test_format_message_content_with_code_block() {
+        let content = "\
+Example config:
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test
+```
+Done.";
+
+        let mut lines = Vec::new();
+        format_message_content(&mut lines, content);
+
+        let text_dump: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text_dump.contains("┌── yaml"));
+        assert!(text_dump.contains("│ apiVersion: v1"));
+        assert!(text_dump.contains("│ kind: Pod"));
+        assert!(text_dump.contains("└"));
+        // Make sure no raw ``` remains
+        assert!(!text_dump.contains("```"));
+    }
+
+    #[test]
+    fn test_inline_markdown_rendering() {
+        let line = "In the current context `data-processing-prod-eu-dus1`, **4 of 32 nodes** advertise a GPU.";
+        let spans = parse_inline_markdown(line);
+        let text_dump: String = spans.iter().map(|s| s.content.as_ref()).collect();
+
+        // Ensure backticks and asterisks are stripped
+        assert_eq!(text_dump, "In the current context data-processing-prod-eu-dus1, 4 of 32 nodes advertise a GPU.");
+        assert!(!text_dump.contains('`'));
+        assert!(!text_dump.contains('*'));
+    }
+
+    #[test]
+    fn test_headings_and_lists() {
+        let content = "\
+### GPU Nodes Overview
+- Node 1: T4
+- Node 2: A100
+> Important notice: check quotas.";
+
+        let mut lines = Vec::new();
+        format_message_content(&mut lines, content);
+
+        let text_dump: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text_dump.contains("● GPU Nodes Overview"));
+        assert!(text_dump.contains("• Node 1: T4"));
+        assert!(text_dump.contains("• Node 2: A100"));
+        assert!(text_dump.contains("▎ Important notice: check quotas."));
+        // Make sure raw ### and - are not in the rendered output
+        assert!(!text_dump.contains("###"));
     }
 
     #[test]
