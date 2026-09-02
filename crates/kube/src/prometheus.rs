@@ -71,10 +71,22 @@ pub enum Flavour {
     VictoriaMetrics,
 }
 
+/// Where a query API is, in exactly the shape that addresses one.
+///
+/// The field is `service` and not `name` deliberately: a candidate IS a
+/// [`crate::topology::PrometheusSource`] plus a flavour, so whatever discovery
+/// returns can be handed straight to a query.
+///
+/// It was `name` once. The screen passed a candidate through unchanged and
+/// every graph came back `invalid input: missing field "service"` — a mismatch
+/// the compiler could not see across the IPC boundary, and which the screen's
+/// own test could not either, because the fixture was written from the same
+/// wrong assumption as the code. Making the two shapes compose is what stops
+/// that, rather than a mapping step someone has to remember.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct PrometheusCandidate {
     pub namespace: String,
-    pub name: String,
+    pub service: String,
     pub port: i32,
     pub flavour: Flavour,
 }
@@ -163,12 +175,12 @@ pub fn candidates(services: &[Service]) -> Vec<PrometheusCandidate> {
         };
         out.push(PrometheusCandidate {
             namespace: service.metadata.namespace.clone().unwrap_or_default(),
-            name,
+            service: name,
             port,
             flavour,
         });
     }
-    out.sort_by(|a, b| a.namespace.cmp(&b.namespace).then(a.name.cmp(&b.name)));
+    out.sort_by(|a, b| a.namespace.cmp(&b.namespace).then(a.service.cmp(&b.service)));
     out
 }
 
@@ -416,6 +428,30 @@ mod tests {
     }
 
     #[test]
+    fn what_discovery_returns_is_what_a_query_accepts() {
+        // The bug this pins: a candidate carried `name` while the query input
+        // wanted `service`, so the screen passing one straight to the other got
+        // `invalid input: missing field "service"` on every graph. Neither the
+        // compiler nor a mocked screen test could see it — the two sides only
+        // meet as JSON, across an IPC boundary.
+        //
+        // Serialised and then deserialised as the other type, which is exactly
+        // the trip the value makes.
+        let found = candidates(&[service(
+            "monitoring",
+            "prometheus",
+            &[("app.kubernetes.io/name", "prometheus")],
+            &[("web", 9090)],
+        )]);
+        let json = serde_json::to_value(&found[0]).unwrap();
+        let source: crate::topology::PrometheusSource =
+            serde_json::from_value(json).expect("a candidate must address a query");
+        assert_eq!(source.namespace, "monitoring");
+        assert_eq!(source.service, "prometheus");
+        assert_eq!(source.port, 9090);
+    }
+
+    #[test]
     fn finds_a_prometheus_by_its_well_known_label() {
         let found = candidates(&[service(
             "monitoring",
@@ -457,7 +493,7 @@ mod tests {
             service("monitoring", "mimir-ingester", &[], &[("http", 8080)]),
         ]);
         assert_eq!(
-            found.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            found.iter().map(|c| c.service.as_str()).collect::<Vec<_>>(),
             vec!["mimir-query-frontend", "thanos-query"],
         );
     }
