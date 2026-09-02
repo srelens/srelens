@@ -6404,6 +6404,7 @@ dependencies = [
 name = "srelens-tui"
 version = "0.8.0"
 dependencies = [
+ "chrono",
  "clap",
  "crossterm",
  "dirs",
