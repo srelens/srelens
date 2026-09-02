@@ -95,6 +95,9 @@ export async function topologyGraph(
   /** Where to read measured traffic from. Without it the graph is built from
    *  the API alone — telemetry only ever adds observed edges and rates. */
   prometheus?: PrometheusSource,
+  /** Read each pod's own socket table over `pods/exec`. Off unless the
+   *  reader asks: one exec per pod, and an audit-log entry on each. */
+  connections = false,
   invoke: Invoker = invokeCapability,
 ): Promise<{ graph?: TopologyGraph; error?: string }> {
   try {
@@ -102,6 +105,7 @@ export async function topologyGraph(
       context,
       namespaces,
       prometheus,
+      connections,
     });
     return { graph: { nodes: out.nodes, edges: out.edges } };
   } catch (e) {

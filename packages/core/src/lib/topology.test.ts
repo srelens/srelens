@@ -29,12 +29,13 @@ describe("topologyGraph", () => {
       ],
     });
 
-    const out = await topologyGraph("kind-dev", ["checkout", "payments"], undefined, invoke);
+    const out = await topologyGraph("kind-dev", ["checkout", "payments"], undefined, false, invoke);
 
     expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
       context: "kind-dev",
       namespaces: ["checkout", "payments"],
       prometheus: undefined,
+      connections: false,
     });
     expect(out.graph?.nodes[0].health).toBe("degraded");
     expect(out.graph?.edges[0].kind).toBe("routes");
@@ -45,18 +46,32 @@ describe("topologyGraph", () => {
     // ever adds observed edges and rates on top.
     const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
     const prometheus = { namespace: "monitoring", service: "prometheus", port: 9090 };
-    await topologyGraph("c", ["checkout"], prometheus, invoke);
+    await topologyGraph("c", ["checkout"], prometheus, false, invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
       context: "c",
       namespaces: ["checkout"],
       prometheus,
+      connections: false,
+    });
+  });
+
+  it("asks for connection probing only when told to", async () => {
+    // One exec per pod and an audit-log entry on each, so the default has to be
+    // off and the flag has to travel exactly as given.
+    const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
+    await topologyGraph("c", ["checkout"], undefined, true, invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
+      context: "c",
+      namespaces: ["checkout"],
+      prometheus: undefined,
+      connections: true,
     });
   });
 
   it("normalises a rejection into an error rather than throwing", async () => {
     // Every other reader in core answers this shape, and the screen renders
     // `error` as its own state — a throw here would take the tab down instead.
-    const out = await topologyGraph("c", ["checkout"], undefined, () =>
+    const out = await topologyGraph("c", ["checkout"], undefined, false, () =>
       Promise.reject(new Error("no such namespace")),
     );
     expect(out.graph).toBeUndefined();
@@ -68,7 +83,7 @@ describe("topologyGraph", () => {
     // answer — the screen says the namespace is empty rather than staying on
     // its loading state forever.
     const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
-    const out = await topologyGraph("c", ["empty"], undefined, invoke);
+    const out = await topologyGraph("c", ["empty"], undefined, false, invoke);
     expect(out.error).toBeUndefined();
     expect(out.graph).toEqual({ nodes: [], edges: [] });
   });

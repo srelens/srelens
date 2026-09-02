@@ -7,7 +7,7 @@ import {
   type TopologyNode,
   type ClusterContext,
 } from "@srelens/core";
-import { EmptyState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
+import { Button, EmptyState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import {
@@ -128,6 +128,16 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   }, [context.name]);
   const source = metrics.data?.[0];
 
+  /**
+   * Whether to read each pod's socket table.
+   *
+   * Off until asked, and it stays this screen's own state rather than the
+   * workspace's: it is one `kubectl exec` per pod and an audit-log entry on
+   * each, so it is a thing a reader does once while looking at something,
+   * not a preference that follows them around.
+   */
+  const [probeConnections, setProbeConnections] = useState(false);
+
   const all = namespaces ?? [];
   const chosen = scoped.length > 0 ? scoped : all.slice(0, NAMESPACE_LIMIT);
   const cut = scoped.length === 0 && all.length > NAMESPACE_LIMIT;
@@ -138,14 +148,14 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   const graph = useResource(
     async () => {
       if (!cluster || chosen.length === 0) return { nodes: [], edges: [] };
-      const out = await topologyGraph(cluster.name, chosen, source);
+      const out = await topologyGraph(cluster.name, chosen, source, probeConnections);
       if (out.error) throw new Error(out.error);
       return out.graph ?? { nodes: [], edges: [] };
     },
     // Re-read when a metrics source appears: discovery resolves after the
     // first draw, and the graph would otherwise stay structural until
     // something else moved.
-    [cluster?.name, key, source?.service, source?.namespace],
+    [cluster?.name, key, source?.service, source?.namespace, probeConnections],
     (g) => g.nodes.length === 0,
   );
 
@@ -164,6 +174,16 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
         // Inherited, not grown here: the same control and the same selection
         // every list on this cluster uses, so narrowing in one place narrows
         // the rest.
+        <>
+          {/* Named for what it COSTS, not for what it shows: a reader has to
+              know this runs an exec in every pod before they turn it on. */}
+          <Button
+            variant={probeConnections ? "primary" : "secondary"}
+            onClick={() => setProbeConnections((on) => !on)}
+            title="Runs `cat /proc/net/tcp` in each pod, over pods/exec"
+          >
+            {probeConnections ? "Probing connections" : "Probe connections"}
+          </Button>
         <NamespacePicker
           namespaces={namespaces}
           selection={scoped}
@@ -173,6 +193,7 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
             setSelectedId(null);
           }}
         />
+        </>
       }
       fill
     >

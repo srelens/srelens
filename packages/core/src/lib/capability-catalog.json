@@ -372,6 +372,12 @@
     "requiresConfirm": false
   },
   {
+    "id": "k8s.podConnections",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.podCount",
     "readOnly": true,
     "destructive": false,

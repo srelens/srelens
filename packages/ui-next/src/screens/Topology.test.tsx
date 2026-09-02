@@ -163,7 +163,7 @@ describe("Topology", () => {
     // screen honours it rather than quietly picking one for them.
     render(<Topology />);
     await waitFor(() =>
-      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["checkout", "default", "payments"], undefined),
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["checkout", "default", "payments"], undefined, false),
     );
   });
 
@@ -172,7 +172,7 @@ describe("Topology", () => {
     // reader who narrowed to `payments` elsewhere lands there here too.
     workspace.scoped = ["payments"];
     render(<Topology />);
-    await waitFor(() => expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["payments"], undefined));
+    await waitFor(() => expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["payments"], undefined, false));
   });
 
   it("caps `All namespaces` on a big cluster, and says that it did", async () => {
@@ -299,13 +299,31 @@ describe("Topology", () => {
         service: "prometheus",
         port: 9090,
         flavour: "prometheus",
-      }),
+      }, false),
     );
     expect(await screen.findByText("41 rpm")).toBeDefined();
     const canvas = screen.getByRole("img", { name: "Namespace topology" });
     // Solid: a measurement is not a guess, and must not wear the dotted line
     // that says "someone wrote this in a config file".
     expect(canvas.querySelectorAll("path[stroke-dasharray]")).toHaveLength(0);
+  });
+
+  it("probes connections only when asked, and says what it costs", async () => {
+    // One `kubectl exec` per pod, and an audit-log entry on each. Nothing turns
+    // that on for a reader.
+    render(<Topology />);
+    await waitFor(() =>
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), undefined, false),
+    );
+
+    const toggle = screen.getByRole("button", { name: "Probe connections" });
+    expect(toggle.getAttribute("title")).toContain("pods/exec");
+    await userEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), undefined, true),
+    );
+    expect(screen.getByRole("button", { name: "Probing connections" })).toBeDefined();
   });
 
   it("says in words that an external node is config, not observed traffic", async () => {

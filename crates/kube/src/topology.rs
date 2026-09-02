@@ -144,6 +144,13 @@ pub struct TopologyGraphIn {
     /// — telemetry only ever ADDS observed edges and rates on top.
     #[serde(default)]
     pub prometheus: Option<PrometheusSource>,
+    /// Read each pod's own socket table over `pods/exec`.
+    ///
+    /// Off by default and deliberately: it is one exec per pod, it shows up
+    /// in the audit log of every pod it touches, and it needs `pods/exec`
+    /// wherever it runs. A reader asks for it; nothing turns it on for them.
+    #[serde(default)]
+    pub connections: bool,
 }
 
 /// Which column a node stands in. The screen lays these out left to right;
@@ -1121,6 +1128,14 @@ pub fn build_graph(
 /// the same shape with different label names, and belong here beside this one
 /// when they are added. Nothing about the plumbing changes for them — which is
 /// the point of routing all of it through one query capability.
+/// How many pods one connection read will exec into.
+///
+/// Each is a round trip and an audit-log entry, so this is a budget rather
+/// than a limit of the data: a namespace with more pods than this gives a
+/// partial picture, which is the honest trade for not opening five hundred
+/// exec sessions to draw one diagram.
+pub const CONNECTION_POD_LIMIT: usize = 40;
+
 pub const ISTIO_CALL_GRAPH: &str = "sum by (source_workload, source_workload_namespace, destination_service_name, destination_service_namespace) (rate(istio_requests_total[5m]))";
 
 /// Where a metrics backend lives, as `k8s.prometheusDiscover` reported it.
@@ -1175,6 +1190,119 @@ fn observed_edge(
         .iter()
         .find(|n| n.lane == Lane::Service && n.name == dest && n.namespace == dest_ns)?;
     Some((from.id.clone(), to.id.clone(), rate_label(sample.value)))
+}
+
+/// What a pod's socket table says, ready to be mapped onto the graph.
+pub struct PodPeers {
+    /// The node the pod belongs to — its workload, already in the graph.
+    pub from: String,
+    pub peers: Vec<crate::connections::Peer>,
+}
+
+/// Where every address in the cluster points, for turning a peer IP into a node.
+///
+/// A Service is preferred over the pod behind it, deliberately: `checkout`
+/// talking to the `payments` Service is what a reader is looking for, and
+/// `checkout` talking to `payments-7d9f4b8c6-x2mzp` is the same fact with the
+/// useful half removed. Pod IPs are still mapped, for a connection to something
+/// no Service fronts.
+pub struct AddressBook {
+    by_address: BTreeMap<String, String>,
+}
+
+impl AddressBook {
+    /// Build from the objects the graph was built from.
+    ///
+    /// Services first, then pods — so a pod IP never wins over the Service IP
+    /// of the thing in front of it.
+    pub fn new(
+        services: &[Service],
+        pods: &[k8s_openapi::api::core::v1::Pod],
+        nodes: &[TopologyNode],
+    ) -> Self {
+        let mut by_address = BTreeMap::new();
+        for pod in pods {
+            let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.clone()) else {
+                continue;
+            };
+            let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+            // A pod is not drawn; the workload that made it is. The owner chain
+            // is Pod -> ReplicaSet -> Deployment, so the pod's own owner name is
+            // matched against every workload node rather than guessed at.
+            let owner = pod
+                .metadata
+                .owner_references
+                .as_ref()
+                .and_then(|refs| refs.first())
+                .map(|o| o.name.clone())
+                .unwrap_or_default();
+            if let Some(node) = nodes.iter().find(|n| {
+                n.lane == Lane::Workload && n.namespace == namespace && owner.starts_with(&n.name)
+            }) {
+                by_address.insert(ip, node.id.clone());
+            }
+        }
+        for service in services {
+            let Some(ip) = service.spec.as_ref().and_then(|s| s.cluster_ip.clone()) else {
+                continue;
+            };
+            if ip.is_empty() || ip == "None" {
+                continue;
+            }
+            let name = service.metadata.name.clone().unwrap_or_default();
+            let namespace = service.metadata.namespace.clone().unwrap_or_default();
+            let id = node_id("Service", &namespace, &name);
+            if nodes.iter().any(|n| n.id == id) {
+                by_address.insert(ip, id);
+            }
+        }
+        Self { by_address }
+    }
+
+    pub fn node_for(&self, address: &str) -> Option<&String> {
+        self.by_address.get(address)
+    }
+}
+
+/// Sockets held open, said the way a reader would.
+///
+/// Never a rate: a socket table is what is open right now, and a pool of five
+/// idle connections looks exactly like five busy ones. Calling this `rpm` would
+/// be a number the kernel never reported.
+pub fn connection_label(count: u32) -> String {
+    if count == 1 {
+        "1 conn".to_string()
+    } else {
+        format!("{count} conns")
+    }
+}
+
+/// Fold observed connections into a graph already built from the API.
+///
+/// A connection to something not drawn is dropped — a pod talks to the API
+/// server, to CoreDNS and to whatever else the cluster runs, and putting a node
+/// on the diagram for each would bury the namespace a reader asked about.
+pub fn apply_connections(graph: &mut TopologyGraphOut, book: &AddressBook, pods: &[PodPeers]) {
+    for pod in pods {
+        for peer in &pod.peers {
+            let Some(to) = book.node_for(&peer.address) else {
+                continue;
+            };
+            // A pod's connections to its own workload are the replicas talking
+            // among themselves, which is not a dependency.
+            if to == &pod.from {
+                continue;
+            }
+            push_edge_labelled(
+                &mut graph.edges,
+                pod.from.clone(),
+                to.clone(),
+                EdgeKind::Calls,
+                Provenance::Observed,
+                connection_label(peer.count),
+            );
+        }
+    }
 }
 
 /// Fold measured traffic into a graph already built from the API.
@@ -1255,6 +1383,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 // a `checkout` that calls `payments-api.payments.svc` only
                 // resolves to the real Service when both namespaces are in the
                 // same pass.
+                let all_services = all.services.clone();
                 let mut graph = build_graph(
                     all.ingresses,
                     all.services,
@@ -1282,6 +1411,58 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     {
                         apply_observed(&mut graph, &samples);
                     }
+                }
+                // Observed connections, when the reader asked for them.
+                // Capped: this is an exec each, and a namespace of five
+                // hundred pods is not a picture anyone wants at that price.
+                if input.connections {
+                    let pods = tokio::time::timeout(
+                        request_timeout(),
+                        list_of::<k8s_openapi::api::core::v1::Pod>(
+                            client.clone(),
+                            input.namespaces.first().map(String::as_str).unwrap_or(""),
+                            "pods",
+                        ),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Ok(Vec::new()))
+                    .unwrap_or_default();
+                    let book = AddressBook::new(&all_services, &pods, &graph.nodes);
+                    let mut read = Vec::new();
+                    for pod in pods.iter().take(CONNECTION_POD_LIMIT) {
+                        let (Some(name), Some(namespace)) =
+                            (pod.metadata.name.clone(), pod.metadata.namespace.clone())
+                        else {
+                            continue;
+                        };
+                        let owner = pod
+                            .metadata
+                            .owner_references
+                            .as_ref()
+                            .and_then(|r| r.first())
+                            .map(|o| o.name.clone())
+                            .unwrap_or_default();
+                        let Some(from) = graph.nodes.iter().find(|n| {
+                            n.lane == Lane::Workload
+                                && n.namespace == namespace
+                                && owner.starts_with(&n.name)
+                        }) else {
+                            continue;
+                        };
+                        // One pod refusing must not cost the rest: a single
+                        // distroless sidecar would otherwise take the whole
+                        // read with it.
+                        if let Ok(peers) = crate::connections::read_pod_connections(
+                            client.clone(),
+                            &namespace,
+                            &name,
+                        )
+                        .await
+                        {
+                            read.push(PodPeers { from: from.id.clone(), peers });
+                        }
+                    }
+                    apply_connections(&mut graph, &book, &read);
                 }
                 Ok(graph)
             }
@@ -1758,6 +1939,146 @@ mod tests {
             vec![],
             vec![],
         )
+    }
+
+    // ---- observed connections: what the kernel has open ----
+
+    fn pod(name: &str, ip: &str, owner: &str) -> k8s_openapi::api::core::v1::Pod {
+        use k8s_openapi::api::core::v1::PodStatus;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+        let mut metadata = meta(name);
+        metadata.owner_references = Some(vec![OwnerReference {
+            kind: "ReplicaSet".into(),
+            name: owner.into(),
+            ..Default::default()
+        }]);
+        k8s_openapi::api::core::v1::Pod {
+            metadata,
+            status: Some(PodStatus {
+                pod_ip: Some(ip.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn peer(address: &str, port: u16, count: u32) -> crate::connections::Peer {
+        crate::connections::Peer {
+            address: address.into(),
+            port,
+            count,
+        }
+    }
+
+    #[test]
+    fn a_connection_count_is_never_called_a_rate() {
+        // A socket table says what is open now. Five idle pooled connections
+        // look exactly like five busy ones, so calling this rpm would be a
+        // number the kernel never reported.
+        assert_eq!(connection_label(1), "1 conn");
+        assert_eq!(connection_label(5), "5 conns");
+    }
+
+    #[test]
+    fn a_connection_to_a_service_ip_becomes_an_edge_to_that_service() {
+        let mut svc = service("payments", &[("app", "payments")], 8080);
+        svc.spec.as_mut().unwrap().cluster_ip = Some("10.96.1.5".into());
+        let g_services = vec![svc];
+        let pods = vec![pod("checkout-abc", "10.1.0.9", "checkout-7d9f")];
+        let mut g = build_graph(
+            vec![],
+            g_services.clone(),
+            vec![
+                deployment("checkout", 1, 1, &[("app", "checkout")]),
+                deployment("payments", 1, 1, &[("app", "payments")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let book = AddressBook::new(&g_services, &pods, &g.nodes);
+        apply_connections(
+            &mut g,
+            &book,
+            &[PodPeers {
+                from: "Deployment/checkout/checkout".into(),
+                peers: vec![peer("10.96.1.5", 8080, 5)],
+            }],
+        );
+        let edge = g.edges.iter().find(|e| e.kind == EdgeKind::Calls).expect("a call");
+        assert_eq!(edge.to, "Service/checkout/payments");
+        assert_eq!(edge.provenance, Provenance::Observed);
+        assert_eq!(edge.detail, "5 conns");
+    }
+
+    #[test]
+    fn a_service_wins_over_the_pod_behind_it() {
+        // `checkout talks to the payments Service` is what a reader wants;
+        // `checkout talks to payments-7d9f4b8c6-x2mzp` is the same fact with
+        // the useful half removed.
+        let mut svc = service("payments", &[("app", "payments")], 8080);
+        svc.spec.as_mut().unwrap().cluster_ip = Some("10.96.1.5".into());
+        let services = vec![svc];
+        let pods = vec![pod("payments-abc", "10.96.1.5", "payments-1")];
+        let g = build_graph(
+            vec![],
+            services.clone(),
+            vec![deployment("payments", 1, 1, &[("app", "payments")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let book = AddressBook::new(&services, &pods, &g.nodes);
+        assert_eq!(
+            book.node_for("10.96.1.5").map(String::as_str),
+            Some("Service/checkout/payments"),
+        );
+    }
+
+    #[test]
+    fn replicas_talking_among_themselves_are_not_a_dependency() {
+        let pods = vec![pod("checkout-abc", "10.1.0.9", "checkout-7d9f")];
+        let mut g = build_graph(
+            vec![],
+            vec![],
+            vec![deployment("checkout", 2, 2, &[("app", "checkout")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let book = AddressBook::new(&[], &pods, &g.nodes);
+        apply_connections(
+            &mut g,
+            &book,
+            &[PodPeers {
+                from: "Deployment/checkout/checkout".into(),
+                peers: vec![peer("10.1.0.9", 8080, 2)],
+            }],
+        );
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
+    }
+
+    #[test]
+    fn a_connection_to_something_not_drawn_is_dropped() {
+        // Every pod talks to the API server and to CoreDNS. Putting a node on
+        // the diagram for each would bury the namespace a reader asked about.
+        let mut g = demo_graph();
+        let book = AddressBook::new(&[], &[], &g.nodes);
+        apply_connections(
+            &mut g,
+            &book,
+            &[PodPeers {
+                from: "Deployment/checkout/checkout".into(),
+                peers: vec![peer("10.96.0.1", 443, 3)],
+            }],
+        );
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls));
     }
 
     #[test]
