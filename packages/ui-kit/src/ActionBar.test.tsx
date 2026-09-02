@@ -300,8 +300,11 @@ describe("ActionBar — an action that confirms", () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
     });
     expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
-    // The spoken half — a glyph swap alone reaches nobody using a screen reader.
-    expect(screen.getByRole("status").textContent).toBe("Copied to clipboard");
+    // The word IS the confirmation, and it is the accessible name too — no live
+    // region beside it saying the same thing again. A button reading "Copied"
+    // under the name "Copy as kubectl" is a visible word missing from its own
+    // name, which is what WCAG 2.5.3 forbids. (#413 review)
+    expect(screen.queryByRole("status")).toBeNull();
 
     await act(async () => {
       vi.advanceTimersByTime(1400);
@@ -319,7 +322,7 @@ describe("ActionBar — an action that confirms", () => {
     });
     expect(screen.queryByRole("button", { name: "Copied" })).toBeNull();
     expect(screen.getByRole("button", { name: "Copy as kubectl failed" })).toBeDefined();
-    expect(screen.getByRole("status").textContent).toBe("Could not copy to clipboard");
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("leaves an action with no confirmLabel exactly as it was", async () => {
@@ -334,6 +337,63 @@ describe("ActionBar — an action that confirms", () => {
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Restart" })).toBeDefined();
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  // The blocker #413's review found. Whether an action is on the bar or behind
+  // the overflow is decided by how many actions come before it, so a
+  // confirmation only the bar could draw appeared or did not depending on the
+  // kind — "Copy as kubectl" is fifth in the row menu's order, so on a Pod's
+  // peek footer (max 2) it is in the menu, and that is the exact click #410
+  // reports.
+  describe("from the overflow menu", () => {
+    const fiveWithCopyLast = (onSelect: ActionBarAction["onSelect"]): ActionBarAction[] => [
+      action("Follow logs"),
+      action("Open shell"),
+      action("Port forward"),
+      action("Edit"),
+      { id: "copy", label: "Copy as kubectl", confirmLabel: "Copied", onSelect },
+    ];
+
+    it("confirms on the row, where the bar never reached", async () => {
+      render(<ActionBar actions={fiveWithCopyLast(() => true)} label="Pod actions" max={2} />);
+      await openMenu();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+      });
+      expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
+    });
+
+    // The menu has to outlive the pick for the row to have anywhere to say it.
+    it("holds the menu open while it is confirming, then closes it", async () => {
+      render(<ActionBar actions={fiveWithCopyLast(() => true)} label="Pod actions" max={2} />);
+      // Opened BEFORE the clock is frozen: `openMenu` drives `userEvent`, whose
+      // pointer sequence runs on the very timers this test goes on to hold
+      // still, and it waits forever for a menu it is itself preventing.
+      await openMenu();
+      vi.useFakeTimers();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+      });
+      expect(screen.getByRole("dialog")).toBeDefined();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("never says the confirm word from the menu either when the copy fails", async () => {
+      render(<ActionBar actions={fiveWithCopyLast(() => false)} label="Pod actions" max={2} />);
+      await openMenu();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+      });
+      expect(screen.queryByRole("button", { name: "Copied" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Copy as kubectl failed" })).toBeDefined();
+    });
   });
 
   // Two buttons, one confirmation: copying must not flash "Copied" on Restart.

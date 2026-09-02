@@ -14,8 +14,17 @@ import { notify } from "./notify";
  * controls there confirm on the button instead and do not rely on this.
  */
 export async function copyKubectlCommand(command: string): Promise<boolean> {
+  // Checked, not optional-chained. `await navigator.clipboard?.writeText(...)`
+  // resolves `undefined` when there is no clipboard at all, so the happy path
+  // ran on to `return true` and raised the success toast having copied nothing
+  // — the exact "Copied" over an empty clipboard this function exists to stop.
+  // `navigator.clipboard` is absent on any non-secure origin, so web mode
+  // served over plain http to anything but localhost hit it every time.
+  // `CopyCommand` and `CopyIconButton` call `writeText` unguarded and so report
+  // the failure correctly; this now agrees with them.
+  if (!navigator.clipboard) return false;
   try {
-    await navigator.clipboard?.writeText(command);
+    await navigator.clipboard.writeText(command);
     notify.success("Copied kubectl command");
     return true;
   } catch {

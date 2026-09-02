@@ -1,12 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "./Button";
-import { CopyAnnounce } from "./CopyAnnounce";
 import { cx } from "./cx";
 import type { IconComponent } from "./IconButton";
 import { Popover } from "./Popover";
 import { filled } from "./slot";
 import { toneColor } from "./tone";
-import { useCopied } from "./useCopied";
+import { useCopied, type CopyState } from "./useCopied";
 
 export interface ActionBarAction {
   /** Unique within the bar. Identifies the action, never shown. */
@@ -23,12 +22,17 @@ export interface ActionBarAction {
   disabledReason?: string;
   /**
    * Turns this into an action that answers. After `onSelect` resolves — and
-   * does not resolve `false` — the button shows this word with a check for a
+   * does not resolve `false` — the control shows this word with a check for a
    * moment, then goes back to `label`.
    *
-   * Only the bar draws it. A menu row closes on the pick, so a confirmation
-   * there would be drawn on something already gone; the point of this is the
-   * button the reader is still looking at. (#410)
+   * Drawn wherever the action landed, bar or overflow. It was the bar only at
+   * first, on the reasoning that a menu row closes on the pick and a
+   * confirmation drawn on something already gone is no confirmation — which
+   * mistook a consequence for a constraint. Whether an action sits on the bar
+   * is a matter of how many actions come before it, so "Copy as kubectl"
+   * confirmed on a ConfigMap and not on a Pod, in the same footer, for no
+   * reason the reader could see. The menu now holds still for a confirming
+   * pick instead. (#410, #413 review)
    */
   confirmLabel?: string;
   onSelect: () => void | boolean | Promise<void | boolean>;
@@ -144,38 +148,7 @@ export function ActionBar({
         >
           {(close) => (
             <div className="py-1">
-              {rest.map((a) => {
-                const blocked = filled(a.disabledReason);
-                const Icon = a.icon;
-                return (
-                  <button
-                    key={a.id}
-                    type="button"
-                    // Named explicitly: otherwise the name is computed from
-                    // everything in the row, and a blocked action would be
-                    // called "Delete No access".
-                    aria-label={a.label}
-                    aria-disabled={blocked || undefined}
-                    title={a.disabledReason}
-                    className="ns-row aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
-                    // The whole row, not just the glyph the mock tinted: on the
-                    // bar `.btn-danger` colours the label too, and a menu that
-                    // marks the same action more quietly is the inconsistency.
-                    style={a.danger ? { color: toneColor("sev") } : undefined}
-                    onClick={() => {
-                      // Left open on purpose: a menu that shuts looks like the
-                      // action was taken.
-                      if (blocked) return;
-                      close();
-                      a.onSelect();
-                    }}
-                  >
-                    {Icon && <Icon size={12} className="shrink-0" aria-hidden="true" />}
-                    <span className="flex-1 truncate">{a.label}</span>
-                    {blocked && <span className="path text-faint">{NO_ACCESS}</span>}
-                  </button>
-                );
-              })}
+              {rest.map((a) => <MenuRow key={a.id} action={a} close={close} />)}
               {filled(menuFooter) && (
                 <div data-slot="menu-footer" className="rule-t mt-1 space-y-1.5 p-1.5">
                   {menuFooter}
@@ -218,36 +191,127 @@ function CheckGlyph() {
 function BarButton({ action: a }: { action: ActionBarAction }) {
   const { state, run } = useCopied();
   const blocked = filled(a.disabledReason);
-  const confirming = filled(a.confirmLabel) && state === "copied";
-  const failed = filled(a.confirmLabel) && state === "failed";
   const Icon = a.icon;
+  const confirming = filled(a.confirmLabel) && state === "copied";
 
   return (
-    <>
-      <Button
-        type="button"
-        variant={a.danger ? "danger" : "secondary"}
-        // Not `disabled`: see the note above — the reason has to stay
-        // reachable, and a disabled button cannot be focused to read it.
-        aria-disabled={blocked || undefined}
-        title={a.disabledReason}
-        className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
-        onClick={() => {
-          if (blocked) return;
-          // Only an action that asked to confirm is awaited for its answer;
-          // every other one keeps the fire-and-forget call it had.
-          if (filled(a.confirmLabel)) void run(a.onSelect);
-          else void a.onSelect();
-        }}
-      >
-        {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
-        {confirming ? a.confirmLabel : failed ? `${a.label} failed` : a.label}
-      </Button>
-      {/* Outside the button, not inside it. A live region nested in the control
-          becomes part of the control's accessible name, so the button would be
-          called "Copied Copied to clipboard" — the announcement read back as
-          the name of the thing that made it. */}
-      {filled(a.confirmLabel) && <CopyAnnounce state={state} />}
-    </>
+    <Button
+      type="button"
+      variant={a.danger ? "danger" : "secondary"}
+      // Not `disabled`: see the note above — the reason has to stay
+      // reachable, and a disabled button cannot be focused to read it.
+      aria-disabled={blocked || undefined}
+      title={a.disabledReason}
+      className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+      onClick={() => {
+        if (blocked) return;
+        // Only an action that asked to confirm is awaited for its answer;
+        // every other one keeps the fire-and-forget call it had.
+        if (filled(a.confirmLabel)) void run(a.onSelect);
+        else void a.onSelect();
+      }}
+    >
+      {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
+      {actionWord(a, state)}
+    </Button>
+  );
+}
+
+/**
+ * What the control says right now: the confirm word, the failure, or the label.
+ *
+ * One function for the bar and the menu so the two cannot drift, and it feeds
+ * the accessible name as well as the visible text. That pairing is the point.
+ * An earlier draft left the name pinned to `label` and put the outcome in a
+ * live region beside it, which gave a screen reader the news twice and left the
+ * button reading "Copied" under a name of "Copy as kubectl" — a visible word
+ * that is not in the accessible name, which is the failure WCAG 2.5.3 is about
+ * and which strands anyone driving the app by voice. A control with a word in
+ * it confirms with that word; {@link CopyAnnounce} is for the icon-only
+ * controls that have no word to change. (#413 review)
+ */
+function actionWord(a: ActionBarAction, state: CopyState): string {
+  // `filled` answers "is there a word here", including the whitespace-only case
+  // the rest of the kit treats as nothing; the `undefined` half is spelt out
+  // beside it because `filled` returns a plain boolean and narrows nothing.
+  const confirm = a.confirmLabel;
+  if (confirm === undefined || !filled(confirm)) return a.label;
+  if (state === "copied") return confirm;
+  if (state === "failed") return `${a.label} failed`;
+  return a.label;
+}
+
+/**
+ * One row of the overflow menu.
+ *
+ * Its own component for the same reason {@link BarButton} is: an action that
+ * confirms needs state, and a hook cannot live in a map.
+ *
+ * **A confirming pick does not shut the menu.** A row that runs and vanishes
+ * takes its own answer with it, which is why "Copy as kubectl" confirmed
+ * nothing on a Pod: the peek's footer keeps two actions on the bar, Copy is
+ * fifth in the row menu's order, and everything past the second is here. It
+ * worked on a ConfigMap, which has no logs or shell or forward ahead of it, so
+ * the confirmation appeared or did not depending on the kind — in the same
+ * footer, for no reason the reader could see. The row now holds still, swaps to
+ * a check and the confirm word, and the menu closes when the confirmation is
+ * spent. Every other row keeps the immediate close it had. (#410, #413 review)
+ */
+function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => void }) {
+  const { state, run } = useCopied();
+  const blocked = filled(a.disabledReason);
+  const confirms = filled(a.confirmLabel);
+  const confirming = confirms && state === "copied";
+  const Icon = a.icon;
+  const word = actionWord(a, state);
+
+  // Closed on the way back to idle rather than on a timer of its own, so the
+  // menu and the word it is showing are governed by one clock: however long the
+  // confirmation is worth looking at is exactly how long the menu is worth
+  // holding open. `answered` is what tells the first idle — the state every row
+  // mounts in — from the one the confirmation expires into.
+  const answered = useRef(false);
+  useEffect(() => {
+    if (state !== "idle") {
+      answered.current = true;
+    } else if (answered.current) {
+      answered.current = false;
+      close();
+    }
+  }, [state, close]);
+
+  return (
+    <button
+      type="button"
+      // Named explicitly: otherwise the name is computed from everything in the
+      // row, and a blocked action would be called "Delete No access". It
+      // tracks the visible word rather than pinning to `label`, so the name and
+      // the text never disagree — see {@link actionWord}.
+      aria-label={word}
+      aria-disabled={blocked || undefined}
+      title={a.disabledReason}
+      className="ns-row aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+      // The whole row, not just the glyph the mock tinted: on the bar
+      // `.btn-danger` colours the label too, and a menu that marks the same
+      // action more quietly is the inconsistency.
+      style={a.danger ? { color: toneColor("sev") } : undefined}
+      onClick={() => {
+        // Left open on purpose: a menu that shuts looks like the action was
+        // taken.
+        if (blocked) return;
+        // An action that answers keeps the menu until it has answered; see
+        // above. Everything else closes on the pick, as it always did.
+        if (confirms) {
+          void run(a.onSelect);
+          return;
+        }
+        close();
+        a.onSelect();
+      }}
+    >
+      {confirming ? <CheckGlyph /> : Icon && <Icon size={12} className="shrink-0" aria-hidden="true" />}
+      <span className="flex-1 truncate">{word}</span>
+      {blocked && <span className="path text-faint">{NO_ACCESS}</span>}
+    </button>
   );
 }

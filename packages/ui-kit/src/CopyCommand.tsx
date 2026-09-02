@@ -1,5 +1,4 @@
 import { Button } from "./Button";
-import { CopyAnnounce } from "./CopyAnnounce";
 import { cx } from "./cx";
 import { useCopied } from "./useCopied";
 
@@ -75,6 +74,11 @@ function CheckGlyph() {
  * what makes "Copied" land as confirmation rather than as the button's new
  * name. The button's accessible name is its own visible text — no `aria-label`
  * over the top of it, which would be a second string saying the same thing.
+ *
+ * And no live region beside it either. A control with a word in it confirms
+ * with that word, once; {@link CopyAnnounce} is for the icon-only controls that
+ * have no word to change. A draft of #410 gave this one both, which told a
+ * screen reader the same news twice. (#413 review)
  */
 export function CopyCommand({ command, className }: CopyCommandProps) {
   // The state, the timer and the never-say-Copied-on-failure rule are the
@@ -100,7 +104,6 @@ export function CopyCommand({ command, className }: CopyCommandProps) {
             again. */}
         {copied ? "Copied" : state === "failed" ? "Copy failed" : "Copy"}
       </Button>
-      <CopyAnnounce state={state} />
     </div>
   );
 }

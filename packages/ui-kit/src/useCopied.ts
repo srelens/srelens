@@ -30,12 +30,20 @@ export type CopyState = "idle" | "copied" | "failed";
  * to draw, not a signal to swallow — the whole complaint that started this was
  * a copy that reported into a void.
  *
- * The reset is keyed on a counter rather than on the state alone, and that is
- * load-bearing: clicking a second time while "Copied" is still up sets the same
- * state value, React bails out of an identical update, the effect never re-runs
- * and the original timer keeps running — so the confirmation for the second
- * click would vanish early, on the first click's schedule. The counter makes
- * every copy a distinct value, so the window restarts.
+ * **The state is held in an object, and that wrapper is load-bearing.** Clicking
+ * a second time while "Copied" is still up records the same `CopyState` value;
+ * as a bare `useState<CopyState>` React bails out of the identical update, the
+ * effect never re-runs, the first click's timer keeps running, and the second
+ * confirmation vanishes early on the first one's schedule. A fresh object every
+ * time is never equal to the last, so the effect re-runs and the window
+ * restarts. Turning this back into `useState<CopyState>` reintroduces the bug;
+ * "restarts the window on a rapid second copy rather than expiring early", in
+ * this module's tests, is the guard that catches it.
+ *
+ * An earlier draft carried a `seq` counter here and credited it with that,
+ * which was wrong — the object literal did the work either way, so the counter
+ * could be frozen with the suite still green. It is gone rather than left as a
+ * comment describing a mechanism that was not the one running. (#413 review)
  *
  * The timer is cleared by the effect's own cleanup, so a control unmounted
  * mid-confirmation — the peek closing while "Copied" is up — leaves nothing
@@ -46,12 +54,14 @@ export function useCopied(ms: number = COPIED_MS): {
   /** Runs a copy and records what happened. Never rejects. */
   run: (copy: () => unknown | Promise<unknown>) => Promise<void>;
 } {
-  // `seq` distinguishes two copies that landed on the same state — see above.
-  const [result, setResult] = useState<{ state: CopyState; seq: number }>({ state: "idle", seq: 0 });
+  // An object, not a bare `CopyState`: a new one every time is what keeps two
+  // copies that landed on the same state from being folded into one update —
+  // see above.
+  const [result, setResult] = useState<{ state: CopyState }>({ state: "idle" });
 
   useEffect(() => {
     if (result.state === "idle") return;
-    const timer = setTimeout(() => setResult((r) => ({ state: "idle", seq: r.seq })), ms);
+    const timer = setTimeout(() => setResult({ state: "idle" }), ms);
     return () => clearTimeout(timer);
   }, [result, ms]);
 
@@ -64,7 +74,7 @@ export function useCopied(ms: number = COPIED_MS): {
     } catch {
       state = "failed";
     }
-    setResult((r) => ({ state, seq: r.seq + 1 }));
+    setResult({ state });
   }
 
   return { state: result.state, run };

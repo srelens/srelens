@@ -39,11 +39,18 @@ export interface CopyIconButtonProps {
  * confirm dialog. Both draw their state from {@link useCopied}, so the delay and
  * the never-say-Copied-on-failure rule are written once. (#410)
  *
- * **The name changes with the glyph.** A button drawn as a check but still named
- * "Copy address for web-0" is the version a screen-reader user is handed, and it
- * is the wrong one. The spoken confirmation is {@link CopyAnnounce}'s, because a
- * name that changes under a button the reader has just pressed is not reliably
- * announced on its own.
+ * **The name does not change; the live region speaks instead.** There is no
+ * visible word here to carry the outcome, so {@link CopyAnnounce} carries it —
+ * and the button stays called what it does. Renaming it to "Copied" was the
+ * first draft, and it is the wrong half of the choice twice over: the name of
+ * the control under the reader's own click changes, and the announcement
+ * arrives as well, so the news is delivered twice. This is the same split
+ * `CopyButton` makes for its icon-only form. (#413 review)
+ *
+ * The outcome also rides along as the tooltip, which is the only place a
+ * sighted user can be told that a copy FAILED on a control with no word in it —
+ * a check that never appears is not a message. `title` is a description, not a
+ * name, so it does not disturb the one above it.
  */
 export function CopyIconButton({ icon, label, onCopy, className }: CopyIconButtonProps) {
   const { state, run } = useCopied();
@@ -51,7 +58,8 @@ export function CopyIconButton({ icon, label, onCopy, className }: CopyIconButto
     <>
       <IconButton
         icon={state === "copied" ? CheckGlyph : icon}
-        label={state === "copied" ? "Copied" : state === "failed" ? `${label} — failed` : label}
+        label={label}
+        title={state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : undefined}
         className={state === "copied" ? `copy-ok ${className ?? ""}`.trim() : className}
         onClick={() => void run(onCopy)}
       />

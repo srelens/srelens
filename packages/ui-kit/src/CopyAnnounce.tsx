@@ -8,9 +8,18 @@ const WORD: Record<Exclude<CopyState, "idle">, string> = {
 /**
  * Says out loud what a copy control only shows.
  *
- * A control that swaps a glyph and a word tells a sighted reader it worked and
- * tells a screen-reader user nothing: the change is a repaint, and a name that
- * changes under a button the reader has just activated is not reliably spoken.
+ * **For the controls with no word to change.** A control that swaps a glyph and
+ * nothing else tells a sighted reader it worked and tells a screen-reader user
+ * nothing: the change is a repaint. A control that swaps a WORD does not need
+ * this — it already says what happened, its accessible name is that same word,
+ * and a live region beside it delivers the news a second time. So exactly one
+ * of the two per control: {@link CopyIconButton} announces here, while
+ * {@link CopyCommand} and a confirming {@link ActionBar} action speak in their
+ * own text. Pinning a name to the action and announcing separately is the other
+ * consistent answer, and it is the one this kit does NOT take where there is a
+ * visible word, because a button reading "Copied" under the name "Copy as
+ * kubectl" is a word not in its own name — what WCAG 2.5.3 is about, and what
+ * strands anyone driving the app by voice. (#413 review)
  *
  * `role="status"` and nothing else. It carries `aria-live="polite"` implicitly,
  * and the kit's {@link Toast} already settled that writing both is the same

@@ -792,7 +792,9 @@ export function Gallery() {
             to print what is being copied — a table row's trailing column. Both
             take their timing and their never-say-Copied-on-failure rule from
             `useCopied`. Click it: the glyph becomes a check and the name
-            becomes "Copied" for 1.4s. */}
+            becomes a check for 1.4s. The NAME stays put — there is no word here
+            to change, so the outcome is spoken by the live region below and
+            shown as the tooltip. */}
         <div className="flex items-center gap-2">
           <CopyIconButton
             icon={GalleryCopyGlyph}
@@ -811,7 +813,8 @@ export function Gallery() {
             can claim every export. */}
         <p className="text-[0.75rem] text-muted">
           A visually hidden <code className="code">role=&quot;status&quot;</code> region — the spoken
-          half of the copy controls. <CopyAnnounce state="copied" />
+          half of the icon-only copy controls, which have no visible word to
+          carry the outcome themselves. <CopyAnnounce state="copied" />
         </p>
       </section>
 
