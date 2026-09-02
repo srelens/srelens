@@ -1165,10 +1165,24 @@ impl App {
                     return;
                 }
                 match key.code {
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(2),
+                    // Navigation & Scrolling
+                    KeyCode::Up => ai.scroll_up(2),
+                    KeyCode::Down => ai.scroll_down(2),
+                    KeyCode::PageUp => ai.scroll_up(10),
+                    KeyCode::PageDown => ai.scroll_down(10),
+                    KeyCode::Home => ai.scroll_to_top(),
+                    KeyCode::End => ai.scroll_to_bottom(),
                     KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(2),
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(2),
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(10),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(10),
+
+                    // Editing & Input
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         delete_prev_word(&mut ai.input);
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        ai.input.clear();
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                         ai.input.push(c);

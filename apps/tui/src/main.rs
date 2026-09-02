@@ -221,7 +221,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::Key(key) => {
                     app.handle_key_event(key).await;
                 }
-                AppEvent::Mouse(_) => {}
+                AppEvent::Mouse(mouse) => {
+                    use crossterm::event::MouseEventKind;
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                ai.scroll_up(3);
+                            } else if let app::ActiveView::Logs(logs) = &mut app.active_view {
+                                logs.scroll_up(3);
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                ai.scroll_down(3);
+                            } else if let app::ActiveView::Logs(logs) = &mut app.active_view {
+                                logs.scroll_down(3);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 AppEvent::Resize(_, _) => {}
                 AppEvent::Tick => {
                     app.handle_tick();

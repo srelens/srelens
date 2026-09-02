@@ -19,6 +19,8 @@ pub fn current_timestamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
+use std::cell::Cell;
+
 pub struct AssistantViewState {
     pub messages: Vec<ChatMessage>,
     pub input: String,
@@ -27,6 +29,9 @@ pub struct AssistantViewState {
     pub busy_start: Option<std::time::Instant>,
     pub spinner_frame: usize,
     pub scroll_offset: usize,
+    pub auto_scroll: bool,
+    pub last_max_scroll: Cell<usize>,
+    pub last_total_lines: Cell<usize>,
 }
 
 impl AssistantViewState {
@@ -43,6 +48,9 @@ impl AssistantViewState {
             busy_start: None,
             spinner_frame: 0,
             scroll_offset: 0,
+            auto_scroll: true,
+            last_max_scroll: Cell::new(0),
+            last_total_lines: Cell::new(0),
         }
     }
 
@@ -57,6 +65,8 @@ impl AssistantViewState {
         self.busy_status = "Consulting AI provider & cluster state...".to_string();
         self.busy_start = Some(std::time::Instant::now());
         self.spinner_frame = 0;
+        self.auto_scroll = true;
+        self.scroll_offset = self.last_max_scroll.get();
     }
 
     pub fn add_user_message(&mut self, text: String) {
@@ -71,6 +81,8 @@ impl AssistantViewState {
         });
         self.is_busy = false;
         self.busy_start = None;
+        self.auto_scroll = true;
+        self.scroll_offset = self.last_max_scroll.get();
     }
 
     pub fn append_stream_chunk(&mut self, chunk: &str) {
@@ -102,12 +114,39 @@ impl AssistantViewState {
         }
     }
 
-    pub fn scroll_down(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(n);
+    pub fn scroll_up(&mut self, n: usize) {
+        let max_scroll = self.last_max_scroll.get();
+        let current = if self.auto_scroll {
+            max_scroll
+        } else {
+            self.scroll_offset.min(max_scroll)
+        };
+        self.scroll_offset = current.saturating_sub(n);
+        self.auto_scroll = false;
     }
 
-    pub fn scroll_up(&mut self, n: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    pub fn scroll_down(&mut self, n: usize) {
+        let max_scroll = self.last_max_scroll.get();
+        if self.auto_scroll {
+            return;
+        }
+        let next = self.scroll_offset.saturating_add(n);
+        if next >= max_scroll {
+            self.scroll_offset = max_scroll;
+            self.auto_scroll = true;
+        } else {
+            self.scroll_offset = next;
+        }
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.auto_scroll = false;
+        self.scroll_offset = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_scroll = true;
+        self.scroll_offset = self.last_max_scroll.get();
     }
 }
 
@@ -191,16 +230,33 @@ pub fn render_assistant_view(
         ]));
     }
 
+    let total_lines = rendered_lines.len();
+    let viewport_height = chunks[0].height as usize;
+    let max_scroll = total_lines.saturating_sub(viewport_height);
+    state.last_max_scroll.set(max_scroll);
+    state.last_total_lines.set(total_lines);
+
+    let effective_scroll = if state.auto_scroll {
+        max_scroll
+    } else {
+        state.scroll_offset.min(max_scroll)
+    };
+
     let history_widget = Paragraph::new(rendered_lines)
         .wrap(Wrap { trim: false })
-        .scroll((state.scroll_offset as u16, 0));
+        .scroll((effective_scroll as u16, 0));
     f.render_widget(history_widget, chunks[0]);
 
     // 2. Input box
+    let input_title = if !state.auto_scroll && effective_scroll < max_scroll {
+        format!(" Ask Assistant (<End> Follow bottom, ↑/↓ Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
+    } else {
+        " Ask Assistant (<Ctrl+w> Rubout, <Ctrl+s> Settings, ↑/↓ Scroll) ".to_string()
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::CYAN))
-        .title(" Ask Assistant (<Ctrl+w> Rubout, <Ctrl+s> Settings) ");
+        .title(input_title);
     let input_widget = Paragraph::new(format!("{}█", state.input))
         .block(input_block);
     f.render_widget(input_widget, chunks[1]);

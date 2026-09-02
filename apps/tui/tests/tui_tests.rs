@@ -493,4 +493,52 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
         assert!(matches!(app.active_view, ActiveView::Settings(_)));
     }
+
+    #[tokio::test]
+    async fn test_assistant_scrolling_and_auto_follow() {
+        use srelens_tui::views::assistant_view::AssistantViewState;
+
+        let mut ai = AssistantViewState::new();
+        // Set last_max_scroll to 50
+        ai.last_max_scroll.set(50);
+        ai.last_total_lines.set(75);
+        assert!(ai.auto_scroll);
+
+        // 1. Scrolling up disengages auto_scroll and scrolls up from bottom
+        ai.scroll_up(5);
+        assert!(!ai.auto_scroll);
+        assert_eq!(ai.scroll_offset, 45);
+
+        // Scroll up more
+        ai.scroll_up(10);
+        assert_eq!(ai.scroll_offset, 35);
+
+        // 2. Scroll to top
+        ai.scroll_to_top();
+        assert_eq!(ai.scroll_offset, 0);
+        assert!(!ai.auto_scroll);
+
+        // 3. Scroll down
+        ai.scroll_down(20);
+        assert_eq!(ai.scroll_offset, 20);
+        assert!(!ai.auto_scroll);
+
+        // Scroll down past max_scroll re-engages auto_scroll
+        ai.scroll_down(40);
+        assert_eq!(ai.scroll_offset, 50);
+        assert!(ai.auto_scroll);
+
+        // 4. scroll_to_bottom re-engages auto_scroll
+        ai.scroll_up(10);
+        assert!(!ai.auto_scroll);
+        ai.scroll_to_bottom();
+        assert!(ai.auto_scroll);
+        assert_eq!(ai.scroll_offset, 50);
+
+        // 5. Sending new message re-engages auto_scroll
+        ai.scroll_up(15);
+        assert!(!ai.auto_scroll);
+        ai.start_turn("new question".to_string());
+        assert!(ai.auto_scroll);
+    }
 }
