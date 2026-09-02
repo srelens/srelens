@@ -1378,7 +1378,7 @@ impl App {
                         return;
                     }
                 }
-                if (key.code == KeyCode::Tab || key.code == KeyCode::Char('t')) && (key.modifiers.contains(KeyModifiers::CONTROL) || key.code == KeyCode::Tab) {
+                if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     ai.toggle_tools_expansion();
                     return;
                 }
@@ -1552,6 +1552,13 @@ impl App {
                 let screen_row = mouse.row.saturating_sub(vp.y) as usize;
                 let screen_col = mouse.column.saturating_sub(vp.x) as usize;
                 let line_idx = self.assistant_state.scroll_offset + screen_row;
+
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if self.assistant_state.tool_chip_lines.borrow().contains(&line_idx) {
+                        self.assistant_state.toggle_tools_expansion();
+                        return;
+                    }
+                }
 
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
@@ -2416,16 +2423,22 @@ pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String
 }
 
 pub(crate) fn extract_usage_metrics(v: &serde_json::Value) -> Option<(usize, usize, usize, usize, Option<u64>)> {
-    let usage = v.get("usage")?;
+    let usage = v.get("usage")
+        .or_else(|| v.get("model_usage"))
+        .or_else(|| v.get("token_usage"))
+        .or_else(|| v.get("tokens"))?;
+
     let prompt = usage.get("inputTokens")
         .or_else(|| usage.get("prompt_tokens"))
         .or_else(|| usage.get("input_tokens"))
+        .or_else(|| usage.get("promptTokens"))
         .and_then(|n| n.as_u64())
         .unwrap_or(0) as usize;
 
     let completion = usage.get("outputTokens")
         .or_else(|| usage.get("completion_tokens"))
         .or_else(|| usage.get("output_tokens"))
+        .or_else(|| usage.get("completionTokens"))
         .and_then(|n| n.as_u64())
         .unwrap_or(0) as usize;
 
@@ -2435,9 +2448,16 @@ pub(crate) fn extract_usage_metrics(v: &serde_json::Value) -> Option<(usize, usi
         .and_then(|n| n.as_u64())
         .unwrap_or(0) as usize;
 
-    let total = prompt + completion;
+    let total = usage.get("totalTokens")
+        .or_else(|| usage.get("total_tokens"))
+        .and_then(|n| n.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(prompt + completion);
+
     let duration = v.get("duration_ms")
         .or_else(|| v.get("durationMs"))
+        .or_else(|| usage.get("duration_ms"))
+        .or_else(|| usage.get("durationMs"))
         .and_then(|n| n.as_u64());
 
     Some((prompt, completion, cached, total, duration))

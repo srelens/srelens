@@ -430,6 +430,9 @@ pub async fn run_boxed_cursor_turn(
     cmd.stderr(std::process::Stdio::piped());
 
     // 5. Spawn and stream results
+    let mut total_output_chars: usize = 0;
+    let mut has_emitted_usage = false;
+
     match cmd.spawn() {
         Ok(mut child) => {
             if let Some(stdout) = child.stdout.take() {
@@ -438,6 +441,16 @@ pub async fn run_boxed_cursor_turn(
                 while let Ok(Some(line)) = reader.next_line().await {
                     let trimmed = line.trim();
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) = crate::app::extract_usage_metrics(&v) {
+                            let dur_val = dur_t.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
+                            let payload = format!("{}|{}|{}|{}|{}", prompt_t, comp_t, cached_t, total_t, dur_val);
+                            let _ = event_tx.send(AppEvent::ActionResult {
+                                title: "ai_usage".to_string(),
+                                result: Ok(payload),
+                            });
+                            has_emitted_usage = true;
+                        }
+
                         if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
                             if t == "thinking" {
                                 let _ = event_tx.send(AppEvent::ActionResult {
@@ -466,15 +479,6 @@ pub async fn run_boxed_cursor_turn(
                                         });
                                     }
                                 }
-                            } else if t == "result" {
-                                if let Some((prompt, comp, cached, total, dur)) = crate::app::extract_usage_metrics(&v) {
-                                    let dur_val = dur.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
-                                    let payload = format!("{}|{}|{}|{}|{}", prompt, comp, cached, total, dur_val);
-                                    let _ = event_tx.send(AppEvent::ActionResult {
-                                        title: "ai_usage".to_string(),
-                                        result: Ok(payload),
-                                    });
-                                }
                             }
                         }
                     }
@@ -483,6 +487,7 @@ pub async fn run_boxed_cursor_turn(
                     for ev in events {
                         match ev {
                             srelens_agent::event::AgentEvent::TextDelta { text } => {
+                                total_output_chars += text.len();
                                 let _ = event_tx.send(AppEvent::ActionResult {
                                     title: "ai_chunk".to_string(),
                                     result: Ok(text),
@@ -501,6 +506,17 @@ pub async fn run_boxed_cursor_turn(
             }
             let _ = child.wait().await;
             let _ = shutdown_tx.send(());
+            if !has_emitted_usage {
+                let dur_val = start_time.elapsed().as_millis() as u64;
+                let prompt_est = (prompt_with_context.len() + 500) / 4;
+                let comp_est = (total_output_chars / 4).max(1);
+                let total_est = prompt_est + comp_est;
+                let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, dur_val);
+                let _ = event_tx.send(AppEvent::ActionResult {
+                    title: "ai_usage".to_string(),
+                    result: Ok(payload),
+                });
+            }
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: "ai_done".to_string(),
                 result: Ok(String::new()),

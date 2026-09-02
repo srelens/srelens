@@ -1274,4 +1274,93 @@ mod tests {
         assert_eq!(app.show_help, false);
         assert_eq!(app.assistant_state.input, "how to fix?");
     }
+
+    #[tokio::test]
+    async fn test_assistant_mouse_click_tool_chip_and_tab_view_toggle() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use ratatui::layout::Rect;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "kind-dev".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Assistant,
+            nav_stack: vec![ActiveView::Table(ResourceTableState::new(ResourceKind::Nodes))],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // Set viewport and simulate tool chip line at index 2
+        app.assistant_state.last_viewport_rect.set(Rect { x: 0, y: 0, width: 80, height: 24 });
+        app.assistant_state.tool_chip_lines.borrow_mut().push(2);
+
+        // 1. Left clicking on row 2 toggles expand_tools!
+        assert_eq!(app.assistant_state.expand_tools, false);
+        let click_chip = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(click_chip);
+        assert_eq!(app.assistant_state.expand_tools, true);
+
+        // Clicking again collapses it
+        app.handle_mouse(click_chip);
+        assert_eq!(app.assistant_state.expand_tools, false);
+
+        // 2. Ctrl+t also toggles expand_tools
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)).await;
+        assert_eq!(app.assistant_state.expand_tools, true);
+
+        // 3. Pressing Tab toggles back to previous view (Nodes)!
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
+    }
 }

@@ -117,6 +117,7 @@ pub struct AssistantViewState {
     pub is_selecting: bool,
     pub last_viewport_rect: Cell<Rect>,
     pub plain_lines: RefCell<Vec<String>>,
+    pub tool_chip_lines: RefCell<Vec<usize>>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -154,6 +155,7 @@ impl AssistantViewState {
             is_selecting: false,
             last_viewport_rect: Cell::new(Rect::default()),
             plain_lines: RefCell::new(Vec::new()),
+            tool_chip_lines: RefCell::new(Vec::new()),
         }
     }
 
@@ -385,10 +387,8 @@ impl AssistantViewState {
     }
 
     pub fn set_token_usage(&mut self, usage: TokenUsage) {
-        if let Some(last) = self.messages.last_mut() {
-            if last.role == "assistant" {
-                last.token_usage = Some(usage);
-            }
+        if let Some(last_asst) = self.messages.iter_mut().rev().find(|m| m.role == "assistant") {
+            last_asst.token_usage = Some(usage);
         }
     }
 
@@ -605,11 +605,14 @@ pub fn render_assistant_view(
     let prov = settings.default_provider;
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
-    let tools_hint = if state.expand_tools { "<Tab> Fold Tools" } else { "<Tab> Tools" };
+    let token_hint = state.messages.iter().rev().find_map(|m| m.token_usage.as_ref()).map(|u| {
+        format!("⚡ {} tokens, ", format_number(u.total_tokens))
+    }).unwrap_or_default();
+    let tools_hint = if state.expand_tools { "<Ctrl+t> Fold Tools" } else { "<Ctrl+t> Tools" };
     let copy_hint = if state.selection.is_some() { "<c> Copy Selection" } else { "<c> Copy" };
     let title = format!(
-        " SRElens AI Assistant [{} - {}] [{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        prov_name, model, copy_hint, tools_hint
+        " SRElens AI Assistant [{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
+        prov_name, model, token_hint, copy_hint, tools_hint
     );
 
     let block = Block::default()
@@ -630,6 +633,7 @@ pub fn render_assistant_view(
         .split(inner);
 
     // 1. Message history
+    state.tool_chip_lines.borrow_mut().clear();
     let mut rendered_lines = Vec::new();
     for msg in &state.messages {
         let (role_label, role_style) = match msg.role.as_str() {
@@ -692,6 +696,9 @@ pub fn render_assistant_view(
                 .collect();
             let summary_str = summary_list.join(", ");
 
+            let chip_line_idx = rendered_lines.len();
+            state.tool_chip_lines.borrow_mut().push(chip_line_idx);
+
             if !state.expand_tools {
                 // Collapsed mode: sleek 1-line chip
                 rendered_lines.push(Line::from(vec![
@@ -699,13 +706,14 @@ pub fn render_assistant_view(
                     Span::styled(format!("{} tools queried: ", total_tools), Style::default().fg(Theme::DIM)),
                     Span::styled(summary_str, Style::default().fg(Theme::ACCENT)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
-                    Span::styled("  (<Tab> to expand)", Style::default().fg(Theme::DIM)),
+                    Span::styled("  (click or <Ctrl+t> to expand)", Style::default().fg(Theme::DIM)),
                 ]));
+                rendered_lines.push(Line::from(""));
             } else {
                 // Expanded mode: header + compact 1-line chips per tool
                 rendered_lines.push(Line::from(vec![
                     Span::styled("  ▼ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{} tools queried (<Tab> to collapse):", total_tools), Style::default().fg(Theme::DIM)),
+                    Span::styled(format!("{} tools queried (click or <Ctrl+t> to collapse):", total_tools), Style::default().fg(Theme::DIM)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
                 ]));
 
@@ -735,6 +743,7 @@ pub fn render_assistant_view(
 
                     rendered_lines.push(Line::from(spans));
                 }
+                rendered_lines.push(Line::from(""));
             }
         }
 
@@ -845,7 +854,8 @@ pub fn render_assistant_view(
 
     let history_widget = Paragraph::new(rendered_lines)
         .wrap(Wrap { trim: false })
-        .scroll((effective_scroll as u16, 0));
+        .scroll((effective_scroll as u16, 0))
+        .block(Block::default().padding(ratatui::widgets::Padding::new(1, 1, 0, 0)));
     f.render_widget(history_widget, chunks[0]);
 
     // 2. Input box
@@ -1274,8 +1284,7 @@ fn render_text_line(out: &mut Vec<Line<'static>>, line: &str) {
         return;
     }
     let normalized = ensure_spacing_after_periods(line);
-    let mut spans = vec![Span::raw("  ")];
-    spans.extend(parse_inline_markdown(&normalized));
+    let spans = parse_inline_markdown(&normalized);
     out.push(Line::from(spans));
 }
 
