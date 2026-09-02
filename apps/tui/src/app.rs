@@ -87,6 +87,27 @@ pub enum SuspendAction {
     NodeShell { node: String },
 }
 
+/// Deletes the preceding word from a string buffer, matching Unix readline / k9s / vim `<Ctrl+w>`.
+/// Strips trailing whitespace, then removes non-whitespace characters until the next whitespace boundary.
+pub fn delete_prev_word(s: &mut String) {
+    // 1. Pop trailing whitespace
+    while let Some(c) = s.chars().last() {
+        if c.is_whitespace() {
+            s.pop();
+        } else {
+            break;
+        }
+    }
+    // 2. Pop preceding non-whitespace word characters
+    while let Some(c) = s.chars().last() {
+        if !c.is_whitespace() {
+            s.pop();
+        } else {
+            break;
+        }
+    }
+}
+
 impl App {
     pub async fn new(
         initial_context: Option<String>,
@@ -596,11 +617,23 @@ impl App {
                             self.modal = None;
                             self.switch_namespace(String::new()).await;
                         }
+                        KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            delete_prev_word(&mut filter);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                        }
+                        KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            filter.clear();
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                        }
+                        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                            delete_prev_word(&mut filter);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                        }
                         KeyCode::Backspace => {
                             filter.pop();
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
                         }
-                        KeyCode::Char(c) => {
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                             filter.push(c);
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
                         }
@@ -670,6 +703,43 @@ impl App {
                         self.command_suggestion_idx = idx;
                     }
                 }
+                KeyCode::Char('n') | KeyCode::Char('N') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    if !suggestions.is_empty() {
+                        let idx = self.command_suggestion_idx % suggestions.len();
+                        self.command_buffer = suggestions[idx].0.name.clone();
+                        self.command_suggestion_idx = (idx + 1) % suggestions.len();
+                    }
+                }
+                KeyCode::Char('p') | KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    if !suggestions.is_empty() {
+                        let len = suggestions.len();
+                        let idx = (self.command_suggestion_idx + len - 1) % len;
+                        self.command_buffer = suggestions[idx].0.name.clone();
+                        self.command_suggestion_idx = idx;
+                    }
+                }
+                KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if self.command_buffer.is_empty() {
+                        self.input_mode = InputMode::Normal;
+                    } else {
+                        delete_prev_word(&mut self.command_buffer);
+                        self.command_suggestion_idx = 0;
+                    }
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.command_buffer.clear();
+                    self.command_suggestion_idx = 0;
+                }
+                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                    if self.command_buffer.is_empty() {
+                        self.input_mode = InputMode::Normal;
+                    } else {
+                        delete_prev_word(&mut self.command_buffer);
+                        self.command_suggestion_idx = 0;
+                    }
+                }
                 KeyCode::Backspace => {
                     self.command_buffer.pop();
                     self.command_suggestion_idx = 0;
@@ -677,7 +747,7 @@ impl App {
                         self.input_mode = InputMode::Normal;
                     }
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
                 }
@@ -699,6 +769,26 @@ impl App {
                 KeyCode::Enter => {
                     self.input_mode = InputMode::Normal;
                 }
+                KeyCode::Char('w') | KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    delete_prev_word(&mut self.filter_buffer);
+                    let filter = self.filter_buffer.clone();
+                    if let ActiveView::Table(table) = &mut self.active_view {
+                        table.apply_filter(&filter);
+                    }
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.filter_buffer.clear();
+                    if let ActiveView::Table(table) = &mut self.active_view {
+                        table.apply_filter("");
+                    }
+                }
+                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) => {
+                    delete_prev_word(&mut self.filter_buffer);
+                    let filter = self.filter_buffer.clone();
+                    if let ActiveView::Table(table) = &mut self.active_view {
+                        table.apply_filter(&filter);
+                    }
+                }
                 KeyCode::Backspace => {
                     self.filter_buffer.pop();
                     let filter = self.filter_buffer.clone();
@@ -706,7 +796,7 @@ impl App {
                         table.apply_filter(&filter);
                     }
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                     self.filter_buffer.push(c);
                     let filter = self.filter_buffer.clone();
                     if let ActiveView::Table(table) = &mut self.active_view {
@@ -1713,5 +1803,55 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
             return Ok(());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_delete_prev_word_simple() {
+        let mut s = String::from("pods");
+        delete_prev_word(&mut s);
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn test_delete_prev_word_multiple_words() {
+        let mut s = String::from("pods -n default");
+        delete_prev_word(&mut s);
+        assert_eq!(s, "pods -n ");
+
+        delete_prev_word(&mut s);
+        assert_eq!(s, "pods ");
+
+        delete_prev_word(&mut s);
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn test_delete_prev_word_with_trailing_spaces() {
+        let mut s = String::from("context my-cluster   ");
+        delete_prev_word(&mut s);
+        assert_eq!(s, "context ");
+    }
+
+    #[test]
+    fn test_delete_prev_word_empty_or_whitespace() {
+        let mut s = String::new();
+        delete_prev_word(&mut s);
+        assert_eq!(s, "");
+
+        let mut s2 = String::from("     ");
+        delete_prev_word(&mut s2);
+        assert_eq!(s2, "");
+    }
+
+    #[test]
+    fn test_delete_prev_word_crd_or_symbol_name() {
+        let mut s = String::from("crds cilium.io");
+        delete_prev_word(&mut s);
+        assert_eq!(s, "crds ");
     }
 }
