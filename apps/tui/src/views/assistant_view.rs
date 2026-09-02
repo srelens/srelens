@@ -131,8 +131,21 @@ impl AssistantViewState {
     }
 
     pub fn append_stream_chunk(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
         if let Some(last) = self.messages.last_mut() {
             if last.role == "assistant" {
+                if !last.content.is_empty() {
+                    let last_char = last.content.chars().last().unwrap();
+                    let first_char = chunk.chars().next().unwrap();
+                    // If previous content ends with punctuation (. ! ? : ;) and chunk starts without whitespace
+                    if (last_char == '.' || last_char == '!' || last_char == '?' || last_char == ':' || last_char == ';')
+                        && !first_char.is_whitespace()
+                    {
+                        last.content.push(' ');
+                    }
+                }
                 last.content.push_str(chunk);
                 return;
             }
@@ -382,6 +395,7 @@ pub fn render_assistant_view(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),    // Messages history
+            Constraint::Length(1), // Blank separator between chat history and input window
             Constraint::Length(3), // Input prompt
         ])
         .split(inner);
@@ -520,6 +534,10 @@ pub fn render_assistant_view(
         ]));
     }
 
+    // Add breathing room of two empty lines between generated text and the input window
+    rendered_lines.push(Line::from(""));
+    rendered_lines.push(Line::from(""));
+
     let total_lines = rendered_lines.len();
     let viewport_height = chunks[0].height as usize;
     let max_scroll = total_lines.saturating_sub(viewport_height);
@@ -549,7 +567,7 @@ pub fn render_assistant_view(
         .title(input_title);
     let input_widget = Paragraph::new(format!("{}█", state.input))
         .block(input_block);
-    f.render_widget(input_widget, chunks[1]);
+    f.render_widget(input_widget, chunks[2]);
 }
 
 /// Formats message text lines, detecting and rendering Markdown structures:
@@ -697,7 +715,8 @@ pub fn format_message_content(out: &mut Vec<Line<'static>>, content: &str) {
                 Span::raw(indent),
                 Span::styled(bullet_symbol, Style::default().fg(bullet_color).add_modifier(Modifier::BOLD)),
             ];
-            spans.extend(parse_inline_markdown(item_text));
+            let normalized_item = ensure_spacing_after_periods(item_text);
+            spans.extend(parse_inline_markdown(&normalized_item));
             out.push(Line::from(spans));
             i += 1;
             continue;
@@ -713,7 +732,8 @@ pub fn format_message_content(out: &mut Vec<Line<'static>>, content: &str) {
                     Span::raw(indent),
                     Span::styled(format!("{}. ", prefix), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 ];
-                spans.extend(parse_inline_markdown(item_text));
+                let normalized_item = ensure_spacing_after_periods(item_text);
+                spans.extend(parse_inline_markdown(&normalized_item));
                 out.push(Line::from(spans));
                 i += 1;
                 continue;
@@ -916,13 +936,53 @@ pub fn render_markdown_table(out: &mut Vec<Line<'static>>, header_line: &str, ro
     out.push(Line::from(bot_spans));
 }
 
+/// Ensures that sentences separated by a period have a space after the period.
+/// Handles cases where multi-part assistant outputs or separate stream blocks are concatenated without spaces (e.g. `deployed.HAMi`, `doing.ArgoCD`, `GPUs.I`).
+/// Preserves code spans within backticks (`...`), URLs, decimal numbers, and abbreviations (e.g. U.S.A.).
+pub fn ensure_spacing_after_periods(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() + 8);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut in_code_span = false;
+
+    let mut i = 0;
+    while i < len {
+        let c = chars[i];
+        if c == '`' {
+            in_code_span = !in_code_span;
+            result.push(c);
+            i += 1;
+            continue;
+        }
+
+        result.push(c);
+
+        if !in_code_span && c == '.' && i + 1 < len {
+            let next_char = chars[i + 1];
+            // If next char is an uppercase letter, and previous char is an alphabetic character
+            if next_char.is_ascii_uppercase() && i > 0 && chars[i - 1].is_alphabetic() {
+                // Check that it's not an abbreviation like U.S.A. or St.
+                let prev_prev_is_dot = i >= 2 && chars[i - 2] == '.';
+                let next_next_is_dot = i + 2 < len && chars[i + 2] == '.';
+                if !prev_prev_is_dot && !next_next_is_dot {
+                    result.push(' ');
+                }
+            }
+        }
+        i += 1;
+    }
+
+    result
+}
+
 fn render_text_line(out: &mut Vec<Line<'static>>, line: &str) {
     if line.trim().is_empty() {
         out.push(Line::from(""));
         return;
     }
+    let normalized = ensure_spacing_after_periods(line);
     let mut spans = vec![Span::raw("  ")];
-    spans.extend(parse_inline_markdown(line));
+    spans.extend(parse_inline_markdown(&normalized));
     out.push(Line::from(spans));
 }
 
@@ -1201,5 +1261,37 @@ Done.";
         state.add_assistant_message("test assistant reply".to_string());
         assert_eq!(state.messages.len(), 3);
         assert!(!state.messages[2].timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_ensure_spacing_after_periods() {
+        let input = "deployed.HAMi is running. Next doing.ArgoCD owns it. GPUs.I have";
+        let output = ensure_spacing_after_periods(input);
+        assert_eq!(output, "deployed. HAMi is running. Next doing. ArgoCD owns it. GPUs. I have");
+
+        // Code spans preserved
+        let code_input = "Use `pod.Status` to inspect.";
+        assert_eq!(ensure_spacing_after_periods(code_input), "Use `pod.Status` to inspect.");
+
+        // Domain names and versions preserved
+        let domain_input = "Visit https://srelens.io or v1.31.7 with 10.240.0.1";
+        assert_eq!(ensure_spacing_after_periods(domain_input), "Visit https://srelens.io or v1.31.7 with 10.240.0.1");
+
+        // Abbreviations preserved
+        let abbrev_input = "Made in the U.S.A. today.";
+        assert_eq!(ensure_spacing_after_periods(abbrev_input), "Made in the U.S.A. today.");
+    }
+
+    #[test]
+    fn test_append_stream_chunk_spacing() {
+        let mut state = AssistantViewState::new();
+        state.add_user_message("check cluster".to_string());
+        state.append_stream_chunk("I'll query the cluster and how it's deployed.");
+        // Appending chunk starting with capital letter after a period adds space
+        state.append_stream_chunk("HAMi is running in hami-system.");
+        assert_eq!(
+            state.messages.last().unwrap().content,
+            "I'll query the cluster and how it's deployed. HAMi is running in hami-system."
+        );
     }
 }
