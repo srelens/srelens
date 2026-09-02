@@ -6,8 +6,10 @@ import React from "react";
 // and a stub window so we can assert tab-close vs. window-close behavior.
 const tauri = vi.hoisted(() => {
   const handlers = new Map<string, (e: { payload: unknown }) => void>();
-  const windowClose = vi.fn();
-  const windowDestroy = vi.fn();
+  // Promise-returning, like the real commands: the close path chains a
+  // `.catch()` onto destroy(), which a bare vi.fn() would make explode.
+  const windowClose = vi.fn(() => Promise.resolve());
+  const windowDestroy = vi.fn(() => Promise.resolve());
   return {
     handlers,
     windowClose,
@@ -348,6 +350,30 @@ describe("App", () => {
     // write has drained — close() would re-enter this handler and loop.
     expect(preventDefault).toHaveBeenCalled();
     expect(tauri.windowDestroy).toHaveBeenCalled();
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  it("still closes when destroy() is refused, rather than wedging the window (#425)", async () => {
+    // `core:window:allow-destroy` was never granted, so the destroy that
+    // re-issues the cancelled close was rejected by the ACL and nothing closed
+    // the window: the macOS red traffic light did nothing, and only Cmd+Q —
+    // which quits without reaching this handler — could shut the app down.
+    // The grant is the fix; this is the belt, because any rejection here has
+    // the same cost, and losing a flush is cheaper than losing the quit.
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    tauri.windowDestroy.mockClear().mockRejectedValueOnce(new Error("window.destroy not allowed"));
+    tauri.windowClose.mockClear();
+    render(<App />);
+
+    expect(tauri.closeRequestedHandler).toBeTypeOf("function");
+    await tauri.closeRequestedHandler!({ preventDefault: vi.fn() });
+    expect(tauri.windowClose).toHaveBeenCalled();
+
+    // close() re-emits this event, so the second pass has to let it through —
+    // cancelling the close it just asked for is how a fallback becomes a loop.
+    const second = vi.fn();
+    await tauri.closeRequestedHandler!({ preventDefault: second });
+    expect(second).not.toHaveBeenCalled();
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
