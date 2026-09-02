@@ -158,6 +158,69 @@ describe("ObjectDetail (Pod)", () => {
     expect(screen.getByText("beta.kubernetes.io/arch")).toBeDefined();
   });
 
+  /**
+   * #426 — the classic half of the Node detail page's Taints section. The
+   * ui-next half is `screens/detail/NodeBody.test.tsx`; both read the same
+   * `@srelens/core` formatting and ordering, which is what keeps the two
+   * designs from drifting.
+   */
+  describe("a Node's taints", () => {
+    const nodeWith = (spec: Record<string, unknown>): K8sObject => ({
+      metadata: { name: "worker-1", creationTimestamp: "2026-01-01T00:00:00Z" },
+      spec,
+      status: {},
+    });
+
+    it("says the count is 0 rather than leaving the block out", () => {
+      render(<ObjectDetail kind="Node" obj={nodeWith({})} now={NOW} />);
+      expect(screen.getByText("Taints")).toBeDefined();
+      expect(screen.getByText("Count")).toBeDefined();
+    });
+
+    it("lists one taint as key=value:effect", () => {
+      render(
+        <ObjectDetail
+          kind="Node"
+          obj={nodeWith({ taints: [{ key: "node-role.kubernetes.io/control-plane", effect: "NoSchedule" }] })}
+          now={NOW}
+        />,
+      );
+      expect(screen.getByText("node-role.kubernetes.io/control-plane=:NoSchedule")).toBeDefined();
+    });
+
+    it("lists N taints worst-effect first, with timeAdded where Kubernetes set one", () => {
+      render(
+        <ObjectDetail
+          kind="Node"
+          obj={nodeWith({
+            taints: [
+              { key: "spot", value: "true", effect: "PreferNoSchedule" },
+              { key: "team", value: "payments", effect: "NoExecute", timeAdded: "2026-09-02T08:15:00Z" },
+            ],
+          })}
+          now={NOW}
+        />,
+      );
+      const listed = screen.getAllByText(/:(No|Prefer)/).map((el) => el.textContent);
+      expect(listed).toEqual(["team=payments:NoExecute", "spot=true:PreferNoSchedule"]);
+      expect(screen.getByText("added 2026-09-02T08:15:00Z")).toBeDefined();
+    });
+
+    it("keeps the cordon taint the list leaves to its SchedulingDisabled badge", () => {
+      render(
+        <ObjectDetail
+          kind="Node"
+          obj={nodeWith({
+            unschedulable: true,
+            taints: [{ key: "node.kubernetes.io/unschedulable", effect: "NoSchedule" }],
+          })}
+          now={NOW}
+        />,
+      );
+      expect(screen.getByText("node.kubernetes.io/unschedulable=:NoSchedule")).toBeDefined();
+    });
+  });
+
   it("shows real volume sources and opens linked resources", () => {
     const onOpenResource = vi.fn();
     const pod: K8sObject = {

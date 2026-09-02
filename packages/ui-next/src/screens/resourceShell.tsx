@@ -244,10 +244,18 @@ export function toggleColumnVisibility(params: {
   hidden: ReadonlySet<string>;
   filterKey: string | null;
   tabId: string;
+  /** Keys of the kind's `defaultHidden` columns, so the first toggle of one
+   *  starts from what the reader is actually looking at. (#426) */
+  defaultHidden?: readonly string[];
 }): void {
-  const { key, storageKey, hidden, filterKey, tabId } = params;
+  const { key, storageKey, hidden, filterKey, tabId, defaultHidden } = params;
   if (!hidden.has(key) && filterKey === key) setTabView(tabId, { filterKey: null });
-  toggleColumn(storageKey, key);
+  toggleColumn(storageKey, key, undefined, defaultHidden);
+}
+
+/** The keys a kind starts with hidden — `ColumnPicker`'s "off by default". */
+export function defaultHiddenKeys<T>(columns: readonly Column<T>[]): string[] {
+  return columns.filter((column) => column.defaultHidden).map((column) => column.key);
 }
 
 /** "This kind has none" and "the filter matched none" are different facts,

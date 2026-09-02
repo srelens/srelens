@@ -1,4 +1,12 @@
-import { asRecord, str, type K8sObject } from "@srelens/core";
+import {
+  asRecord,
+  formatTaint,
+  orderTaints,
+  parseTaints,
+  str,
+  taintTimeAddedText,
+  type K8sObject,
+} from "@srelens/core";
 import { KV, StatusPill } from "@srelens/ui-kit";
 import { Section } from "./Section";
 
@@ -53,6 +61,45 @@ function CapacitySection({ object }: { object: K8sObject }) {
 }
 
 /**
+ * A Node's taints, in full — the drill-down the list's count sends a reader to.
+ *
+ * Unlike the list, this reads the live object and keeps EVERY taint, including
+ * the one Kubernetes adds when a node is cordoned. The list leaves that one out
+ * because the SchedulingDisabled badge beside its count already says it; here
+ * there is no such badge, and `kubectl describe node` shows it too, so leaving
+ * it out would be the pane quietly disagreeing with kubectl.
+ *
+ * The section stays on a node with none and says so: an absent block cannot be
+ * told apart from a block that failed to render, and "no taints" is a fact an
+ * operator asking why a pod will not schedule specifically wants confirmed.
+ *
+ * `timeAdded` is set by Kubernetes only for `NoExecute` taints; the rest say
+ * so in words, which `taintTimeAddedText` explains is not merely a wording
+ * choice. (#426)
+ */
+function TaintsSection({ object }: { object: K8sObject }) {
+  const taints = orderTaints(parseTaints(object.spec));
+  return (
+    <Section title="Taints">
+      {taints.length === 0 ? (
+        // "Taints" as the key under a section already headed Taints is the
+        // word twice; the count is the fact, and it is the list's zero-state.
+        <KV k="Count" v="0" />
+      ) : (
+        taints.map((taint) => (
+          <KV
+            key={`${taint.key}:${taint.effect}`}
+            k={formatTaint(taint)}
+            v={taintTimeAddedText(taint)}
+            mono
+          />
+        ))
+      )}
+    </Section>
+  );
+}
+
+/**
  * A Node's Details pane: Info and Capacity, in classic's own order
  * (`NodeBody`). `relatedPodSelector` has no case for "Node", so `GenericBody`
  * fetches no related pods for one; its unheaded identity block and its
@@ -68,6 +115,7 @@ export function NodeDetailsBody({ object }: { object: K8sObject }) {
     <>
       <InfoSection object={object} />
       <CapacitySection object={object} />
+      <TaintsSection object={object} />
     </>
   );
 }

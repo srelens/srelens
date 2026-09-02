@@ -77,7 +77,8 @@ describe("NodeDetailsBody", () => {
   it("is a run of flat blocks, not a stack of cards", () => {
     const { container } = render(<NodeDetailsBody object={node({})} />);
     const blocks = [...container.children];
-    expect(blocks).toHaveLength(2);
+    // Info, Capacity, and Taints since #426.
+    expect(blocks).toHaveLength(3);
     for (const block of blocks) expect(block.matches("section.section")).toBe(true);
     expect(container.querySelector(".card")).toBeNull();
   });
@@ -103,5 +104,81 @@ describe("NodeDetailsBody", () => {
       // Node has no `relatedPodSelector` case, so GenericBody fetches nothing.
       expect(screen.queryByRole("heading", { name: "Pods" })).toBeNull();
     });
+  });
+});
+
+/**
+ * #426 — the drill-down the Nodes list's taint count sends a reader to. Unlike
+ * the list, this keeps every taint, cordon one included: there is no
+ * SchedulingDisabled badge here to say it, and `kubectl describe node` shows
+ * it, so dropping it would be the pane disagreeing with kubectl.
+ */
+describe("NodeDetailsBody — Taints", () => {
+  it("says so plainly on a node with none, rather than leaving the block out", () => {
+    render(<NodeDetailsBody object={node({})} />);
+    expect(screen.getByText("Taints")).toBeTruthy();
+    expect(screen.getByText("Count")).toBeTruthy();
+    expect(screen.getByText("0")).toBeTruthy();
+  });
+
+  it("lists one taint as key=value:effect", () => {
+    render(
+      <NodeDetailsBody
+        object={node({ taints: [{ key: "node-role.kubernetes.io/control-plane", effect: "NoSchedule" }] })}
+      />,
+    );
+    expect(screen.getByText("node-role.kubernetes.io/control-plane=:NoSchedule")).toBeTruthy();
+  });
+
+  it("lists N taints worst-effect first", () => {
+    render(
+      <NodeDetailsBody
+        object={node({
+          taints: [
+            { key: "spot", value: "true", effect: "PreferNoSchedule" },
+            { key: "node.kubernetes.io/memory-pressure", effect: "NoSchedule" },
+            { key: "team", value: "payments", effect: "NoExecute" },
+          ],
+        })}
+      />,
+    );
+    const rows = screen.getAllByText(/:(No|Prefer)/).map((el) => el.textContent);
+    expect(rows).toEqual([
+      "team=payments:NoExecute",
+      "node.kubernetes.io/memory-pressure=:NoSchedule",
+      "spot=true:PreferNoSchedule",
+    ]);
+  });
+
+  it("shows timeAdded for the NoExecute taint that has one, and an em dash for the rest", () => {
+    render(
+      <NodeDetailsBody
+        object={node({
+          taints: [
+            { key: "team", value: "payments", effect: "NoExecute", timeAdded: "2026-09-02T08:15:00Z" },
+            { key: "dedicated", effect: "NoSchedule" },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("added 2026-09-02T08:15:00Z")).toBeTruthy();
+    // Not an em dash: classic's KV drops a row whose value is "—", so the
+    // taint would have vanished from that design's page altogether.
+    expect(screen.getByText("time not recorded")).toBeTruthy();
+  });
+
+  it("keeps the cordon taint the list leaves to its SchedulingDisabled badge", () => {
+    render(
+      <NodeDetailsBody
+        object={node({
+          unschedulable: true,
+          taints: [
+            { key: "node.kubernetes.io/unschedulable", effect: "NoSchedule" },
+            { key: "dedicated", effect: "NoSchedule" },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("node.kubernetes.io/unschedulable=:NoSchedule")).toBeTruthy();
   });
 });
