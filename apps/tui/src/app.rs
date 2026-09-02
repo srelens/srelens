@@ -1363,10 +1363,16 @@ impl App {
                     self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
                     return;
                 }
+                if (key.code == KeyCode::Tab || key.code == KeyCode::Char('t')) && (key.modifiers.contains(KeyModifiers::CONTROL) || key.code == KeyCode::Tab) {
+                    ai.toggle_tools_expansion();
+                    return;
+                }
                 match key.code {
-                    // Navigation & Scrolling
-                    KeyCode::Up => ai.scroll_up(2),
-                    KeyCode::Down => ai.scroll_down(2),
+                    // Prompt History Navigation (Up/Down recalls sent prompts)
+                    KeyCode::Up => ai.history_up(),
+                    KeyCode::Down => ai.history_down(),
+
+                    // Viewport Scrolling (PageUp/PageDown, Home/End, or Mouse Scroll)
                     KeyCode::PageUp => ai.scroll_up(10),
                     KeyCode::PageDown => ai.scroll_down(10),
                     KeyCode::Home => ai.scroll_to_top(),

@@ -72,6 +72,17 @@ pub struct AssistantViewState {
     pub last_max_scroll: Cell<usize>,
     pub last_total_lines: Cell<usize>,
     pub native_history: std::sync::Arc<tokio::sync::Mutex<Vec<srelens_llm::types::Turn>>>,
+    pub prompt_history: Vec<String>,
+    pub history_cursor: Option<usize>,
+    pub history_draft: String,
+    pub expand_tools: bool,
+}
+
+pub fn is_internal_meta_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "hookAdditionalContexts" | "getMcpTools" | "listMcpTools" | "list_tools" | "tools/list"
+    ) || (tool.starts_with("hook") && !tool.starts_with("hook-"))
 }
 
 impl AssistantViewState {
@@ -94,10 +105,60 @@ impl AssistantViewState {
             last_max_scroll: Cell::new(0),
             last_total_lines: Cell::new(0),
             native_history: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            prompt_history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
+            expand_tools: false,
         }
     }
 
+    pub fn history_up(&mut self) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        match self.history_cursor {
+            None => {
+                self.history_draft = self.input.clone();
+                let last_idx = self.prompt_history.len() - 1;
+                self.history_cursor = Some(last_idx);
+                self.input = self.prompt_history[last_idx].clone();
+            }
+            Some(idx) => {
+                if idx > 0 {
+                    let new_idx = idx - 1;
+                    self.history_cursor = Some(new_idx);
+                    self.input = self.prompt_history[new_idx].clone();
+                }
+            }
+        }
+    }
+
+    pub fn history_down(&mut self) {
+        if let Some(idx) = self.history_cursor {
+            if idx + 1 < self.prompt_history.len() {
+                let new_idx = idx + 1;
+                self.history_cursor = Some(new_idx);
+                self.input = self.prompt_history[new_idx].clone();
+            } else {
+                self.history_cursor = None;
+                self.input = self.history_draft.clone();
+                self.history_draft.clear();
+            }
+        }
+    }
+
+    pub fn toggle_tools_expansion(&mut self) {
+        self.expand_tools = !self.expand_tools;
+    }
+
     pub fn start_turn(&mut self, text: String) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed) {
+            self.prompt_history.push(text.clone());
+        }
+        self.history_cursor = None;
+        self.history_draft.clear();
+
         self.messages.push(ChatMessage {
             role: "user".to_string(),
             content: text,
@@ -255,9 +316,7 @@ impl AssistantViewState {
 
             md.push_str(&format!("{}{}\n\n", role_label, time_str));
 
-            let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| {
-                tc.tool != "hookAdditionalContexts" && !(tc.args_summary.is_empty() && tc.tool.starts_with("hook"))
-            }).collect();
+            let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| !is_internal_meta_tool(&tc.tool)).collect();
 
             if !visible_tools.is_empty() {
                 md.push_str("#### Executed Tools:\n");
@@ -383,9 +442,10 @@ pub fn render_assistant_view(
     let prov = settings.default_provider;
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
+    let tools_hint = if state.expand_tools { "<Tab> Fold Tools" } else { "<Tab> Tools" };
     let title = format!(
-        " SRElens AI Assistant [{} - {}] [<Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        prov_name, model
+        " SRElens AI Assistant [{} - {}] [{}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
+        prov_name, model, tools_hint
     );
 
     let block = Block::default()
@@ -430,46 +490,88 @@ pub fn render_assistant_view(
         rendered_lines.push(Line::from(header_spans));
 
         // 1a. Render tool calls (if any)
-        for tc in &msg.tool_calls {
-            // Filter out internal metadata hooks that are not user-facing cluster tools
-            if tc.tool == "hookAdditionalContexts" || (tc.args_summary.is_empty() && tc.tool.starts_with("hook")) {
-                continue;
+        let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| !is_internal_meta_tool(&tc.tool)).collect();
+        if !visible_tools.is_empty() {
+            let total_tools = visible_tools.len();
+            let any_running = visible_tools.iter().any(|tc| matches!(tc.status, ToolCallStatus::Running));
+            let any_error = visible_tools.iter().any(|tc| matches!(tc.status, ToolCallStatus::Error(_)));
+
+            let (overall_badge, overall_style) = if any_running {
+                ("[⠋ running]", Theme::status_warn())
+            } else if any_error {
+                ("[✗ error]", Theme::status_error())
+            } else {
+                ("[✓ ok]", Theme::status_ok())
+            };
+
+            // Group consecutive identical tool names (e.g. getObject × 4)
+            let mut grouped_names: Vec<(String, usize)> = Vec::new();
+            for tc in &visible_tools {
+                let clean = tc.tool.strip_prefix("srelens-k8s.").or_else(|| tc.tool.strip_prefix("k8s_")).unwrap_or(&tc.tool);
+                if let Some(last) = grouped_names.last_mut() {
+                    if last.0 == clean {
+                        last.1 += 1;
+                        continue;
+                    }
+                }
+                grouped_names.push((clean.to_string(), 1));
             }
+            let summary_list: Vec<String> = grouped_names
+                .iter()
+                .map(|(name, count)| {
+                    if *count > 1 {
+                        format!("{} (×{})", name, count)
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            let summary_str = summary_list.join(", ");
 
-            let (status_badge, status_style) = match &tc.status {
-                ToolCallStatus::Running => ("[⠋ running]", Theme::status_warn()),
-                ToolCallStatus::Success => ("[✓ ok]", Theme::status_ok()),
-                ToolCallStatus::Error(_err) => ("[✗ error]", Theme::status_error()),
-            };
-
-            let arg_preview = if tc.args_summary.len() > 70 {
-                format!("{}...", &tc.args_summary[..67])
+            if !state.expand_tools {
+                // Collapsed mode: sleek 1-line chip
+                rendered_lines.push(Line::from(vec![
+                    Span::styled("  ▶ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{} tools queried: ", total_tools), Style::default().fg(Theme::DIM)),
+                    Span::styled(summary_str, Style::default().fg(Theme::ACCENT)),
+                    Span::styled(format!(" {}", overall_badge), overall_style),
+                    Span::styled("  (<Tab> to expand)", Style::default().fg(Theme::DIM)),
+                ]));
             } else {
-                tc.args_summary.clone()
-            };
+                // Expanded mode: header + compact 1-line chips per tool
+                rendered_lines.push(Line::from(vec![
+                    Span::styled("  ▼ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{} tools queried (<Tab> to collapse):", total_tools), Style::default().fg(Theme::DIM)),
+                    Span::styled(format!(" {}", overall_badge), overall_style),
+                ]));
 
-            rendered_lines.push(Line::from(vec![
-                Span::styled("  ┌─ ⚙ Tool: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{} ", tc.tool), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled("─".repeat(25), Style::default().fg(Theme::DIM)),
-            ]));
+                for tc in visible_tools {
+                    let (status_badge, status_style) = match &tc.status {
+                        ToolCallStatus::Running => ("[⠋ running]", Theme::status_warn()),
+                        ToolCallStatus::Success => ("[✓ ok]", Theme::status_ok()),
+                        ToolCallStatus::Error(_err) => ("[✗ error]", Theme::status_error()),
+                    };
 
-            let command_display = if arg_preview.is_empty() {
-                format!("executing {} ", tc.tool)
-            } else {
-                format!("$ {} ", arg_preview)
-            };
+                    let clean_name = tc.tool.strip_prefix("srelens-k8s.").or_else(|| tc.tool.strip_prefix("k8s_")).unwrap_or(&tc.tool);
+                    let arg_preview = if tc.args_summary.len() > 65 {
+                        format!("{}...", &tc.args_summary[..62])
+                    } else {
+                        tc.args_summary.clone()
+                    };
 
-            rendered_lines.push(Line::from(vec![
-                Span::styled("  │ ", Style::default().fg(Theme::CYAN)),
-                Span::styled(command_display, Style::default().fg(Color::White)),
-                Span::styled(format!(" {}", status_badge), status_style),
-            ]));
+                    let mut spans = vec![
+                        Span::styled("    ⚙ ", Style::default().fg(Theme::CYAN)),
+                        Span::styled(clean_name.to_string(), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                    ];
+                    if !arg_preview.is_empty() {
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled(arg_preview, Style::default().fg(Theme::DIM)));
+                    }
+                    spans.push(Span::styled(format!(" {}", status_badge), status_style));
 
-            rendered_lines.push(Line::from(vec![
-                Span::styled("  └", Style::default().fg(Theme::CYAN)),
-                Span::styled("─".repeat(45), Style::default().fg(Theme::DIM)),
-            ]));
+                    rendered_lines.push(Line::from(spans));
+                }
+            }
         }
 
         // 1b. Format message body (rich rendered markdown)
@@ -1298,5 +1400,57 @@ Done.";
             state.messages.last().unwrap().content,
             "I'll query the cluster and how it's deployed. HAMi is running in hami-system."
         );
+    }
+
+    #[test]
+    fn test_assistant_prompt_history_up_and_down() {
+        let mut state = AssistantViewState::new();
+        state.start_turn("first prompt".to_string());
+        state.start_turn("second prompt".to_string());
+        state.start_turn("third prompt".to_string());
+
+        // Now user types a draft "new query"
+        state.input = "new query".to_string();
+
+        // Up navigates backwards: third -> second -> first
+        state.history_up();
+        assert_eq!(state.input, "third prompt");
+
+        state.history_up();
+        assert_eq!(state.input, "second prompt");
+
+        state.history_up();
+        assert_eq!(state.input, "first prompt");
+
+        // Cannot go past top
+        state.history_up();
+        assert_eq!(state.input, "first prompt");
+
+        // Down navigates forwards: second -> third -> restores draft "new query"
+        state.history_down();
+        assert_eq!(state.input, "second prompt");
+
+        state.history_down();
+        assert_eq!(state.input, "third prompt");
+
+        state.history_down();
+        assert_eq!(state.input, "new query");
+    }
+
+    #[test]
+    fn test_internal_meta_tools_filtered_and_toggle_expansion() {
+        assert!(is_internal_meta_tool("getMcpTools"));
+        assert!(is_internal_meta_tool("listMcpTools"));
+        assert!(is_internal_meta_tool("hookAdditionalContexts"));
+        assert!(!is_internal_meta_tool("srelens-k8s.listNodes"));
+        assert!(!is_internal_meta_tool("k8s_listPods"));
+        assert!(!is_internal_meta_tool("getObject"));
+
+        let mut state = AssistantViewState::new();
+        assert!(!state.expand_tools);
+        state.toggle_tools_expansion();
+        assert!(state.expand_tools);
+        state.toggle_tools_expansion();
+        assert!(!state.expand_tools);
     }
 }
