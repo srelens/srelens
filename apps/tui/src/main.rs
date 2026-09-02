@@ -223,7 +223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::Mouse(_) => {}
                 AppEvent::Resize(_, _) => {}
-                AppEvent::Tick => {}
+                AppEvent::Tick => {
+                    app.handle_tick();
+                }
                 AppEvent::StreamEvent { channel, payload } => {
                     app.handle_stream_event(channel, payload);
                 }
@@ -240,11 +242,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let app::ActiveView::Assistant(ai) = &mut app.active_view {
                                     ai.add_assistant_message(msg);
                                 }
+                            } else if title == "ai_chunk" {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    ai.append_stream_chunk(&msg);
+                                }
+                            } else if title == "ai_status" {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    ai.set_status(msg);
+                                }
+                            } else if title == "ai_done" {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    ai.finish_turn();
+                                }
                             } else {
                                 app.set_toast(msg, theme::Theme::status_ok());
                             }
                         }
                         Err(err) => {
+                            if title.starts_with("ai_") {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    ai.append_stream_chunk(&format!("\n[Error: {}]", err));
+                                    ai.finish_turn();
+                                }
+                            }
                             app.set_toast(err, theme::Theme::status_error());
                         }
                     }

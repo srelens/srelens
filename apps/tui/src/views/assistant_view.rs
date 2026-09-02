@@ -23,6 +23,9 @@ pub struct AssistantViewState {
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub is_busy: bool,
+    pub busy_status: String,
+    pub busy_start: Option<std::time::Instant>,
+    pub spinner_frame: usize,
     pub scroll_offset: usize,
 }
 
@@ -36,11 +39,14 @@ impl AssistantViewState {
             }],
             input: String::new(),
             is_busy: false,
+            busy_status: String::new(),
+            busy_start: None,
+            spinner_frame: 0,
             scroll_offset: 0,
         }
     }
 
-    pub fn add_user_message(&mut self, text: String) {
+    pub fn start_turn(&mut self, text: String) {
         self.messages.push(ChatMessage {
             role: "user".to_string(),
             content: text,
@@ -48,6 +54,13 @@ impl AssistantViewState {
         });
         self.input.clear();
         self.is_busy = true;
+        self.busy_status = "Consulting AI provider & cluster state...".to_string();
+        self.busy_start = Some(std::time::Instant::now());
+        self.spinner_frame = 0;
+    }
+
+    pub fn add_user_message(&mut self, text: String) {
+        self.start_turn(text);
     }
 
     pub fn add_assistant_message(&mut self, text: String) {
@@ -57,6 +70,36 @@ impl AssistantViewState {
             timestamp: current_timestamp(),
         });
         self.is_busy = false;
+        self.busy_start = None;
+    }
+
+    pub fn append_stream_chunk(&mut self, chunk: &str) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == "assistant" {
+                last.content.push_str(chunk);
+                return;
+            }
+        }
+        self.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: chunk.to_string(),
+            timestamp: current_timestamp(),
+        });
+    }
+
+    pub fn set_status(&mut self, status: String) {
+        self.busy_status = status;
+    }
+
+    pub fn finish_turn(&mut self) {
+        self.is_busy = false;
+        self.busy_start = None;
+    }
+
+    pub fn tick(&mut self) {
+        if self.is_busy {
+            self.spinner_frame = (self.spinner_frame + 1) % 10;
+        }
     }
 
     pub fn scroll_down(&mut self, n: usize) {
@@ -128,11 +171,23 @@ pub fn render_assistant_view(
     }
 
     if state.is_busy {
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spinner = frames[state.spinner_frame % frames.len()];
+        let elapsed_secs = state
+            .busy_start
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+
+        let status_text = if state.busy_status.is_empty() {
+            "Consulting AI provider & cluster state..."
+        } else {
+            &state.busy_status
+        };
+
         rendered_lines.push(Line::from(vec![
-            Span::styled(
-                "⚡ SRElens agent is consulting cluster state and AI provider...",
-                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::ITALIC),
-            ),
+            Span::styled(format!("  {} ", spinner), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} ", status_text), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("({}s elapsed)", elapsed_secs), Style::default().fg(Theme::DIM)),
         ]));
     }
 

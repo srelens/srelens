@@ -223,6 +223,12 @@ impl App {
         self.toast = Some((msg, Instant::now(), style));
     }
 
+    pub fn handle_tick(&mut self) {
+        if let ActiveView::Assistant(ai) = &mut self.active_view {
+            ai.tick();
+        }
+    }
+
     pub fn refresh_cluster_info(&self) {
         let context = self.active_context.clone();
         let cache = self.client_cache.clone();
@@ -1171,13 +1177,20 @@ impl App {
                     KeyCode::Enter => {
                         if !ai.input.trim().is_empty() {
                             let query = ai.input.clone();
-                            ai.add_user_message(query.clone());
+                            ai.start_turn(query.clone());
                             let provider = self.ai_settings.default_provider;
+                            let active_ctx = self.active_context.clone();
+                            let active_ns = self.active_namespace.clone();
+
                             if provider == crate::ai_config::AiProvider::Cursor {
                                 if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
                                     let event_tx = self.event_tx.clone();
                                     let model = self.ai_settings.get_model(provider);
                                     let api_key = self.ai_settings.get_api_key(provider);
+                                    let targeted_prompt = format!(
+                                        "You are an SRE assistant inside SRElens TUI. Active Kubernetes context: '{}', namespace: '{}'.\nAnswer the user request directly (use kubectl commands to query the cluster if needed, rather than scanning the local workspace repo files):\n\n{}",
+                                        active_ctx, active_ns, query
+                                    );
                                     tokio::spawn(async move {
                                         use tokio::io::{AsyncBufReadExt, BufReader};
                                         let mut cmd = tokio::process::Command::new(&cursor_bin);
@@ -1191,49 +1204,70 @@ impl App {
                                         if let Some(key) = api_key {
                                             cmd.env("CURSOR_API_KEY", key);
                                         }
-                                        cmd.arg("--").arg(&query);
+                                        cmd.arg("--").arg(&targeted_prompt);
                                         cmd.stdout(std::process::Stdio::piped());
                                         cmd.stderr(std::process::Stdio::piped());
 
                                         match cmd.spawn() {
                                             Ok(mut child) => {
-                                                let mut accumulated = String::new();
                                                 if let Some(stdout) = child.stdout.take() {
                                                     let mut reader = BufReader::new(stdout).lines();
                                                     while let Ok(Some(line)) = reader.next_line().await {
+                                                        let trimmed = line.trim();
+                                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                                                            if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
+                                                                if t == "thinking" {
+                                                                    let _ = event_tx.send(AppEvent::ActionResult {
+                                                                        title: "ai_status".to_string(),
+                                                                        result: Ok("Thinking & analyzing cluster query...".to_string()),
+                                                                    });
+                                                                } else if t == "tool_call" {
+                                                                    let tool_name = v.get("tool_name")
+                                                                        .or_else(|| v.get("name"))
+                                                                        .and_then(|s| s.as_str())
+                                                                        .unwrap_or("kubectl");
+                                                                    let _ = event_tx.send(AppEvent::ActionResult {
+                                                                        title: "ai_status".to_string(),
+                                                                        result: Ok(format!("Executing {} query on cluster...", tool_name)),
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+
                                                         let events = srelens_agent::cursor::parse_line(&line);
                                                         for ev in events {
                                                             match ev {
                                                                 srelens_agent::event::AgentEvent::TextDelta { text } => {
-                                                                    accumulated.push_str(&text);
+                                                                    let _ = event_tx.send(AppEvent::ActionResult {
+                                                                        title: "ai_chunk".to_string(),
+                                                                        result: Ok(text),
+                                                                    });
                                                                 }
                                                                 srelens_agent::event::AgentEvent::Error { message } => {
-                                                                    accumulated.push_str(&format!("\n[Error: {}]", message));
+                                                                    let _ = event_tx.send(AppEvent::ActionResult {
+                                                                        title: "ai_chunk".to_string(),
+                                                                        result: Ok(format!("\n[Error: {}]", message)),
+                                                                    });
                                                                 }
                                                                 _ => {}
                                                             }
                                                         }
                                                     }
                                                 }
-                                                let status = child.wait().await;
-                                                if accumulated.trim().is_empty() {
-                                                    if let Ok(st) = status {
-                                                        if !st.success() {
-                                                            accumulated = format!("cursor-agent exited with status: {}", st);
-                                                        } else {
-                                                            accumulated = "(completed with no text output)".to_string();
-                                                        }
-                                                    }
-                                                }
+                                                let _ = child.wait().await;
                                                 let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "ai_reply".to_string(),
-                                                    result: Ok(accumulated),
+                                                    title: "ai_done".to_string(),
+                                                    result: Ok(String::new()),
                                                 });
                                             }
                                             Err(err) => {
                                                 let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "ai_reply".to_string(),
+                                                    title: "ai_chunk".to_string(),
                                                     result: Err(format!("Failed to launch cursor-agent: {}", err)),
+                                                });
+                                                let _ = event_tx.send(AppEvent::ActionResult {
+                                                    title: "ai_done".to_string(),
+                                                    result: Ok(String::new()),
                                                 });
                                             }
                                         }
@@ -1247,23 +1281,30 @@ impl App {
                                     use srelens_llm::Provider;
                                     let http = srelens_llm::HttpProvider::new(config);
                                     let turn = srelens_llm::types::Turn::User(query);
-                                    let mut full_text = String::new();
-                                    let mut on_item = |item: srelens_llm::StreamItem| {
+                                    let event_tx_clone = event_tx.clone();
+                                    let mut on_item = move |item: srelens_llm::StreamItem| {
                                         if let srelens_llm::StreamItem::Text(t) = item {
-                                            full_text.push_str(&t);
+                                            let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                                title: "ai_chunk".to_string(),
+                                                result: Ok(t),
+                                            });
                                         }
                                     };
                                     match http.stream_turn(&[turn], &[], &mut on_item).await {
                                         Ok(()) => {
                                             let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "ai_reply".to_string(),
-                                                result: Ok(full_text),
+                                                title: "ai_done".to_string(),
+                                                result: Ok(String::new()),
                                             });
                                         }
                                         Err(err) => {
                                             let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "ai_reply".to_string(),
+                                                title: "ai_chunk".to_string(),
                                                 result: Err(format!("AI Provider Error: {}", err)),
+                                            });
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "ai_done".to_string(),
+                                                result: Ok(String::new()),
                                             });
                                         }
                                     }
@@ -1272,7 +1313,7 @@ impl App {
                                 let env_var = crate::ai_config::env_var_for_provider(provider);
                                 let prov_name = crate::ai_config::provider_display_name(provider);
                                 let reply = format!(
-                                    "No API key configured for {}. Press 's' to configure settings, or set the {} environment variable.",
+                                    "No API key configured for {}. Press '<Ctrl+s>' to configure settings, or set the {} environment variable.",
                                     prov_name, env_var
                                 );
                                 ai.add_assistant_message(reply);
