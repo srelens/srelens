@@ -1550,8 +1550,8 @@ impl App {
                 && mouse.row >= vp.y && mouse.row < vp.y + vp.height
             {
                 let screen_row = mouse.row.saturating_sub(vp.y) as usize;
-                let screen_col = mouse.column.saturating_sub(vp.x) as usize;
-                let line_idx = self.assistant_state.scroll_offset + screen_row;
+                let screen_col = mouse.column.saturating_sub(vp.x + 1) as usize;
+                let line_idx = self.assistant_state.effective_scroll() + screen_row;
 
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                     if self.assistant_state.tool_chip_lines.borrow().contains(&line_idx) {

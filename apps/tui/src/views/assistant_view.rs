@@ -559,6 +559,118 @@ impl AssistantViewState {
         self.auto_scroll = true;
         self.scroll_offset = self.last_max_scroll.get();
     }
+
+    pub fn effective_scroll(&self) -> usize {
+        if self.auto_scroll {
+            self.last_max_scroll.get()
+        } else {
+            self.scroll_offset.min(self.last_max_scroll.get())
+        }
+    }
+}
+
+pub fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 {
+        return vec![line];
+    }
+
+    // Never wrap box-drawing table rows
+    let is_table = line.spans.iter().any(|s| {
+        s.content.contains('│') || s.content.contains('┌') || s.content.contains('└') || s.content.contains('├')
+    });
+    if is_table {
+        return vec![line];
+    }
+
+    let total_width: usize = line.spans.iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if total_width <= max_width {
+        return vec![line];
+    }
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_line_width = 0;
+
+    for span in line.spans {
+        let span_style = span.style;
+        let content = span.content.into_owned();
+
+        let mut chunks: Vec<String> = Vec::new();
+        let mut cur_chunk = String::new();
+        let mut is_space = false;
+
+        for ch in content.chars() {
+            let ch_is_space = ch == ' ';
+            if cur_chunk.is_empty() {
+                cur_chunk.push(ch);
+                is_space = ch_is_space;
+            } else if ch_is_space == is_space {
+                cur_chunk.push(ch);
+            } else {
+                chunks.push(cur_chunk);
+                cur_chunk = String::new();
+                cur_chunk.push(ch);
+                is_space = ch_is_space;
+            }
+        }
+        if !cur_chunk.is_empty() {
+            chunks.push(cur_chunk);
+        }
+
+        for chunk in chunks {
+            let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
+            let is_whitespace = chunk.chars().all(|c| c == ' ');
+
+            if current_line_width + chunk_width <= max_width {
+                current_spans.push(Span::styled(chunk, span_style));
+                current_line_width += chunk_width;
+            } else if is_whitespace {
+                if !current_spans.is_empty() {
+                    result.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_line_width = 0;
+                }
+            } else {
+                if current_line_width > 0 {
+                    result.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_line_width = 0;
+                }
+
+                if chunk_width > max_width {
+                    let mut sub = String::new();
+                    let mut sub_w = 0;
+                    for ch in chunk.chars() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                        if sub_w + cw > max_width && sub_w > 0 {
+                            result.push(Line::from(vec![Span::styled(sub, span_style)]));
+                            sub = String::new();
+                            sub_w = 0;
+                        }
+                        sub.push(ch);
+                        sub_w += cw;
+                    }
+                    if !sub.is_empty() {
+                        current_spans.push(Span::styled(sub, span_style));
+                        current_line_width = sub_w;
+                    }
+                } else {
+                    current_spans.push(Span::styled(chunk, span_style));
+                    current_line_width = chunk_width;
+                }
+            }
+        }
+    }
+
+    if !current_spans.is_empty() {
+        result.push(Line::from(current_spans));
+    }
+
+    if result.is_empty() {
+        vec![Line::from("")]
+    } else {
+        result
+    }
 }
 
 fn highlight_line_selection<'a>(line: &Line<'a>, c_start: usize, c_end: usize) -> Line<'a> {
@@ -634,7 +746,9 @@ pub fn render_assistant_view(
 
     // 1. Message history
     state.tool_chip_lines.borrow_mut().clear();
+    let content_width = (chunks[0].width as usize).saturating_sub(2).max(20);
     let mut rendered_lines = Vec::new();
+
     for msg in &state.messages {
         let (role_label, role_style) = match msg.role.as_str() {
             "user" => ("You", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
@@ -696,27 +810,32 @@ pub fn render_assistant_view(
                 .collect();
             let summary_str = summary_list.join(", ");
 
-            let chip_line_idx = rendered_lines.len();
-            state.tool_chip_lines.borrow_mut().push(chip_line_idx);
-
-            if !state.expand_tools {
+            let chip_line = if !state.expand_tools {
                 // Collapsed mode: sleek 1-line chip
-                rendered_lines.push(Line::from(vec![
+                Line::from(vec![
                     Span::styled("  ▶ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} tools queried: ", total_tools), Style::default().fg(Theme::DIM)),
                     Span::styled(summary_str, Style::default().fg(Theme::ACCENT)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
                     Span::styled("  (click or <Ctrl+t> to expand)", Style::default().fg(Theme::DIM)),
-                ]));
-                rendered_lines.push(Line::from(""));
+                ])
             } else {
                 // Expanded mode: header + compact 1-line chips per tool
-                rendered_lines.push(Line::from(vec![
+                Line::from(vec![
                     Span::styled("  ▼ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{} tools queried (click or <Ctrl+t> to collapse):", total_tools), Style::default().fg(Theme::DIM)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
-                ]));
+                ])
+            };
 
+            let chip_start = rendered_lines.len();
+            let wrapped_chip = wrap_line(chip_line, content_width);
+            for idx in chip_start..(chip_start + wrapped_chip.len()) {
+                state.tool_chip_lines.borrow_mut().push(idx);
+            }
+            rendered_lines.extend(wrapped_chip);
+
+            if state.expand_tools {
                 for tc in visible_tools {
                     let (status_badge, status_style) = match &tc.status {
                         ToolCallStatus::Running => ("[⠋ running]", Theme::status_warn()),
@@ -741,15 +860,21 @@ pub fn render_assistant_view(
                     }
                     spans.push(Span::styled(format!(" {}", status_badge), status_style));
 
-                    rendered_lines.push(Line::from(spans));
+                    let wrapped_tc = wrap_line(Line::from(spans), content_width);
+                    rendered_lines.extend(wrapped_tc);
                 }
-                rendered_lines.push(Line::from(""));
             }
+            rendered_lines.push(Line::from(""));
         }
 
         // 1b. Format message body (rich rendered markdown)
         if !msg.content.trim().is_empty() {
-            format_message_content(&mut rendered_lines, &msg.content);
+            let mut msg_lines = Vec::new();
+            format_message_content(&mut msg_lines, &msg.content);
+            for l in msg_lines {
+                let wrapped = wrap_line(l, content_width);
+                rendered_lines.extend(wrapped);
+            }
         }
 
         // 1c. Render token usage footer (if any)
@@ -774,7 +899,7 @@ pub fn render_assistant_view(
                 String::new()
             };
 
-            rendered_lines.push(Line::from(vec![
+            let usage_line = Line::from(vec![
                 Span::styled("  ⚡ ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!(
@@ -787,7 +912,9 @@ pub fn render_assistant_view(
                     ),
                     Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
                 ),
-            ]));
+            ]);
+            let wrapped_usage = wrap_line(usage_line, content_width);
+            rendered_lines.extend(wrapped_usage);
         }
 
         rendered_lines.push(Line::from(""));
@@ -807,18 +934,20 @@ pub fn render_assistant_view(
             &state.busy_status
         };
 
-        rendered_lines.push(Line::from(vec![
+        let busy_line = Line::from(vec![
             Span::styled(format!("  {} ", spinner), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{} ", status_text), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled(format!("({}s elapsed)", elapsed_secs), Style::default().fg(Theme::DIM)),
-        ]));
+        ]);
+        let wrapped_busy = wrap_line(busy_line, content_width);
+        rendered_lines.extend(wrapped_busy);
     }
 
     // Add breathing room of two empty lines between generated text and the input window
     rendered_lines.push(Line::from(""));
     rendered_lines.push(Line::from(""));
 
-    // Cache plain text lines for selection extraction
+    // Cache plain text lines for selection extraction (1:1 with visual screen rows)
     let plain: Vec<String> = rendered_lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -846,14 +975,9 @@ pub fn render_assistant_view(
     state.last_max_scroll.set(max_scroll);
     state.last_total_lines.set(total_lines);
 
-    let effective_scroll = if state.auto_scroll {
-        max_scroll
-    } else {
-        state.scroll_offset.min(max_scroll)
-    };
+    let effective_scroll = state.effective_scroll();
 
     let history_widget = Paragraph::new(rendered_lines)
-        .wrap(Wrap { trim: false })
         .scroll((effective_scroll as u16, 0))
         .block(Block::default().padding(ratatui::widgets::Padding::new(1, 1, 0, 0)));
     f.render_widget(history_widget, chunks[0]);
@@ -1683,5 +1807,27 @@ Done.";
         // 4. Clear selection
         state.clear_selection();
         assert_eq!(state.get_selected_text(), None);
+    }
+
+    #[test]
+    fn test_wrap_line_and_mid_sentence_selection() {
+        // 1. Short line is unchanged
+        let short = Line::from("hello world");
+        let wrapped = wrap_line(short, 20);
+        assert_eq!(wrapped.len(), 1);
+
+        // 2. Long line wraps at spaces
+        let long = Line::from("That is scheduler allocation, not live SM utilization. srelens node metrics are CPU/memory only, so this does not show whether those Flink processes are currently driving the cards at 0% or 100%.");
+        let wrapped = wrap_line(long, 50);
+        assert!(wrapped.len() >= 3);
+        for l in &wrapped {
+            let width: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+            assert!(width <= 50, "wrapped line width {} exceeds 50", width);
+        }
+
+        // 3. Table rows are preserved intact
+        let table_row = Line::from("│ data-processing-prod-gpu-t4-jt8ld │ gpu-t4 │ 2x T4 (15 GiB each) │");
+        let wrapped_table = wrap_line(table_row, 30);
+        assert_eq!(wrapped_table.len(), 1);
     }
 }
