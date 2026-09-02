@@ -18,7 +18,9 @@ export { ConsoleDock, type ConsoleDockProps } from "./ConsoleDock";
 export { ConsolePrompt, type ConsolePromptProps } from "./ConsolePrompt";
 export { CopyButton, type CopyButtonProps } from "./CopyButton";
 export { ContextMenu, type ContextMenuItem, type ContextMenuProps } from "./ContextMenu";
+export { CopyAnnounce } from "./CopyAnnounce";
 export { CopyCommand, type CopyCommandProps } from "./CopyCommand";
+export { CopyIconButton, type CopyIconButtonProps } from "./CopyIconButton";
 export { CustomizeMark, type CustomizeMarkProps, type MarkAppearance } from "./CustomizeMark";
 export { Dialog, type DialogProps } from "./Dialog";
 export { DiffLines, type DiffLinesProps, type DiffRow } from "./DiffLines";
@@ -87,3 +89,7 @@ export { WorkspaceSwitcher, type WorkspaceSummary, type WorkspaceSwitcherProps }
 export { type ClusterLink, type WorkspaceCluster, WorkspaceTree, type WorkspaceTreeProps } from "./WorkspaceTree";
 export { cx } from "./cx";
 export { loadTone, toneColor, toneWash, type Tone } from "./tone";
+// `COPIED_MS` stays unexported: the gallery test reads every capitalised name
+// in this barrel as a component, and a constant is not one. Nothing outside
+// the kit needs the number — the controls that use it live here.
+export { useCopied, type CopyState } from "./useCopied";

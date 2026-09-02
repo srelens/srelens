@@ -19,7 +19,21 @@ export type ContextMenuItem =
       hint?: string;
       /** Tints the row with the danger colour, over a label that already says so. */
       danger?: boolean;
-      onPick: () => void;
+      /**
+       * What a bar built from these items says after the action succeeds — see
+       * {@link ActionBarAction.confirmLabel}.
+       *
+       * It rides here as a carrier: `DetailActions` builds its `ActionBar` from
+       * these items and has nowhere else to learn it from. **This menu does not
+       * draw it.** A row here closes on the pick and the confirmation would go
+       * with it — `ActionBar`'s overflow now holds still for a confirming pick
+       * precisely so it does not, and the same could be done here. It has not
+       * been, because the detail footer is the surface #410 reports and this is
+       * the list's own right-click menu; that is a limit of this change rather
+       * than a rule about menus. (#410, #413 review)
+       */
+      confirmLabel?: string;
+      onPick: () => void | boolean | Promise<void | boolean>;
     };
 
 export interface ContextMenuProps {

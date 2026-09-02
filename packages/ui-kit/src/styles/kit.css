@@ -1528,6 +1528,14 @@
   }
   .copy-command-check { color: var(--ok); flex-shrink: 0; }
 
+  /* A copy control while it is confirming. The tint fades rather than snapping,
+     which is the whole of the motion here — and it is dropped entirely for a
+     reader who has asked for less of it, below. */
+  .copy-ok { color: var(--ok); transition: color 120ms ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .copy-ok { transition: none; }
+  }
+
   .scroll { overflow: auto; scrollbar-gutter: stable; }
 }
 
