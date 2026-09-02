@@ -473,18 +473,34 @@ export function App() {
     if (typeof win?.onCloseRequested !== "function") return;
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    // Set once we have taken over a close, so the close() below — which
+    // re-emits this event — is let through instead of cancelled a second time.
+    let closing = false;
     void win
       .onCloseRequested(async (event) => {
+        if (closing) return;
         event.preventDefault();
-        flushSaveOpenTabs();
-        // Bounded: a stuck or slow write must never leave the user unable to
-        // quit, so the close proceeds either way.
-        await Promise.race([
-          flushSettingsWrites(),
-          new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
-        ]);
-        // destroy(), not close() — close() re-emits this event and would loop.
-        await win.destroy();
+        closing = true;
+        try {
+          flushSaveOpenTabs();
+          // Bounded: a stuck or slow write must never leave the user unable to
+          // quit, so the close proceeds either way.
+          await Promise.race([
+            flushSettingsWrites(),
+            new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
+          ]);
+        } finally {
+          // Whatever the drain did, the close it cancelled has to be re-issued:
+          // a best-effort flush must never cost the user the ability to quit.
+          // Anything thrown above escaped here and left the window stuck open
+          // with the red light dead — which is exactly what an ungranted
+          // `core:window:allow-destroy` did to every close but Cmd+Q. (#425)
+          //
+          // destroy(), not close() — close() re-emits this event, so it is the
+          // last resort rather than the path, and the guard above stops it
+          // looping.
+          await win.destroy().catch(() => win.close());
+        }
       })
       .then((fn) => {
         if (disposed) fn();
