@@ -935,16 +935,16 @@ impl App {
         // 6. Normal Mode - k9s Global & View Keybindings
         match key.code {
             // Enter Command Mode
-            KeyCode::Char(':') => {
+            KeyCode::Char(':') if !matches!(self.active_view, ActiveView::Assistant) || self.assistant_state.input.is_empty() => {
                 self.input_mode = InputMode::Command;
                 self.command_buffer.clear();
             }
             // Enter Filter Mode
-            KeyCode::Char('/') => {
+            KeyCode::Char('/') if !matches!(self.active_view, ActiveView::Assistant) => {
                 self.input_mode = InputMode::Filter;
             }
             // Open Help Modal
-            KeyCode::Char('?') => {
+            KeyCode::Char('?') if !matches!(self.active_view, ActiveView::Assistant) || self.assistant_state.input.is_empty() => {
                 self.show_help = true;
             }
             // Toggle All Namespaces vs Active Namespace
@@ -2220,8 +2220,12 @@ impl App {
         };
         let suggestions_prop = suggestions.as_ref().map(|s| (s.as_slice(), self.command_suggestion_idx));
 
-        let custom_hints: Option<&[(&str, &str)]> = if let ActiveView::Table(table) = &self.active_view {
-            match table.kind {
+        let custom_hints: Option<&[(&str, &str)]> = match &self.active_view {
+            ActiveView::Assistant => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Table(table) => match table.kind {
                 ResourceKind::Pods => Some(&[
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
@@ -2266,9 +2270,8 @@ impl App {
                     ("<?>", "Help"),
                 ][..]),
                 _ => None,
-            }
-        } else {
-            None
+            },
+            _ => None,
         };
 
         render_statusbar(
