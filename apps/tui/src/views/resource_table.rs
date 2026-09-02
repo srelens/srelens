@@ -450,6 +450,26 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
             return ip.to_string();
         }
     }
+    if key_lower == "cpu" {
+        if let Some(cpu) = val.get("cpu").or_else(|| val.get("cpuUsage")).and_then(|v| v.as_str()) {
+            if !cpu.is_empty() {
+                return cpu.to_string();
+            }
+        }
+        if let Some(req_cpu) = val.pointer("/spec/containers/0/resources/requests/cpu").and_then(|v| v.as_str()) {
+            return req_cpu.to_string();
+        }
+    }
+    if key_lower == "memory" || key_lower == "mem" {
+        if let Some(mem) = val.get("memory").or_else(|| val.get("memUsage")).and_then(|v| v.as_str()) {
+            if !mem.is_empty() {
+                return mem.to_string();
+            }
+        }
+        if let Some(req_mem) = val.pointer("/spec/containers/0/resources/requests/memory").and_then(|v| v.as_str()) {
+            return req_mem.to_string();
+        }
+    }
 
     "-".to_string()
 }

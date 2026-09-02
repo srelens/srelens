@@ -304,16 +304,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.assistant_state.set_status(msg);
                             } else if title == "ai_done" {
                                 app.assistant_state.finish_turn();
+                            } else if title == "pod_metrics_updated" {
+                                app.handle_pod_metrics_update(&msg);
                             } else {
                                 app.set_toast(msg, theme::Theme::status_ok());
                             }
                         }
                         Err(err) => {
-                            if title.starts_with("ai_") {
+                            if title == "pod_metrics_updated" {
+                                // Best-effort: ignore if metrics-server is unavailable
+                            } else if title.starts_with("ai_") {
                                 app.assistant_state.append_stream_chunk(&format!("\n[Error: {}]", err));
                                 app.assistant_state.finish_turn();
+                                app.set_toast(err, theme::Theme::status_error());
+                            } else {
+                                app.set_toast(err, theme::Theme::status_error());
                             }
-                            app.set_toast(err, theme::Theme::status_error());
                         }
                     }
                 }

@@ -81,6 +81,7 @@ pub struct App {
     pub is_connected: bool,
     pub ai_settings: crate::ai_config::AiSettings,
     pub assistant_state: AssistantViewState,
+    pub pod_metrics_tick_counter: usize,
 }
 
 pub enum SuspendAction {
@@ -224,6 +225,7 @@ impl App {
             is_connected: true,
             ai_settings: crate::ai_config::AiSettings::load(),
             assistant_state: AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         app.refresh_cluster_info();
@@ -238,6 +240,97 @@ impl App {
 
     pub fn handle_tick(&mut self) {
         self.assistant_state.tick();
+
+        // Clear expired toasts (auto-dismiss after 3s)
+        if let Some((_, created, _)) = &self.toast {
+            if created.elapsed() > Duration::from_secs(3) {
+                self.toast = None;
+            }
+        }
+
+        // Periodically refresh pod metrics (CPU/MEM) every ~4 seconds (40 ticks at 100ms)
+        if let ActiveView::Table(table) = &self.active_view {
+            if table.kind == ResourceKind::Pods {
+                self.pod_metrics_tick_counter = self.pod_metrics_tick_counter.saturating_add(1);
+                if self.pod_metrics_tick_counter % 40 == 1 {
+                    self.refresh_pod_metrics();
+                }
+            }
+        }
+    }
+
+    pub fn refresh_pod_metrics(&self) {
+        let event_tx = self.event_tx.clone();
+        let cache = self.client_cache.clone();
+        let ctx = self.active_context.clone();
+        let ns = self.active_namespace.clone();
+
+        tokio::spawn(async move {
+            if let Ok(metrics) = srelens_kube::metrics::fetch_pod_metrics(cache, &ctx, &ns).await {
+                if let Ok(json_str) = serde_json::to_string(&metrics) {
+                    let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                        title: "pod_metrics_updated".to_string(),
+                        result: Ok(json_str),
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn handle_pod_metrics_update(&mut self, payload: &str) {
+        let metrics: Vec<srelens_kube::metrics::PodMetric> = match serde_json::from_str(payload) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        if metrics.is_empty() {
+            return;
+        }
+
+        let metric_map: std::collections::HashMap<String, (i64, i64)> = metrics
+            .into_iter()
+            .map(|m| (m.name, (m.cpu_millicores, m.memory_mib)))
+            .collect();
+
+        // 1. Update in active table view if currently viewing Pods
+        if let ActiveView::Table(table) = &mut self.active_view {
+            if table.kind == ResourceKind::Pods {
+                for item in table.raw_items.iter_mut() {
+                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(&(cpu, mem)) = metric_map.get(name) {
+                        if let Some(obj) = item.as_object_mut() {
+                            let mem_str = if mem >= 1024 {
+                                format!("{:.1}Gi", mem as f64 / 1024.0)
+                            } else {
+                                format!("{}Mi", mem)
+                            };
+                            obj.insert("cpu".to_string(), serde_json::Value::String(format!("{}m", cpu)));
+                            obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
+                        }
+                    }
+                }
+                table.apply_filter(&self.filter_buffer);
+            }
+        }
+
+        // 2. Also update in-memory resource_cache so switching views retains metrics
+        let key = (self.active_context.clone(), self.active_namespace.clone(), "pods".to_string());
+        if let Some(cached_items) = self.resource_cache.get_mut(&key) {
+            for item in cached_items.iter_mut() {
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(&(cpu, mem)) = metric_map.get(name) {
+                    if let Some(obj) = item.as_object_mut() {
+                        let mem_str = if mem >= 1024 {
+                            format!("{:.1}Gi", mem as f64 / 1024.0)
+                        } else {
+                            format!("{}Mi", mem)
+                        };
+                        obj.insert("cpu".to_string(), serde_json::Value::String(format!("{}m", cpu)));
+                        obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
+                    }
+                }
+            }
+        }
     }
 
     pub fn refresh_cluster_info(&self) {
@@ -427,13 +520,17 @@ impl App {
                     let paths = self.kubeconfig_paths.clone();
                     self.active_watch_channels.insert(channel.clone());
                     self.active_watch_pool.push(channel.clone());
-                    let _ = self.watch_manager.start(sink, ctx, ns, kind, channel, paths).await;
+                    let _ = self.watch_manager.start(sink, ctx, ns, kind.clone(), channel, paths).await;
                 } else {
                     // Move to most-recently-used in pool
                     if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
                         let ch = self.active_watch_pool.remove(pos);
                         self.active_watch_pool.push(ch);
                     }
+                }
+
+                if kind == "pods" {
+                    self.refresh_pod_metrics();
                 }
             }
         }
@@ -912,11 +1009,34 @@ impl App {
                 let table_kind = table.kind.clone();
 
                 match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => table.select_next(),
-                    KeyCode::Char('k') | KeyCode::Up => table.select_prev(),
-                    KeyCode::Char('g') | KeyCode::Home => table.select_top(),
-                    KeyCode::Char('G') | KeyCode::End => table.select_bottom(),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => table.page_up(10),
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.toast = None;
+                        table.select_next();
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.toast = None;
+                        table.select_prev();
+                    }
+                    KeyCode::Char('g') | KeyCode::Home => {
+                        self.toast = None;
+                        table.select_top();
+                    }
+                    KeyCode::Char('G') | KeyCode::End => {
+                        self.toast = None;
+                        table.select_bottom();
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.toast = None;
+                        table.page_up(10);
+                    }
+                    KeyCode::PageUp => {
+                        self.toast = None;
+                        table.page_up(10);
+                    }
+                    KeyCode::PageDown => {
+                        self.toast = None;
+                        table.page_down(10);
+                    }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+d -> Delete resource confirmation
                         if let Some(name) = sel_name {
@@ -951,15 +1071,25 @@ impl App {
                             });
                         }
                     }
-                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Port forward (Shift+f or Ctrl+f)
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        // Port forward (f, Shift+f, or Ctrl+f)
                         if let Some(pod_name) = sel_name {
                             let ns = sel_ns.unwrap_or_else(|| self.active_namespace.clone());
+                            let detected_port = table.selected_item().and_then(|item| {
+                                item.pointer("/spec/containers/0/ports/0/containerPort")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|p| p as u16)
+                                    .or_else(|| {
+                                        item.pointer("/spec/ports/0/port")
+                                            .and_then(|v| v.as_u64())
+                                            .map(|p| p as u16)
+                                    })
+                            }).unwrap_or(8080);
                             self.modal = Some(Modal::PortForward {
                                 pod_name,
                                 namespace: ns,
-                                container_port: 8080,
-                                local_port_input: "8080".to_string(),
+                                container_port: detected_port,
+                                local_port_input: detected_port.to_string(),
                             });
                         }
                     }
@@ -1980,7 +2110,33 @@ impl App {
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
                     if let ActiveView::Table(table) = &mut self.active_view {
-                        table.set_items(items.clone(), &self.filter_buffer);
+                        if table.kind == ResourceKind::Pods {
+                            let mut merged_items = items.clone();
+                            let prev_metrics: std::collections::HashMap<String, (Option<String>, Option<String>)> = table.raw_items.iter().filter_map(|it| {
+                                let name = it.get("name")?.as_str()?.to_string();
+                                let cpu = it.get("cpu").and_then(|v| v.as_str()).map(String::from);
+                                let mem = it.get("memory").and_then(|v| v.as_str()).map(String::from);
+                                Some((name, (cpu, mem)))
+                            }).collect();
+
+                            for item in merged_items.iter_mut() {
+                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                                    if let Some((cpu, mem)) = prev_metrics.get(name) {
+                                        if let Some(obj) = item.as_object_mut() {
+                                            if let Some(c) = cpu {
+                                                obj.insert("cpu".to_string(), serde_json::Value::String(c.clone()));
+                                            }
+                                            if let Some(m) = mem {
+                                                obj.insert("memory".to_string(), serde_json::Value::String(m.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            table.set_items(merged_items, &self.filter_buffer);
+                        } else {
+                            table.set_items(items.clone(), &self.filter_buffer);
+                        }
                     }
                 }
             }
@@ -2094,6 +2250,57 @@ impl App {
         };
         let suggestions_prop = suggestions.as_ref().map(|s| (s.as_slice(), self.command_suggestion_idx));
 
+        let custom_hints: Option<&[(&str, &str)]> = if let ActiveView::Table(table) = &self.active_view {
+            match table.kind {
+                ResourceKind::Pods => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<l>", "Logs"),
+                    ("<s>", "Shell"),
+                    ("<f>/<F>", "PortForward"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::Deployments | ResourceKind::DaemonSets | ResourceKind::StatefulSets => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Pods"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
+                    ("<^s>", "Scale"),
+                    ("<^r>", "Restart"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::Services => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<f>/<F>", "PortForward"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::Namespaces => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Pods"),
+                    ("<y>", "YAML"),
+                    ("<d>", "Describe"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         render_statusbar(
             f,
             chunks[2],
@@ -2104,7 +2311,7 @@ impl App {
                 matched_count,
                 total_count,
                 toast: toast_prop,
-                custom_hints: None,
+                custom_hints,
                 suggestions: suggestions_prop,
             },
         );

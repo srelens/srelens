@@ -117,47 +117,46 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
             f.render_widget(Paragraph::new(filter_text), inner);
         }
         InputMode::Normal => {
+            let default_hints: &[(&str, &str)] = &[
+                ("<:>", "Cmd"),
+                ("</>", "Filter"),
+                ("<l>", "Logs"),
+                ("<s>", "Shell"),
+                ("<f>/<F>", "PortForward"),
+                ("<d>", "Describe"),
+                ("<y>", "YAML"),
+                ("<e>", "Edit"),
+                ("<^d>", "Delete"),
+                ("<^r>", "Restart"),
+                ("<^s>", "Scale"),
+                ("<?>", "Help"),
+            ];
+            let hints = props.custom_hints.unwrap_or(default_hints);
+
+            let mut spans = Vec::new();
+
+            // Render notification toast without hiding keystroke palette
             if let Some((msg, style)) = props.toast {
-                // Show notification toast message
-                let toast_line = Line::from(vec![
-                    Span::styled("➜ ", style),
-                    Span::styled(msg, style),
-                ]);
-                f.render_widget(Paragraph::new(toast_line), inner);
-            } else {
-                // Show k9s shortcut key hints
-                let hints = props.custom_hints.unwrap_or(&[
-                    ("<:>", "Cmd"),
-                    ("</>", "Filter"),
-                    ("<l>", "Logs"),
-                    ("<s>", "Shell"),
-                    ("<y>", "YAML"),
-                    ("<e>", "Edit"),
-                    ("<d>", "Describe"),
-                    ("<^d>", "Delete"),
-                    ("<^r>", "Restart"),
-                    ("<^s>", "Scale"),
-                    ("<^f>", "PF"),
-                    ("<?>", "Help"),
-                ]);
-
-                let mut spans = Vec::new();
-                for (key, desc) in hints {
-                    spans.push(Span::styled(*key, Theme::key_hint_key()));
-                    spans.push(Span::styled(format!(" {} ", desc), Theme::key_hint_desc()));
-                }
-
-                if !props.filter_input.is_empty() {
-                    spans.push(Span::raw(" | "));
-                    spans.push(Span::styled("Filter: ", Theme::header_label()));
-                    spans.push(Span::styled(
-                        format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count),
-                        Style::default().fg(Theme::YELLOW),
-                    ));
-                }
-
-                f.render_widget(Paragraph::new(Line::from(spans)), inner);
+                spans.push(Span::styled("➜ ", style));
+                spans.push(Span::styled(format!("{} ", msg), style));
+                spans.push(Span::styled("│ ", Style::default().fg(Theme::BORDER)));
             }
+
+            for (key, desc) in hints {
+                spans.push(Span::styled(*key, Theme::key_hint_key()));
+                spans.push(Span::styled(format!(" {} ", desc), Theme::key_hint_desc()));
+            }
+
+            if !props.filter_input.is_empty() {
+                spans.push(Span::raw(" | "));
+                spans.push(Span::styled("Filter: ", Theme::header_label()));
+                spans.push(Span::styled(
+                    format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count),
+                    Style::default().fg(Theme::YELLOW),
+                ));
+            }
+
+            f.render_widget(Paragraph::new(Line::from(spans)), inner);
         }
     }
 }

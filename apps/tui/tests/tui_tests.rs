@@ -185,6 +185,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -265,6 +266,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         // 1. Enter command mode by typing ':'
@@ -353,6 +355,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         // 1. Switch to settings view via :settings command
@@ -476,6 +479,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -674,6 +678,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         // 1. User starts turn in Assistant view
@@ -854,6 +859,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
         };
 
         // 1. Enter filter mode with '/'
@@ -907,5 +913,187 @@ mod tests {
         table.apply_filter(r"postgres-\d");
         assert_eq!(table.filtered_indices.len(), 1);
         assert_eq!(table.selected_resource_name().as_deref(), Some("db-postgres-0"));
+    }
+
+    #[tokio::test]
+    async fn test_port_forward_keybinding_on_pods() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::{InputMode, Modal};
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![
+            serde_json::json!({
+                "name": "my-api-pod-xyz",
+                "namespace": "default",
+                "spec": {
+                    "containers": [{
+                        "name": "api",
+                        "ports": [{ "containerPort": 3000 }]
+                    }]
+                }
+            }),
+        ], "");
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)).await;
+        match app.modal {
+            Some(Modal::PortForward { pod_name, container_port, .. }) => {
+                assert_eq!(pod_name, "my-api-pod-xyz");
+                assert_eq!(container_port, 3000);
+            }
+            other => panic!("Expected PortForward modal, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pod_metrics_usage_update_and_column_extraction() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::{extract_field_str, ResourceTableState};
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![
+            serde_json::json!({
+                "name": "copy-controller-7b44647bcd-rzd8x",
+                "namespace": "copy-controller",
+                "phase": "Running",
+                "ready": "1/1",
+                "restarts": 1,
+                "node": "data-processing-prod",
+                "age": "70d",
+            }),
+        ], "");
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "copy-controller".to_string(),
+            contexts: vec![],
+            namespaces: vec!["copy-controller".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "copy-controller".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.31.7".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 32,
+            pod_count: 1,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // Initially without metrics, extract_field_str returns "-"
+        if let ActiveView::Table(t) = &app.active_view {
+            let item = &t.raw_items[0];
+            assert_eq!(extract_field_str(item, "cpu"), "-");
+            assert_eq!(extract_field_str(item, "memory"), "-");
+        }
+
+        // Simulate metrics update received from metrics.k8s.io
+        let metrics_json = serde_json::json!([
+            {
+                "name": "copy-controller-7b44647bcd-rzd8x",
+                "namespace": "copy-controller",
+                "cpuMillicores": 15,
+                "memoryMiB": 128
+            }
+        ]).to_string();
+
+        app.handle_pod_metrics_update(&metrics_json);
+
+        // Verify that CPU and Memory columns now show the live formatted usage
+        if let ActiveView::Table(t) = &app.active_view {
+            let item = &t.raw_items[0];
+            assert_eq!(extract_field_str(item, "cpu"), "15m");
+            assert_eq!(extract_field_str(item, "memory"), "128Mi");
+        } else {
+            panic!("Expected active_view to be Table");
+        }
     }
 }

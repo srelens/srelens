@@ -114,7 +114,7 @@ pub struct PodMetricsIn {
     pub namespace: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PodMetric {
     pub name: String,
     pub namespace: String,
@@ -174,6 +174,34 @@ pub fn pod_metrics_capability(cache: Arc<ClientCache>) -> Capability {
             }
         },
     )
+}
+
+/// Fetch per-pod CPU and memory metrics from metrics.k8s.io
+pub async fn fetch_pod_metrics(
+    cache: Arc<ClientCache>,
+    context: &str,
+    namespace: &str,
+) -> Result<Vec<PodMetric>, String> {
+    let client = cache.get(context).await.map_err(|e| e.to_string())?;
+    let api = metrics_api(client, "PodMetrics", true, namespace);
+    let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+        .await
+        .map_err(|_| "pod metrics timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let metrics = list
+        .items
+        .into_iter()
+        .map(|o| {
+            let (cpu, mem) = sum_pod_usage(&o.data["containers"]);
+            PodMetric {
+                name: o.metadata.name.unwrap_or_default(),
+                namespace: o.metadata.namespace.unwrap_or_default(),
+                cpu_millicores: cpu,
+                memory_mib: mem,
+            }
+        })
+        .collect();
+    Ok(metrics)
 }
 
 #[cfg(test)]
