@@ -541,4 +541,69 @@ mod tests {
         ai.start_turn("new question".to_string());
         assert!(ai.auto_scroll);
     }
+
+    #[tokio::test]
+    async fn test_assistant_tool_calls_and_token_usage_lifecycle() {
+        use srelens_tui::views::assistant_view::{AssistantViewState, TokenUsage, ToolCallStatus};
+
+        let mut ai = AssistantViewState::new();
+        ai.start_turn("Which pods are crashing?".to_string());
+
+        // 1. Tool call starts
+        ai.add_tool_call_start(
+            "call_1".to_string(),
+            "bash".to_string(),
+            "kubectl get pods -A".to_string(),
+        );
+
+        let last_msg = ai.messages.last().expect("last message");
+        assert_eq!(last_msg.tool_calls.len(), 1);
+        assert_eq!(last_msg.tool_calls[0].tool, "bash");
+        assert_eq!(last_msg.tool_calls[0].args_summary, "kubectl get pods -A");
+        assert_eq!(last_msg.tool_calls[0].status, ToolCallStatus::Running);
+
+        // 2. Tool call completes
+        ai.finish_tool_call("call_1", ToolCallStatus::Success);
+        let last_msg = ai.messages.last().expect("last message");
+        assert_eq!(last_msg.tool_calls[0].status, ToolCallStatus::Success);
+
+        // 3. Second tool call
+        ai.add_tool_call_start(
+            "call_2".to_string(),
+            "read".to_string(),
+            "path: k8s/deploy.yaml".to_string(),
+        );
+        ai.finish_tool_call(
+            "call_2",
+            ToolCallStatus::Error("file not found".to_string()),
+        );
+        let last_msg = ai.messages.last().expect("last message");
+        assert_eq!(last_msg.tool_calls.len(), 2);
+        assert_eq!(
+            last_msg.tool_calls[1].status,
+            ToolCallStatus::Error("file not found".to_string())
+        );
+
+        // 4. Stream response text
+        ai.append_stream_chunk("Found 2 crashing pods.");
+        let last_msg = ai.messages.last().expect("last message");
+        assert_eq!(last_msg.content, "Found 2 crashing pods.");
+
+        // 5. Token usage
+        ai.set_token_usage(TokenUsage {
+            prompt_tokens: 3500,
+            completion_tokens: 120,
+            cached_tokens: 2400,
+            total_tokens: 3620,
+            duration_ms: Some(2150),
+        });
+
+        let last_msg = ai.messages.last().expect("last message");
+        let usage = last_msg.token_usage.as_ref().expect("usage set");
+        assert_eq!(usage.prompt_tokens, 3500);
+        assert_eq!(usage.completion_tokens, 120);
+        assert_eq!(usage.cached_tokens, 2400);
+        assert_eq!(usage.total_tokens, 3620);
+        assert_eq!(usage.duration_ms, Some(2150));
+    }
 }

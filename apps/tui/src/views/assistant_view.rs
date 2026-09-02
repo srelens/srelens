@@ -8,15 +8,54 @@ use ratatui::{
 
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallStatus {
+    Running,
+    Success,
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallRecord {
+    pub id: String,
+    pub tool: String,
+    pub args_summary: String,
+    pub status: ToolCallStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub cached_tokens: usize,
+    pub total_tokens: usize,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: String, // "user", "assistant", "system"
     pub content: String,
     pub timestamp: String,
+    pub tool_calls: Vec<ToolCallRecord>,
+    pub token_usage: Option<TokenUsage>,
 }
 
 pub fn current_timestamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let len = s.len();
+    for (idx, ch) in s.chars().enumerate() {
+        if idx > 0 && (len - idx) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
 }
 
 use std::cell::Cell;
@@ -41,6 +80,8 @@ impl AssistantViewState {
                 role: "assistant".to_string(),
                 content: "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string(),
                 timestamp: current_timestamp(),
+                tool_calls: Vec::new(),
+                token_usage: None,
             }],
             input: String::new(),
             is_busy: false,
@@ -59,6 +100,8 @@ impl AssistantViewState {
             role: "user".to_string(),
             content: text,
             timestamp: current_timestamp(),
+            tool_calls: Vec::new(),
+            token_usage: None,
         });
         self.input.clear();
         self.is_busy = true;
@@ -78,6 +121,8 @@ impl AssistantViewState {
             role: "assistant".to_string(),
             content: text,
             timestamp: current_timestamp(),
+            tool_calls: Vec::new(),
+            token_usage: None,
         });
         self.is_busy = false;
         self.busy_start = None;
@@ -96,7 +141,51 @@ impl AssistantViewState {
             role: "assistant".to_string(),
             content: chunk.to_string(),
             timestamp: current_timestamp(),
+            tool_calls: Vec::new(),
+            token_usage: None,
         });
+    }
+
+    pub fn add_tool_call_start(&mut self, id: String, tool: String, args_summary: String) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == "assistant" {
+                last.tool_calls.push(ToolCallRecord {
+                    id,
+                    tool,
+                    args_summary,
+                    status: ToolCallStatus::Running,
+                });
+                return;
+            }
+        }
+        self.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: current_timestamp(),
+            tool_calls: vec![ToolCallRecord {
+                id,
+                tool,
+                args_summary,
+                status: ToolCallStatus::Running,
+            }],
+            token_usage: None,
+        });
+    }
+
+    pub fn finish_tool_call(&mut self, id: &str, status: ToolCallStatus) {
+        if let Some(last) = self.messages.last_mut() {
+            if let Some(tc) = last.tool_calls.iter_mut().find(|tc| tc.id == id) {
+                tc.status = status;
+            }
+        }
+    }
+
+    pub fn set_token_usage(&mut self, usage: TokenUsage) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == "assistant" {
+                last.token_usage = Some(usage);
+            }
+        }
     }
 
     pub fn set_status(&mut self, status: String) {
@@ -204,8 +293,81 @@ pub fn render_assistant_view(
 
         rendered_lines.push(Line::from(header_spans));
 
-        // Format message body (rich rendered markdown)
-        format_message_content(&mut rendered_lines, &msg.content);
+        // 1a. Render tool calls (if any)
+        for tc in &msg.tool_calls {
+            let (status_badge, status_style) = match &tc.status {
+                ToolCallStatus::Running => ("[⠋ running]", Theme::status_warn()),
+                ToolCallStatus::Success => ("[✓ ok]", Theme::status_ok()),
+                ToolCallStatus::Error(_err) => ("[✗ error]", Theme::status_error()),
+            };
+
+            let arg_preview = if tc.args_summary.len() > 70 {
+                format!("{}...", &tc.args_summary[..67])
+            } else {
+                tc.args_summary.clone()
+            };
+
+            rendered_lines.push(Line::from(vec![
+                Span::styled("  ┌─ ⚙ Tool: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{} ", tc.tool), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled("─".repeat(25), Style::default().fg(Theme::DIM)),
+            ]));
+
+            rendered_lines.push(Line::from(vec![
+                Span::styled("  │ ", Style::default().fg(Theme::CYAN)),
+                Span::styled(format!("$ {} ", arg_preview), Style::default().fg(Color::White)),
+                Span::styled(format!(" {}", status_badge), status_style),
+            ]));
+
+            rendered_lines.push(Line::from(vec![
+                Span::styled("  └", Style::default().fg(Theme::CYAN)),
+                Span::styled("─".repeat(45), Style::default().fg(Theme::DIM)),
+            ]));
+        }
+
+        // 1b. Format message body (rich rendered markdown)
+        if !msg.content.trim().is_empty() {
+            format_message_content(&mut rendered_lines, &msg.content);
+        }
+
+        // 1c. Render token usage footer (if any)
+        if let Some(usage) = &msg.token_usage {
+            let duration_str = usage.duration_ms.map(|ms| {
+                if ms >= 1000 {
+                    format!("{:.1}s", ms as f64 / 1000.0)
+                } else {
+                    format!("{}ms", ms)
+                }
+            }).unwrap_or_default();
+
+            let cached_str = if usage.cached_tokens > 0 {
+                format!(" • {} cached", format_number(usage.cached_tokens))
+            } else {
+                String::new()
+            };
+
+            let duration_badge = if !duration_str.is_empty() {
+                format!(" • {}", duration_str)
+            } else {
+                String::new()
+            };
+
+            rendered_lines.push(Line::from(vec![
+                Span::styled("  ⚡ ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(
+                        "{} tokens ({} prompt, {} completion{}){}",
+                        format_number(usage.total_tokens),
+                        format_number(usage.prompt_tokens),
+                        format_number(usage.completion_tokens),
+                        cached_str,
+                        duration_badge
+                    ),
+                    Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+
         rendered_lines.push(Line::from(""));
     }
 

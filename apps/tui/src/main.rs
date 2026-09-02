@@ -268,6 +268,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let app::ActiveView::Assistant(ai) = &mut app.active_view {
                                     ai.add_assistant_message(msg);
                                 }
+                            } else if title == "ai_tool_start" {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    let mut parts = msg.splitn(3, '|');
+                                    let id = parts.next().unwrap_or_default().to_string();
+                                    let tool = parts.next().unwrap_or_default().to_string();
+                                    let args = parts.next().unwrap_or_default().to_string();
+                                    ai.add_tool_call_start(id, tool, args);
+                                }
+                            } else if title == "ai_tool_done" {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    let mut parts = msg.splitn(2, '|');
+                                    let id = parts.next().unwrap_or_default();
+                                    let status_str = parts.next().unwrap_or_default();
+                                    let status = if status_str == "ok" {
+                                        views::assistant_view::ToolCallStatus::Success
+                                    } else {
+                                        views::assistant_view::ToolCallStatus::Error(status_str.to_string())
+                                    };
+                                    ai.finish_tool_call(id, status);
+                                }
+                            } else if title == "ai_usage" {
+                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
+                                    let parts: Vec<&str> = msg.split('|').collect();
+                                    if parts.len() >= 4 {
+                                        let prompt = parts[0].parse().unwrap_or(0);
+                                        let comp = parts[1].parse().unwrap_or(0);
+                                        let cached = parts[2].parse().unwrap_or(0);
+                                        let total = parts[3].parse().unwrap_or(prompt + comp);
+                                        let duration = parts.get(4).and_then(|s| s.parse().ok());
+                                        ai.set_token_usage(views::assistant_view::TokenUsage {
+                                            prompt_tokens: prompt,
+                                            completion_tokens: comp,
+                                            cached_tokens: cached,
+                                            total_tokens: total,
+                                            duration_ms: duration,
+                                        });
+                                    }
+                                }
                             } else if title == "ai_chunk" {
                                 if let app::ActiveView::Assistant(ai) = &mut app.active_view {
                                     ai.append_stream_chunk(&msg);

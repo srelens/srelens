@@ -1205,6 +1205,7 @@ impl App {
                                         "You are an SRE assistant inside SRElens TUI. Active Kubernetes context: '{}', namespace: '{}'.\nAnswer the user request directly (use kubectl commands to query the cluster if needed, rather than scanning the local workspace repo files):\n\n{}",
                                         active_ctx, active_ns, query
                                     );
+                                    let start_time = std::time::Instant::now();
                                     tokio::spawn(async move {
                                         use tokio::io::{AsyncBufReadExt, BufReader};
                                         let mut cmd = tokio::process::Command::new(&cursor_bin);
@@ -1236,14 +1237,36 @@ impl App {
                                                                         result: Ok("Thinking & analyzing cluster query...".to_string()),
                                                                     });
                                                                 } else if t == "tool_call" {
-                                                                    let tool_name = v.get("tool_name")
-                                                                        .or_else(|| v.get("name"))
-                                                                        .and_then(|s| s.as_str())
-                                                                        .unwrap_or("kubectl");
-                                                                    let _ = event_tx.send(AppEvent::ActionResult {
-                                                                        title: "ai_status".to_string(),
-                                                                        result: Ok(format!("Executing {} query on cluster...", tool_name)),
-                                                                    });
+                                                                    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                                                                    if subtype == "started" {
+                                                                        if let Some((id, tool, args)) = extract_tool_call_start_info(&v) {
+                                                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                                                title: "ai_status".to_string(),
+                                                                                result: Ok(format!("Executing {} query on cluster...", tool)),
+                                                                            });
+                                                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                                                title: "ai_tool_start".to_string(),
+                                                                                result: Ok(format!("{}|{}|{}", id, tool, args)),
+                                                                            });
+                                                                        }
+                                                                    } else if subtype == "completed" {
+                                                                        if let Some((id, is_err)) = extract_tool_call_completed_info(&v) {
+                                                                            let status_str = if is_err { "error" } else { "ok" };
+                                                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                                                title: "ai_tool_done".to_string(),
+                                                                                result: Ok(format!("{}|{}", id, status_str)),
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                } else if t == "result" {
+                                                                    if let Some((prompt, comp, cached, total, dur)) = extract_usage_metrics(&v) {
+                                                                        let dur_val = dur.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
+                                                                        let payload = format!("{}|{}|{}|{}|{}", prompt, comp, cached, total, dur_val);
+                                                                        let _ = event_tx.send(AppEvent::ActionResult {
+                                                                            title: "ai_usage".to_string(),
+                                                                            result: Ok(payload),
+                                                                        });
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -1291,13 +1314,17 @@ impl App {
                                 }
                             } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
                                 let event_tx = self.event_tx.clone();
+                                let start_time = std::time::Instant::now();
                                 tokio::spawn(async move {
                                     use srelens_llm::Provider;
                                     let http = srelens_llm::HttpProvider::new(config);
-                                    let turn = srelens_llm::types::Turn::User(query);
+                                    let turn = srelens_llm::types::Turn::User(query.clone());
                                     let event_tx_clone = event_tx.clone();
+                                    let out_chars = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                                    let out_chars_clone = out_chars.clone();
                                     let mut on_item = move |item: srelens_llm::StreamItem| {
                                         if let srelens_llm::StreamItem::Text(t) = item {
+                                            out_chars_clone.fetch_add(t.len(), std::sync::atomic::Ordering::Relaxed);
                                             let _ = event_tx_clone.send(AppEvent::ActionResult {
                                                 title: "ai_chunk".to_string(),
                                                 result: Ok(t),
@@ -1306,6 +1333,15 @@ impl App {
                                     };
                                     match http.stream_turn(&[turn], &[], &mut on_item).await {
                                         Ok(()) => {
+                                            let duration_ms = start_time.elapsed().as_millis() as u64;
+                                            let prompt_est = (query.len() + 200) / 4;
+                                            let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
+                                            let total_est = prompt_est + comp_est;
+                                            let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, duration_ms);
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "ai_usage".to_string(),
+                                                result: Ok(payload),
+                                            });
                                             let _ = event_tx.send(AppEvent::ActionResult {
                                                 title: "ai_done".to_string(),
                                                 result: Ok(String::new()),
@@ -2029,6 +2065,78 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
         }
         Ok(())
     }
+}
+
+pub(crate) fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
+    let call_id = v.get("call_id")
+        .or_else(|| v.get("callId"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let tool_call_obj = v.get("tool_call").or_else(|| v.get("toolCall"))?;
+    let (key, inner) = tool_call_obj.as_object()?.iter().find(|(k, _)| k.ends_with("ToolCall") || !k.is_empty())?;
+    let tool_name = key.strip_suffix("ToolCall").unwrap_or(key).to_string();
+
+    let mut args_summary = String::new();
+    if let Some(args) = inner.get("args") {
+        if let Some(cmd) = args.get("command").and_then(|s| s.as_str()) {
+            args_summary = cmd.to_string();
+        } else if let Some(path) = args.get("path").and_then(|s| s.as_str()) {
+            args_summary = format!("path: {}", path);
+        } else if let Some(pattern) = args.get("pattern").and_then(|s| s.as_str()) {
+            args_summary = format!("pattern: {}", pattern);
+        } else if let Some(query) = args.get("query").and_then(|s| s.as_str()) {
+            args_summary = format!("query: {}", query);
+        } else if let Some(s) = args.as_str() {
+            args_summary = s.to_string();
+        } else {
+            args_summary = args.to_string();
+        }
+    }
+
+    Some((call_id, tool_name, args_summary))
+}
+
+pub(crate) fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String, bool)> {
+    let call_id = v.get("call_id")
+        .or_else(|| v.get("callId"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_error = v.get("is_error")
+        .or_else(|| v.get("isError"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    Some((call_id, is_error))
+}
+
+pub(crate) fn extract_usage_metrics(v: &serde_json::Value) -> Option<(usize, usize, usize, usize, Option<u64>)> {
+    let usage = v.get("usage")?;
+    let prompt = usage.get("inputTokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as usize;
+
+    let completion = usage.get("outputTokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as usize;
+
+    let cached = usage.get("cacheReadTokens")
+        .or_else(|| usage.get("cached_tokens"))
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as usize;
+
+    let total = prompt + completion;
+    let duration = v.get("duration_ms")
+        .or_else(|| v.get("durationMs"))
+        .and_then(|n| n.as_u64());
+
+    Some((prompt, completion, cached, total, duration))
 }
 
 #[cfg(test)]
