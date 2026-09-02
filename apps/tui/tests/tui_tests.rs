@@ -184,6 +184,7 @@ mod tests {
             pod_count: 50,
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -263,6 +264,7 @@ mod tests {
             pod_count: 50,
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
         };
 
         // 1. Enter command mode by typing ':'
@@ -350,6 +352,7 @@ mod tests {
             pod_count: 50,
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
         };
 
         // 1. Switch to settings view via :settings command
@@ -443,7 +446,7 @@ mod tests {
             active_namespace: "default".to_string(),
             contexts: vec![],
             namespaces: vec!["default".to_string()],
-            active_view: ActiveView::Assistant(srelens_tui::views::assistant_view::AssistantViewState::new()),
+            active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
@@ -472,41 +475,32 @@ mod tests {
             pod_count: 50,
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
-        assert!(matches!(app.active_view, ActiveView::Assistant(_)));
-        if let ActiveView::Assistant(ai) = &app.active_view {
-            assert_eq!(ai.input, "s");
-        }
+        assert!(matches!(app.active_view, ActiveView::Assistant));
+        assert_eq!(app.assistant_state.input, "s");
 
         // Type "how me pods"
         for c in "how me pods".chars() {
             app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
         }
-        if let ActiveView::Assistant(ai) = &app.active_view {
-            assert_eq!(ai.input, "show me pods");
-        }
+        assert_eq!(app.assistant_state.input, "show me pods");
 
         // 2. Test word deletion in Assistant view:
         // Option + Backspace (macOS) -> rubs out "pods" -> "show me "
         app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
-        if let ActiveView::Assistant(ai) = &app.active_view {
-            assert_eq!(ai.input, "show me ");
-        }
+        assert_eq!(app.assistant_state.input, "show me ");
 
         // Ctrl + Backspace (Windows/Linux) -> rubs out "me" -> "show "
         app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)).await;
-        if let ActiveView::Assistant(ai) = &app.active_view {
-            assert_eq!(ai.input, "show ");
-        }
+        assert_eq!(app.assistant_state.input, "show ");
 
         // Ctrl + w (Unix/Vim) -> rubs out "show" -> ""
         app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
-        if let ActiveView::Assistant(ai) = &app.active_view {
-            assert_eq!(ai.input, "");
-        }
+        assert_eq!(app.assistant_state.input, "");
 
         // 3. Pressing Ctrl+s should open Settings!
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
@@ -624,5 +618,177 @@ mod tests {
         assert_eq!(usage.cached_tokens, 2400);
         assert_eq!(usage.total_tokens, 3620);
         assert_eq!(usage.duration_ms, Some(2150));
+    }
+
+    #[tokio::test]
+    async fn test_assistant_conversation_persistence_across_view_switches() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::assistant_view::ToolCallStatus;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Assistant,
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+        };
+
+        // 1. User starts turn in Assistant view
+        app.assistant_state.start_turn("Which nodes have GPUs?".to_string());
+        app.assistant_state.add_tool_call_start(
+            "call_gpu_1".to_string(),
+            "bash".to_string(),
+            "kubectl get nodes -l nvidia.com/gpu".to_string(),
+        );
+        app.assistant_state.finish_tool_call("call_gpu_1", ToolCallStatus::Success);
+        app.assistant_state.append_stream_chunk("Node worker-gpu-1 has an NVIDIA A100 GPU.");
+        app.assistant_state.finish_turn();
+
+        assert_eq!(app.assistant_state.messages.len(), 3);
+        assert_eq!(app.assistant_state.messages[2].tool_calls.len(), 1);
+
+        // 2. User navigates away to Pods view (:pods)
+        app.switch_view_to_kind(ResourceKind::Pods).await;
+        assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+        // 3. While in Pods view, a background stream chunk or status update arrives
+        app.assistant_state.append_stream_chunk(" Also, driver version is 535.129.");
+
+        // 4. User navigates back to Assistant view (via Tab or switch_view_to_kind)
+        app.switch_view_to_kind(ResourceKind::Assistant).await;
+        assert!(matches!(app.active_view, ActiveView::Assistant));
+
+        // 5. Verify entire conversation is intact!
+        assert_eq!(app.assistant_state.messages.len(), 3);
+        assert_eq!(app.assistant_state.messages[1].content, "Which nodes have GPUs?");
+        assert!(app.assistant_state.messages[2].content.contains("Node worker-gpu-1 has an NVIDIA A100 GPU. Also, driver version is 535.129."));
+        assert_eq!(app.assistant_state.messages[2].tool_calls[0].tool, "bash");
+    }
+
+    #[tokio::test]
+    async fn test_assistant_conversation_export_and_clear() {
+        use srelens_tui::views::assistant_view::{AssistantViewState, TokenUsage, ToolCallStatus};
+
+        let mut ai = AssistantViewState::new();
+        ai.start_turn("Test query".to_string());
+        ai.add_tool_call_start("c1".to_string(), "bash".to_string(), "kubectl get nodes".to_string());
+        ai.finish_tool_call("c1", ToolCallStatus::Success);
+        ai.append_stream_chunk("Cluster has 3 nodes.");
+        ai.set_token_usage(TokenUsage {
+            prompt_tokens: 1500,
+            completion_tokens: 25,
+            cached_tokens: 500,
+            total_tokens: 1525,
+            duration_ms: Some(1200),
+        });
+
+        // 1. Test markdown export
+        let md = ai.export_to_markdown("Cursor Agent", "default");
+        assert!(md.contains("# SRElens AI Assistant Conversation Export"));
+        assert!(md.contains("Test query"));
+        assert!(md.contains("Cluster has 3 nodes."));
+        assert!(md.contains("`bash`: `kubectl get nodes` [ok]"));
+        assert!(md.contains("1,525 tokens"));
+
+        // 2. Test saving to custom file
+        let temp_dir = tempfile::tempdir().unwrap();
+        let export_path = temp_dir.path().join("saved_chat.md");
+        let result = ai.save_conversation_to_file("Cursor Agent", "default", Some(export_path.to_str().unwrap()));
+        assert!(result.is_ok());
+        let saved_content = std::fs::read_to_string(&export_path).unwrap();
+        assert_eq!(saved_content, md);
+
+        // 3. Test clear conversation
+        ai.clear_conversation();
+        assert_eq!(ai.messages.len(), 1);
+        assert_eq!(ai.messages[0].role, "assistant");
+        assert!(ai.messages[0].content.contains("Hello! I am your SRElens AI Assistant"));
+        assert!(ai.messages[0].tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_filter_out_hook_additional_contexts() {
+        use srelens_tui::app::extract_tool_call_start_info;
+
+        // JSON emitted by cursor-agent with both real tool (bashToolCall) and hookAdditionalContexts
+        let json_str = r#"{
+            "type": "tool_call",
+            "subtype": "started",
+            "call_id": "call_123",
+            "tool_call": {
+                "hookAdditionalContexts": [],
+                "bashToolCall": {
+                    "args": {
+                        "command": "kubectl get pods -A"
+                    }
+                },
+                "toolCallId": "call_123",
+                "startedAtMs": "1786359191055"
+            }
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let extracted = extract_tool_call_start_info(&v);
+        assert!(extracted.is_some());
+        let (id, tool, args) = extracted.unwrap();
+        assert_eq!(id, "call_123");
+        assert_eq!(tool, "bash");
+        assert_eq!(args, "kubectl get pods -A");
+
+        // JSON with ONLY hookAdditionalContexts metadata and no real ToolCall
+        let json_hook_only = r#"{
+            "type": "tool_call",
+            "subtype": "started",
+            "call_id": "call_999",
+            "tool_call": {
+                "hookAdditionalContexts": [],
+                "toolCallId": "call_999"
+            }
+        }"#;
+        let v_hook: serde_json::Value = serde_json::from_str(json_hook_only).unwrap();
+        let extracted_hook = extract_tool_call_start_info(&v_hook);
+        assert!(extracted_hook.is_none(), "hookAdditionalContexts without a ToolCall key should be ignored");
     }
 }

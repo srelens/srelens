@@ -197,6 +197,123 @@ impl AssistantViewState {
         self.busy_start = None;
     }
 
+    pub fn clear_conversation(&mut self) {
+        self.messages = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string(),
+            timestamp: current_timestamp(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        }];
+        self.input.clear();
+        self.is_busy = false;
+        self.busy_status.clear();
+        self.busy_start = None;
+        self.scroll_offset = 0;
+        self.auto_scroll = true;
+    }
+
+    pub fn export_to_markdown(&self, provider_name: &str, model_name: &str) -> String {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut md = String::new();
+        md.push_str("# SRElens AI Assistant Conversation Export\n\n");
+        md.push_str(&format!("- **Exported At**: {}\n", now));
+        md.push_str(&format!("- **Provider**: {}\n", provider_name));
+        md.push_str(&format!("- **Model**: {}\n\n", model_name));
+        md.push_str("---\n\n");
+
+        for msg in &self.messages {
+            let role_label = match msg.role.as_str() {
+                "user" => "### 👤 You",
+                "assistant" => "### 🤖 SRElens Assistant",
+                _ => "### ℹ️ System",
+            };
+
+            let time_str = if !msg.timestamp.is_empty() {
+                format!(" [{}]", msg.timestamp)
+            } else {
+                String::new()
+            };
+
+            md.push_str(&format!("{}{}\n\n", role_label, time_str));
+
+            let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| {
+                tc.tool != "hookAdditionalContexts" && !(tc.args_summary.is_empty() && tc.tool.starts_with("hook"))
+            }).collect();
+
+            if !visible_tools.is_empty() {
+                md.push_str("#### Executed Tools:\n");
+                for tc in visible_tools {
+                    let status = match &tc.status {
+                        ToolCallStatus::Running => "running",
+                        ToolCallStatus::Success => "ok",
+                        ToolCallStatus::Error(e) => e.as_str(),
+                    };
+                    md.push_str(&format!("- `{}`: `{}` [{}]\n", tc.tool, tc.args_summary, status));
+                }
+                md.push_str("\n");
+            }
+
+            if !msg.content.trim().is_empty() {
+                md.push_str(&msg.content);
+                md.push_str("\n\n");
+            }
+
+            if let Some(usage) = &msg.token_usage {
+                let duration_str = usage.duration_ms.map(|ms| {
+                    if ms >= 1000 {
+                        format!("{:.1}s", ms as f64 / 1000.0)
+                    } else {
+                        format!("{}ms", ms)
+                    }
+                }).unwrap_or_default();
+
+                let cached_str = if usage.cached_tokens > 0 {
+                    format!(" • {} cached", format_number(usage.cached_tokens))
+                } else {
+                    String::new()
+                };
+
+                let duration_badge = if !duration_str.is_empty() {
+                    format!(" • {}", duration_str)
+                } else {
+                    String::new()
+                };
+
+                md.push_str(&format!(
+                    "*⚡ {} tokens ({} prompt, {} completion{}){}*\n\n",
+                    format_number(usage.total_tokens),
+                    format_number(usage.prompt_tokens),
+                    format_number(usage.completion_tokens),
+                    cached_str,
+                    duration_badge
+                ));
+            }
+
+            md.push_str("---\n\n");
+        }
+
+        md
+    }
+
+    pub fn save_conversation_to_file(&self, provider_name: &str, model_name: &str, custom_path: Option<&str>) -> Result<std::path::PathBuf, String> {
+        let md_content = self.export_to_markdown(provider_name, model_name);
+
+        let path = if let Some(p) = custom_path {
+            std::path::PathBuf::from(p)
+        } else {
+            let base_dir = dirs::config_dir()
+                .map(|d| d.join("srelens").join("conversations"))
+                .unwrap_or_else(|| std::path::PathBuf::from("srelens_conversations"));
+            std::fs::create_dir_all(&base_dir).map_err(|e| format!("Failed to create export directory: {}", e))?;
+            let filename = format!("srelens_ai_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+            base_dir.join(filename)
+        };
+
+        std::fs::write(&path, md_content).map_err(|e| format!("Failed to save conversation: {}", e))?;
+        Ok(path)
+    }
+
     pub fn tick(&mut self) {
         if self.is_busy {
             self.spinner_frame = (self.spinner_frame + 1) % 10;
@@ -249,7 +366,7 @@ pub fn render_assistant_view(
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
     let title = format!(
-        " SRElens AI Assistant [{} - {}] [<Ctrl+s> Settings, <Enter> Send, <Esc> Back] ",
+        " SRElens AI Assistant [{} - {}] [<Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
         prov_name, model
     );
 
@@ -295,6 +412,11 @@ pub fn render_assistant_view(
 
         // 1a. Render tool calls (if any)
         for tc in &msg.tool_calls {
+            // Filter out internal metadata hooks that are not user-facing cluster tools
+            if tc.tool == "hookAdditionalContexts" || (tc.args_summary.is_empty() && tc.tool.starts_with("hook")) {
+                continue;
+            }
+
             let (status_badge, status_style) = match &tc.status {
                 ToolCallStatus::Running => ("[⠋ running]", Theme::status_warn()),
                 ToolCallStatus::Success => ("[✓ ok]", Theme::status_ok()),
@@ -313,9 +435,15 @@ pub fn render_assistant_view(
                 Span::styled("─".repeat(25), Style::default().fg(Theme::DIM)),
             ]));
 
+            let command_display = if arg_preview.is_empty() {
+                format!("executing {} ", tc.tool)
+            } else {
+                format!("$ {} ", arg_preview)
+            };
+
             rendered_lines.push(Line::from(vec![
                 Span::styled("  │ ", Style::default().fg(Theme::CYAN)),
-                Span::styled(format!("$ {} ", arg_preview), Style::default().fg(Color::White)),
+                Span::styled(command_display, Style::default().fg(Color::White)),
                 Span::styled(format!(" {}", status_badge), status_style),
             ]));
 
@@ -413,7 +541,7 @@ pub fn render_assistant_view(
     let input_title = if !state.auto_scroll && effective_scroll < max_scroll {
         format!(" Ask Assistant (<End> Follow bottom, ↑/↓ Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
     } else {
-        " Ask Assistant (<Option+⌫>/<Ctrl+⌫> Rubout, <Ctrl+s> Settings, ↑/↓ Scroll) ".to_string()
+        " Ask Assistant (<Option+⌫>/<Ctrl+⌫> Rubout, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)

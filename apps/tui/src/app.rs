@@ -40,7 +40,7 @@ pub enum ActiveView {
     Helm(HelmViewState),
     Overview(OverviewViewState),
     Toolbox(ToolboxViewState),
-    Assistant(AssistantViewState),
+    Assistant,
     Settings(SettingsViewState),
 }
 
@@ -80,6 +80,7 @@ pub struct App {
     pub pod_count: usize,
     pub is_connected: bool,
     pub ai_settings: crate::ai_config::AiSettings,
+    pub assistant_state: AssistantViewState,
 }
 
 pub enum SuspendAction {
@@ -222,6 +223,7 @@ impl App {
             pod_count: 0,
             is_connected: true,
             ai_settings: crate::ai_config::AiSettings::load(),
+            assistant_state: AssistantViewState::new(),
         };
 
         app.refresh_cluster_info();
@@ -235,9 +237,7 @@ impl App {
     }
 
     pub fn handle_tick(&mut self) {
-        if let ActiveView::Assistant(ai) = &mut self.active_view {
-            ai.tick();
-        }
+        self.assistant_state.tick();
     }
 
     pub fn refresh_cluster_info(&self) {
@@ -875,13 +875,13 @@ impl App {
             }
             // Toggle AI Assistant Drawer
             KeyCode::Tab => {
-                if matches!(self.active_view, ActiveView::Assistant(_)) {
+                if matches!(self.active_view, ActiveView::Assistant) {
                     if let Some(prev) = self.nav_stack.pop() {
                         self.active_view = prev;
                         self.restart_active_watch().await;
                     }
                 } else {
-                    let prev = std::mem::replace(&mut self.active_view, ActiveView::Assistant(AssistantViewState::new()));
+                    let prev = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
                     self.nav_stack.push(prev);
                 }
             }
@@ -1151,9 +1151,25 @@ impl App {
                     _ => {}
                 }
             }
-            ActiveView::Assistant(ai) => {
+            ActiveView::Assistant => {
+                let ai = &mut self.assistant_state;
                 if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.switch_view_to_kind(ResourceKind::Settings).await;
+                    return;
+                }
+                if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let prov = self.ai_settings.default_provider;
+                    let prov_name = crate::ai_config::provider_display_name(prov);
+                    let model = self.ai_settings.get_model(prov);
+                    match ai.save_conversation_to_file(prov_name, &model, None) {
+                        Ok(path) => self.set_toast(format!("✓ Saved conversation to {}", path.display()), Theme::status_ok()),
+                        Err(err) => self.set_toast(format!("Failed to save conversation: {}", err), Theme::status_error()),
+                    }
+                    return;
+                }
+                if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    ai.clear_conversation();
+                    self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
                     return;
                 }
                 match key.code {
@@ -1416,6 +1432,23 @@ impl App {
     }
 
     pub async fn execute_colon_command(&mut self, cmd: &str) {
+        let trimmed = cmd.trim();
+        if trimmed == "save-ai" || trimmed == "export-ai" || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant)) {
+            let prov = self.ai_settings.default_provider;
+            let prov_name = crate::ai_config::provider_display_name(prov);
+            let model = self.ai_settings.get_model(prov);
+            match self.assistant_state.save_conversation_to_file(prov_name, &model, None) {
+                Ok(path) => self.set_toast(format!("✓ Saved conversation to {}", path.display()), Theme::status_ok()),
+                Err(err) => self.set_toast(format!("Failed to save conversation: {}", err), Theme::status_error()),
+            }
+            return;
+        }
+        if trimmed == "clear-ai" || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant)) {
+            self.assistant_state.clear_conversation();
+            self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
+            return;
+        }
+
         if let Some(target) = resolve_command_with_crds(cmd, &self.crds) {
             self.execute_command_target(target).await;
         } else {
@@ -1543,7 +1576,7 @@ impl App {
             ResourceKind::HelmReleases => ActiveView::Helm(HelmViewState::new()),
             ResourceKind::Overview => ActiveView::Overview(OverviewViewState::new()),
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
-            ResourceKind::Assistant => ActiveView::Assistant(AssistantViewState::new()),
+            ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
             _ => {
                 let mut table = ResourceTableState::new(kind.clone());
@@ -1938,7 +1971,7 @@ impl App {
             ActiveView::Helm(_) => "Helm Releases",
             ActiveView::Overview(_) => "Overview",
             ActiveView::Toolbox(_) => "Toolbox",
-            ActiveView::Assistant(_) => "AI Assistant",
+            ActiveView::Assistant => "AI Assistant",
             ActiveView::Settings(_) => "AI Settings",
         };
 
@@ -1980,7 +2013,7 @@ impl App {
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
-            ActiveView::Assistant(ai) => render_assistant_view(f, chunks[1], ai, &self.ai_settings),
+            ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
         }
 
@@ -2059,7 +2092,7 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     }
 }
 
-pub(crate) fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
+pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
     let call_id = v.get("call_id")
         .or_else(|| v.get("callId"))
         .and_then(|s| s.as_str())
@@ -2067,8 +2100,16 @@ pub(crate) fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(Str
         .to_string();
 
     let tool_call_obj = v.get("tool_call").or_else(|| v.get("toolCall"))?;
-    let (key, inner) = tool_call_obj.as_object()?.iter().find(|(k, _)| k.ends_with("ToolCall") || !k.is_empty())?;
+    let inner_map = tool_call_obj.as_object()?;
+    // Strictly find the payload key ending with "ToolCall" (e.g. bashToolCall, readToolCall),
+    // ignoring metadata siblings like hookAdditionalContexts, toolCallId, startedAtMs, completedAtMs.
+    let (key, inner) = inner_map.iter().find(|(k, _)| k.ends_with("ToolCall"))?;
     let tool_name = key.strip_suffix("ToolCall").unwrap_or(key).to_string();
+
+    // Skip internal hooks that are not executable tools
+    if tool_name == "hookAdditionalContexts" {
+        return None;
+    }
 
     let mut args_summary = String::new();
     if let Some(args) = inner.get("args") {
@@ -2080,8 +2121,16 @@ pub(crate) fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(Str
             args_summary = format!("pattern: {}", pattern);
         } else if let Some(query) = args.get("query").and_then(|s| s.as_str()) {
             args_summary = format!("query: {}", query);
+        } else if let Some(name) = args.get("name").and_then(|s| s.as_str()) {
+            args_summary = format!("name: {}", name);
         } else if let Some(s) = args.as_str() {
             args_summary = s.to_string();
+        } else if let Some(obj) = args.as_object() {
+            if obj.is_empty() {
+                args_summary = String::new();
+            } else {
+                args_summary = serde_json::to_string(obj).unwrap_or_default();
+            }
         } else {
             args_summary = args.to_string();
         }
@@ -2090,12 +2139,22 @@ pub(crate) fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(Str
     Some((call_id, tool_name, args_summary))
 }
 
-pub(crate) fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String, bool)> {
+pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String, bool)> {
     let call_id = v.get("call_id")
         .or_else(|| v.get("callId"))
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
+
+    // Check if this completion corresponds to an internal metadata hook that has no ToolCall
+    if let Some(tool_call_obj) = v.get("tool_call").or_else(|| v.get("toolCall")) {
+        if let Some(inner_map) = tool_call_obj.as_object() {
+            if !inner_map.iter().any(|(k, _)| k.ends_with("ToolCall")) {
+                return None;
+            }
+        }
+    }
+
     let is_error = v.get("is_error")
         .or_else(|| v.get("isError"))
         .and_then(|b| b.as_bool())

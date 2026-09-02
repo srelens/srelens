@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             match &mut app.active_view {
-                                app::ActiveView::Assistant(ai) => ai.scroll_up(3),
+                                app::ActiveView::Assistant => app.assistant_state.scroll_up(3),
                                 app::ActiveView::Logs(logs) => logs.scroll_up(3),
                                 app::ActiveView::Describe(desc) => desc.scroll_up(3),
                                 app::ActiveView::Yaml(yaml) => yaml.scroll_up(3),
@@ -237,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         MouseEventKind::ScrollDown => {
                             match &mut app.active_view {
-                                app::ActiveView::Assistant(ai) => ai.scroll_down(3),
+                                app::ActiveView::Assistant => app.assistant_state.scroll_down(3),
                                 app::ActiveView::Logs(logs) => logs.scroll_down(3),
                                 app::ActiveView::Describe(desc) => desc.scroll_down(3),
                                 app::ActiveView::Yaml(yaml) => yaml.scroll_down(3),
@@ -265,69 +265,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if title.starts_with("crd_instances:") {
                                 app.handle_crd_instances_update(&title, &msg);
                             } else if title == "ai_reply" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    ai.add_assistant_message(msg);
-                                }
+                                app.assistant_state.add_assistant_message(msg);
                             } else if title == "ai_tool_start" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    let mut parts = msg.splitn(3, '|');
-                                    let id = parts.next().unwrap_or_default().to_string();
-                                    let tool = parts.next().unwrap_or_default().to_string();
-                                    let args = parts.next().unwrap_or_default().to_string();
-                                    ai.add_tool_call_start(id, tool, args);
-                                }
+                                let mut parts = msg.splitn(3, '|');
+                                let id = parts.next().unwrap_or_default().to_string();
+                                let tool = parts.next().unwrap_or_default().to_string();
+                                let args = parts.next().unwrap_or_default().to_string();
+                                app.assistant_state.add_tool_call_start(id, tool, args);
                             } else if title == "ai_tool_done" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    let mut parts = msg.splitn(2, '|');
-                                    let id = parts.next().unwrap_or_default();
-                                    let status_str = parts.next().unwrap_or_default();
-                                    let status = if status_str == "ok" {
-                                        views::assistant_view::ToolCallStatus::Success
-                                    } else {
-                                        views::assistant_view::ToolCallStatus::Error(status_str.to_string())
-                                    };
-                                    ai.finish_tool_call(id, status);
-                                }
+                                let mut parts = msg.splitn(2, '|');
+                                let id = parts.next().unwrap_or_default();
+                                let status_str = parts.next().unwrap_or_default();
+                                let status = if status_str == "ok" {
+                                    views::assistant_view::ToolCallStatus::Success
+                                } else {
+                                    views::assistant_view::ToolCallStatus::Error(status_str.to_string())
+                                };
+                                app.assistant_state.finish_tool_call(id, status);
                             } else if title == "ai_usage" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    let parts: Vec<&str> = msg.split('|').collect();
-                                    if parts.len() >= 4 {
-                                        let prompt = parts[0].parse().unwrap_or(0);
-                                        let comp = parts[1].parse().unwrap_or(0);
-                                        let cached = parts[2].parse().unwrap_or(0);
-                                        let total = parts[3].parse().unwrap_or(prompt + comp);
-                                        let duration = parts.get(4).and_then(|s| s.parse().ok());
-                                        ai.set_token_usage(views::assistant_view::TokenUsage {
-                                            prompt_tokens: prompt,
-                                            completion_tokens: comp,
-                                            cached_tokens: cached,
-                                            total_tokens: total,
-                                            duration_ms: duration,
-                                        });
-                                    }
+                                let parts: Vec<&str> = msg.split('|').collect();
+                                if parts.len() >= 4 {
+                                    let prompt = parts[0].parse().unwrap_or(0);
+                                    let comp = parts[1].parse().unwrap_or(0);
+                                    let cached = parts[2].parse().unwrap_or(0);
+                                    let total = parts[3].parse().unwrap_or(prompt + comp);
+                                    let duration = parts.get(4).and_then(|s| s.parse().ok());
+                                    app.assistant_state.set_token_usage(views::assistant_view::TokenUsage {
+                                        prompt_tokens: prompt,
+                                        completion_tokens: comp,
+                                        cached_tokens: cached,
+                                        total_tokens: total,
+                                        duration_ms: duration,
+                                    });
                                 }
                             } else if title == "ai_chunk" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    ai.append_stream_chunk(&msg);
-                                }
+                                app.assistant_state.append_stream_chunk(&msg);
                             } else if title == "ai_status" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    ai.set_status(msg);
-                                }
+                                app.assistant_state.set_status(msg);
                             } else if title == "ai_done" {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    ai.finish_turn();
-                                }
+                                app.assistant_state.finish_turn();
                             } else {
                                 app.set_toast(msg, theme::Theme::status_ok());
                             }
                         }
                         Err(err) => {
                             if title.starts_with("ai_") {
-                                if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                    ai.append_stream_chunk(&format!("\n[Error: {}]", err));
-                                    ai.finish_turn();
-                                }
+                                app.assistant_state.append_stream_chunk(&format!("\n[Error: {}]", err));
+                                app.assistant_state.finish_turn();
                             }
                             app.set_toast(err, theme::Theme::status_error());
                         }
