@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -184,14 +185,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen);
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
         default_panic(panic_info);
     }));
 
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -225,17 +226,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     use crossterm::event::MouseEventKind;
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
-                            if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                ai.scroll_up(3);
-                            } else if let app::ActiveView::Logs(logs) = &mut app.active_view {
-                                logs.scroll_up(3);
+                            match &mut app.active_view {
+                                app::ActiveView::Assistant(ai) => ai.scroll_up(3),
+                                app::ActiveView::Logs(logs) => logs.scroll_up(3),
+                                app::ActiveView::Describe(desc) => desc.scroll_up(3),
+                                app::ActiveView::Yaml(yaml) => yaml.scroll_up(3),
+                                app::ActiveView::Table(table) => table.select_prev(),
+                                _ => {}
                             }
                         }
                         MouseEventKind::ScrollDown => {
-                            if let app::ActiveView::Assistant(ai) = &mut app.active_view {
-                                ai.scroll_down(3);
-                            } else if let app::ActiveView::Logs(logs) = &mut app.active_view {
-                                logs.scroll_down(3);
+                            match &mut app.active_view {
+                                app::ActiveView::Assistant(ai) => ai.scroll_down(3),
+                                app::ActiveView::Logs(logs) => logs.scroll_down(3),
+                                app::ActiveView::Describe(desc) => desc.scroll_down(3),
+                                app::ActiveView::Yaml(yaml) => yaml.scroll_down(3),
+                                app::ActiveView::Table(table) => table.select_next(),
+                                _ => {}
                             }
                         }
                         _ => {}
@@ -295,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(action) = app.requires_terminal_suspend.take() {
             // 1. Temporarily restore terminal
             disable_raw_mode()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
             terminal.show_cursor()?;
 
             // 2. Run external action
@@ -378,7 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 3. Re-enter TUI mode
             enable_raw_mode()?;
-            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
             terminal.hide_cursor()?;
             terminal.clear()?;
         }
@@ -386,7 +393,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Clean exit
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     Ok(())
