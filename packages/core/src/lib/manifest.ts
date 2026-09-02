@@ -1,5 +1,6 @@
 import { isMap, isScalar, parse, parseDocument, visit } from "yaml";
 import { invokeCapability, type Invoker } from "../transport/transport";
+import type { NodeTaint } from "./taints";
 
 export interface NodeSummary {
   name: string;
@@ -9,6 +10,12 @@ export interface NodeSummary {
   unschedulable: boolean;
   /** Number of taints, excluding the auto-added unschedulable taint. */
   taints: number;
+  /**
+   * The taints `taints` counts — the same filtered set, so the list badge's
+   * number and its tooltip can never disagree. The Node detail page reads the
+   * live object instead and lists every taint, cordon one included.
+   */
+  taintDetails: NodeTaint[];
   version: string;
   roles: string;
   age: string;

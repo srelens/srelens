@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, RefreshCw } from "lucide-react";
 import {
   podMetrics,
+  TAINT_COLUMN_HINT,
+  taintBadgeLabel,
+  taintBadgeText,
+  taintSortValue,
+  taintTallyText,
+  taintTooltip,
   type PodSummary,
   type DeploymentSummary,
   type ServiceSummary,
@@ -362,6 +368,21 @@ const clusterRoleBindingColumns: Column<ClusterRoleBindingSummary>[] = [
   { key: "age", header: "Age", getSortValue: ageSortValue, render: (b) => <Muted>{b.age}</Muted> },
 ];
 
+/**
+ * The Tainted badge with its count, its hover list and its accessible name —
+ * the classic half of the pair in `ui-next`'s `columns.tsx`. Both render their
+ * own design's Badge and take every word, every ordering and the sort value
+ * from `@srelens/core`'s `taints`, so the two lists cannot drift. (#426)
+ */
+function TaintBadge({ row }: { row: NodeRow }) {
+  const taints = row.taintDetails ?? [];
+  return (
+    <span tabIndex={0} title={taintTooltip(taints)} aria-label={taintBadgeLabel(row.taints)}>
+      <Badge variant="neutral">{taintBadgeText(row.taints)}</Badge>
+    </span>
+  );
+}
+
 const nodeColumns: Column<NodeRow>[] = [
   { key: "name", header: "Node", render: (n) => <strong>{n.name}</strong> },
   {
@@ -371,9 +392,7 @@ const nodeColumns: Column<NodeRow>[] = [
       <span className="inline-flex items-center gap-1.5">
         <StatusPill status={n.status} kind={phaseKind(n.status)} />
         {n.unschedulable && <Badge variant="warning">SchedulingDisabled</Badge>}
-        {n.taints > 0 && (
-          <Badge variant="neutral">{n.taints > 1 ? `Tainted (${n.taints})` : "Tainted"}</Badge>
-        )}
+        {n.taints > 0 && <TaintBadge row={n} />}
       </span>
     ),
   },
@@ -381,6 +400,20 @@ const nodeColumns: Column<NodeRow>[] = [
   { key: "cpu", header: "CPU", render: (n) => <Muted>{n.cpu != null ? `${n.cpu}m` : "—"}</Muted> },
   { key: "memory", header: "Memory", render: (n) => <Muted>{n.memory != null ? `${n.memory}Mi` : "—"}</Muted> },
   { key: "version", header: "Version", render: (n) => <Muted>{n.version}</Muted> },
+  {
+    key: "taints",
+    header: "Taints",
+    // Off until asked for — the same bargain the new design's column makes.
+    defaultHidden: true,
+    getSortValue: (n) => taintSortValue(n.taintDetails),
+    render: (n) => (
+      <Muted>
+        <span title={(n.taintDetails ?? []).length > 0 ? taintTooltip(n.taintDetails ?? []) : TAINT_COLUMN_HINT}>
+          {taintTallyText(n.taintDetails ?? [])}
+        </span>
+      </Muted>
+    ),
+  },
   { key: "age", header: "Age", getSortValue: ageSortValue, render: (n) => <Muted>{n.age}</Muted> },
 ];
 

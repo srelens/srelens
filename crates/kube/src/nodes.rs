@@ -17,6 +17,21 @@ pub struct ListNodesIn {
     pub context: String,
 }
 
+/// One entry of `spec.taints` — the shape the Nodes list's badge tooltip and
+/// the optional Taints column read. `value` is empty for the common valueless
+/// taint (`node-role.kubernetes.io/control-plane:NoSchedule`), which is a real
+/// value and not a missing one, so it is a `String` and not an `Option`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct NodeTaint {
+    pub key: String,
+    pub value: String,
+    /// `NoSchedule`, `PreferNoSchedule` or `NoExecute`.
+    pub effect: String,
+    /// Set by Kubernetes only for `NoExecute` taints.
+    #[serde(rename = "timeAdded", skip_serializing_if = "Option::is_none")]
+    pub time_added: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct NodeSummary {
     pub name: String,
@@ -26,6 +41,15 @@ pub struct NodeSummary {
     pub unschedulable: bool,
     /// Number of taints on the node, excluding the auto-added unschedulable taint.
     pub taints: u32,
+    /// The taints `taints` counts, in the order the API server reports them.
+    /// Deliberately the *same* filtered set as the count rather than the whole
+    /// of `spec.taints`: the list's badge shows the count and its tooltip shows
+    /// this, and a badge reading "2" over a tooltip listing three lines is a
+    /// worse answer than leaving the cordon taint — already spelled out by the
+    /// SchedulingDisabled badge beside it — to the detail page, which reads the
+    /// live object and lists every taint.
+    #[serde(rename = "taintDetails")]
+    pub taint_details: Vec<NodeTaint>,
     pub version: String,
     pub roles: String,
     pub age: String,
@@ -90,15 +114,22 @@ fn summarise(node: Node) -> NodeSummary {
     let unschedulable = spec.and_then(|s| s.unschedulable).unwrap_or(false);
     // Count taints, ignoring the taint Kubernetes adds automatically when a node
     // is cordoned — that state is already conveyed by `unschedulable`.
-    let taints = spec
+    let taint_details: Vec<NodeTaint> = spec
         .and_then(|s| s.taints.as_ref())
         .map(|taints| {
             taints
                 .iter()
                 .filter(|taint| taint.key != "node.kubernetes.io/unschedulable")
-                .count() as u32
+                .map(|taint| NodeTaint {
+                    key: taint.key.clone(),
+                    value: taint.value.clone().unwrap_or_default(),
+                    effect: taint.effect.clone(),
+                    time_added: taint.time_added.as_ref().map(|t| t.0.to_string()),
+                })
+                .collect()
         })
-        .unwrap_or(0);
+        .unwrap_or_default();
+    let taints = taint_details.len() as u32;
     // A node that reports no allocatable at all reports zero, not a guess —
     // the consumer downstream (packages/core/src/lib/k8sCapacity.ts) is what
     // turns a zero denominator into "no reading".
@@ -134,6 +165,7 @@ fn summarise(node: Node) -> NodeSummary {
         status,
         unschedulable,
         taints,
+        taint_details,
         version,
         roles,
         age: crate::humanize_age(node.metadata.creation_timestamp.as_ref()),
@@ -361,5 +393,118 @@ mod tests {
         assert_eq!(s.status, "Ready");
         assert!(s.unschedulable);
         assert_eq!(s.taints, 1);
+        // The detail list is the same filtered set the count reports, so the
+        // badge's number and its tooltip can never disagree.
+        assert_eq!(s.taint_details.len(), 1);
+        assert_eq!(s.taint_details[0].key, "dedicated");
+    }
+
+    /// A node with an empty `spec.taints` and a node with no `spec` at all are
+    /// the same answer — zero, and an empty list rather than a null the
+    /// frontend would have to guard.
+    #[test]
+    fn a_node_with_no_taints_reports_zero_and_an_empty_list() {
+        let no_spec = Node {
+            metadata: kube::core::ObjectMeta {
+                name: Some("clean-1".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = summarise(no_spec);
+        assert_eq!(s.taints, 0);
+        assert!(s.taint_details.is_empty());
+
+        let empty_taints = Node {
+            metadata: kube::core::ObjectMeta {
+                name: Some("clean-2".into()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::NodeSpec {
+                taints: Some(vec![]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = summarise(empty_taints);
+        assert_eq!(s.taints, 0);
+        assert!(s.taint_details.is_empty());
+    }
+
+    /// The single-taint case the issue calls out as the benign one: a fresh
+    /// control-plane node. Its taint carries no value, which is a real value
+    /// (the empty string) and not a missing one.
+    #[test]
+    fn a_control_plane_nodes_one_taint_is_carried_whole() {
+        use k8s_openapi::api::core::v1::{NodeSpec, Taint};
+        let node = Node {
+            metadata: kube::core::ObjectMeta {
+                name: Some("cp-1".into()),
+                ..Default::default()
+            },
+            spec: Some(NodeSpec {
+                taints: Some(vec![Taint {
+                    key: "node-role.kubernetes.io/control-plane".into(),
+                    effect: "NoSchedule".into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = summarise(node);
+        assert_eq!(s.taints, 1);
+        assert_eq!(s.taint_details.len(), 1);
+        assert_eq!(s.taint_details[0].value, "");
+        assert_eq!(s.taint_details[0].effect, "NoSchedule");
+        assert_eq!(s.taint_details[0].time_added, None);
+    }
+
+    /// N taints across all three effects, with `timeAdded` — which Kubernetes
+    /// sets only for `NoExecute` — carried through as RFC 3339 for the detail
+    /// page. Order is the API server's, unchanged.
+    #[test]
+    fn carries_every_effect_and_the_time_a_no_execute_taint_was_added() {
+        use k8s_openapi::api::core::v1::{NodeSpec, Taint};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let added: Time = serde_json::from_str("\"2026-09-02T08:15:00Z\"").unwrap();
+        let node = Node {
+            metadata: kube::core::ObjectMeta {
+                name: Some("worker-9".into()),
+                ..Default::default()
+            },
+            spec: Some(NodeSpec {
+                taints: Some(vec![
+                    Taint {
+                        key: "node.kubernetes.io/memory-pressure".into(),
+                        effect: "NoSchedule".into(),
+                        ..Default::default()
+                    },
+                    Taint {
+                        key: "spot".into(),
+                        value: Some("true".into()),
+                        effect: "PreferNoSchedule".into(),
+                        ..Default::default()
+                    },
+                    Taint {
+                        key: "team".into(),
+                        value: Some("payments".into()),
+                        effect: "NoExecute".into(),
+                        time_added: Some(added),
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = summarise(node);
+        assert_eq!(s.taints, 3);
+        let effects: Vec<&str> = s.taint_details.iter().map(|t| t.effect.as_str()).collect();
+        assert_eq!(effects, ["NoSchedule", "PreferNoSchedule", "NoExecute"]);
+        assert_eq!(s.taint_details[1].value, "true");
+        assert_eq!(
+            s.taint_details[2].time_added.as_deref(),
+            Some("2026-09-02T08:15:00Z")
+        );
     }
 }
