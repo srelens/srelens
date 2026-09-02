@@ -176,24 +176,36 @@ describe("AccessibilityPane", () => {
   });
 
   /**
-   * §23 says "the console announces agent replies through a live region".
-   * `shell/Console.tsx` has no `aria-live`, no `role="status"` and no
-   * `role="log"` — and it says on screen that the agent is not in the new
-   * design, so there are no replies to announce either. What IS true is that
-   * every failure surface in this package is a live region (`Alert` carries
-   * `role="alert"` for `sev` and `role="status"` otherwise), which is what the
-   * pane claims instead.
+   * §23 says "the console announces agent replies through a live region", and
+   * as of step 9 that is TRUE: the dock has a real agent behind it, and
+   * `ui-kit`'s `ConsoleDock` declares the one ARIA log region for it, which
+   * `shell/Console.tsx` drives through `live` — polite for the thread, off for
+   * the palette and the suggestions list, whose whole body re-renders on every
+   * keystroke.
+   *
+   * This test used to assert the OPPOSITE, because the console was a stub with
+   * nothing to announce. Step 9 made the pane's sentence false and the guard
+   * missed it: the guard scanned `Console.tsx` for `aria-live`, and the region
+   * had moved into `ConsoleDock`, so an absence-scan could pass while the
+   * console announced. An absence is the wrong thing to pin — it goes stale
+   * silently the moment the feature arrives. So this pins the PRESENCE of what
+   * the copy claims, in the file that actually carries it.
    */
-  it("does not claim the console announces anything", () => {
+  it("claims the console announces replies, and that claim is true", () => {
     render(<AccessibilityPane />);
     const note = screen.getByTestId("live-region-note").textContent ?? "";
     expect(note).toMatch(/live region/i);
-    expect(note).not.toMatch(/console announces agent replies/i);
-    expect(note).toMatch(/console announces nothing yet/i);
-    // The source of the claim, so this cannot pass on a reworded promise: no
-    // live-region markup exists in the console at all.
+    // The pane must not still be telling the reader the agent is absent.
+    expect(note).not.toMatch(/announces nothing yet|not in the new design/i);
+    expect(note).toMatch(/read as it arrives/i);
+    expect(note).toMatch(/goes quiet while you type/i);
+    // The source of the claim, so it cannot pass on copy alone: the region the
+    // sentence promises exists, and the console drives it.
+    const dock = readFileSync(join(HERE, "../../../../ui-kit/src/ConsoleDock.tsx"), "utf8");
+    expect(dock).toMatch(/role="log"/);
+    expect(dock).toMatch(/aria-live=\{live \? "polite" : "off"\}/);
     const console_ = readFileSync(join(HERE, "../../shell/Console.tsx"), "utf8");
-    expect(console_).not.toMatch(/aria-live|role="status"|role="log"/);
+    expect(console_).toMatch(/live=\{dockLive\}/);
   });
 
   it("carries §23's other screen-reader paragraph", () => {

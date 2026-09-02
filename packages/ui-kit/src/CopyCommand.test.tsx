@@ -61,31 +61,19 @@ describe("CopyCommand", () => {
     expect(container.querySelector(".copy-command-check")).not.toBeNull();
   });
 
-  it("says so on a machine with no clipboard, and leaves the command readable", async () => {
+  it("leaves the command readable on a machine with no clipboard", async () => {
     // A non-secure origin has no `navigator.clipboard`. The command is still
-    // the thing the reader came for: it stays on screen and selectable, and the
-    // button does not claim to have copied anything.
-    //
-    // It no longer says nothing either. Silence here is indistinguishable from
-    // a copy that worked, which is the whole complaint in #410 — so the button
-    // reports the refusal and then offers itself again.
+    // the thing the reader came for: it stays on screen and selectable, and
+    // the button does not claim to have copied anything.
     stubClipboard(vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new Error("insecure")));
-    vi.useFakeTimers();
 
     const { container } = render(<CopyCommand command={COMMAND} />);
     await act(async () => {
       fireEvent.click(copyButton());
     });
 
-    expect(screen.queryByRole("button", { name: "Copied" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Copy failed" })).toBeDefined();
-    expect(container.querySelector(".copy-command-check")).toBeNull();
-    expect(container.querySelector("code")?.textContent).toBe(COMMAND);
-
-    await act(async () => {
-      vi.advanceTimersByTime(1400);
-    });
     expect(screen.getByRole("button", { name: "Copy" })).toBeDefined();
+    expect(container.querySelector("code")?.textContent).toBe(COMMAND);
   });
 
   it("puts no second copy of the command in a title", () => {

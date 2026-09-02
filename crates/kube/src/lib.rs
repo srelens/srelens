@@ -31,6 +31,24 @@ pub(crate) fn humanize_age(creation: Option<&Time>) -> String {
     }
 }
 
+/// A resource's `creationTimestamp` as RFC 3339, for a caller that must
+/// compute the age itself rather than read one someone else already rendered.
+///
+/// `humanize_age` above resolves `now` at the moment it is called, so what it
+/// returns is a SNAPSHOT. A summary is built once per watch event and then
+/// cached, so an object nothing is changing keeps the age string it was born
+/// with — a Secret created while its list is open reads `0s` for as long as the
+/// list stays open (#405). Sending the timestamp instead lets the frontend
+/// re-derive the age against a clock that ticks, which is the only place that
+/// can be done: the backend cannot re-render a string for an object no event
+/// is arriving for.
+///
+/// `None` for an object with no timestamp, so a caller renders nothing rather
+/// than a wrong number.
+pub(crate) fn creation_rfc3339(creation: Option<&Time>) -> Option<String> {
+    creation.map(|t| t.0.to_string())
+}
+
 /// Abbreviate PV/PVC access modes ("ReadWriteOnce" → "RWO"), comma-joined.
 pub(crate) fn abbreviate_access_modes(modes: Option<&Vec<String>>) -> String {
     modes

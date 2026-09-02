@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, ScrollText, SquareTerminal } from "lucide-react";
+import { formatTaint, orderTaints, parseTaints, taintTimeAddedText } from "@srelens/core";
 import { getObject, getSecret, type K8sObject } from "@srelens/core";
 import { certificateRows, type CertificateRow } from "@srelens/core";
 import { listEndpointSlices } from "@srelens/core";
@@ -1172,6 +1173,7 @@ function NodeBody({ obj }: { obj: K8sObject }) {
   const cap = asRecord(status.capacity);
   const alloc = asRecord(status.allocatable);
   const cordoned = spec.unschedulable === true;
+  const taints = orderTaints(parseTaints(obj.spec));
   return (
     <>
       <Section title="Info">
@@ -1200,6 +1202,21 @@ function NodeBody({ obj }: { obj: K8sObject }) {
             ["Memory", `${str(alloc.memory)} / ${str(cap.memory)}`],
             ["Pods", `${str(alloc.pods)} / ${str(cap.pods)}`],
           ]}
+        />
+      </Section>
+      {/* Every taint, cordon one included — see `NodeBody` in ui-next's
+          `screens/detail` for why this differs from the list's count, and
+          `@srelens/core`'s `taints` for the ordering both designs share. */}
+      <Section title="Taints">
+        <KV
+          pairs={
+            taints.length === 0
+              ? [["Count", "0"]]
+              : taints.map(
+                  (taint) =>
+                    [formatTaint(taint), taintTimeAddedText(taint)] as [string, React.ReactNode],
+                )
+          }
         />
       </Section>
     </>

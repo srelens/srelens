@@ -24,6 +24,11 @@ pub struct ConfigMapSummary {
     pub namespace: String,
     /// Number of keys (`data` + `binaryData`).
     pub keys: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and a summary
+    /// is only rebuilt when a watch event arrives for the object — so it goes
+    /// stale (#405). Prefer this; `age` stays for callers that have no clock.
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -39,6 +44,7 @@ pub(crate) fn summarise(cm: ConfigMap) -> ConfigMapSummary {
         name: cm.metadata.name.clone().unwrap_or_default(),
         namespace: cm.metadata.namespace.clone().unwrap_or_default(),
         keys: (data_keys + binary_keys) as i32,
+        created: crate::creation_rfc3339(cm.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(cm.metadata.creation_timestamp.as_ref()),
     }
 }
@@ -80,6 +86,34 @@ mod tests {
         let cap = list_configmaps_capability(ClientCache::new(PathBuf::from("/x")));
         assert_eq!(cap.id, "k8s.listConfigMaps");
         assert!(cap.annotations.read_only);
+    }
+
+    /// #405: the summary must carry the raw `creationTimestamp`, not only the
+    /// rendered `age`. `age` is resolved against `now` when the summary is
+    /// built and a summary is rebuilt only on a watch event, so a list showing
+    /// it freezes; `created` is what lets the frontend re-derive a live age.
+    #[test]
+    fn summary_carries_creation_timestamp_for_a_live_age() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let created = "2026-09-01T12:59:22Z".parse::<k8s_openapi::jiff::Timestamp>().unwrap();
+        let cm = ConfigMap {
+            metadata: kube::core::ObjectMeta {
+                name: Some("demo-cm".into()),
+                namespace: Some("default".into()),
+                creation_timestamp: Some(Time(created)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = summarise(cm);
+        assert_eq!(out.created.as_deref(), Some("2026-09-01T12:59:22Z"));
+
+        // No timestamp => None, so the UI renders nothing rather than a wrong age.
+        let bare = ConfigMap {
+            metadata: kube::core::ObjectMeta { name: Some("x".into()), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(summarise(bare).created, None);
     }
 
     #[test]

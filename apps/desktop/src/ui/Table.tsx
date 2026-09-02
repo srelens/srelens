@@ -25,6 +25,9 @@ export interface Column<T> {
    *  visible text. */
   getSortValue?: (row: T) => unknown;
   sortable?: boolean;
+  /** Start hidden, offered by the ColumnPicker — see ui-kit's `Column`. Only
+   *  the default: a reader's own toggle for this view wins from then on. */
+  defaultHidden?: boolean;
   filterable?: boolean;
   minWidth?: number;
 }

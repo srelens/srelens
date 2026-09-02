@@ -15,6 +15,8 @@ export { ColumnPicker, type ColumnOption, type ColumnPickerProps } from "./Colum
 export { Combobox, type ComboboxOption, type ComboboxProps } from "./Combobox";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";
 export { ConsoleDock, type ConsoleDockProps } from "./ConsoleDock";
+export { ConsolePrompt, type ConsolePromptProps } from "./ConsolePrompt";
+export { CopyButton, type CopyButtonProps } from "./CopyButton";
 export { ContextMenu, type ContextMenuItem, type ContextMenuProps } from "./ContextMenu";
 export { CopyAnnounce } from "./CopyAnnounce";
 export { CopyCommand, type CopyCommandProps } from "./CopyCommand";
@@ -44,6 +46,7 @@ export { MultiSelect, type MultiSelectProps } from "./MultiSelect";
 export { NavIcon, type NavIconProps } from "./NavIcon";
 export { PairList, type PairListProps } from "./PairList";
 export { Panel, type PanelProps } from "./Panel";
+export { OptionCheck } from "./OptionCheck";
 export { Popover, type PopoverProps } from "./Popover";
 export {
   PortalScopeProvider,
@@ -51,6 +54,7 @@ export {
   usePortalContainer,
   usePortalHost,
   usePortalScoped,
+  usePortalShowing,
   type PortalScope,
 } from "./portal";
 export { Progress, type ProgressProps } from "./Progress";

@@ -46,6 +46,7 @@ import {
   NoClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
+  defaultHiddenKeys,
   emptyTableCopy,
   toggleColumnVisibility,
   useResourceTabView,
@@ -167,8 +168,9 @@ function KindList({
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
   const list = useResourceList<ListRow>(name, slug, descriptor, namespace, files);
 
-  const hidden = useHiddenColumns(slug);
   const allColumns = descriptor?.columns ?? NO_COLUMNS;
+  const defaultHidden = useMemo(() => defaultHiddenKeys(allColumns), [allColumns]);
+  const hidden = useHiddenColumns(slug, defaultHidden);
   const columns = useMemo(
     // The identifier is never hidden: a table whose rows lost their name is
     // not a table any more. `ColumnPicker` pins the same key.
@@ -312,7 +314,7 @@ function KindList({
   const lower = title.toLocaleLowerCase();
 
   function onToggleColumn(key: string) {
-    toggleColumnVisibility({ key, storageKey: slug, hidden, filterKey, tabId });
+    toggleColumnVisibility({ key, storageKey: slug, hidden, filterKey, tabId, defaultHidden });
   }
 
   if (!descriptor) {

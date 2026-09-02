@@ -100,18 +100,44 @@ function save(storage: Storage) {
   }
 }
 
-/** The columns hidden for a kind, as a stable set until it next changes. */
-export function hiddenColumns(kind: string): ReadonlySet<string> {
-  const cached = snapshots.get(kind);
+/**
+ * The columns hidden for a kind, as a stable set until it next changes.
+ *
+ * `defaultHidden` is consulted only while the kind has **no stored entry at
+ * all**. That is the whole of what makes a default-off column work here: the
+ * record holds hidden keys, so "the reader turned the default-off column on"
+ * and "the reader has expressed nothing" would otherwise both be an absent
+ * key, and the column would spring back to hidden on the next launch. A
+ * stored empty array is a choice — everything shown — and outranks the
+ * defaults. (#426)
+ */
+export function hiddenColumns(kind: string, defaultHidden: readonly string[] = []): ReadonlySet<string> {
+  // The cache is keyed by both, because one kind can be asked with different
+  // defaults (a screen before and after its descriptor loads) and the memo
+  // must not answer the first question with the second one's set.
+  const cacheKey = `${kind}\u0000${defaultHidden.join(",")}`;
+  const cached = snapshots.get(cacheKey);
   if (cached) return cached;
-  const set = new Set(prefs[kind] ?? []);
-  snapshots.set(kind, set);
+  const set = new Set(prefs[kind] ?? defaultHidden);
+  snapshots.set(cacheKey, set);
   return set;
 }
 
-/** Hide a shown column, or show a hidden one, for one kind. */
-export function toggleColumn(kind: string, key: string, storage: Storage = settingsStorage): void {
-  const next = new Set(prefs[kind] ?? []);
+/**
+ * Hide a shown column, or show a hidden one, for one kind.
+ *
+ * Starts from the *effective* set, not the raw record, so the first toggle of
+ * a default-hidden column turns it on rather than hiding it a second time.
+ * Always writes an entry — an empty one included — which is what turns "no
+ * choice" into "chose everything".
+ */
+export function toggleColumn(
+  kind: string,
+  key: string,
+  storage: Storage = settingsStorage,
+  defaultHidden: readonly string[] = [],
+): void {
+  const next = new Set(prefs[kind] ?? defaultHidden);
   if (next.has(key)) next.delete(key);
   else next.add(key);
   prefs = { ...prefs, [kind]: [...next] };
@@ -119,7 +145,7 @@ export function toggleColumn(kind: string, key: string, storage: Storage = setti
   save(storage);
 }
 
-/** Forget a kind's hidden columns, putting it back to showing all of them. */
+/** Forget a kind's hidden columns, putting it back to its default columns. */
 export function resetColumns(kind: string, storage: Storage = settingsStorage): void {
   if (!(kind in prefs)) return;
   const { [kind]: _dropped, ...rest } = prefs;
@@ -128,11 +154,16 @@ export function resetColumns(kind: string, storage: Storage = settingsStorage): 
   save(storage);
 }
 
-/** The columns hidden for a kind, re-rendering whoever reads it when they change. */
-export function useHiddenColumns(kind: string): ReadonlySet<string> {
+/**
+ * The columns hidden for a kind, re-rendering whoever reads it when they
+ * change. `defaultHidden` is compared by value, not identity, so a caller may
+ * hand it a fresh array every render without tearing the store.
+ */
+export function useHiddenColumns(kind: string, defaultHidden: readonly string[] = []): ReadonlySet<string> {
+  const defaults = defaultHidden.join(",");
   return useSyncExternalStore(
     subscribe,
-    () => hiddenColumns(kind),
-    () => hiddenColumns(kind),
+    () => hiddenColumns(kind, defaults ? defaults.split(",") : []),
+    () => hiddenColumns(kind, defaults ? defaults.split(",") : []),
   );
 }
