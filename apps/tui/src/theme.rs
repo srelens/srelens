@@ -95,12 +95,12 @@ impl Theme {
 /// Helper function to colorize a status string (e.g. "Running" -> Green, "CrashLoopBackOff" -> Red)
 pub fn status_style(status: &str) -> Style {
     let lower = status.to_lowercase();
-    if lower.contains("running") || lower.contains("active") || lower.contains("ready") || lower.contains("completed") || lower.contains("succeeded") || lower == "true" {
-        Theme::status_ok()
+    if lower.contains("crash") || lower.contains("error") || lower.contains("failed") || lower.contains("notready") || lower.contains("unknown") || lower.contains("backoff") || lower == "false" {
+        Theme::status_error()
     } else if lower.contains("pending") || lower.contains("containercreating") || lower.contains("terminating") || lower.contains("warning") {
         Theme::status_warn()
-    } else if lower.contains("crash") || lower.contains("error") || lower.contains("failed") || lower.contains("notready") || lower.contains("unknown") || lower.contains("backoff") {
-        Theme::status_error()
+    } else if lower.contains("running") || lower.contains("active") || lower.contains("ready") || lower.contains("completed") || lower.contains("succeeded") || lower == "true" || lower == "secretsynced" {
+        Theme::status_ok()
     } else {
         Style::default().fg(Theme::FG)
     }

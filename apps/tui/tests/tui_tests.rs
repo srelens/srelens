@@ -80,6 +80,7 @@ mod tests {
             singular: "ciliumloadbalancerippool".to_string(),
             namespaced: false,
             short_names: vec!["ippool".to_string(), "lbippool".to_string()],
+            printer_columns: vec![],
         };
         let crds = vec![cilium_crd];
 
@@ -2003,6 +2004,170 @@ mod tests {
         if let ActiveView::Table(ref table) = app.active_view {
             assert_eq!(table.filtered_indices.len(), 3);
             assert!(!table.warning_triage);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crd_dynamic_printer_columns_kubectl_parity() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::{resolve_command_with_crds, CrdMeta, PrinterColumn};
+        use srelens_tui::views::resource_table::extract_field_str;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("prod".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let es_meta = CrdMeta {
+            crd_name: "externalsecrets.external-secrets.io".to_string(),
+            group: "external-secrets.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ExternalSecret".to_string(),
+            plural: "externalsecrets".to_string(),
+            singular: "externalsecret".to_string(),
+            namespaced: true,
+            short_names: vec!["es".to_string()],
+            printer_columns: vec![
+                PrinterColumn {
+                    name: "StoreType".to_string(),
+                    json_path: ".spec.secretStoreRef.kind".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Store".to_string(),
+                    json_path: ".spec.secretStoreRef.name".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Refresh Interval".to_string(),
+                    json_path: ".spec.refreshInterval".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Status".to_string(),
+                    json_path: ".status.conditions[?(@.type==\"Ready\")].reason".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Ready".to_string(),
+                    json_path: ".status.conditions[?(@.type==\"Ready\")].status".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Last Sync".to_string(),
+                    json_path: ".status.refreshTime".to_string(),
+                    col_type: "date".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+            ],
+        };
+
+        app.crds = vec![es_meta.clone()];
+
+        // Switch to CRD view via command
+        let target = resolve_command_with_crds(":es", &app.crds).expect("resolve :es");
+        app.execute_view_target(target).await;
+
+        let items = vec![
+            serde_json::json!({
+                "name": "aip-secrets-binding",
+                "namespace": "accommodation-identification-pipeline",
+                "spec": {
+                    "refreshInterval": "1h",
+                    "secretStoreRef": {
+                        "kind": "SecretStore",
+                        "name": "trv-acc-ident-pipeline-prod"
+                    }
+                },
+                "status": {
+                    "conditions": [{ "type": "Ready", "status": "False", "reason": "SecretSyncedError" }]
+                },
+                "age": "1y"
+            }),
+            serde_json::json!({
+                "name": "harvester-token-binding",
+                "namespace": "cluster-autoscaler",
+                "spec": {
+                    "refreshInterval": "1h",
+                    "secretStoreRef": {
+                        "kind": "SecretStore",
+                        "name": "harvester-token"
+                    }
+                },
+                "status": {
+                    "conditions": [{ "type": "Ready", "status": "True", "reason": "SecretSynced" }],
+                    "refreshTime": "2026-09-03T09:04:38Z"
+                },
+                "age": "7m20s"
+            }),
+        ];
+
+        app.handle_crd_instances_update("crd_instances:ExternalSecret", &serde_json::to_string(&items).unwrap());
+
+        if let ActiveView::Table(ref table) = app.active_view {
+            // Verify columns match kubectl get externalsecrets
+            let col_names: Vec<&str> = table.columns.iter().map(|c| c.name).collect();
+            assert_eq!(
+                col_names,
+                vec![
+                    "NAMESPACE",
+                    "NAME",
+                    "STORETYPE",
+                    "STORE",
+                    "REFRESH INTERVAL",
+                    "STATUS",
+                    "READY",
+                    "LAST SYNC",
+                    "AGE"
+                ]
+            );
+
+            assert_eq!(table.filtered_indices.len(), 2);
+            assert_eq!(table.raw_items.len(), 2);
+
+            // Test field extraction
+            let row0 = &table.raw_items[0];
+            assert_eq!(extract_field_str(row0, "printer:.spec.secretStoreRef.kind"), "SecretStore");
+            assert_eq!(extract_field_str(row0, "printer:.spec.secretStoreRef.name"), "trv-acc-ident-pipeline-prod");
+            assert_eq!(extract_field_str(row0, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSyncedError");
+            assert_eq!(extract_field_str(row0, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "False");
+
+            let row1 = &table.raw_items[1];
+            assert_eq!(extract_field_str(row1, "printer:.spec.secretStoreRef.name"), "harvester-token");
+            assert_eq!(extract_field_str(row1, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSynced");
+            assert_eq!(extract_field_str(row1, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "True");
+        } else {
+            panic!("Expected ActiveView::Table for ExternalSecret");
+        }
+
+        // Apply filter to simulate filtering
+        if let ActiveView::Table(ref mut table) = app.active_view {
+            table.apply_filter("aip-secrets");
+            assert_eq!(table.filtered_indices.len(), 1);
+            assert_eq!(table.raw_items.len(), 2);
+        }
+
+        // Press Esc to clear filter and restore all items
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        if let ActiveView::Table(ref table) = app.active_view {
+            assert_eq!(table.filtered_indices.len(), 2);
+            assert_eq!(table.raw_items.len(), 2);
         }
     }
 }

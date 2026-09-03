@@ -339,8 +339,42 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
             if crd.namespaced {
                 cols.push(ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) });
             }
-            cols.push(ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) });
-            cols.push(ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) });
+            cols.push(ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) });
+
+            if crd.printer_columns.is_empty() {
+                cols.push(ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) });
+            } else {
+                let mut has_age = false;
+                for pc in &crd.printer_columns {
+                    if pc.priority > 0 {
+                        continue;
+                    }
+                    let col_name_upper = pc.name.to_uppercase();
+                    if col_name_upper == "AGE" {
+                        has_age = true;
+                    }
+                    let width = match col_name_upper.as_str() {
+                        "READY" => Constraint::Length(8),
+                        "STATUS" => Constraint::Length(18),
+                        "STORETYPE" => Constraint::Length(14),
+                        "STORE" => Constraint::Min(22),
+                        "REFRESH INTERVAL" => Constraint::Length(18),
+                        "LAST SYNC" | "LASTSYNC" => Constraint::Length(12),
+                        "AGE" => Constraint::Length(8),
+                        _ => Constraint::Length(16),
+                    };
+                    let name_str: &'static str = Box::leak(pc.name.to_uppercase().into_boxed_str());
+                    let key_str: &'static str = Box::leak(format!("printer:{}", pc.json_path).into_boxed_str());
+                    cols.push(ColumnDef {
+                        name: name_str,
+                        key: key_str,
+                        width,
+                    });
+                }
+                if !has_age {
+                    cols.push(ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) });
+                }
+            }
             cols
         }
         _ => vec![
@@ -404,7 +438,183 @@ pub fn is_event_warning_or_failure(item: &Value) -> bool {
     false
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PathSegment {
+    Field(String),
+    Index(usize),
+    Filter {
+        field: String,
+        match_key: String,
+        match_val: String,
+    },
+}
+
+fn parse_json_path_segments(path: &str) -> Vec<PathSegment> {
+    let mut segments = Vec::new();
+    let mut parts = Vec::new();
+    let mut in_bracket = false;
+    let mut start = 0;
+
+    for (i, c) in path.char_indices() {
+        if c == '[' {
+            in_bracket = true;
+        } else if c == ']' {
+            in_bracket = false;
+        } else if c == '.' && !in_bracket {
+            if i > start {
+                let segment = &path[start..i];
+                if !segment.is_empty() {
+                    parts.push(segment);
+                }
+            }
+            start = i + 1;
+        }
+    }
+    if start < path.len() {
+        let segment = &path[start..];
+        if !segment.is_empty() {
+            parts.push(segment);
+        }
+    }
+
+    for part in parts {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        if let Some(bracket_start) = part.find('[') {
+            let field = &part[..bracket_start];
+            let rest = &part[bracket_start..];
+            if rest.starts_with("[?(@.") {
+                // e.g. conditions[?(@.type=="Ready")]
+                let inner = rest.strip_prefix("[?(@.").unwrap_or("");
+                let inner = inner.trim_end_matches(|c| c == ']' || c == ')' || c == ' ');
+                if let Some((k, v)) = inner.split_once("==") {
+                    let match_key = k.trim().to_string();
+                    let match_val = v.trim().trim_matches(|c| c == '"' || c == '\'' || c == ')' || c == ']').to_string();
+                    segments.push(PathSegment::Filter {
+                        field: field.to_string(),
+                        match_key,
+                        match_val,
+                    });
+                } else if !field.is_empty() {
+                    segments.push(PathSegment::Field(field.to_string()));
+                }
+            } else if let Some(idx_str) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                if !field.is_empty() {
+                    segments.push(PathSegment::Field(field.to_string()));
+                }
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    segments.push(PathSegment::Index(idx));
+                } else {
+                    let key = idx_str.trim_matches('"').trim_matches('\'');
+                    segments.push(PathSegment::Field(key.to_string()));
+                }
+            } else if !field.is_empty() {
+                segments.push(PathSegment::Field(field.to_string()));
+            }
+        } else {
+            segments.push(PathSegment::Field(part.to_string()));
+        }
+    }
+
+    segments
+}
+
+pub fn eval_crd_json_path(val: &Value, raw_path: &str) -> String {
+    let path = raw_path.trim().trim_start_matches('.');
+    if path.is_empty() {
+        return "-".to_string();
+    }
+
+    let mut current = val;
+    let segments = parse_json_path_segments(path);
+
+    for seg in &segments {
+        match seg {
+            PathSegment::Field(name) => {
+                if let Some(next) = current.get(name) {
+                    current = next;
+                } else {
+                    return "-".to_string();
+                }
+            }
+            PathSegment::Index(idx) => {
+                if let Some(next) = current.get(idx) {
+                    current = next;
+                } else {
+                    return "-".to_string();
+                }
+            }
+            PathSegment::Filter { field, match_key, match_val } => {
+                let target = if field.is_empty() {
+                    Some(current)
+                } else {
+                    current.get(field)
+                };
+                if let Some(arr) = target.and_then(|v| v.as_array()) {
+                    let matched = arr.iter().find(|item| {
+                        item.get(match_key)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == match_val)
+                            .unwrap_or(false)
+                    });
+                    if let Some(next) = matched {
+                        current = next;
+                    } else {
+                        return "-".to_string();
+                    }
+                } else {
+                    return "-".to_string();
+                }
+            }
+        }
+    }
+
+    format_crd_cell_value(current)
+}
+
+fn format_crd_cell_value(val: &Value) -> String {
+    match val {
+        Value::String(s) => {
+            if s.is_empty() {
+                return "-".to_string();
+            }
+            // Check if RFC3339 timestamp (e.g. 2026-09-03T09:04:38Z)
+            if (s.contains('T') && s.ends_with('Z')) || (s.len() >= 20 && s.contains('-') && s.contains(':')) {
+                if let Ok(ts) = s.parse::<srelens_kube::k8s_openapi::jiff::Timestamp>() {
+                    let k8s_time = srelens_kube::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ts);
+                    let age = srelens_kube::humanize_age(Some(&k8s_time));
+                    if !age.is_empty() {
+                        return age;
+                    }
+                }
+            }
+            s.clone()
+        }
+        Value::Bool(b) => {
+            if *b { "True".to_string() } else { "False".to_string() }
+        }
+        Value::Number(n) => n.to_string(),
+        Value::Array(arr) => {
+            let strs: Vec<_> = arr.iter().map(format_crd_cell_value).filter(|s| s != "-").collect();
+            if strs.is_empty() {
+                "-".to_string()
+            } else {
+                strs.join(", ")
+            }
+        }
+        Value::Object(_) | Value::Null => "-".to_string(),
+    }
+}
+
 pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
+    // CRD printer column lookup (starts with printer:)
+    if let Some(path) = key.strip_prefix("printer:") {
+        return eval_crd_json_path(val, path);
+    }
+
     let key_lower = key.to_lowercase();
 
     // 0. Event specific field aliases
@@ -557,11 +767,15 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
         ""
     };
 
-    let title = if state.is_loading {
-        format!(" {} [Loading...]{} ", state.kind.display_name(), triage_badge)
+    let count_badge = if !state.is_loading && state.filtered_indices.len() != state.raw_items.len() {
+        format!(" [{}/{}]", state.filtered_indices.len(), state.raw_items.len())
+    } else if state.is_loading {
+        " [Loading...]".to_string()
     } else {
-        format!(" {} [{}]{} ", state.kind.display_name(), state.filtered_indices.len(), triage_badge)
+        format!(" [{}]", state.filtered_indices.len())
     };
+
+    let title = format!(" {}{}{} ", state.kind.display_name(), count_badge, triage_badge);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -620,7 +834,12 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
 
             let cells = state.columns.iter().map(|col| {
                 let text = extract_field_str(item, col.key);
-                let cell_style = if col.key == "status" || (state.kind == ResourceKind::Events && (col.key == "type" || col.key == "reason")) {
+                let is_crd = matches!(state.kind, ResourceKind::CustomResource(_));
+                let is_status_col = col.key == "status"
+                    || (state.kind == ResourceKind::Events && (col.key == "type" || col.key == "reason"))
+                    || (is_crd && (col.name == "STATUS" || col.name == "READY" || col.name == "HEALTH" || col.name == "SYNC"));
+
+                let cell_style = if is_status_col {
                     status_style(&text)
                 } else if is_selected {
                     Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
@@ -837,5 +1056,145 @@ mod tests {
         let active = table.toggle_warning_triage("");
         assert!(!active);
         assert_eq!(table.filtered_indices.len(), 3);
+    }
+
+    #[test]
+    fn test_crd_printer_columns_and_json_path_evaluator() {
+        use crate::commands::{CrdMeta, PrinterColumn};
+
+        let es_meta = CrdMeta {
+            crd_name: "externalsecrets.external-secrets.io".to_string(),
+            group: "external-secrets.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ExternalSecret".to_string(),
+            plural: "externalsecrets".to_string(),
+            singular: "externalsecret".to_string(),
+            namespaced: true,
+            short_names: vec!["es".to_string()],
+            printer_columns: vec![
+                PrinterColumn {
+                    name: "StoreType".to_string(),
+                    json_path: ".spec.secretStoreRef.kind".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Store".to_string(),
+                    json_path: ".spec.secretStoreRef.name".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Refresh Interval".to_string(),
+                    json_path: ".spec.refreshInterval".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Status".to_string(),
+                    json_path: ".status.conditions[?(@.type==\"Ready\")].reason".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Ready".to_string(),
+                    json_path: ".status.conditions[?(@.type==\"Ready\")].status".to_string(),
+                    col_type: "string".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+                PrinterColumn {
+                    name: "Last Sync".to_string(),
+                    json_path: ".status.refreshTime".to_string(),
+                    col_type: "date".to_string(),
+                    priority: 0,
+                    description: None,
+                },
+            ],
+        };
+
+        // Check generated columns
+        let cols = default_columns_for_kind(&ResourceKind::CustomResource(es_meta.clone()));
+        let col_names: Vec<&str> = cols.iter().map(|c| c.name).collect();
+        assert_eq!(
+            col_names,
+            vec![
+                "NAMESPACE",
+                "NAME",
+                "STORETYPE",
+                "STORE",
+                "REFRESH INTERVAL",
+                "STATUS",
+                "READY",
+                "LAST SYNC",
+                "AGE"
+            ]
+        );
+
+        let es_json = json!({
+            "metadata": {
+                "name": "aip-secrets-binding",
+                "namespace": "accommodation-identification-pipeline",
+                "creationTimestamp": "2025-07-04T08:52:51Z"
+            },
+            "name": "aip-secrets-binding",
+            "namespace": "accommodation-identification-pipeline",
+            "age": "1y",
+            "spec": {
+                "refreshInterval": "1h",
+                "secretStoreRef": {
+                    "kind": "SecretStore",
+                    "name": "trv-acc-ident-pipeline-prod"
+                }
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "SecretSyncedError",
+                        "message": "could not get secret data from provider"
+                    }
+                ]
+            }
+        });
+
+        // Test field extraction
+        assert_eq!(extract_field_str(&es_json, "printer:.spec.secretStoreRef.kind"), "SecretStore");
+        assert_eq!(extract_field_str(&es_json, "printer:.spec.secretStoreRef.name"), "trv-acc-ident-pipeline-prod");
+        assert_eq!(extract_field_str(&es_json, "printer:.spec.refreshInterval"), "1h");
+        assert_eq!(extract_field_str(&es_json, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSyncedError");
+        assert_eq!(extract_field_str(&es_json, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "False");
+        assert_eq!(extract_field_str(&es_json, "printer:.status.refreshTime"), "-");
+
+        // Test with healthy item having refreshTime
+        let healthy_es = json!({
+            "name": "harvester-token-binding",
+            "spec": {
+                "refreshInterval": "1h",
+                "secretStoreRef": {
+                    "kind": "SecretStore",
+                    "name": "harvester-token"
+                }
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "True",
+                        "reason": "SecretSynced"
+                    }
+                ],
+                "refreshTime": "2026-09-03T09:04:38Z"
+            }
+        });
+
+        assert_eq!(extract_field_str(&healthy_es, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSynced");
+        assert_eq!(extract_field_str(&healthy_es, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "True");
+        assert_ne!(extract_field_str(&healthy_es, "printer:.status.refreshTime"), "-");
     }
 }

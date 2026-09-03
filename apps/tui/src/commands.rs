@@ -42,6 +42,15 @@ pub enum ResourceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct PrinterColumn {
+    pub name: String,
+    pub json_path: String,
+    pub col_type: String,
+    pub priority: i32,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CrdMeta {
     pub crd_name: String,
     pub group: String,
@@ -51,6 +60,8 @@ pub struct CrdMeta {
     pub singular: String,
     pub namespaced: bool,
     pub short_names: Vec<String>,
+    #[serde(default)]
+    pub printer_columns: Vec<PrinterColumn>,
 }
 
 impl ResourceKind {

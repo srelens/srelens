@@ -397,15 +397,31 @@ impl App {
                             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                             .unwrap_or_default();
 
-                        let version = spec["versions"]
+                        let (version, printer_columns) = spec["versions"]
                             .as_array()
                             .and_then(|vs| {
-                                vs.iter()
+                                let ver_obj = vs.iter()
                                     .find(|v| v["storage"].as_bool().unwrap_or(false))
-                                    .or_else(|| vs.iter().find(|v| v["served"].as_bool().unwrap_or(false)))
-                                    .and_then(|v| v["name"].as_str().map(String::from))
+                                    .or_else(|| vs.iter().find(|v| v["served"].as_bool().unwrap_or(false)))?;
+                                let ver_name = ver_obj["name"].as_str()?.to_string();
+                                let cols = ver_obj["additionalPrinterColumns"]
+                                    .as_array()
+                                    .or_else(|| spec["additionalPrinterColumns"].as_array())
+                                    .map(|arr| {
+                                        arr.iter().filter_map(|col| {
+                                            Some(crate::commands::PrinterColumn {
+                                                name: col["name"].as_str()?.to_string(),
+                                                json_path: col["jsonPath"].as_str()?.to_string(),
+                                                col_type: col["type"].as_str().unwrap_or("string").to_string(),
+                                                priority: col["priority"].as_i64().unwrap_or(0) as i32,
+                                                description: col["description"].as_str().map(String::from),
+                                            })
+                                        }).collect()
+                                    })
+                                    .unwrap_or_default();
+                                Some((ver_name, cols))
                             })
-                            .unwrap_or_else(|| "v1".to_string());
+                            .unwrap_or_else(|| ("v1".to_string(), Vec::new()));
 
                         if !group.is_empty() && !kind.is_empty() && !plural.is_empty() {
                             crds.push(CrdMeta {
@@ -417,6 +433,7 @@ impl App {
                                 singular,
                                 namespaced,
                                 short_names,
+                                printer_columns,
                             });
                         }
                     }
@@ -445,8 +462,14 @@ impl App {
             self.resource_cache.insert((ctx, ns, crd_kind.to_string()), items.clone());
 
             if let ActiveView::Table(table) = &mut self.active_view {
-                if let ResourceKind::CustomResource(crd) = &table.kind {
+                if let ResourceKind::CustomResource(crd) = &mut table.kind {
                     if crd.kind == crd_kind || crd.plural == crd_kind {
+                        if crd.printer_columns.is_empty() {
+                            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+                                crd.printer_columns = discovered.printer_columns.clone();
+                                table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
+                            }
+                        }
                         table.set_items(items, &self.filter_buffer);
                     }
                 }
@@ -1324,7 +1347,12 @@ impl App {
                     self.assistant_state.clear_selection();
                     return;
                 }
-                if !self.filter_buffer.is_empty() {
+                let has_table_filter = if let ActiveView::Table(t) = &self.active_view {
+                    t.filtered_indices.len() != t.raw_items.len()
+                } else {
+                    false
+                };
+                if !self.filter_buffer.is_empty() || has_table_filter {
                     self.filter_buffer.clear();
                     if let ActiveView::Table(table) = &mut self.active_view {
                         table.apply_filter("");
@@ -2403,7 +2431,12 @@ impl App {
         }
     }
 
-    pub async fn switch_view_to_crd(&mut self, crd: CrdMeta) {
+    pub async fn switch_view_to_crd(&mut self, mut crd: CrdMeta) {
+        if crd.printer_columns.is_empty() {
+            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+                crd.printer_columns = discovered.printer_columns.clone();
+            }
+        }
         let kind = ResourceKind::CustomResource(crd.clone());
         let mut table = ResourceTableState::new(kind);
         let ctx = &self.active_context;
