@@ -414,11 +414,14 @@ pub fn revision_of(rs: &ReplicaSet) -> Option<String> {
 
 /// The Deployment a ReplicaSet belongs to, if one made it.
 pub fn owning_deployment(rs: &ReplicaSet) -> Option<String> {
-    rs.metadata
-        .owner_references
-        .as_ref()?
-        .iter()
-        .find(|o| o.kind == "Deployment")
+    // The controlling reference first, whatever its position: the API marks
+    // the managing owner with `controller: true` and promises nothing about
+    // order, and a ReplicaSet can carry a non-controlling Deployment reference
+    // ahead of its real one.
+    let refs = rs.metadata.owner_references.as_ref()?;
+    refs.iter()
+        .find(|o| o.kind == "Deployment" && o.controller == Some(true))
+        .or_else(|| refs.iter().find(|o| o.kind == "Deployment"))
         .map(|o| o.name.clone())
 }
 
@@ -1546,7 +1549,12 @@ impl AddressBook {
         nodes: &[TopologyNode],
         owners: &ReplicaSetOwners,
     ) -> Self {
-        let mut by_address = BTreeMap::new();
+        // An address claimed by more than one workload — `hostNetwork` pods on
+        // one node all answer on the node's IP — names none of them. The last
+        // one listed used to win, and every connection to that node was drawn
+        // to whichever DaemonSet the API happened to list last; an edge
+        // dropped is the right way to be wrong about that.
+        let mut claims: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for pod in pods {
             let Some(node) = workload_of_pod(pod, nodes, owners) else {
                 continue;
@@ -1555,9 +1563,15 @@ impl AddressBook {
             // peer may have been reached over the other family, and a socket
             // table read from tcp6 names that one.
             for ip in pod_addresses(pod) {
-                by_address.insert(ip, node.id.clone());
+                claims.entry(ip).or_default().insert(node.id.clone());
             }
         }
+        let mut by_address: BTreeMap<String, String> = claims
+            .into_iter()
+            .filter_map(|(ip, nodes)| {
+                (nodes.len() == 1).then(|| (ip, nodes.into_iter().next().unwrap_or_default()))
+            })
+            .collect();
         for service in services {
             let name = service.metadata.name.clone().unwrap_or_default();
             let namespace = service.metadata.namespace.clone().unwrap_or_default();
@@ -3522,6 +3536,43 @@ mod tests {
         assert_eq!(probe.id, "k8s.topologyProbe");
         assert!(probe.annotations.requires_confirm);
         assert!(probe.annotations.read_only);
+    }
+
+    #[test]
+    fn an_address_two_workloads_share_names_neither() {
+        // hostNetwork pods on one node all answer on the node's IP; the last
+        // one listed used to win.
+        let g = build_graph(
+            vec![],
+            vec![],
+            vec![
+                deployment("agent-a", 1, 1, &[("app", "a")]),
+                deployment("agent-b", 1, 1, &[("app", "b")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let pods = vec![pod("agent-a-x", "10.0.0.5", "agent-a-7d9f"), pod("agent-b-y", "10.0.0.5", "agent-b-5bc6")];
+        let book = AddressBook::new(&[], &pods, &g.nodes, &rs_owners_of(&[("agent-a-7d9f", "agent-a"), ("agent-b-5bc6", "agent-b")]));
+        assert_eq!(book.node_for("10.0.0.5"), None);
+    }
+
+    #[test]
+    fn a_replicasets_controlling_deployment_wins_over_an_earlier_reference() {
+        let mut rs = ReplicaSet::default();
+        rs.metadata.owner_references = Some(vec![
+            OwnerReference { kind: "Deployment".into(), name: "wrong".into(), ..Default::default() },
+            OwnerReference {
+                kind: "Deployment".into(),
+                name: "right".into(),
+                controller: Some(true),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(owning_deployment(&rs).as_deref(), Some("right"));
     }
 
     fn pod(name: &str, ip: &str, owner: &str) -> k8s_openapi::api::core::v1::Pod {
