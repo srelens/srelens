@@ -441,6 +441,8 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         let help = Line::from(vec![
             Span::styled("<Enter> ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
             Span::styled("Confirm  |  ", Theme::header_label()),
+            Span::styled("<Ctrl+v> ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled("Paste  |  ", Theme::header_label()),
             Span::styled("<Ctrl+w> ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
             Span::styled("Rubout  |  ", Theme::header_label()),
             Span::styled("<Esc> ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),

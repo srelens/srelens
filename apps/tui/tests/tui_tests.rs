@@ -467,6 +467,23 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
 
         assert_eq!(app.ai_settings.get_timeout_seconds(AiProvider::Cursor), 240);
+
+        // 9. Test pasting into an edit buffer
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // ProviderToggle
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // ApiKey
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).await; // Open edit dialog
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.is_editing, true);
+        }
+        app.handle_paste("pasted-cursor-api-key-12345".to_string());
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.edit_buffer, "pasted-cursor-api-key-12345");
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.is_editing, false);
+            assert_eq!(s.settings.get_api_key(AiProvider::Cursor).as_deref(), Some("pasted-cursor-api-key-12345"));
+        }
     }
 
     #[tokio::test]

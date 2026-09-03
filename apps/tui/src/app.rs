@@ -1368,6 +1368,13 @@ impl App {
                         self.input_mode = InputMode::Normal;
                     }
                 }
+                KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(clip) = get_clipboard_text() {
+                        let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
+                        self.command_buffer.push_str(&cleaned);
+                        self.command_suggestion_idx = 0;
+                    }
+                }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
@@ -1417,6 +1424,16 @@ impl App {
                     let filter = self.filter_buffer.clone();
                     if let ActiveView::Table(table) = &mut self.active_view {
                         table.apply_filter(&filter);
+                    }
+                }
+                KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(clip) = get_clipboard_text() {
+                        let cleaned = clip.replace("\r\n", "").replace('\n', "");
+                        self.filter_buffer.push_str(&cleaned);
+                        let filter = self.filter_buffer.clone();
+                        if let ActiveView::Table(table) = &mut self.active_view {
+                            table.apply_filter(&filter);
+                        }
                     }
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
@@ -2273,6 +2290,12 @@ impl App {
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
                         ai.input.clear();
                     }
+                    KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(clip) = get_clipboard_text() {
+                            let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
+                            ai.input.push_str(&cleaned);
+                        }
+                    }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                         ai.input.push(c);
                     }
@@ -2362,6 +2385,12 @@ impl App {
                         }
                         KeyCode::Backspace => {
                             settings.edit_buffer.pop();
+                        }
+                        KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(clip) = get_clipboard_text() {
+                                let cleaned = clip.replace("\r\n", "").replace('\n', "");
+                                settings.edit_buffer.push_str(&cleaned);
+                            }
                         }
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                             settings.edit_buffer.push(c);
@@ -2618,6 +2647,27 @@ impl App {
         if let ActiveView::Assistant = &mut self.active_view {
             let cleaned = text.replace("\r\n", " ").replace('\n', " ");
             self.assistant_state.input.push_str(&cleaned);
+            return;
+        }
+        if let ActiveView::Settings(ref mut settings) = self.active_view {
+            if settings.is_editing {
+                let cleaned = text.replace("\r\n", "").replace('\n', "");
+                settings.edit_buffer.push_str(&cleaned);
+                return;
+            }
+        }
+        if let Some(ref mut modal) = self.modal {
+            match modal {
+                Modal::Scale { ref mut input, .. } => {
+                    let cleaned = text.replace("\r\n", "").replace('\n', "");
+                    input.push_str(&cleaned);
+                }
+                Modal::PortForward { ref mut local_port_input, .. } => {
+                    let cleaned = text.replace("\r\n", "").replace('\n', "");
+                    local_port_input.push_str(&cleaned);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -4285,6 +4335,45 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
         }
         Ok(())
     }
+}
+
+pub fn get_clipboard_text() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("pbpaste").output() {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Ok(output) = std::process::Command::new("wl-paste").output() {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+        if let Ok(output) = std::process::Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .arg("-o")
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
