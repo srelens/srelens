@@ -440,14 +440,11 @@ pub async fn run_boxed_cursor_turn(
         cmd.env("CURSOR_API_KEY", key);
     }
 
-    // Insert --model and --stream-partial-output BEFORE the trailing "--" and positional prompt
+    // Insert --model BEFORE the trailing "--" and positional prompt
     let mut final_args = Vec::new();
     let dash_dash_idx = cmd_spec.args.iter().position(|a| a == "--").unwrap_or(cmd_spec.args.len());
     for (i, arg) in cmd_spec.args.iter().enumerate() {
         if i == dash_dash_idx {
-            if !cmd_spec.args.contains(&"--stream-partial-output".to_string()) {
-                final_args.push("--stream-partial-output".to_string());
-            }
             if !model.is_empty() && model != "default" {
                 final_args.push("--model".to_string());
                 final_args.push(model.clone());
