@@ -344,6 +344,9 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::topology::topology_graph_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::topology::topology_probe_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::prometheus::prometheus_discover_capability(
         cache.clone(),
     ));

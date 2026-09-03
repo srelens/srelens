@@ -1346,7 +1346,7 @@ async fn run_suite() {
     let out = h
         .ok(
             "k8s.topologyGraph",
-            json!({ "context": ctx, "namespaces": [NS], "prometheus": [], "connections": false }),
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }),
         )
         .await;
     let nodes = out["nodes"].as_array().unwrap();
@@ -1388,6 +1388,18 @@ async fn run_suite() {
     let deploy = nodes.iter().find(|n| n["id"] == json!(deploy_id)).unwrap();
     assert_eq!(deploy["desired"], json!(2), "{out}");
     assert_eq!(deploy["health"], json!("ok"), "{out}");
+
+    // The probe is the same graph read with one exec per pod, and a
+    // capability of its own so the consent layer can gate it. On the fixture
+    // pods (busybox) it reads, and it always answers with its report.
+    let out = h
+        .ok("k8s.topologyProbe", json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }))
+        .await;
+    assert!(out["probe"].is_object(), "the probe must report on itself: {out}");
+    assert!(
+        out["nodes"].as_array().unwrap().iter().any(|n| n["id"] == json!(deploy_id)),
+        "{out}"
+    );
 
     // --- the topology's optional sources ---------------------------------------
     // The e2e cluster runs no metrics backend, and that is the ordinary case

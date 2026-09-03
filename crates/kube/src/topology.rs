@@ -145,13 +145,6 @@ pub struct TopologyGraphIn {
     /// — telemetry only ever ADDS observed edges and rates on top.
     #[serde(default)]
     pub prometheus: Vec<PrometheusSource>,
-    /// Read each pod's own socket table over `pods/exec`.
-    ///
-    /// Off by default and deliberately: it is one exec per pod, it shows up
-    /// in the audit log of every pod it touches, and it needs `pods/exec`
-    /// wherever it runs. A reader asks for it; nothing turns it on for them.
-    #[serde(default)]
-    pub connections: bool,
 }
 
 /// Which column a node stands in. The screen lays these out left to right;
@@ -1551,10 +1544,11 @@ impl AddressBook {
         services: &[Service],
         pods: &[k8s_openapi::api::core::v1::Pod],
         nodes: &[TopologyNode],
+        owners: &ReplicaSetOwners,
     ) -> Self {
         let mut by_address = BTreeMap::new();
         for pod in pods {
-            let Some(node) = workload_of_pod(pod, nodes) else {
+            let Some(node) = workload_of_pod(pod, nodes, owners) else {
                 continue;
             };
             // Every address, not only the primary: on a dual-stack cluster a
@@ -1606,17 +1600,34 @@ fn pod_addresses(pod: &k8s_openapi::api::core::v1::Pod) -> Vec<String> {
         .collect()
 }
 
+/// Which Deployment each ReplicaSet in view belongs to, by `(namespace, name)`,
+/// read off the ReplicaSets' own owner references.
+pub type ReplicaSetOwners = BTreeMap<(String, String), String>;
+
+pub fn replicaset_owners(replicasets: &[ReplicaSet]) -> ReplicaSetOwners {
+    replicasets
+        .iter()
+        .filter_map(|rs| {
+            let name = rs.metadata.name.clone()?;
+            let namespace = rs.metadata.namespace.clone().unwrap_or_default();
+            Some(((namespace, name), owning_deployment(rs)?))
+        })
+        .collect()
+}
+
 /// The workload node a pod belongs to, from its owner reference.
 ///
 /// Exact, not a prefix: `api` and `api-v2` are both workloads, and matching a
 /// pod owned by `api-v2-7d9f4b8c6` against whichever node's name it STARTED
-/// with handed all of `api-v2`'s traffic to `api`. A ReplicaSet is named
-/// `<deployment>-<pod-template-hash>`, so its Deployment is the name with the
-/// last segment removed; a StatefulSet or DaemonSet owns its pods directly and
-/// is named outright.
+/// with handed all of `api-v2`'s traffic to `api`. And through the
+/// ReplicaSet's own owner reference, not its name: stripping the last segment
+/// of `api-canary` — a standalone ReplicaSet — also gave `api`. A ReplicaSet
+/// that no Deployment owns places its pods nowhere; a StatefulSet or DaemonSet
+/// owns its pods directly and is named outright.
 pub fn workload_of_pod<'a>(
     pod: &k8s_openapi::api::core::v1::Pod,
     nodes: &'a [TopologyNode],
+    owners: &ReplicaSetOwners,
 ) -> Option<&'a TopologyNode> {
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
     // The controller, not whichever owner was listed first: the API marks the
@@ -1627,7 +1638,10 @@ pub fn workload_of_pod<'a>(
         .find(|o| o.controller == Some(true))
         .or_else(|| refs.first())?;
     let (kind, name): (&str, &str) = match owner.kind.as_str() {
-        "ReplicaSet" => ("Deployment", owner.name.rsplit_once('-')?.0),
+        "ReplicaSet" => (
+            "Deployment",
+            owners.get(&(namespace.clone(), owner.name.clone()))?.as_str(),
+        ),
         "StatefulSet" | "DaemonSet" => (owner.kind.as_str(), owner.name.as_str()),
         _ => return None,
     };
@@ -1762,6 +1776,25 @@ fn peer_namespaces<'a>(
     let Some(selector) = selector else {
         return vec![own];
     };
+    // Only the name label is known here. A selector on any other namespace
+    // label — `tenant DoesNotExist`, say — cannot be judged without the real
+    // Namespace objects, and judging it against a made-up label map matched
+    // every namespace, including ones the policy excludes. Unknown means no
+    // match: an edge dropped rather than one invented.
+    const NAME: &str = "kubernetes.io/metadata.name";
+    let only_the_name = selector
+        .match_labels
+        .iter()
+        .flatten()
+        .all(|(k, _)| k == NAME)
+        && selector
+            .match_expressions
+            .iter()
+            .flatten()
+            .all(|e| e.key == NAME);
+    if !only_the_name {
+        return Vec::new();
+    }
     in_view
         .iter()
         .filter(|ns| {
@@ -2042,7 +2075,8 @@ struct Fetched {
 }
 
 /// `k8s.topologyGraph` — the route/service/workload/revision/dependency graph
-/// of one or more namespaces.
+/// of one or more namespaces. Reads the API and, when a metrics backend is
+/// named, queries it; never execs.
 pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<TopologyGraphIn, TopologyGraphOut, _, _>(
         "k8s.topologyGraph",
@@ -2050,7 +2084,42 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
         Annotations::READ_ONLY,
         move |input: TopologyGraphIn| {
             let cache = cache.clone();
-            async move {
+            async move { build_topology(cache, input, false).await }
+        },
+    )
+}
+
+/// `k8s.topologyProbe` — the same graph, plus each pod's own open connections
+/// read over `pods/exec`.
+///
+/// A capability of its own rather than a flag on the graph, because the
+/// consent an MCP client is asked for is decided per capability: a flag on a
+/// `READ_ONLY` capability passed the gate, and an agent could put an exec
+/// event in the audit log of every pod in a namespace with nobody having
+/// agreed to one. `SENSITIVE_READ` is what makes the probe's opt-in real for
+/// every caller, not only the screen's button.
+pub fn topology_probe_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<TopologyGraphIn, TopologyGraphOut, _, _>(
+        "k8s.topologyProbe",
+        "the topology graph, plus each pod's open connections read over pods/exec (one exec per pod)",
+        Annotations::SENSITIVE_READ,
+        move |input: TopologyGraphIn| {
+            let cache = cache.clone();
+            async move { build_topology(cache, input, true).await }
+        },
+    )
+}
+
+/// Build the graph from the API, then fold in whatever the optional sources
+/// give; `probe` is the exec-per-pod connection read.
+async fn build_topology(
+    cache: Arc<ClientCache>,
+    input: TopologyGraphIn,
+    probe: bool,
+) -> Result<TopologyGraphOut, CapabilityError> {
+    {
+        {
+            {
                 let client = cache
                     .get(&input.context)
                     .await
@@ -2091,6 +2160,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 // Read off before the objects are handed over, from the same
                 // mappers the graph uses.
                 let labels = workload_labels(&all.deployments, &all.statefulsets, &all.daemonsets);
+                let rs_owners = replicaset_owners(&all.replicasets);
                 let mut graph = build_graph(
                     all.ingresses,
                     all.services,
@@ -2140,7 +2210,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 // Observed connections, when the reader asked for them.
                 // Capped: this is an exec each, and a namespace of five
                 // hundred pods is not a picture anyone wants at that price.
-                if input.connections {
+                if probe {
                     // Every namespace drawn, under one cap: the probe is
                     // presented as applying to the whole graph, and reading
                     // only the first namespace left every other tier without
@@ -2168,7 +2238,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                             }),
                         }
                     }
-                    let book = AddressBook::new(&all_services, &pods, &graph.nodes);
+                    let book = AddressBook::new(&all_services, &pods, &graph.nodes, &rs_owners);
                     let mut read = Vec::new();
                     let mut unreadable = Vec::new();
                     // Only pods that belong to a drawn workload count against
@@ -2179,7 +2249,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     // the whole of a sixty-pod namespace.
                     let eligible: Vec<&k8s_openapi::api::core::v1::Pod> = pods
                         .iter()
-                        .filter(|p| workload_of_pod(p, &graph.nodes).is_some())
+                        .filter(|p| workload_of_pod(p, &graph.nodes, &rs_owners).is_some())
                         .collect();
                     let skipped = eligible.len().saturating_sub(CONNECTION_POD_LIMIT);
                     for pod in eligible.into_iter().take(CONNECTION_POD_LIMIT) {
@@ -2188,7 +2258,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         else {
                             continue;
                         };
-                        let Some(from) = workload_of_pod(pod, &graph.nodes) else {
+                        let Some(from) = workload_of_pod(pod, &graph.nodes, &rs_owners) else {
                             continue;
                         };
                         // One pod refusing must not cost the rest — a single
@@ -2226,8 +2296,8 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 resolve_call_health(&mut graph);
                 Ok(graph)
             }
-        },
-    )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2932,9 +3002,9 @@ mod tests {
             vec![],
         );
         let p = pod("api-v2-7d9f4b8c6-x2mzp", "10.0.0.9", "api-v2-7d9f4b8c6");
-        assert_eq!(workload_of_pod(&p, &g.nodes).map(|n| n.id.as_str()), Some("Deployment/checkout/api-v2"));
+        assert_eq!(workload_of_pod(&p, &g.nodes, &rs_owners_of(&[("api-v2-7d9f4b8c6", "api-v2"), ("api-5bc6575d7", "api")])).map(|n| n.id.as_str()), Some("Deployment/checkout/api-v2"));
         let p = pod("api-5bc6575d7-abcde", "10.0.0.10", "api-5bc6575d7");
-        assert_eq!(workload_of_pod(&p, &g.nodes).map(|n| n.id.as_str()), Some("Deployment/checkout/api"));
+        assert_eq!(workload_of_pod(&p, &g.nodes, &rs_owners_of(&[("api-v2-7d9f4b8c6", "api-v2"), ("api-5bc6575d7", "api")])).map(|n| n.id.as_str()), Some("Deployment/checkout/api"));
     }
 
     #[test]
@@ -3053,6 +3123,27 @@ mod tests {
     }
 
     #[test]
+    fn a_namespace_selector_on_a_label_that_cannot_be_seen_matches_nothing() {
+        // `tenant DoesNotExist` against a made-up label map matched every
+        // namespace. Without the Namespace objects it cannot be judged, and
+        // an edge dropped is the right way to be wrong.
+        let mut by_tenant = policy_peer(&[("app", "checkout")], None);
+        by_tenant.namespace_selector = Some(LabelSelector {
+            match_expressions: Some(vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                    key: "tenant".into(),
+                    operator: "DoesNotExist".into(),
+                    values: None,
+                },
+            ]),
+            ..Default::default()
+        });
+        let mut g = demo_graph();
+        apply_allowed(&mut g, &[policy("checkout", &[("app", "payments")], vec![by_tenant], vec![])], &demo_labels());
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
+    }
+
+    #[test]
     fn telemetry_that_lands_on_nothing_is_not_taken() {
         // A shard full of series about other namespaces answers with plenty
         // and applies nothing; the caller must go on to the next candidate.
@@ -3125,7 +3216,7 @@ mod tests {
                 ..controller
             },
         ]);
-        assert_eq!(workload_of_pod(&p, &g.nodes).map(|n| n.id.as_str()), Some("Deployment/checkout/api"));
+        assert_eq!(workload_of_pod(&p, &g.nodes, &rs_owners_of(&[("api-v2-7d9f4b8c6", "api-v2"), ("api-5bc6575d7", "api")])).map(|n| n.id.as_str()), Some("Deployment/checkout/api"));
     }
 
     // ---- allowed: what a NetworkPolicy would let through ----
@@ -3387,6 +3478,52 @@ mod tests {
 
     // ---- observed connections: what the kernel has open ----
 
+    /// Which Deployment each test ReplicaSet belongs to, in `checkout`.
+    fn rs_owners_of(pairs: &[(&str, &str)]) -> ReplicaSetOwners {
+        pairs
+            .iter()
+            .map(|(rs, deploy)| (("checkout".to_string(), (*rs).to_string()), (*deploy).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_standalone_replicaset_is_not_mistaken_for_a_deployment_by_its_name() {
+        // `api-canary` beside Deployment `api`: stripping the hash segment
+        // gave `api`, and the canary's traffic was drawn as the Deployment's.
+        // The ReplicaSet's own owner reference is what decides, and a
+        // ReplicaSet no Deployment owns places its pods nowhere.
+        let g = build_graph(
+            vec![],
+            vec![],
+            vec![deployment("api", 1, 1, &[("app", "api")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let canary = pod("api-canary-x2mzp", "10.0.0.9", "api-canary");
+        assert_eq!(workload_of_pod(&canary, &g.nodes, &rs_owners_of(&[])), None);
+        let owned = pod("api-5bc6575d7-abcde", "10.0.0.10", "api-5bc6575d7");
+        assert_eq!(
+            workload_of_pod(&owned, &g.nodes, &rs_owners_of(&[("api-5bc6575d7", "api")])).map(|n| n.id.as_str()),
+            Some("Deployment/checkout/api"),
+        );
+    }
+
+    #[test]
+    fn the_probe_is_its_own_capability_and_asks_first() {
+        // The consent an MCP client is asked for is decided per capability;
+        // a flag on a read-only one passed the gate.
+        let graph = topology_graph_capability(ClientCache::new(PathBuf::from("/x")));
+        let probe = topology_probe_capability(ClientCache::new(PathBuf::from("/x")));
+        assert_eq!(graph.id, "k8s.topologyGraph");
+        assert!(!graph.annotations.requires_confirm);
+        assert_eq!(probe.id, "k8s.topologyProbe");
+        assert!(probe.annotations.requires_confirm);
+        assert!(probe.annotations.read_only);
+    }
+
     fn pod(name: &str, ip: &str, owner: &str) -> k8s_openapi::api::core::v1::Pod {
         use k8s_openapi::api::core::v1::PodStatus;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -3442,7 +3579,7 @@ mod tests {
             vec![],
             vec![],
         );
-        let book = AddressBook::new(&g_services, &pods, &g.nodes);
+        let book = AddressBook::new(&g_services, &pods, &g.nodes, &rs_owners_of(&[("checkout-7d9f", "checkout")]));
         apply_connections(
             &mut g,
             &book,
@@ -3482,7 +3619,7 @@ mod tests {
             vec![],
             vec![],
         );
-        let book = AddressBook::new(&services, &pods, &g.nodes);
+        let book = AddressBook::new(&services, &pods, &g.nodes, &rs_owners_of(&[("checkout-7d9f", "checkout")]));
         assert_eq!(
             book.node_for("10.96.1.5").map(String::as_str),
             Some("Service/checkout/payments"),
@@ -3502,7 +3639,7 @@ mod tests {
             vec![],
             vec![],
         );
-        let book = AddressBook::new(&[], &pods, &g.nodes);
+        let book = AddressBook::new(&[], &pods, &g.nodes, &rs_owners_of(&[("checkout-7d9f", "checkout")]));
         apply_connections(
             &mut g,
             &book,
@@ -3519,7 +3656,7 @@ mod tests {
         // Every pod talks to the API server and to CoreDNS. Putting a node on
         // the diagram for each would bury the namespace a reader asked about.
         let mut g = demo_graph();
-        let book = AddressBook::new(&[], &[], &g.nodes);
+        let book = AddressBook::new(&[], &[], &g.nodes, &rs_owners_of(&[]));
         apply_connections(
             &mut g,
             &book,

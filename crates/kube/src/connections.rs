@@ -203,16 +203,26 @@ pub async fn read_pod_connections(
         .exec(pod, vec!["cat", "/proc/net/tcp", "/proc/net/tcp6"], &params)
         .await
         .map_err(|e| e.to_string())?;
+    // Taken before stdout is drained: the status frame arrives as the remote
+    // command ends. It is not REQUIRED to be a success — `cat` exits non-zero
+    // when only `/proc/net/tcp6` is missing, on a node with IPv6 disabled, and
+    // the v4 table it already printed is a perfectly good answer — but a
+    // failure that printed nothing is a distroless image with no `cat`, whose
+    // exec opens fine, and ignoring the status counted that pod as read.
+    let status = attached.take_status();
     let mut stdout = attached.stdout().ok_or("exec produced no stdout")?;
     let mut text = String::new();
     stdout
         .read_to_string(&mut text)
         .await
         .map_err(|e| e.to_string())?;
-    // The status frame is taken but not required: `cat` exits non-zero when
-    // only `/proc/net/tcp6` is missing, on a node with IPv6 disabled, and the
-    // v4 table it already printed is a perfectly good answer.
-    let _ = attached.take_status();
+    if let Some(status) = status {
+        if let Some(st) = status.await {
+            if st.status.as_deref() == Some("Failure") && text.trim().is_empty() {
+                return Err(st.message.unwrap_or_else(|| "command failed".to_string()));
+            }
+        }
+    }
     Ok(parse_proc_net_tcp(&text))
 }
 
@@ -257,8 +267,11 @@ pub fn pod_connections_capability(cache: Arc<ClientCache>) -> Capability {
         "read the established TCP connections of pods, from their own /proc/net/tcp",
         // Read-only in effect — it runs `cat` on a path that cannot be written
         // — but it is an exec, and an exec is in the audit log of every pod it
-        // touches. Callers must ask for it deliberately.
-        Annotations::READ_ONLY,
+        // touches. `SENSITIVE_READ` is what makes "callers must ask for it
+        // deliberately" true for an MCP client too: plain `READ_ONLY` passed
+        // the consent gate, and an agent could raise an exec event in every
+        // pod of a namespace with nobody having agreed to one.
+        Annotations::SENSITIVE_READ,
         move |input: ConnectionsIn| {
             let cache = cache.clone();
             async move {

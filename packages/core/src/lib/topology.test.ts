@@ -35,7 +35,6 @@ describe("topologyGraph", () => {
       context: "kind-dev",
       namespaces: ["checkout", "payments"],
       prometheus: [],
-      connections: false,
     });
     expect(out.graph?.nodes[0].health).toBe("degraded");
     expect(out.graph?.edges[0].kind).toBe("routes");
@@ -51,7 +50,6 @@ describe("topologyGraph", () => {
       context: "c",
       namespaces: ["checkout"],
       prometheus: [prometheus],
-      connections: false,
     });
   });
 
@@ -60,11 +58,10 @@ describe("topologyGraph", () => {
     // off and the flag has to travel exactly as given.
     const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
     await topologyGraph("c", ["checkout"], undefined, true, invoke);
-    expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
+    expect(invoke).toHaveBeenCalledWith("k8s.topologyProbe", {
       context: "c",
       namespaces: ["checkout"],
       prometheus: [],
-      connections: true,
     });
   });
 

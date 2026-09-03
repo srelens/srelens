@@ -134,12 +134,13 @@ export async function topologyGraph(
   invoke: Invoker = invokeCapability,
 ): Promise<{ graph?: TopologyGraph; error?: string }> {
   try {
-    const out = await invoke<TopologyGraph>("k8s.topologyGraph", {
-      context,
-      namespaces,
-      prometheus,
-      connections,
-    });
+    // Two capabilities, not a flag: the probe is an exec in every pod, and
+    // it has to be a thing an MCP client is asked to consent to — which the
+    // consent layer decides per capability, not per field.
+    const out = await invoke<TopologyGraph>(
+      connections ? "k8s.topologyProbe" : "k8s.topologyGraph",
+      { context, namespaces, prometheus },
+    );
     return { graph: { nodes: out.nodes, edges: out.edges, probe: out.probe ?? null } };
   } catch (e) {
     return { error: String(e) };
