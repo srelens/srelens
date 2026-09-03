@@ -1199,7 +1199,7 @@ function NodeBody({ obj }: { obj: K8sObject }) {
         <KV
           pairs={[
             ["CPU", `${str(alloc.cpu)} / ${str(cap.cpu)}`],
-            ["Memory", `${str(alloc.memory)} / ${str(cap.memory)}`],
+            ["Memory", `${formatStorageSize(str(alloc.memory))} / ${formatStorageSize(str(cap.memory))}`],
             ["Pods", `${str(alloc.pods)} / ${str(cap.pods)}`],
           ]}
         />
