@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     Frame,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -85,6 +85,13 @@ pub struct App {
     pub assistant_states: HashMap<String, AssistantViewState>,
     pub pod_metrics_tick_counter: usize,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
+    /// Global drag-to-copy selection as (anchor, cursor) screen cells. Active
+    /// in every view without its own selection handler (YAML and Assistant
+    /// keep theirs); the render pass highlights the range on the final buffer
+    /// and captures its text so mouse-up copies exactly what is on screen.
+    pub screen_selection: Option<((u16, u16), (u16, u16))>,
+    pub screen_selecting: bool,
+    pub screen_selection_text: std::cell::RefCell<String>,
 }
 
 pub enum SuspendAction {
@@ -232,6 +239,9 @@ impl App {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         app.refresh_cluster_info();
@@ -866,6 +876,10 @@ impl App {
     }
 
     pub async fn handle_key_event(&mut self, key: KeyEvent) {
+        // Any keypress dismisses the drag-to-copy selection highlight.
+        self.screen_selection = None;
+        self.screen_selecting = false;
+
         // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.is_running = false;
@@ -2315,6 +2329,51 @@ impl App {
                 yaml.clear_selection();
             }
         }
+
+        // Global drag-to-copy selection for every view without its own
+        // handler (tables, logs, describe, helm, overview, ...). The text is
+        // captured from the rendered buffer, so whatever is visible is what
+        // gets copied.
+        if !matches!(self.active_view, ActiveView::Assistant | ActiveView::Yaml(_)) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.screen_selection =
+                        Some(((mouse.column, mouse.row), (mouse.column, mouse.row)));
+                    self.screen_selecting = true;
+                    self.screen_selection_text.borrow_mut().clear();
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if self.screen_selecting {
+                        if let Some(sel) = &mut self.screen_selection {
+                            sel.1 = (mouse.column, mouse.row);
+                        }
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if self.screen_selecting {
+                        self.screen_selecting = false;
+                        match self.screen_selection {
+                            Some((anchor, cursor)) if anchor != cursor => {
+                                let text = self.screen_selection_text.borrow().clone();
+                                if text.trim().is_empty() {
+                                    self.screen_selection = None;
+                                } else {
+                                    tokio::spawn(async move {
+                                        let _ = copy_to_clipboard(&text);
+                                    });
+                                    self.set_toast(
+                                        "✓ Copied selection to clipboard".to_string(),
+                                        Theme::status_ok(),
+                                    );
+                                }
+                            }
+                            _ => self.screen_selection = None,
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn handle_paste(&mut self, text: String) {
@@ -3384,7 +3443,63 @@ impl App {
         } else if self.show_help {
             render_help_modal(f, size);
         }
+
+        // 5. Global drag-to-copy selection overlay: highlight the selected
+        // cells on the final buffer and capture their text so mouse-up
+        // copies exactly what the user sees.
+        if let Some((anchor, cursor)) = self.screen_selection {
+            let text = apply_screen_selection(f.buffer_mut(), anchor, cursor);
+            *self.screen_selection_text.borrow_mut() = text;
+        }
     }
+}
+
+/// Highlight the terminal-style linear range between `anchor` and `cursor`
+/// (both screen cells, in either order) directly on the buffer and return the
+/// covered text, one string per row joined with newlines, trailing whitespace
+/// trimmed per row. First row starts at the selection start column, middle
+/// rows span the full width, last row ends at the selection end column.
+pub fn apply_screen_selection(
+    buf: &mut ratatui::buffer::Buffer,
+    anchor: (u16, u16),
+    cursor: (u16, u16),
+) -> String {
+    use ratatui::layout::Position;
+
+    let area = buf.area;
+    if area.width == 0 || area.height == 0 {
+        return String::new();
+    }
+    let clamp = |(x, y): (u16, u16)| {
+        (
+            x.clamp(area.left(), area.right() - 1),
+            y.clamp(area.top(), area.bottom() - 1),
+        )
+    };
+    let a = clamp(anchor);
+    let c = clamp(cursor);
+    let (start, end) = if (a.1, a.0) <= (c.1, c.0) { (a, c) } else { (c, a) };
+
+    let mut out = String::new();
+    for y in start.1..=end.1 {
+        let x0 = if y == start.1 { start.0 } else { area.left() };
+        let x1 = if y == end.1 { end.0 } else { area.right() - 1 };
+        let mut line = String::new();
+        for x in x0..=x1 {
+            if let Some(cell) = buf.cell(Position::new(x, y)) {
+                line.push_str(cell.symbol());
+            }
+        }
+        buf.set_style(
+            ratatui::layout::Rect::new(x0, y, x1 - x0 + 1, 1),
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+        out.push_str(line.trim_end());
+        if y != end.1 {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn base64_encode_bytes(data: &[u8]) -> String {

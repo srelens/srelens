@@ -190,6 +190,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -274,6 +277,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Enter command mode by typing ':'
@@ -366,6 +372,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Switch to settings view via :settings command
@@ -493,6 +502,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -695,6 +707,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. User starts turn in Assistant view
@@ -879,6 +894,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Enter filter mode with '/'
@@ -1007,6 +1025,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
@@ -1091,6 +1112,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // Initially without metrics, extract_field_str returns "-"
@@ -1208,6 +1232,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Test paste handling into Assistant input
@@ -1292,6 +1319,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // When input is empty, typing '?' opens help modal
@@ -1368,6 +1398,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // Set viewport and simulate tool chip line at index 2
@@ -1485,6 +1518,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
@@ -1606,6 +1642,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. In data-processing-prod-eu-dus1, user has a conversation
@@ -1752,6 +1791,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Pressing 'c' on the selected row copies the resource name!
@@ -1844,6 +1886,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Switch view to Overview
@@ -2242,6 +2287,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Press 'c' -> Copies selected pod name
@@ -2352,6 +2400,9 @@ mod tests {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
         };
 
         // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
@@ -2461,5 +2512,41 @@ mod tests {
             "note: a\tb".into(),
         );
         assert_eq!(yaml.lines, vec!["note: a b"]);
+    }
+
+    /// Global drag-to-copy selection: the highlighted screen range must come
+    /// back as the visible text (terminal-style linear range, trailing
+    /// whitespace trimmed), and the covered cells must be restyled.
+    #[test]
+    fn test_screen_selection_extracts_visible_text() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::{Position, Rect};
+        use ratatui::style::Modifier;
+        use srelens_tui::app::apply_screen_selection;
+
+        let mut buf = Buffer::with_lines(vec![
+            "istio-system  istio-ingress   ",
+            "istio-system  istiod          ",
+            "kube-system   coredns         ",
+        ]);
+
+        // Drag from row 0 col 14 down to row 1 col 19 (reading order).
+        let text = apply_screen_selection(&mut buf, (14, 0), (19, 1));
+        assert_eq!(text, "istio-ingress\nistio-system  istiod");
+        // Selected cells are reverse-video; unselected ones are not.
+        assert!(buf.cell(Position::new(14, 0)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
+        assert!(buf.cell(Position::new(0, 1)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
+        assert!(!buf.cell(Position::new(0, 0)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
+        assert!(!buf.cell(Position::new(0, 2)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
+
+        // A backwards drag (cursor above anchor) selects the same range.
+        let mut buf2 = Buffer::with_lines(vec!["abc", "def"]);
+        assert_eq!(apply_screen_selection(&mut buf2, (1, 1), (1, 0)), "bc\nde");
+
+        // Out-of-bounds coordinates clamp instead of panicking.
+        let mut buf3 = Buffer::with_lines(vec!["xy"]);
+        assert_eq!(apply_screen_selection(&mut buf3, (0, 0), (500, 500)), "xy");
+        let mut empty = Buffer::empty(Rect::new(0, 0, 0, 0));
+        assert_eq!(apply_screen_selection(&mut empty, (0, 0), (5, 5)), "");
     }
 }

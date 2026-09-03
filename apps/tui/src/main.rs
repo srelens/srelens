@@ -195,6 +195,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     use crossterm::event::MouseEventKind;
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
+                            // Scrolling moves content under a screen-anchored
+                            // drag selection; drop the stale highlight.
+                            app.screen_selection = None;
                             match &mut app.active_view {
                                 app::ActiveView::Assistant => app.assistant_state.scroll_up(3),
                                 app::ActiveView::Logs(logs) => logs.scroll_up(3),
@@ -205,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         MouseEventKind::ScrollDown => {
+                            app.screen_selection = None;
                             match &mut app.active_view {
                                 app::ActiveView::Assistant => app.assistant_state.scroll_down(3),
                                 app::ActiveView::Logs(logs) => logs.scroll_down(3),
