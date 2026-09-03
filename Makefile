@@ -6,8 +6,10 @@ TARGET_BIN ?= $(DEST_DIR)/srelens-tui
 srelens-tui:
 	@mkdir -p $(DEST_DIR)
 	cargo build --release -p srelens-tui
+	@rm -f $(TARGET_BIN)
 	cp target/release/srelens-tui $(TARGET_BIN)
-	@echo "✓ Successfully built and installed srelens-tui to $(TARGET_BIN)"
+	@codesign -f -s - $(TARGET_BIN) 2>/dev/null || true
+	@echo "✓ Successfully built, signed, and installed srelens-tui to $(TARGET_BIN)"
 
 help:
 	@echo "Available targets:"
