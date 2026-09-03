@@ -66,6 +66,45 @@ pub fn sanitize_span_text(text: &str) -> String {
     out
 }
 
+use ratatui::style::Style;
+use ratatui::text::Span;
+
+/// Splits `text` into Spans, highlighting every case-insensitive occurrence of `query`
+/// with `match_style` while styling non-matching portions with `base_style`.
+pub fn highlight_text_matches<'a>(
+    text: &'a str,
+    query: &str,
+    base_style: Style,
+    match_style: Style,
+) -> Vec<Span<'a>> {
+    if query.is_empty() {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+    let query_lower = query.to_lowercase();
+    let text_lower = text.to_lowercase();
+    let mut spans = Vec::new();
+    let mut last_idx = 0;
+
+    for (match_start, _) in text_lower.match_indices(&query_lower) {
+        if match_start > last_idx {
+            spans.push(Span::styled(text[last_idx..match_start].to_string(), base_style));
+        }
+        let match_end = (match_start + query.len()).min(text.len());
+        spans.push(Span::styled(text[match_start..match_end].to_string(), match_style));
+        last_idx = match_end;
+    }
+
+    if last_idx < text.len() {
+        spans.push(Span::styled(text[last_idx..].to_string(), base_style));
+    }
+
+    if spans.is_empty() {
+        vec![Span::styled(text.to_string(), base_style)]
+    } else {
+        spans
+    }
+}
+
 pub use assistant_view::{render_assistant_view, AssistantViewState};
 pub use describe_view::{render_describe_view, DescribeViewState};
 pub use exec_view::ExecRunner;

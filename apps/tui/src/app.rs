@@ -1384,15 +1384,12 @@ impl App {
             return;
         }
 
-        // 4. Filter Mode (`/`)
+        // 4. Filter / Search Mode (`/`)
         if self.input_mode == InputMode::Filter {
             match key.code {
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
-                    self.filter_buffer.clear();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter("");
-                    }
+                    self.clear_current_filter();
                 }
                 KeyCode::Enter => {
                     self.input_mode = InputMode::Normal;
@@ -1408,40 +1405,26 @@ impl App {
                 }
                 _ if is_word_delete_key(&key) => {
                     delete_prev_word(&mut self.filter_buffer);
-                    let filter = self.filter_buffer.clone();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter(&filter);
-                    }
+                    self.apply_current_filter();
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.filter_buffer.clear();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter("");
-                    }
+                    self.apply_current_filter();
                 }
                 KeyCode::Backspace => {
                     self.filter_buffer.pop();
-                    let filter = self.filter_buffer.clone();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter(&filter);
-                    }
+                    self.apply_current_filter();
                 }
                 KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", "").replace('\n', "");
                         self.filter_buffer.push_str(&cleaned);
-                        let filter = self.filter_buffer.clone();
-                        if let ActiveView::Table(table) = &mut self.active_view {
-                            table.apply_filter(&filter);
-                        }
+                        self.apply_current_filter();
                     }
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                     self.filter_buffer.push(c);
-                    let filter = self.filter_buffer.clone();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter(&filter);
-                    }
+                    self.apply_current_filter();
                 }
                 _ => {}
             }
@@ -1468,9 +1451,33 @@ impl App {
                 self.input_mode = InputMode::Command;
                 self.command_buffer.clear();
             }
-            // Enter Filter Mode
+            // Enter Filter / Search Mode
             KeyCode::Char('/') if !matches!(self.active_view, ActiveView::Assistant) => {
                 self.input_mode = InputMode::Filter;
+                match &self.active_view {
+                    ActiveView::Describe(desc) => self.filter_buffer = desc.search_query.clone(),
+                    ActiveView::Yaml(yaml) => self.filter_buffer = yaml.search_query.clone(),
+                    ActiveView::Logs(logs) => self.filter_buffer = logs.search_query.clone(),
+                    _ => {}
+                }
+            }
+            // Next search match in text views (Describe, YAML, Logs)
+            KeyCode::Char('n') => {
+                match &mut self.active_view {
+                    ActiveView::Describe(desc) => desc.next_match(),
+                    ActiveView::Yaml(yaml) => yaml.next_match(),
+                    ActiveView::Logs(logs) => logs.next_match(),
+                    _ => {}
+                }
+            }
+            // Previous search match in text views (Describe, YAML, Logs)
+            KeyCode::Char('N') => {
+                match &mut self.active_view {
+                    ActiveView::Describe(desc) => desc.prev_match(),
+                    ActiveView::Yaml(yaml) => yaml.prev_match(),
+                    ActiveView::Logs(logs) => logs.prev_match(),
+                    _ => {}
+                }
             }
             // Open Help Modal
             KeyCode::Char('?') if !matches!(self.active_view, ActiveView::Assistant) || self.assistant_state.input.is_empty() => {
@@ -1508,6 +1515,25 @@ impl App {
                         yaml.clear_selection();
                         return;
                     }
+                    if !yaml.search_query.is_empty() {
+                        yaml.clear_search();
+                        self.filter_buffer.clear();
+                        return;
+                    }
+                }
+                if let ActiveView::Describe(ref mut desc) = self.active_view {
+                    if !desc.search_query.is_empty() {
+                        desc.clear_search();
+                        self.filter_buffer.clear();
+                        return;
+                    }
+                }
+                if let ActiveView::Logs(ref mut logs) = self.active_view {
+                    if !logs.search_query.is_empty() {
+                        logs.clear_search();
+                        self.filter_buffer.clear();
+                        return;
+                    }
                 }
                 let has_table_filter = if let ActiveView::Table(t) = &self.active_view {
                     t.filtered_indices.len() != t.raw_items.len()
@@ -1515,10 +1541,7 @@ impl App {
                     false
                 };
                 if !self.filter_buffer.is_empty() || has_table_filter {
-                    self.filter_buffer.clear();
-                    if let ActiveView::Table(table) = &mut self.active_view {
-                        table.apply_filter("");
-                    }
+                    self.clear_current_filter();
                 } else if let Some(prev_view) = self.nav_stack.pop() {
                     if let Some(ch) = self.active_log_channel.take() {
                         self.logs_manager.stop(&ch);
@@ -2864,6 +2887,44 @@ impl App {
         }
     }
 
+    pub fn apply_current_filter(&mut self) {
+        let filter = self.filter_buffer.clone();
+        match &mut self.active_view {
+            ActiveView::Table(table) => {
+                table.apply_filter(&filter);
+            }
+            ActiveView::Describe(desc) => {
+                desc.set_search_query(&filter);
+            }
+            ActiveView::Yaml(yaml) => {
+                yaml.set_search_query(&filter);
+            }
+            ActiveView::Logs(logs) => {
+                logs.set_search_query(&filter);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn clear_current_filter(&mut self) {
+        self.filter_buffer.clear();
+        match &mut self.active_view {
+            ActiveView::Table(table) => {
+                table.apply_filter("");
+            }
+            ActiveView::Describe(desc) => {
+                desc.clear_search();
+            }
+            ActiveView::Yaml(yaml) => {
+                yaml.clear_search();
+            }
+            ActiveView::Logs(logs) => {
+                logs.clear_search();
+            }
+            _ => {}
+        }
+    }
+
     pub fn handle_paste(&mut self, text: String) {
         if self.input_mode == InputMode::Command {
             let cleaned = text.replace("\r\n", " ").replace('\n', " ");
@@ -2873,10 +2934,7 @@ impl App {
         if self.input_mode == InputMode::Filter {
             let cleaned = text.replace("\r\n", "").replace('\n', "");
             self.filter_buffer.push_str(&cleaned);
-            let filter = self.filter_buffer.clone();
-            if let ActiveView::Table(table) = &mut self.active_view {
-                table.apply_filter(&filter);
-            }
+            self.apply_current_filter();
             return;
         }
         if let ActiveView::Assistant = &mut self.active_view {
@@ -4333,10 +4391,12 @@ impl App {
         }
 
         // 3. Render Status Bar
-        let (matched_count, total_count) = if let ActiveView::Table(t) = &self.active_view {
-            (t.filtered_indices.len(), t.raw_items.len())
-        } else {
-            (0, 0)
+        let (matched_count, total_count, is_text_search) = match &self.active_view {
+            ActiveView::Table(t) => (t.filtered_indices.len(), t.raw_items.len(), false),
+            ActiveView::Describe(desc) => (desc.search_matches.len(), desc.lines.len(), true),
+            ActiveView::Yaml(yaml) => (yaml.search_matches.len(), yaml.lines.len(), true),
+            ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
+            _ => (0, 0, false),
         };
 
         let toast_prop = self.toast.as_ref().map(|(msg, _, style)| (msg.as_str(), *style));
@@ -4384,6 +4444,23 @@ impl App {
             ][..]),
             ActiveView::Assistant => Some(&[
                 ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Describe(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<c>", "Copy"),
+                ("</>", "Search"),
+                ("<n/N>", "Next/Prev"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Yaml(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<c>", "Copy"),
+                ("<e>", "Edit"),
+                ("</>", "Search"),
+                ("<n/N>", "Next/Prev"),
+                ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
             ActiveView::Table(table) => match table.kind {
@@ -4465,6 +4542,8 @@ impl App {
                 ("<c>", "Copy"),
                 ("<f>", "Follow"),
                 ("<t>", "Timestamps"),
+                ("</>", "Search"),
+                ("<n/N>", "Next/Prev"),
                 ("<s>", "Save"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
@@ -4502,6 +4581,7 @@ impl App {
                 filter_input: &self.filter_buffer,
                 matched_count,
                 total_count,
+                is_text_search,
                 toast: toast_prop,
                 custom_hints,
                 suggestions: suggestions_prop,

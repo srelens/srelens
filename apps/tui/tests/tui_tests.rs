@@ -3143,7 +3143,7 @@ mod tests {
                 pod_ip: "10.0.0.2".to_string(),
             },
         ];
-        let mut details = NodeInspectorDetails {
+        let details = NodeInspectorDetails {
             name: "node-1".to_string(),
             status: "Ready".to_string(),
             unschedulable: false,
@@ -3197,6 +3197,150 @@ mod tests {
         app.handle_mouse(click_pod_1).await;
         if let ActiveView::NodeInspector(ni) = &app.active_view {
             assert_eq!(ni.selected_pod_idx, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_search_in_describe_yaml_and_logs() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::views::describe_view::DescribeViewState;
+        use srelens_tui::views::yaml_view::YamlViewState;
+        use srelens_tui::views::logs_view::LogsViewState;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let desc_text = "Name: my-pod\nNamespace: default\nContainers:\n  app:\n    Image: nginx:latest\nEvents:\n  Type: Normal\n  Reason: Started";
+        let desc_view = DescribeViewState::new("my-pod".to_string(), "Pod".to_string(), Some("default".to_string()), desc_text.to_string());
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Describe(desc_view),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: std::collections::HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 10,
+            is_connected: true,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 1. In Describe mode: press '/' to enter search mode
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Filter);
+
+        // Type "normal"
+        for c in "normal".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        assert_eq!(app.filter_buffer, "normal");
+
+        if let ActiveView::Describe(d) = &app.active_view {
+            assert_eq!(d.search_query, "normal");
+            assert_eq!(d.search_matches.len(), 1);
+            assert_eq!(d.scroll_offset, 6); // Line 6 contains "Type: Normal"
+        }
+
+        // Press Enter to finalize search and return to Normal mode
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // Press Esc to clear search
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        if let ActiveView::Describe(d) = &app.active_view {
+            assert!(d.search_query.is_empty());
+        }
+
+        // 2. In YAML mode: test '/' search and n/N cycling
+        let yaml_text = "apiVersion: v1\nkind: Service\nmetadata:\n  name: my-svc\nspec:\n  ports:\n  - port: 80\n    targetPort: 8080\n  - port: 443\n    targetPort: 8443";
+        let yaml_view = YamlViewState::new("my-svc".to_string(), "Service".to_string(), Some("default".to_string()), yaml_text.to_string());
+        app.active_view = ActiveView::Yaml(yaml_view);
+
+        // Press '/' and search "port"
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Filter);
+        for c in "port".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        if let ActiveView::Yaml(y) = &app.active_view {
+            assert_eq!(y.search_matches.len(), 5); // ports, port 80, targetPort 8080, port 443, targetPort 8443
+            assert_eq!(y.current_match_idx, Some(0));
+        }
+
+        // Press Enter to lock search
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // Press 'n' to go to next match
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+        if let ActiveView::Yaml(y) = &app.active_view {
+            assert_eq!(y.current_match_idx, Some(1));
+        }
+
+        // Press 'N' to go back to prev match
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE)).await;
+        if let ActiveView::Yaml(y) = &app.active_view {
+            assert_eq!(y.current_match_idx, Some(0));
+        }
+
+        // 3. In Logs mode: test '/' search
+        let mut logs_view = LogsViewState::new("my-pod".to_string(), "default".to_string(), None, "chan-1".to_string());
+        logs_view.push_line("INFO Server listening on :8080".to_string());
+        logs_view.push_line("WARN High memory pressure detected".to_string());
+        logs_view.push_line("ERROR Connection reset by peer".to_string());
+        app.active_view = ActiveView::Logs(logs_view);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        for c in "error".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        if let ActiveView::Logs(l) = &app.active_view {
+            assert_eq!(l.search_matches.len(), 1);
+            assert_eq!(l.scroll_offset, 2); // 3rd line has ERROR
         }
     }
 }

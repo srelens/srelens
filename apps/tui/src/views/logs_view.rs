@@ -20,6 +20,8 @@ pub struct LogsViewState {
     pub previous: bool,
     pub wrap: bool,
     pub search_query: String,
+    pub search_matches: Vec<usize>,
+    pub current_match_idx: Option<usize>,
 }
 
 impl LogsViewState {
@@ -36,7 +38,66 @@ impl LogsViewState {
             previous: false,
             wrap: false,
             search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_idx: None,
         }
+    }
+
+    pub fn set_search_query(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        if query.is_empty() {
+            self.search_matches.clear();
+            self.current_match_idx = None;
+            return;
+        }
+        let q = query.to_lowercase();
+        self.search_matches = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+
+        if !self.search_matches.is_empty() {
+            self.current_match_idx = Some(0);
+            self.scroll_offset = self.search_matches[0];
+            self.follow = false;
+        } else {
+            self.current_match_idx = None;
+        }
+    }
+
+    pub fn next_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let next_idx = match self.current_match_idx {
+            Some(curr) => (curr + 1) % self.search_matches.len(),
+            None => 0,
+        };
+        self.current_match_idx = Some(next_idx);
+        self.scroll_offset = self.search_matches[next_idx];
+        self.follow = false;
+    }
+
+    pub fn prev_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let prev_idx = match self.current_match_idx {
+            Some(0) | None => self.search_matches.len().saturating_sub(1),
+            Some(curr) => curr - 1,
+        };
+        self.current_match_idx = Some(prev_idx);
+        self.scroll_offset = self.search_matches[prev_idx];
+        self.follow = false;
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.current_match_idx = None;
     }
 
     pub fn push_line(&mut self, line: String) {
@@ -118,14 +179,30 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
         if state.wrap { "W" } else { "w" },
     );
 
+    let search_badge = if !state.search_query.is_empty() {
+        if state.search_matches.is_empty() {
+            format!(" [Search: \"{}\" (0 matches)]", state.search_query)
+        } else {
+            format!(
+                " [Search: \"{}\" ({}/{} matches, n/N)]",
+                state.search_query,
+                state.current_match_idx.map(|i| i + 1).unwrap_or(0),
+                state.search_matches.len()
+            )
+        }
+    } else {
+        String::new()
+    };
+
     let title = format!(
-        " Logs: {} ({}/{}) {} [{}/{} lines] (<f> Follow <t> Time <p> Prev <w> Wrap <s> Save <Esc> Back) ",
+        " Logs: {} ({}/{}) {} [{}/{} lines]{} (<f> Follow <t> Time <p> Prev <w> Wrap <s> Save <Esc> Back) ",
         state.pod_name,
         state.namespace,
         container_str,
         flags_str,
         state.scroll_offset + 1,
-        state.lines.len()
+        state.lines.len(),
+        search_badge,
     );
 
     let block = Block::default()
@@ -152,6 +229,11 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
     };
     let end_idx = (start_idx + visible_lines).min(state.lines.len());
 
+    let match_style = Style::default()
+        .bg(Theme::YELLOW)
+        .fg(Color::Rgb(20, 20, 20))
+        .add_modifier(Modifier::BOLD);
+
     let mut rendered_lines = Vec::new();
 
     for (i, line) in state.lines.iter().enumerate().take(end_idx).skip(start_idx) {
@@ -160,20 +242,31 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
             Style::default().fg(Theme::DIM),
         );
 
-        let lower = line.to_lowercase();
-        let log_style = if lower.contains("error") || lower.contains("fatal") || lower.contains("exception") || lower.contains("panic") {
-            Style::default().fg(Theme::RED)
-        } else if lower.contains("warn") || lower.contains("warning") {
-            Style::default().fg(Theme::YELLOW)
-        } else if lower.contains("info") {
-            Style::default().fg(Theme::FG)
-        } else if lower.contains("debug") || lower.contains("trace") {
-            Style::default().fg(Theme::DIM)
-        } else {
-            Style::default().fg(Theme::FG)
-        };
+        let mut spans = vec![line_num];
 
-        rendered_lines.push(Line::from(vec![line_num, Span::styled(line.clone(), log_style)]));
+        let has_match = !state.search_query.is_empty()
+            && line.to_lowercase().contains(&state.search_query.to_lowercase());
+
+        if has_match {
+            let highlighted = super::highlight_text_matches(line, &state.search_query, Style::default().fg(Theme::FG), match_style);
+            spans.extend(highlighted);
+        } else {
+            let lower = line.to_lowercase();
+            let log_style = if lower.contains("error") || lower.contains("fatal") || lower.contains("exception") || lower.contains("panic") {
+                Style::default().fg(Theme::RED)
+            } else if lower.contains("warn") || lower.contains("warning") {
+                Style::default().fg(Theme::YELLOW)
+            } else if lower.contains("info") {
+                Style::default().fg(Theme::FG)
+            } else if lower.contains("debug") || lower.contains("trace") {
+                Style::default().fg(Theme::DIM)
+            } else {
+                Style::default().fg(Theme::FG)
+            };
+            spans.push(Span::styled(line.clone(), log_style));
+        }
+
+        rendered_lines.push(Line::from(spans));
     }
 
     let mut paragraph = Paragraph::new(rendered_lines);

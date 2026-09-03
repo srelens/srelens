@@ -22,6 +22,7 @@ pub struct StatusBarProps<'a> {
     pub filter_input: &'a str,
     pub matched_count: usize,
     pub total_count: usize,
+    pub is_text_search: bool,
     pub toast: Option<(&'a str, Style)>,
     pub custom_hints: Option<&'a [(&'a str, &'a str)]>,
     pub suggestions: Option<(&'a [(crate::commands::DynamicCommandDef, usize)], usize)>,
@@ -46,49 +47,47 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
             f.render_widget(Paragraph::new(cmd_text), inner);
 
             // Render autocomplete suggestions if typing
-            if let Some((suggestions, selected_idx)) = props.suggestions {
-                if !suggestions.is_empty() && !props.command_input.is_empty() {
-                    let popup_height = (suggestions.len() as u16).min(8) + 2;
+            if let Some((suggs, selected_idx)) = props.suggestions {
+                if !suggs.is_empty() {
+                    let popup_height = (suggs.len() as u16 + 2).min(8);
                     let popup_area = Rect {
-                        x: area.x + 1,
+                        x: area.x + 2,
                         y: area.y.saturating_sub(popup_height),
-                        width: 60.min(area.width.saturating_sub(2)),
+                        width: area.width.saturating_sub(4).min(65),
                         height: popup_height,
                     };
-
                     f.render_widget(Clear, popup_area);
 
-                    let items: Vec<ListItem> = suggestions
+                    let items: Vec<ListItem> = suggs
                         .iter()
-                        .take(8)
                         .enumerate()
-                        .map(|(i, (cmd, _))| {
-                            let is_sel = i == selected_idx % suggestions.len().max(1);
-                            let aliases_str = if cmd.aliases.is_empty() {
-                                String::new()
-                            } else {
+                        .map(|(i, (cmd, _score))| {
+                            let is_selected = i == selected_idx;
+                            let prefix = if is_selected { "▶ " } else { "  " };
+                            let alias_str = if !cmd.aliases.is_empty() {
                                 format!(" ({})", cmd.aliases.join(", "))
-                            };
-                            let prefix = if is_sel { "▶ " } else { "  " };
-                            let name_style = if is_sel {
-                                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
                             } else {
-                                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                                String::new()
                             };
-
                             let line = Line::from(vec![
-                                Span::styled(prefix, name_style),
-                                Span::styled(format!(":{}", cmd.name), name_style),
-                                Span::styled(aliases_str, Style::default().fg(Theme::DIM)),
-                                Span::raw(" - "),
-                                Span::styled(&cmd.description, Style::default().fg(Theme::FG)),
+                                Span::styled(
+                                    format!("{}{}{:<20}", prefix, cmd.name, alias_str),
+                                    if is_selected {
+                                        Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Theme::FG)
+                                    },
+                                ),
+                                Span::styled(
+                                    format!("  {}", cmd.description),
+                                    Style::default().fg(Theme::DIM),
+                                ),
                             ]);
-                            let item_style = if is_sel {
-                                Style::default().bg(Theme::SEL_BG)
+                            ListItem::new(line).style(if is_selected {
+                                Theme::selected_row()
                             } else {
                                 Style::default()
-                            };
-                            ListItem::new(line).style(item_style)
+                            })
                         })
                         .collect();
 
@@ -103,16 +102,26 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
             }
         }
         InputMode::Filter => {
+            let (label, stats, hint) = if props.is_text_search {
+                (
+                    "Search: /",
+                    format!("[{} matches]", props.matched_count),
+                    "  (Enter to finish, n/N next/prev, Esc to clear)",
+                )
+            } else {
+                (
+                    "Filter (regex): /",
+                    format!("[{}/{}]", props.matched_count, props.total_count),
+                    "  (Enter to apply, Esc to clear)",
+                )
+            };
             let filter_text = Line::from(vec![
-                Span::styled("Filter (regex): /", Theme::prompt()),
+                Span::styled(label, Theme::prompt()),
                 Span::styled(props.filter_input, Style::default().fg(Theme::FG)),
                 Span::styled("█", Style::default().fg(Theme::YELLOW)), // Cursor
                 Span::raw("  "),
-                Span::styled(
-                    format!("[{}/{}]", props.matched_count, props.total_count),
-                    Style::default().fg(Theme::DIM),
-                ),
-                Span::styled("  (Enter to apply, Esc to clear)", Style::default().fg(Theme::DIM)),
+                Span::styled(stats, Style::default().fg(Theme::DIM)),
+                Span::styled(hint, Style::default().fg(Theme::DIM)),
             ]);
             f.render_widget(Paragraph::new(filter_text), inner);
         }
