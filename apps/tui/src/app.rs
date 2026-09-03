@@ -492,7 +492,44 @@ impl App {
             }
         }
     }
+}
 
+fn is_physical_gpu_key(k: &str) -> bool {
+    let lower = k.to_lowercase();
+    (lower == "nvidia.com/gpu" || lower == "amd.com/gpu" || lower == "intel.com/gpu" || lower.ends_with("/gpu"))
+        && !lower.contains("mem")
+        && !lower.contains("core")
+        && !lower.contains("vgpu")
+}
+
+fn is_gpu_memory_key(k: &str) -> bool {
+    let lower = k.to_lowercase();
+    lower.contains("gpu") && (lower.contains("mem") || lower.contains("vram"))
+}
+
+fn parse_gpu_mem_mib(s: &str) -> i64 {
+    let s = s.trim();
+    let num = |suffix: &str| s.trim_end_matches(suffix).trim().parse::<f64>().unwrap_or(0.0);
+    if s.ends_with("Ki") || s.ends_with("ki") || s.ends_with('k') || s.ends_with('K') {
+        (num("Ki").max(num("ki")).max(num("k")).max(num("K")) / 1024.0) as i64
+    } else if s.ends_with("Mi") || s.ends_with("mi") || s.ends_with('m') || s.ends_with('M') {
+        num("Mi").max(num("mi")).max(num("m")).max(num("M")) as i64
+    } else if s.ends_with("Gi") || s.ends_with("gi") || s.ends_with('g') || s.ends_with('G') {
+        (num("Gi").max(num("gi")).max(num("g")).max(num("G")) * 1024.0) as i64
+    } else if s.ends_with("Ti") || s.ends_with("ti") || s.ends_with('t') || s.ends_with('T') {
+        (num("Ti").max(num("ti")).max(num("t")).max(num("T")) * 1024.0 * 1024.0) as i64
+    } else if let Ok(val) = s.parse::<i64>() {
+        if val > 100_000_000 {
+            val / (1024 * 1024)
+        } else {
+            val
+        }
+    } else {
+        0
+    }
+}
+
+impl App {
     pub fn refresh_cluster_overview(&self) {
         let context = self.active_context.clone();
         let cache = self.client_cache.clone();
@@ -578,13 +615,12 @@ impl App {
                     if let Some(status) = &node.status {
                         if let Some(alloc) = &status.allocatable {
                             for (k, v) in alloc {
-                                let lower = k.to_lowercase();
-                                if lower == "nvidia.com/gpu" || lower == "amd.com/gpu" || lower == "intel.com/gpu" || (lower.ends_with("/gpu") && !lower.contains("mem") && !lower.contains("core") && !lower.contains("vgpu")) {
+                                if is_physical_gpu_key(k) {
                                     if let Ok(count) = v.0.parse::<usize>() {
                                         data.total_gpus += count;
                                     }
-                                } else if lower.contains("gpu") && (lower.contains("mem") || lower.contains("vram")) {
-                                    data.total_gpu_mem_mib += srelens_kube::metrics::mem_mib(&v.0);
+                                } else if is_gpu_memory_key(k) {
+                                    data.total_gpu_mem_mib += parse_gpu_mem_mib(&v.0);
                                 }
                             }
                         }
@@ -664,13 +700,12 @@ impl App {
                                         pod_req_mem += srelens_kube::metrics::mem_mib(&q.0);
                                     }
                                     for (k, v) in reqs {
-                                        let lower = k.to_lowercase();
-                                        if lower == "nvidia.com/gpu" || lower == "amd.com/gpu" || lower == "intel.com/gpu" || (lower.ends_with("/gpu") && !lower.contains("mem") && !lower.contains("core") && !lower.contains("vgpu")) {
+                                        if is_physical_gpu_key(k) {
                                             if let Ok(g) = v.0.parse::<usize>() {
                                                 data.allocated_gpus += g;
                                             }
-                                        } else if lower.contains("gpu") && (lower.contains("mem") || lower.contains("vram")) {
-                                            data.used_gpu_mem_mib += srelens_kube::metrics::mem_mib(&v.0);
+                                        } else if is_gpu_memory_key(k) {
+                                            data.used_gpu_mem_mib += parse_gpu_mem_mib(&v.0);
                                         }
                                     }
                                 }

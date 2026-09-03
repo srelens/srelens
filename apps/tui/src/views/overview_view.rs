@@ -189,13 +189,23 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     f.render_widget(mem_gauge, gauge_layout[1]);
 
     if has_gpus && gauge_layout.len() > 2 {
-        let (gpu_title, gpu_pct) = if d.total_gpus > 0 && d.allocated_gpus > 0 {
+        let (gpu_title, gpu_pct) = if d.total_gpus > 0 {
             let pct = (((d.allocated_gpus as f64 / d.total_gpus as f64) * 100.0).round() as u32).min(100) as u16;
             let title = if d.used_gpu_mem_mib > 0 {
-                format!(
-                    " GPU Allocation: {} / {} GPUs ({}%)  [VRAM: {:.1} GiB] ",
-                    d.allocated_gpus, d.total_gpus, pct, d.used_gpu_mem_mib as f64 / 1024.0
-                )
+                let vram_gib = d.used_gpu_mem_mib as f64 / 1024.0;
+                if d.total_gpu_mem_mib > 0 {
+                    let total_vram = d.total_gpu_mem_mib as f64 / 1024.0;
+                    let vram_pct = (((vram_gib / total_vram) * 100.0).round() as u32).min(100);
+                    format!(
+                        " GPU Allocation: {} / {} GPUs ({}%)  •  VRAM: {:.1} / {:.1} GiB ({}%) ",
+                        d.allocated_gpus, d.total_gpus, pct, vram_gib, total_vram, vram_pct
+                    )
+                } else {
+                    format!(
+                        " GPU Allocation: {} / {} GPUs ({}%)  •  VRAM Allocated: {:.1} GiB ",
+                        d.allocated_gpus, d.total_gpus, pct, vram_gib
+                    )
+                }
             } else {
                 format!(
                     " GPU Allocation: {} / {} GPUs ({}%) ",
@@ -207,30 +217,16 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
             let pct = (((d.used_gpu_mem_mib as f64 / d.total_gpu_mem_mib as f64) * 100.0).round() as u32).min(100) as u16;
             (
                 format!(
-                    " GPU VRAM Allocation: {:.1} / {:.1} GiB ({}%) [{} Physical GPUs] ",
+                    " GPU VRAM Allocation: {:.1} / {:.1} GiB ({}%) ",
                     d.used_gpu_mem_mib as f64 / 1024.0,
                     d.total_gpu_mem_mib as f64 / 1024.0,
                     pct,
-                    d.total_gpus
-                ),
-                pct,
-            )
-        } else if d.total_gpus > 0 && d.used_gpu_mem_mib > 0 {
-            // Virtualized GPU slices across physical cards (e.g. HAMi vGPU)
-            let vram_gib = d.used_gpu_mem_mib as f64 / 1024.0;
-            // Assuming conservative 16 GiB per card if not explicitly reported by node
-            let estimated_total_vram_gib = (d.total_gpus * 16) as f64;
-            let pct = (((vram_gib / estimated_total_vram_gib) * 100.0).round() as u32).min(100) as u16;
-            (
-                format!(
-                    " GPU Allocation: {:.1} GiB VRAM allocated across {} Physical GPUs ({}%) ",
-                    vram_gib, d.total_gpus, pct
                 ),
                 pct,
             )
         } else {
             (
-                format!(" GPU Allocation: 0 / {} GPUs (0%) ", d.total_gpus),
+                format!(" GPU Allocation: {:.1} GiB VRAM allocated ", d.used_gpu_mem_mib as f64 / 1024.0),
                 0,
             )
         };
@@ -250,7 +246,7 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     let pod_dist_inner = pod_dist_block.inner(rows[2]);
     f.render_widget(pod_dist_block, rows[2]);
 
-    let dist_lines = vec![
+    let mut dist_lines = vec![
         Line::from(vec![
             Span::styled("Total Pods:     ", Theme::header_label()),
             Span::styled(format!("{}", d.total_pods), Theme::header_val()),
@@ -278,5 +274,24 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
             },
         ]),
     ];
+
+    if d.total_gpus > 0 || d.used_gpu_mem_mib > 0 {
+        let vram_detail = if d.used_gpu_mem_mib > 0 {
+            if d.total_gpu_mem_mib > 0 {
+                format!("  [VRAM: {:.1} / {:.1} GiB allocated]", d.used_gpu_mem_mib as f64 / 1024.0, d.total_gpu_mem_mib as f64 / 1024.0)
+            } else {
+                format!("  [VRAM: {:.1} GiB allocated]", d.used_gpu_mem_mib as f64 / 1024.0)
+            }
+        } else {
+            String::new()
+        };
+
+        dist_lines.push(Line::from(vec![
+            Span::styled("GPU Slices:     ", Theme::header_label()),
+            Span::styled(format!("{}/{} Physical GPUs", d.allocated_gpus, d.total_gpus), Style::default().fg(Theme::ACCENT)),
+            Span::styled(vram_detail, Style::default().fg(Theme::FG)),
+        ]));
+    }
+
     f.render_widget(Paragraph::new(dist_lines), pod_dist_inner);
 }
