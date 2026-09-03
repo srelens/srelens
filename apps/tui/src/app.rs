@@ -82,6 +82,7 @@ pub struct App {
     pub is_connected: bool,
     pub ai_settings: crate::ai_config::AiSettings,
     pub assistant_state: AssistantViewState,
+    pub assistant_states: HashMap<String, AssistantViewState>,
     pub pod_metrics_tick_counter: usize,
 }
 
@@ -191,7 +192,7 @@ impl App {
         };
 
         let mut app = Self {
-            active_context,
+            active_context: active_context.clone(),
             active_namespace,
             kubeconfig_paths,
             contexts,
@@ -226,7 +227,8 @@ impl App {
             pod_count: 0,
             is_connected: true,
             ai_settings: crate::ai_config::AiSettings::load(),
-            assistant_state: AssistantViewState::new(),
+            assistant_state: AssistantViewState::for_context(&active_context),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -460,17 +462,40 @@ impl App {
     }
 
     pub async fn switch_context(&mut self, new_context: String) {
+        if self.active_context == new_context {
+            return;
+        }
+
         self.watch_manager.shutdown_all();
         self.active_watch_channels.clear();
         self.active_watch_pool.clear();
         self.resource_cache.clear();
         self.current_watch_channel = None;
 
+        // 1. Save outgoing context's assistant view state into map
+        let old_state = std::mem::replace(
+            &mut self.assistant_state,
+            AssistantViewState::for_context(&new_context),
+        );
+        self.assistant_states.insert(self.active_context.clone(), old_state);
+
+        // 2. Switch context and namespace
         self.active_context = new_context;
         if let Some(ctx) = self.contexts.iter().find(|c| c.name == self.active_context) {
             self.cluster_name = ctx.cluster.clone();
             self.server_url = ctx.server.clone();
+            if !ctx.namespace.is_empty() {
+                self.active_namespace = ctx.namespace.clone();
+            } else {
+                self.active_namespace = String::new();
+            }
         }
+
+        // 3. Restore or initialize assistant state for the target context
+        if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
+            self.assistant_state = saved_state;
+        }
+
         self.cluster_version = "Connecting...".to_string();
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();

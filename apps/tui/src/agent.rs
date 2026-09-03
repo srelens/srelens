@@ -158,18 +158,19 @@ pub async fn run_native_agent_turn(
         lock.clone()
     };
 
+    let ctx_tag = active_context.clone();
     let mut on_event = move |ev: AgentEvent| {
         match ev {
             AgentEvent::TextDelta { text } => {
                 out_chars_clone.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
                 let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: "ai_chunk".to_string(),
+                    title: format!("ai_chunk:{}", ctx_tag),
                     result: Ok(text),
                 });
             }
             AgentEvent::Thinking { text } => {
                 let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: "ai_status".to_string(),
+                    title: format!("ai_status:{}", ctx_tag),
                     result: Ok(text),
                 });
             }
@@ -182,11 +183,11 @@ pub async fn run_native_agent_turn(
                     args.to_string()
                 };
                 let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: "ai_status".to_string(),
+                    title: format!("ai_status:{}", ctx_tag),
                     result: Ok(format!("Executing {}...", tool)),
                 });
                 let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: "ai_tool_start".to_string(),
+                    title: format!("ai_tool_start:{}", ctx_tag),
                     result: Ok(format!("{}|{}|{}", id, tool, args_preview)),
                 });
             }
@@ -197,14 +198,14 @@ pub async fn run_native_agent_turn(
                     srelens_agent::event::ToolStatus::Denied => "denied",
                 };
                 let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: "ai_tool_done".to_string(),
+                    title: format!("ai_tool_done:{}", ctx_tag),
                     result: Ok(format!("{}|{}", id, status_str)),
                 });
             }
             AgentEvent::TurnDone => {}
             AgentEvent::Error { message } => {
                 let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: "ai_chunk".to_string(),
+                    title: format!("ai_chunk:{}", ctx_tag),
                     result: Ok(format!("\n[Error: {}]", message)),
                 });
             }
@@ -226,7 +227,7 @@ pub async fn run_native_agent_turn(
     let total_est = prompt_est + comp_est;
     let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, duration_ms);
     let _ = event_tx.send(AppEvent::ActionResult {
-        title: "ai_usage".to_string(),
+        title: format!("ai_usage:{}", active_context),
         result: Ok(payload),
     });
 
@@ -241,17 +242,17 @@ pub async fn run_native_agent_turn(
                 }
             }
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_context),
                 result: Ok(String::new()),
             });
         }
         Err(err) => {
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
+                title: format!("ai_chunk:{}", active_context),
                 result: Err(format!("AI Agent Error: {}", err)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_context),
                 result: Ok(String::new()),
             });
         }
@@ -445,7 +446,7 @@ pub async fn run_boxed_cursor_turn(
                             let dur_val = dur_t.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
                             let payload = format!("{}|{}|{}|{}|{}", prompt_t, comp_t, cached_t, total_t, dur_val);
                             let _ = event_tx.send(AppEvent::ActionResult {
-                                title: "ai_usage".to_string(),
+                                title: format!("ai_usage:{}", active_ctx),
                                 result: Ok(payload),
                             });
                             has_emitted_usage = true;
@@ -454,7 +455,7 @@ pub async fn run_boxed_cursor_turn(
                         if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
                             if t == "thinking" {
                                 let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: "ai_status".to_string(),
+                                    title: format!("ai_status:{}", active_ctx),
                                     result: Ok("Thinking & analyzing cluster query...".to_string()),
                                 });
                             } else if t == "tool_call" {
@@ -462,11 +463,11 @@ pub async fn run_boxed_cursor_turn(
                                 if subtype == "started" {
                                     if let Some((id, tool, args)) = crate::app::extract_tool_call_start_info(&v) {
                                         let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: "ai_status".to_string(),
+                                            title: format!("ai_status:{}", active_ctx),
                                             result: Ok(format!("Executing {} query on cluster...", tool)),
                                         });
                                         let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: "ai_tool_start".to_string(),
+                                            title: format!("ai_tool_start:{}", active_ctx),
                                             result: Ok(format!("{}|{}|{}", id, tool, args)),
                                         });
                                     }
@@ -474,7 +475,7 @@ pub async fn run_boxed_cursor_turn(
                                     if let Some((id, is_err)) = crate::app::extract_tool_call_completed_info(&v) {
                                         let status_str = if is_err { "error" } else { "ok" };
                                         let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: "ai_tool_done".to_string(),
+                                            title: format!("ai_tool_done:{}", active_ctx),
                                             result: Ok(format!("{}|{}", id, status_str)),
                                         });
                                     }
@@ -489,13 +490,13 @@ pub async fn run_boxed_cursor_turn(
                             srelens_agent::event::AgentEvent::TextDelta { text } => {
                                 total_output_chars += text.len();
                                 let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: "ai_chunk".to_string(),
+                                    title: format!("ai_chunk:{}", active_ctx),
                                     result: Ok(text),
                                 });
                             }
                             srelens_agent::event::AgentEvent::Error { message } => {
                                 let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: "ai_chunk".to_string(),
+                                    title: format!("ai_chunk:{}", active_ctx),
                                     result: Ok(format!("\n[Error: {}]", message)),
                                 });
                             }
@@ -513,23 +514,23 @@ pub async fn run_boxed_cursor_turn(
                 let total_est = prompt_est + comp_est;
                 let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, dur_val);
                 let _ = event_tx.send(AppEvent::ActionResult {
-                    title: "ai_usage".to_string(),
+                    title: format!("ai_usage:{}", active_ctx),
                     result: Ok(payload),
                 });
             }
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
         }
         Err(err) => {
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
+                title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to launch cursor-agent: {}", err)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
         }

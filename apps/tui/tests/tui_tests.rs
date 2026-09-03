@@ -186,6 +186,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -268,6 +269,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -358,6 +360,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -483,6 +486,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -683,6 +687,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -865,6 +870,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -991,6 +997,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -1073,6 +1080,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -1188,6 +1196,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -1270,6 +1279,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -1344,6 +1354,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -1459,6 +1470,7 @@ mod tests {
             is_connected: true,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
         };
 
@@ -1497,5 +1509,123 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
         assert_eq!(app.active_context, "prod-eu");
         assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_per_cluster_assistant_state_isolation() {
+        use tokio::sync::mpsc::unbounded_channel;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use std::collections::{HashMap, HashSet};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "data-processing-prod-eu-dus1".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![
+                srelens_kube::contexts::ContextDto {
+                    name: "data-processing-prod-eu-dus1".to_string(),
+                    stable_id: "kube/prod".to_string(),
+                    cluster: "prod-cluster".to_string(),
+                    server: "https://127.0.0.1:6443".to_string(),
+                    namespace: "default".to_string(),
+                    is_current: true,
+                    is_local: false,
+                    provider: Some("EKS".to_string()),
+                    source_file: "config".to_string(),
+                    auth_kind: "token".to_string(),
+                },
+                srelens_kube::contexts::ContextDto {
+                    name: "harvester-amd-eu-dus1".to_string(),
+                    stable_id: "kube/harvester".to_string(),
+                    cluster: "harvester-cluster".to_string(),
+                    server: "https://127.0.0.1:6444".to_string(),
+                    namespace: "kube-system".to_string(),
+                    is_current: false,
+                    is_local: true,
+                    provider: Some("kind".to_string()),
+                    source_file: "config".to_string(),
+                    auth_kind: "client certificate".to_string(),
+                },
+            ],
+            namespaces: vec!["default".to_string(), "kube-system".to_string()],
+            active_view: ActiveView::Assistant,
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod-cluster".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 32,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("data-processing-prod-eu-dus1"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // 1. In data-processing-prod-eu-dus1, user has a conversation
+        app.assistant_state.start_turn("Show me nodes".to_string());
+        app.assistant_state.add_assistant_message("32 nodes on data-processing-prod-eu-dus1: 3 control plane, 8 flink amd64, 16 general, 4 gpu".to_string());
+        app.assistant_state.finish_turn();
+
+        assert_eq!(app.assistant_state.messages.len(), 3);
+        assert!(app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
+
+        // 2. Switch context to harvester-amd-eu-dus1
+        app.switch_context("harvester-amd-eu-dus1".to_string()).await;
+        assert_eq!(app.active_context, "harvester-amd-eu-dus1");
+        assert_eq!(app.active_namespace, "kube-system"); // uses ctx.namespace!
+
+        // The assistant state for harvester should be fresh, NOT showing data-processing nodes!
+        assert_eq!(app.assistant_state.context_name, "harvester-amd-eu-dus1");
+        assert_eq!(app.assistant_state.messages.len(), 1);
+        assert!(!app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
+
+        // User chats in harvester
+        app.assistant_state.start_turn("Show me pods".to_string());
+        app.assistant_state.add_assistant_message("7 pods on harvester-amd-eu-dus1".to_string());
+        app.assistant_state.finish_turn();
+        assert_eq!(app.assistant_state.messages.len(), 3);
+
+        // 3. Switch back to data-processing-prod-eu-dus1
+        app.switch_context("data-processing-prod-eu-dus1".to_string()).await;
+        assert_eq!(app.active_context, "data-processing-prod-eu-dus1");
+        assert_eq!(app.active_namespace, "default");
+
+        // The original conversation from data-processing is completely restored!
+        assert_eq!(app.assistant_state.context_name, "data-processing-prod-eu-dus1");
+        assert!(app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
+        assert!(!app.assistant_state.messages.iter().any(|m| m.content.contains("7 pods on harvester-amd-eu-dus1")));
     }
 }

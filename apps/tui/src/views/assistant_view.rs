@@ -98,6 +98,7 @@ impl SelectionRange {
 }
 
 pub struct AssistantViewState {
+    pub context_name: String,
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub is_busy: bool,
@@ -129,10 +130,23 @@ pub fn is_internal_meta_tool(tool: &str) -> bool {
 
 impl AssistantViewState {
     pub fn new() -> Self {
+        Self::for_context("")
+    }
+
+    pub fn for_context(context_name: &str) -> Self {
+        let content = if context_name.is_empty() {
+            "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
+        } else {
+            format!(
+                "Hello! I am your SRElens AI Assistant for context '{}'. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:",
+                context_name
+            )
+        };
         Self {
+            context_name: context_name.to_string(),
             messages: vec![ChatMessage {
                 role: "assistant".to_string(),
-                content: "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string(),
+                content,
                 timestamp: current_timestamp(),
                 tool_calls: Vec::new(),
                 token_usage: None,
@@ -402,9 +416,17 @@ impl AssistantViewState {
     }
 
     pub fn clear_conversation(&mut self) {
+        let content = if self.context_name.is_empty() {
+            "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
+        } else {
+            format!(
+                "Hello! I am your SRElens AI Assistant for context '{}'. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:",
+                self.context_name
+            )
+        };
         self.messages = vec![ChatMessage {
             role: "assistant".to_string(),
-            content: "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string(),
+            content,
             timestamp: current_timestamp(),
             tool_calls: Vec::new(),
             token_usage: None,
@@ -722,9 +744,14 @@ pub fn render_assistant_view(
     }).unwrap_or_default();
     let tools_hint = if state.expand_tools { "<Ctrl+t> Fold Tools" } else { "<Ctrl+t> Tools" };
     let copy_hint = if state.selection.is_some() { "<c> Copy Selection" } else { "<c> Copy" };
+    let cluster_tag = if !state.context_name.is_empty() {
+        format!(" @{} ", state.context_name)
+    } else {
+        String::new()
+    };
     let title = format!(
-        " SRElens AI Assistant [{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        prov_name, model, token_hint, copy_hint, tools_hint
+        " SRElens AI Assistant{}[{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
+        cluster_tag, prov_name, model, token_hint, copy_hint, tools_hint
     );
 
     let block = Block::default()
