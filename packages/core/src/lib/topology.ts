@@ -107,9 +107,10 @@ export interface TopologyGraph {
 export async function topologyGraph(
   context: string,
   namespaces: string[],
-  /** Where to read measured traffic from. Without it the graph is built from
-   *  the API alone — telemetry only ever adds observed edges and rates. */
-  prometheus?: PrometheusSource,
+  /** Where measured traffic might be read from, best first; the capability
+   *  takes the first that answers with any series. Empty means the graph is
+   *  built from the API alone — telemetry only ever adds observed edges. */
+  prometheus: PrometheusSource[] = [],
   /** Read each pod's own socket table over `pods/exec`. Off unless the
    *  reader asks: one exec per pod, and an audit-log entry on each. */
   connections = false,

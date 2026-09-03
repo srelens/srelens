@@ -66,6 +66,7 @@ pub struct Peer {
 /// a conversation that has already ended — drawing those would put edges on the
 /// diagram for things a pod used to talk to, which ages badly and silently.
 const ESTABLISHED: &str = "01";
+const LISTEN: &str = "0A";
 
 /// Decode one `/proc/net` address, which is hex and NOT in network order.
 ///
@@ -116,13 +117,26 @@ fn interesting(address: &str) -> bool {
 /// the reverse edge is not something a unit test would have thought to look
 /// for.
 ///
-/// The dialler holds an ephemeral local port and connects to a service port, so
-/// the lower remote port is the one being served. It is a heuristic and it is
-/// the one every netstat-style tool uses; where it is wrong — two ephemeral
-/// ports, a service listening high — it drops an edge rather than inventing a
-/// backwards one, which is the right way to be wrong.
-fn we_dialled(local_port: u16, remote_port: u16) -> bool {
-    remote_port < local_port
+/// The first version guessed from port order — the dialler's ephemeral port is
+/// usually the higher one — which is wrong the moment a server listens above
+/// the ephemeral range, as gRPC on 50051 does: the client's row failed the
+/// test, the server's passed it, and the call was drawn backwards. The table
+/// does record a fact that settles it: a pod that ACCEPTED a connection is
+/// listening on that connection's local port, and a pod that dialled one is
+/// not. So the pod's own `LISTEN` rows are read first, and an established row
+/// on a listening port is the other end's to report.
+fn listening_ports(text: &str) -> std::collections::BTreeSet<u16> {
+    text.lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 4 || !fields[0].ends_with(':') || fields[3] != LISTEN {
+                return None;
+            }
+            fields[1]
+                .split_once(':')
+                .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok())
+        })
+        .collect()
 }
 
 /// Read one or more `/proc/net/tcp`-shaped tables into peers.
@@ -132,6 +146,7 @@ fn we_dialled(local_port: u16, remote_port: u16) -> bool {
 /// from an arbitrary container image, and half an answer about a pod's
 /// connections is worth more than none.
 pub fn parse_proc_net_tcp(text: &str) -> Vec<Peer> {
+    let listening = listening_ports(text);
     let mut counts: BTreeMap<(String, u16), u32> = BTreeMap::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -157,7 +172,9 @@ pub fn parse_proc_net_tcp(text: &str) -> Vec<Peer> {
         else {
             continue;
         };
-        if !interesting(&address) || !we_dialled(local_port, port) {
+        // Our end is one we listen on: the peer dialled us, and this
+        // connection is theirs to report.
+        if !interesting(&address) || listening.contains(&local_port) {
             continue;
         }
         *counts.entry((address, port)).or_insert(0) += 1;
@@ -252,7 +269,16 @@ pub fn pod_connections_capability(cache: Arc<ClientCache>) -> Capability {
                 let mut connections = Vec::new();
                 let mut unreadable = Vec::new();
                 for pod in &input.pods {
-                    match read_pod_connections(client.clone(), &input.namespace, pod).await {
+                    // Bounded: a stalled exec stream would otherwise hold this
+                    // loop, and the caller, forever — and every pod after it
+                    // unread. A timeout is reported the same way a refusal is.
+                    let read = tokio::time::timeout(
+                        crate::connect::request_timeout(),
+                        read_pod_connections(client.clone(), &input.namespace, pod),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("exec timed out".to_string()));
+                    match read {
                         Ok(peers) => connections.push(PodConnections {
                             pod: pod.clone(),
                             peers,
@@ -342,14 +368,32 @@ mod tests {
         // conversation appears from both ends and one of them is backwards —
         // `promstub -> storefront` for a connection storefront opened.
         //
-        // The client's row: an ephemeral local port, the service port remote.
+        // The client's row: a local port it is not listening on.
         let client = "   0: 0A800A0A:A56B 0B800A0A:2382 01 0 0 0 0 0 0 0 1";
         assert_eq!(
             parse_proc_net_tcp(client),
             vec![Peer { address: "10.10.128.11".into(), port: 9090, count: 1 }],
         );
-        // The server's row for the very same connection, which must say nothing.
-        let server = "   0: 0B800A0A:2382 0A800A0A:A56B 01 0 0 0 0 0 0 0 1";
+        // The server's table for the very same connection: it LISTENS on that
+        // local port, so the row is the other end's to report.
+        let server = "   0: 00000000:2382 00000000:0000 0A 0 0 0 0 0 0 0 1
+   1: 0B800A0A:2382 0A800A0A:A56B 01 0 0 0 0 0 0 0 2";
+        assert_eq!(parse_proc_net_tcp(server), vec![]);
+    }
+
+    #[test]
+    fn direction_does_not_depend_on_which_port_is_higher() {
+        // gRPC on 50051, dialled from ephemeral port 40000: the server's port
+        // is the higher one, which is where guessing from port order drew the
+        // call backwards. The dialler has no listener on 40000; the server has
+        // one on 50051.
+        let client = "   0: 0A800A0A:9C40 0B800A0A:C383 01 0 0 0 0 0 0 0 1";
+        assert_eq!(
+            parse_proc_net_tcp(client),
+            vec![Peer { address: "10.10.128.11".into(), port: 50051, count: 1 }],
+        );
+        let server = "   0: 00000000:C383 00000000:0000 0A 0 0 0 0 0 0 0 1
+   1: 0B800A0A:C383 0A800A0A:9C40 01 0 0 0 0 0 0 0 2";
         assert_eq!(parse_proc_net_tcp(server), vec![]);
     }
 

@@ -241,6 +241,26 @@ pub fn parse_instant(body: &Value) -> Result<Vec<Sample>, String> {
         .pointer("/data/result")
         .and_then(Value::as_array)
         .ok_or("query response carried no result")?;
+    // A scalar — `time()`, or a vector reduced to one number — arrives as
+    // `[ts, "value"]` in `result` directly. Read as a vector, its two elements
+    // were skipped as malformed entries and a real answer came back as an
+    // empty, successful one. Anything that is not a vector or a scalar is a
+    // range or a string, which an INSTANT query was not asked for.
+    match body.pointer("/data/resultType").and_then(Value::as_str) {
+        Some("vector") | None => {}
+        Some("scalar") => {
+            let value = result
+                .get(1)
+                .and_then(Value::as_str)
+                .and_then(|raw| raw.parse::<f64>().ok())
+                .filter(|v| v.is_finite());
+            return Ok(value
+                .map(|value| Sample { labels: BTreeMap::new(), value })
+                .into_iter()
+                .collect());
+        }
+        Some(other) => return Err(format!("unsupported result type `{other}` for an instant query")),
+    }
     let mut out = Vec::with_capacity(result.len());
     for entry in result {
         let labels = entry

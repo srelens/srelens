@@ -1346,7 +1346,7 @@ async fn run_suite() {
     let out = h
         .ok(
             "k8s.topologyGraph",
-            json!({ "context": ctx, "namespaces": [NS], "prometheus": null, "connections": false }),
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": [], "connections": false }),
         )
         .await;
     let nodes = out["nodes"].as_array().unwrap();

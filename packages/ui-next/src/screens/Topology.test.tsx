@@ -167,7 +167,7 @@ describe("Topology", () => {
     // screen honours it rather than quietly picking one for them.
     render(<Topology />);
     await waitFor(() =>
-      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["checkout", "default", "payments"], undefined, false),
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["checkout", "default", "payments"], [], false),
     );
   });
 
@@ -176,7 +176,7 @@ describe("Topology", () => {
     // reader who narrowed to `payments` elsewhere lands there here too.
     workspace.scoped = ["payments"];
     render(<Topology />);
-    await waitFor(() => expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["payments"], undefined, false));
+    await waitFor(() => expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", ["payments"], [], false));
   });
 
   it("caps `All namespaces` on a big cluster, and says that it did", async () => {
@@ -469,12 +469,12 @@ describe("Topology", () => {
     render(<Topology />);
 
     await waitFor(() =>
-      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), {
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), [{
         namespace: "monitoring",
         service: "prometheus",
         port: 9090,
         flavour: "prometheus",
-      }, false),
+      }], false),
     );
     expect(await screen.findByText("41 rpm")).toBeDefined();
     const canvas = screen.getByRole("group", { name: "Namespace topology" });
@@ -559,7 +559,7 @@ describe("Topology", () => {
     // that on for a reader.
     render(<Topology />);
     await waitFor(() =>
-      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), undefined, false),
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), [], false),
     );
 
     const toggle = screen.getByRole("button", { name: "Probe connections" });
@@ -567,7 +567,7 @@ describe("Topology", () => {
     await userEvent.click(toggle);
 
     await waitFor(() =>
-      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), undefined, true),
+      expect(core.topologyGraph).toHaveBeenCalledWith("prod-eu", expect.any(Array), [], true),
     );
     expect(screen.getByRole("button", { name: "Probing connections" })).toBeDefined();
   });

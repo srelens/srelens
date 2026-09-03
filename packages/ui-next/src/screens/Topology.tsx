@@ -74,7 +74,12 @@ import {
 export function Topology() {
   const context = useActiveContext();
   if (!context) return <NoClusterScreen title="Topology" noun="topology" />;
-  return <TopologyGraph context={context} />;
+  // Keyed by cluster, so switching clusters remounts the screen and every
+  // piece of its own state starts over — above all the connection probe,
+  // which is an exec in every pod and opt-in per cluster. Left mounted, a
+  // probe turned on for one cluster would run against the next the moment it
+  // was selected, with nobody having asked.
+  return <TopologyGraph key={context.stableId} context={context} />;
 }
 
 /**
@@ -123,7 +128,10 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
     const out = await prometheusDiscover(context.name);
     return out.candidates ?? [];
   }, [context.name]);
-  const source = metrics.data?.[0];
+  // Every candidate, not the first: the first discovered may be an unrelated
+  // shard with no mesh series in it. The capability tries them in order.
+  const sources = useMemo(() => metrics.data ?? [], [metrics.data]);
+  const sourcesKey = sources.map((s) => `${s.namespace}/${s.service}:${s.port}`).join(",");
 
   /**
    * Whether to read each pod's socket table.
@@ -145,14 +153,14 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   const graph = useResource(
     async () => {
       if (!cluster || chosen.length === 0) return { nodes: [], edges: [] };
-      const out = await topologyGraph(cluster.name, chosen, source, probeConnections);
+      const out = await topologyGraph(cluster.name, chosen, sources, probeConnections);
       if (out.error) throw new Error(out.error);
       return out.graph ?? { nodes: [], edges: [] };
     },
     // Re-read when a metrics source appears: discovery resolves after the first
     // draw, and the graph would otherwise stay structural until something else
     // moved.
-    [cluster?.name, key, source?.service, source?.namespace, probeConnections],
+    [cluster?.name, key, sourcesKey, probeConnections],
     (g) => g.nodes.length === 0,
   );
 

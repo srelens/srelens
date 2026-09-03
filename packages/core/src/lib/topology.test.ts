@@ -34,7 +34,7 @@ describe("topologyGraph", () => {
     expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
       context: "kind-dev",
       namespaces: ["checkout", "payments"],
-      prometheus: undefined,
+      prometheus: [],
       connections: false,
     });
     expect(out.graph?.nodes[0].health).toBe("degraded");
@@ -46,11 +46,11 @@ describe("topologyGraph", () => {
     // ever adds observed edges and rates on top.
     const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
     const prometheus = { namespace: "monitoring", service: "prometheus", port: 9090 };
-    await topologyGraph("c", ["checkout"], prometheus, false, invoke);
+    await topologyGraph("c", ["checkout"], [prometheus], false, invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
       context: "c",
       namespaces: ["checkout"],
-      prometheus,
+      prometheus: [prometheus],
       connections: false,
     });
   });
@@ -63,7 +63,7 @@ describe("topologyGraph", () => {
     expect(invoke).toHaveBeenCalledWith("k8s.topologyGraph", {
       context: "c",
       namespaces: ["checkout"],
-      prometheus: undefined,
+      prometheus: [],
       connections: true,
     });
   });

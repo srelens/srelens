@@ -224,12 +224,16 @@ export function fold(graph: TopologyGraph): { nodes: FlowNode[]; edges: Topology
     if (edge.kind === "owns") owner.set(edge.to, edge.from);
   }
 
+  const drawn = new Set(graph.nodes.map((n) => n.id));
   const folded = new Set<string>();
   const revisions = new Map<string, string[]>();
   for (const node of graph.nodes) {
     if (node.lane !== "replicaset") continue;
     const into = owner.get(node.id);
-    if (into === undefined) continue;
+    // An owner that is not itself drawn — a Deployment deleted while its
+    // ReplicaSet lingers still names it — has nowhere to take the revision,
+    // so the ReplicaSet stays a node rather than folding into nothing.
+    if (into === undefined || !drawn.has(into)) continue;
     folded.add(node.id);
     const list = revisions.get(into);
     if (list) list.push(node.name);
@@ -1442,7 +1446,11 @@ export function fitTransform(
  * looking at leaves the screen.
  */
 export function zoomAt(current: Transform, factor: number, px: number, py: number): Transform {
-  const k = clampZoom(current.k * factor);
+  // Fit may have put the view below the manual floor for a graph too wide to
+  // fit otherwise; zooming OUT from there must not snap it back up to the
+  // floor, which made a graph 2.5x larger on a click that asked for smaller.
+  const floor = Math.min(MIN_ZOOM, current.k);
+  const k = Math.min(MAX_ZOOM, Math.max(floor, current.k * factor));
   const ratio = k / current.k;
   return {
     k,

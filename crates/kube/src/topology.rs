@@ -103,7 +103,7 @@
 //! `failing` purely from those two numbers. There is no error rate here and no
 //! latency, because there is no source for either.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
@@ -144,7 +144,7 @@ pub struct TopologyGraphIn {
     /// most clusters run none, and the graph is built from the API either way
     /// — telemetry only ever ADDS observed edges and rates on top.
     #[serde(default)]
-    pub prometheus: Option<PrometheusSource>,
+    pub prometheus: Vec<PrometheusSource>,
     /// Read each pod's own socket table over `pods/exec`.
     ///
     /// Off by default and deliberately: it is one exec per pod, it shows up
@@ -439,6 +439,21 @@ fn push_edge_labelled(
         .find(|e| e.from == from && e.to == to && e.kind == kind)
     {
         if provenance == Provenance::Observed {
+            match (existing.unit, measure) {
+                // A rate is the better measurement and is never replaced by a
+                // socket count: enabling the probe on a graph Prometheus had
+                // already measured used to overwrite every rate with `3 conns`.
+                (Some(Unit::Rps), Some((_, Unit::Connections))) => return,
+                // Replicas each report their own sockets; the workload's edge
+                // is the total, not whichever pod the API listed last.
+                (Some(Unit::Connections), Some((more, Unit::Connections))) => {
+                    let total = existing.weight.unwrap_or(0.0) + more;
+                    existing.weight = Some(total);
+                    existing.detail = connection_label(total as u32);
+                    return;
+                }
+                _ => {}
+            }
             existing.provenance = provenance;
             existing.detail = detail;
             existing.weight = measure.map(|(w, _)| w);
@@ -718,10 +733,11 @@ pub fn external_backings(
                     namespace: namespace.clone(),
                     host: address.clone(),
                 };
-                if !out
-                    .iter()
-                    .any(|(s, b)| s == &service && b.host == backing.host)
-                {
+                // Same-named Services in two namespaces may both be backed
+                // by the same address; each is its own dependency.
+                if !out.iter().any(|(s, b)| {
+                    s == &service && b.host == backing.host && b.namespace == backing.namespace
+                }) {
                     out.push((service.clone(), backing));
                 }
             }
@@ -801,6 +817,13 @@ fn pod_spec_sources(template: Option<&k8s_openapi::api::core::v1::PodTemplateSpe
     for volume in spec.volumes.iter().flatten() {
         if let Some(cm) = volume.config_map.as_ref().map(|c| c.name.clone()) {
             config_maps.push(cm);
+        }
+        // A ConfigMap can also arrive through a projected volume, and a chart
+        // that composes several into one directory mounts it no other way.
+        for source in volume.projected.iter().flat_map(|p| p.sources.iter().flatten()) {
+            if let Some(cm) = source.config_map.as_ref().map(|c| c.name.clone()) {
+                config_maps.push(cm);
+            }
         }
     }
     let containers = spec
@@ -1118,21 +1141,32 @@ pub fn build_graph(
     //
     // Marked `Declared` throughout, and that word is doing real work: this says
     // a workload was built to reach a host, NOT that it ever has.
-    let service_names: Vec<String> = services
-        .iter()
-        .filter_map(|s| s.metadata.name.clone())
-        .collect();
-    let config_text: BTreeMap<String, Vec<String>> = config_maps
+    // Both keyed by namespace. A bare `payments:8080` resolves in the pod's
+    // OWN namespace, so it is a Service only if that namespace has one — a
+    // global list made it one whenever any namespace in view did, and then
+    // invented a local Service that did not exist. And two namespaces from
+    // the same chart both have a ConfigMap called `app-config`; keyed by name
+    // alone the later one overwrote the earlier, and a workload was read
+    // against the other namespace's configuration.
+    let mut service_names: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for s in &services {
+        if let (Some(ns), Some(name)) = (s.metadata.namespace.clone(), s.metadata.name.clone()) {
+            service_names.entry(ns).or_default().push(name);
+        }
+    }
+    let no_services: Vec<String> = Vec::new();
+    let config_text: BTreeMap<(String, String), Vec<String>> = config_maps
         .iter()
         .filter_map(|cm| {
             let name = cm.metadata.name.clone()?;
+            let namespace = cm.metadata.namespace.clone().unwrap_or_default();
             let values = cm
                 .data
                 .iter()
                 .flatten()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
-            Some((name, values))
+            Some(((namespace, name), values))
         })
         .collect();
 
@@ -1141,12 +1175,13 @@ pub fn build_graph(
         let from = node_id(w.kind, &w.namespace, &w.name);
         let mut blobs: Vec<&String> = w.text.iter().collect();
         for cm in &w.config_maps {
-            if let Some(values) = config_text.get(cm) {
+            if let Some(values) = config_text.get(&(w.namespace.clone(), cm.clone())) {
                 blobs.extend(values.iter());
             }
         }
+        let services_here = service_names.get(&w.namespace).unwrap_or(&no_services);
         for blob in blobs {
-            for reference in references_in(blob, &service_names) {
+            for reference in references_in(blob, services_here) {
                 let reference = internalise(reference, &ingress_hosts, &service_pairs);
                 match reference {
                     Reference::Service { name, namespace: ns } => {
@@ -1218,38 +1253,66 @@ pub fn build_graph(
         );
     }
 
-    // An ExternalName Service IS a declared external dependency, spelled in the
-    // API rather than in someone's environment.
+    // An ExternalName Service IS a declared dependency, spelled in the API
+    // rather than in someone's environment. Its target is classified like any
+    // other host: `payments.payments.svc.cluster.local` is a cross-namespace
+    // alias for a Service that is probably on this very graph, and only a
+    // host that is nothing here becomes an external node — one shared across
+    // namespaces and belonging to none, like every other external node.
     for svc in &services {
         let Some(target) = svc.spec.as_ref().and_then(|s| s.external_name.clone()) else {
             continue;
         };
         let name = svc.metadata.name.clone().unwrap_or_default();
         let ns = svc.metadata.namespace.clone().unwrap_or_default();
-        let to = external_id(&target);
-        externals.entry(target.clone()).or_insert(TopologyNode {
-            id: to.clone(),
-            kind: "External".into(),
-            name: target,
-            namespace: ns.clone(),
-            lane: Lane::External,
-            detail: String::new(),
-            ready: None,
-            desired: None,
-            health: Health::Unknown,
-        });
-        push_edge(
-            &mut edges,
-            node_id("Service", &ns, &name),
-            to,
-            EdgeKind::Calls,
-            Provenance::Declared,
+        let from = node_id("Service", &ns, &name);
+        let reference = internalise(
+            classify(&target.trim_end_matches('.').to_lowercase(), &[]),
+            &ingress_hosts,
+            &service_pairs,
         );
+        match reference {
+            Reference::Service { name: alias, namespace: alias_ns } => {
+                let alias_ns = alias_ns.unwrap_or_else(|| ns.clone());
+                let to = node_id("Service", &alias_ns, &alias);
+                if !nodes.iter().any(|n| n.id == to) {
+                    nodes.push(TopologyNode {
+                        id: to.clone(),
+                        kind: "Service".into(),
+                        name: alias.clone(),
+                        namespace: alias_ns.clone(),
+                        lane: Lane::Service,
+                        detail: if alias_ns == ns { String::new() } else { alias_ns.clone() },
+                        ready: None,
+                        desired: None,
+                        health: Health::Unknown,
+                    });
+                }
+                push_edge(&mut edges, from, to, EdgeKind::Calls, Provenance::Declared);
+            }
+            Reference::External { host } => {
+                let to = external_id(&host);
+                externals.entry(host.clone()).or_insert(TopologyNode {
+                    id: to.clone(),
+                    kind: "External".into(),
+                    name: host,
+                    namespace: String::new(),
+                    lane: Lane::External,
+                    detail: String::new(),
+                    ready: None,
+                    desired: None,
+                    health: Health::Unknown,
+                });
+                push_edge(&mut edges, from, to, EdgeKind::Calls, Provenance::Declared);
+            }
+        }
     }
 
     nodes.extend(externals.into_values());
 
-    TopologyGraphOut { nodes, edges }
+    let mut graph = TopologyGraphOut { nodes, edges };
+    resolve_call_health(&mut graph);
+    graph
 }
 
 /// The PromQL that turns a mesh's counters into a call graph.
@@ -1273,7 +1336,11 @@ pub fn build_graph(
 /// exec sessions to draw one diagram.
 pub const CONNECTION_POD_LIMIT: usize = 40;
 
-pub const ISTIO_CALL_GRAPH: &str = "sum by (source_workload, source_workload_namespace, destination_service_name, destination_service_namespace) (rate(istio_requests_total[5m]))";
+/// One reporter only. With sidecars on both ends every in-mesh request is
+/// counted twice — once by the caller's proxy, once by the callee's — and a
+/// sum over both doubled every rate on the screen. The destination proxy is
+/// the one that also sees requests from callers outside the mesh.
+pub const ISTIO_CALL_GRAPH: &str = "sum by (source_workload, source_workload_namespace, destination_service_name, destination_service_namespace) (rate(istio_requests_total{reporter=\"destination\"}[5m]))";
 
 /// Cilium's Hubble, where its HTTP visibility is on.
 ///
@@ -1443,38 +1510,34 @@ impl AddressBook {
     ) -> Self {
         let mut by_address = BTreeMap::new();
         for pod in pods {
-            let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.clone()) else {
+            let Some(node) = workload_of_pod(pod, nodes) else {
                 continue;
             };
-            let namespace = pod.metadata.namespace.clone().unwrap_or_default();
-            // A pod is not drawn; the workload that made it is. The owner chain
-            // is Pod -> ReplicaSet -> Deployment, so the pod's own owner name is
-            // matched against every workload node rather than guessed at.
-            let owner = pod
-                .metadata
-                .owner_references
-                .as_ref()
-                .and_then(|refs| refs.first())
-                .map(|o| o.name.clone())
-                .unwrap_or_default();
-            if let Some(node) = nodes.iter().find(|n| {
-                n.lane == Lane::Workload && n.namespace == namespace && owner.starts_with(&n.name)
-            }) {
+            // Every address, not only the primary: on a dual-stack cluster a
+            // peer may have been reached over the other family, and a socket
+            // table read from tcp6 names that one.
+            for ip in pod_addresses(pod) {
                 by_address.insert(ip, node.id.clone());
             }
         }
         for service in services {
-            let Some(ip) = service.spec.as_ref().and_then(|s| s.cluster_ip.clone()) else {
-                continue;
-            };
-            if ip.is_empty() || ip == "None" {
-                continue;
-            }
             let name = service.metadata.name.clone().unwrap_or_default();
             let namespace = service.metadata.namespace.clone().unwrap_or_default();
             let id = node_id("Service", &namespace, &name);
-            if nodes.iter().any(|n| n.id == id) {
-                by_address.insert(ip, id);
+            if !nodes.iter().any(|n| n.id == id) {
+                continue;
+            }
+            let spec = service.spec.as_ref();
+            let ips = spec
+                .and_then(|s| s.cluster_ips.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .chain(spec.and_then(|s| s.cluster_ip.clone()));
+            for ip in ips {
+                if ip.is_empty() || ip == "None" {
+                    continue;
+                }
+                by_address.insert(ip, id.clone());
             }
         }
         Self { by_address }
@@ -1483,6 +1546,44 @@ impl AddressBook {
     pub fn node_for(&self, address: &str) -> Option<&String> {
         self.by_address.get(address)
     }
+}
+
+/// Every IP a pod answers on. `podIPs` carries the primary too, so the pair
+/// is deduplicated by the map it goes into.
+fn pod_addresses(pod: &k8s_openapi::api::core::v1::Pod) -> Vec<String> {
+    let status = pod.status.as_ref();
+    status
+        .and_then(|s| s.pod_ips.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.ip)
+        .chain(status.and_then(|s| s.pod_ip.clone()))
+        .filter(|ip| !ip.is_empty())
+        .collect()
+}
+
+/// The workload node a pod belongs to, from its owner reference.
+///
+/// Exact, not a prefix: `api` and `api-v2` are both workloads, and matching a
+/// pod owned by `api-v2-7d9f4b8c6` against whichever node's name it STARTED
+/// with handed all of `api-v2`'s traffic to `api`. A ReplicaSet is named
+/// `<deployment>-<pod-template-hash>`, so its Deployment is the name with the
+/// last segment removed; a StatefulSet or DaemonSet owns its pods directly and
+/// is named outright.
+pub fn workload_of_pod<'a>(
+    pod: &k8s_openapi::api::core::v1::Pod,
+    nodes: &'a [TopologyNode],
+) -> Option<&'a TopologyNode> {
+    let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+    let owner = pod.metadata.owner_references.as_ref()?.first()?;
+    let (kind, name): (&str, &str) = match owner.kind.as_str() {
+        "ReplicaSet" => ("Deployment", owner.name.rsplit_once('-')?.0),
+        "StatefulSet" | "DaemonSet" => (owner.kind.as_str(), owner.name.as_str()),
+        _ => return None,
+    };
+    nodes.iter().find(|n| {
+        n.lane == Lane::Workload && n.namespace == namespace && n.kind == kind && n.name == name
+    })
 }
 
 /// Sockets held open, said the way a reader would.
@@ -1622,6 +1723,27 @@ fn peer_namespaces<'a>(
         .collect()
 }
 
+/// Give every call edge the health of what it points at.
+///
+/// A `routes` edge carries its target's health from the moment it is made; a
+/// call was left `Unknown` on the grounds that a config reference says nothing
+/// about the target — but the target's own node knows, and the screen colours
+/// a failing path by the edge. Run once everything that adds calls has run.
+pub fn resolve_call_health(graph: &mut TopologyGraphOut) {
+    let health: BTreeMap<&str, Health> =
+        graph.nodes.iter().map(|n| (n.id.as_str(), n.health)).collect();
+    let resolved: Vec<Option<Health>> = graph
+        .edges
+        .iter()
+        .map(|e| (e.kind == EdgeKind::Calls).then(|| health.get(e.to.as_str()).copied()).flatten())
+        .collect();
+    for (edge, health) in graph.edges.iter_mut().zip(resolved) {
+        if let Some(h) = health {
+            edge.health = h;
+        }
+    }
+}
+
 /// Fold what NetworkPolicies permit into a graph already built from the API.
 ///
 /// Intent, not traffic, and drawn as such — [`Provenance::Allowed`]. A rule
@@ -1660,7 +1782,20 @@ pub fn apply_allowed(
             .collect()
     };
 
-    let mut pairs: Vec<(String, String)> = Vec::new();
+    // Both directions have to agree.
+    //
+    // Kubernetes isolates a pod in a direction the moment any policy that
+    // selects it covers that direction, and from then on only a rule lets
+    // traffic through. So an ingress rule on the destination is not enough
+    // when the source sits under a default-deny egress policy — the call is
+    // blocked, and drawing it `allowed` would be wrong in exactly the case the
+    // policies were written for. Each rule contributes a pair to its own
+    // direction; a pair is drawn only when the other direction either is not
+    // isolated or names it too.
+    let mut ingress_allowed: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut egress_allowed: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut ingress_isolated: BTreeSet<String> = BTreeSet::new();
+    let mut egress_isolated: BTreeSet<String> = BTreeSet::new();
     for policy in policies {
         let Some(spec) = policy.spec.as_ref() else {
             continue;
@@ -1672,6 +1807,25 @@ pub fn apply_allowed(
         if subjects.is_empty() {
             continue;
         }
+        // Which directions this policy isolates: what `policyTypes` says, or
+        // — when it is absent — Ingress always, and Egress if any egress rule
+        // is written. That is the API's own default.
+        let types: Vec<String> = match spec.policy_types.as_ref() {
+            Some(t) => t.clone(),
+            None => {
+                let mut t = vec!["Ingress".to_string()];
+                if spec.egress.is_some() {
+                    t.push("Egress".to_string());
+                }
+                t
+            }
+        };
+        if types.iter().any(|t| t == "Ingress") {
+            ingress_isolated.extend(subjects.iter().cloned());
+        }
+        if types.iter().any(|t| t == "Egress") {
+            egress_isolated.extend(subjects.iter().cloned());
+        }
         for rule in spec.ingress.iter().flatten() {
             for peer in rule.from.iter().flatten() {
                 let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
@@ -1680,7 +1834,7 @@ pub fn apply_allowed(
                 let namespaces = peer_namespaces(peer.namespace_selector.as_ref(), &namespace, &in_view);
                 for from in matching(selector, &namespaces) {
                     for to in &subjects {
-                        pairs.push((from.clone(), to.clone()));
+                        ingress_allowed.insert((from.clone(), to.clone()));
                     }
                 }
             }
@@ -1693,20 +1847,27 @@ pub fn apply_allowed(
                 let namespaces = peer_namespaces(peer.namespace_selector.as_ref(), &namespace, &in_view);
                 for to in matching(selector, &namespaces) {
                     for from in &subjects {
-                        pairs.push((from.clone(), to.clone()));
+                        egress_allowed.insert((from.clone(), to.clone()));
                     }
                 }
             }
         }
     }
 
+    let pairs: BTreeSet<&(String, String)> = ingress_allowed.iter().chain(egress_allowed.iter()).collect();
     for (from, to) in pairs {
         // Pods of one workload talking among themselves is not a dependency.
         if from == to {
             continue;
         }
-        let to = fronting_service(graph, &to).unwrap_or(to);
-        push_edge(&mut graph.edges, from, to, EdgeKind::Calls, Provenance::Allowed);
+        let pair = (from.clone(), to.clone());
+        let out_ok = !egress_isolated.contains(from) || egress_allowed.contains(&pair);
+        let in_ok = !ingress_isolated.contains(to) || ingress_allowed.contains(&pair);
+        if !(out_ok && in_ok) {
+            continue;
+        }
+        let to = fronting_service(graph, to).unwrap_or_else(|| to.clone());
+        push_edge(&mut graph.edges, from.clone(), to, EdgeKind::Calls, Provenance::Allowed);
     }
 }
 
@@ -1818,7 +1979,13 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 // Before telemetry, so a measurement upgrades a permitted edge
                 // the same way it upgrades a declared one.
                 apply_allowed(&mut graph, &all.policies, &labels);
-                if let Some(source) = input.prometheus.as_ref() {
+                // Every candidate in turn, and every schema at each: the first
+                // discovered Prometheus may be an unrelated shard with no
+                // mesh series in it while the second has them, and stopping
+                // at the first would show a cluster with telemetry as one
+                // without. The first (backend, mesh) pair that answers with
+                // any series is taken and the rest are not asked.
+                'sources: for source in &input.prometheus {
                     for (schema, query) in CALL_GRAPH_QUERIES {
                         let Ok(samples) = crate::prometheus::instant_query(
                             &client,
@@ -1831,30 +1998,32 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         else {
                             continue;
                         };
-                        // The first mesh that answers is the mesh this cluster
-                        // runs; a query that returns no series is asked past.
                         if samples.is_empty() {
                             continue;
                         }
                         apply_observed(&mut graph, &samples, *schema);
-                        break;
+                        break 'sources;
                     }
                 }
                 // Observed connections, when the reader asked for them.
                 // Capped: this is an exec each, and a namespace of five
                 // hundred pods is not a picture anyone wants at that price.
                 if input.connections {
-                    let pods = tokio::time::timeout(
-                        request_timeout(),
-                        list_of::<k8s_openapi::api::core::v1::Pod>(
-                            client.clone(),
-                            input.namespaces.first().map(String::as_str).unwrap_or(""),
-                            "pods",
-                        ),
-                    )
-                    .await
-                    .unwrap_or_else(|_| Ok(Vec::new()))
-                    .unwrap_or_default();
+                    // Every namespace drawn, under one cap: the probe is
+                    // presented as applying to the whole graph, and reading
+                    // only the first namespace left every other tier without
+                    // an observed edge while the button said otherwise.
+                    let mut pods: Vec<k8s_openapi::api::core::v1::Pod> = Vec::new();
+                    for ns in &input.namespaces {
+                        let listed = tokio::time::timeout(
+                            request_timeout(),
+                            list_of::<k8s_openapi::api::core::v1::Pod>(client.clone(), ns, "pods"),
+                        )
+                        .await
+                        .unwrap_or_else(|_| Ok(Vec::new()))
+                        .unwrap_or_default();
+                        pods.extend(listed);
+                    }
                     let book = AddressBook::new(&all_services, &pods, &graph.nodes);
                     let mut read = Vec::new();
                     for pod in pods.iter().take(CONNECTION_POD_LIMIT) {
@@ -1863,35 +2032,30 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         else {
                             continue;
                         };
-                        let owner = pod
-                            .metadata
-                            .owner_references
-                            .as_ref()
-                            .and_then(|r| r.first())
-                            .map(|o| o.name.clone())
-                            .unwrap_or_default();
-                        let Some(from) = graph.nodes.iter().find(|n| {
-                            n.lane == Lane::Workload
-                                && n.namespace == namespace
-                                && owner.starts_with(&n.name)
-                        }) else {
+                        let Some(from) = workload_of_pod(pod, &graph.nodes) else {
                             continue;
                         };
-                        // One pod refusing must not cost the rest: a single
+                        // One pod refusing must not cost the rest — a single
                         // distroless sidecar would otherwise take the whole
-                        // read with it.
-                        if let Ok(peers) = crate::connections::read_pod_connections(
-                            client.clone(),
-                            &namespace,
-                            &name,
+                        // read with it — and neither may one that hangs: the
+                        // exec is bounded, or a stalled stream left the screen
+                        // loading forever and every later pod unread.
+                        let peers = tokio::time::timeout(
+                            request_timeout(),
+                            crate::connections::read_pod_connections(client.clone(), &namespace, &name),
                         )
-                        .await
-                        {
+                        .await;
+                        if let Ok(Ok(peers)) = peers {
                             read.push(PodPeers { from: from.id.clone(), peers });
                         }
                     }
                     apply_connections(&mut graph, &book, &read);
                 }
+                // Last, over every source: a call's line is coloured by how the
+                // thing it points at is doing, and a measured call into a
+                // failing Service has to take the failing-path treatment the
+                // accessibility pane promises rather than stay accented.
+                resolve_call_health(&mut graph);
                 Ok(graph)
             }
         },
@@ -2495,6 +2659,182 @@ mod tests {
             internalise(Reference::External { host: "accounts.cidaas.com".into() }, &hosts, &[]),
             Reference::External { host: "accounts.cidaas.com".into() }
         );
+    }
+
+    // ---- review findings, each pinned ----
+
+    #[test]
+    fn a_bare_service_name_resolves_only_in_the_workloads_own_namespace() {
+        // `payments:8080` in checkout, and a `payments` Service only in shop:
+        // Kubernetes would resolve nothing, and neither may the graph — a global
+        // name list used to invent `Service/checkout/payments` for it.
+        let mut elsewhere = service("payments", &[("app", "payments")], 8080);
+        elsewhere.metadata.namespace = Some("shop".into());
+        let g = build_graph(
+            vec![],
+            vec![elsewhere],
+            vec![with_env("checkout", &[("app", "checkout")], &[("PAYMENTS", "payments:8080")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(!g.nodes.iter().any(|n| n.id == "Service/checkout/payments"), "{:?}", g.nodes);
+        // What it IS, by the same rule as `kafka:9092`: a host by that name
+        // outside the cluster, which is the honest reading of a port-qualified
+        // name that no local Service answers to.
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "External//payments", EdgeKind::Calls));
+    }
+
+    #[test]
+    fn a_config_map_is_read_from_the_workloads_own_namespace() {
+        // Two namespaces, one ConfigMap name. Keyed by name alone the later
+        // one overwrote the earlier and checkout was read against shop's.
+        let cm = |ns: &str, url: &str| {
+            let mut meta = meta("app-config");
+            meta.namespace = Some(ns.into());
+            ConfigMap {
+                metadata: meta,
+                data: Some(BTreeMap::from([("DB".to_string(), url.to_string())])),
+                ..Default::default()
+            }
+        };
+        let mut d = deployment("checkout", 1, 1, &[("app", "checkout")]);
+        d.spec.as_mut().unwrap().template.spec = Some(k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "app".into(),
+                env_from: Some(vec![k8s_openapi::api::core::v1::EnvFromSource {
+                    config_map_ref: Some(k8s_openapi::api::core::v1::ConfigMapEnvSource {
+                        name: "app-config".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let g = build_graph(
+            vec![],
+            vec![],
+            vec![d],
+            vec![],
+            vec![],
+            vec![],
+            vec![cm("checkout", "postgres://own.example.com:5432/x"), cm("shop", "postgres://other.example.com:5432/y")],
+            vec![],
+        );
+        assert!(g.nodes.iter().any(|n| n.name == "own.example.com"), "{:?}", g.nodes);
+        assert!(!g.nodes.iter().any(|n| n.name == "other.example.com"), "{:?}", g.nodes);
+    }
+
+    #[test]
+    fn socket_counts_add_up_across_replicas_and_never_replace_a_rate() {
+        let mut edges = Vec::new();
+        let from = || "Deployment/checkout/checkout".to_string();
+        let to = || "Service/checkout/payments".to_string();
+        push_edge_labelled(&mut edges, from(), to(), EdgeKind::Calls, Provenance::Observed, "2 conns".into(), Some((2.0, Unit::Connections)));
+        push_edge_labelled(&mut edges, from(), to(), EdgeKind::Calls, Provenance::Observed, "3 conns".into(), Some((3.0, Unit::Connections)));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].weight, Some(5.0));
+        assert_eq!(edges[0].detail, "5 conns");
+        // A rate arriving later wins; a socket count arriving after a rate
+        // does not overwrite it.
+        push_edge_labelled(&mut edges, from(), to(), EdgeKind::Calls, Provenance::Observed, "41 rpm".into(), Some((0.6867, Unit::Rps)));
+        assert_eq!(edges[0].unit, Some(Unit::Rps));
+        push_edge_labelled(&mut edges, from(), to(), EdgeKind::Calls, Provenance::Observed, "1 conn".into(), Some((1.0, Unit::Connections)));
+        assert_eq!(edges[0].unit, Some(Unit::Rps));
+        assert_eq!(edges[0].detail, "41 rpm");
+    }
+
+    #[test]
+    fn a_pod_is_matched_to_its_workload_exactly_not_by_prefix() {
+        let g = build_graph(
+            vec![],
+            vec![],
+            vec![
+                deployment("api", 1, 1, &[("app", "api")]),
+                deployment("api-v2", 1, 1, &[("app", "api-v2")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let p = pod("api-v2-7d9f4b8c6-x2mzp", "10.0.0.9", "api-v2-7d9f4b8c6");
+        assert_eq!(workload_of_pod(&p, &g.nodes).map(|n| n.id.as_str()), Some("Deployment/checkout/api-v2"));
+        let p = pod("api-5bc6575d7-abcde", "10.0.0.10", "api-5bc6575d7");
+        assert_eq!(workload_of_pod(&p, &g.nodes).map(|n| n.id.as_str()), Some("Deployment/checkout/api"));
+    }
+
+    #[test]
+    fn an_external_name_aliasing_an_in_cluster_service_links_to_that_service() {
+        let mut alias = service("payments-alias", &[], 80);
+        {
+            let spec = alias.spec.as_mut().unwrap();
+            spec.type_ = Some("ExternalName".into());
+            spec.external_name = Some("payments.checkout.svc.cluster.local".into());
+        }
+        let g = build_graph(
+            vec![],
+            vec![alias, service("payments", &[("app", "payments")], 8080)],
+            vec![deployment("payments", 1, 1, &[("app", "payments")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(has_edge(&g, "Service/checkout/payments-alias", "Service/checkout/payments", EdgeKind::Calls));
+        assert!(!g.nodes.iter().any(|n| n.lane == Lane::External), "{:?}", g.nodes);
+
+        // A genuinely outside host stays outside, and belongs to no namespace.
+        let mut alias = service("billing", &[], 80);
+        alias.spec.as_mut().unwrap().external_name = Some("billing.legacy.example.com".into());
+        let g = build_graph(vec![], vec![alias], vec![], vec![], vec![], vec![], vec![], vec![]);
+        let external = g.nodes.iter().find(|n| n.lane == Lane::External).expect("an external node");
+        assert_eq!(external.namespace, "");
+    }
+
+    #[test]
+    fn a_call_edge_takes_the_health_of_what_it_points_at() {
+        // So a declared or measured call into a failing Service takes the
+        // failing-path treatment on the screen rather than staying faint.
+        let g = build_graph(
+            vec![],
+            vec![service("payments", &[("app", "payments")], 8080)],
+            vec![
+                with_env("checkout", &[("app", "checkout")], &[("PAYMENTS", "http://payments:8080")]),
+                deployment("payments", 0, 2, &[("app", "payments")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let call = g.edges.iter().find(|e| e.kind == EdgeKind::Calls).expect("a call");
+        assert_eq!(call.health, Health::Failing);
+    }
+
+    #[test]
+    fn a_default_deny_egress_on_the_caller_blocks_an_ingress_allowed_pair() {
+        // The destination lets checkout in; checkout's own egress is isolated
+        // with no rule out. Kubernetes blocks the call, so it is not `allowed`.
+        let mut deny = policy("checkout", &[("app", "checkout")], vec![], vec![]);
+        deny.spec.as_mut().unwrap().policy_types = Some(vec!["Egress".into()]);
+        let allow_in = policy("checkout", &[("app", "payments")], vec![policy_peer(&[("app", "checkout")], None)], vec![]);
+        let mut g = demo_graph();
+        apply_allowed(&mut g, &[deny.clone(), allow_in.clone()], &demo_labels());
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
+
+        // Add the egress rule and both directions agree.
+        let allow_out = policy("checkout", &[("app", "checkout")], vec![], vec![policy_peer(&[("app", "payments")], None)]);
+        let mut g = demo_graph();
+        apply_allowed(&mut g, &[deny, allow_in, allow_out], &demo_labels());
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "Service/checkout/payments", EdgeKind::Calls));
     }
 
     // ---- allowed: what a NetworkPolicy would let through ----
