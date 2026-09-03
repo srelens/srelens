@@ -2549,4 +2549,215 @@ mod tests {
         let mut empty = Buffer::empty(Rect::new(0, 0, 0, 0));
         assert_eq!(apply_screen_selection(&mut empty, (0, 0), (5, 5)), "");
     }
+
+    #[tokio::test]
+    async fn test_action_palette_generation_and_execution() {
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::dialogs::{Modal, QuickActionId};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let items = vec![serde_json::json!({
+            "name": "payment-service",
+            "namespace": "prod",
+            "replicas": 3,
+            "ready": 3,
+        })];
+
+        let mut table = ResourceTableState::new(ResourceKind::Deployments);
+        table.set_items(items, "");
+        table.selected_idx = 0;
+
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "prod".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["prod".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            active_log_channel: None,
+            is_running: true,
+            resource_cache: HashMap::new(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://k8s.example.com".to_string(),
+            cluster_version: "1.30.0".to_string(),
+            node_count: 10,
+            pod_count: 100,
+            is_connected: true,
+            toast: None,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "prod".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 1. Press 'x' on Deployment -> Opens Action Palette
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('x'), crossterm::event::KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+
+        if let Some(Modal::ActionPalette { resource_kind, resource_name, actions, .. }) = &app.modal {
+            assert_eq!(resource_kind, "Deployment");
+            assert_eq!(resource_name, "payment-service");
+            assert!(actions.iter().any(|a| a.id == QuickActionId::AskAi));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::RelationshipTree));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::RolloutRestart));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::Scale));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::JumpToPods));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::Delete));
+        } else {
+            panic!("Expected Modal::ActionPalette");
+        }
+
+        // 2. Type "rest" to filter actions
+        for c in "rest".chars() {
+            app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char(c), crossterm::event::KeyModifiers::NONE)).await;
+        }
+
+        // 3. Press Enter on filtered "Rollout Restart"
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { action_name, is_destructive, .. }) = &app.modal {
+            assert_eq!(action_name, "restart:Deployment:prod:payment-service");
+            assert!(!is_destructive);
+        } else {
+            panic!("Expected Modal::Confirm for restart after selecting from action palette");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resource_relationship_tree_navigation() {
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::lineage::{LineageNode, LineageRelation};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let items = vec![serde_json::json!({
+            "name": "cart-api-987-xyz",
+            "namespace": "shop",
+            "status": "Running",
+        })];
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(items, "");
+        table.selected_idx = 0;
+
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod-cluster".to_string(),
+            active_namespace: "shop".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["shop".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            active_log_channel: None,
+            is_running: true,
+            resource_cache: HashMap::new(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://k8s.example.com".to_string(),
+            cluster_version: "1.30.0".to_string(),
+            node_count: 10,
+            pod_count: 100,
+            is_connected: true,
+            toast: None,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "shop".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("shop"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 1. Press 't' on Pod -> Opens Tree View
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('t'), crossterm::event::KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Tree(_)));
+
+        // 2. Simulate lineage resolution result delivery
+        let mut root = LineageNode::new("Deployment", "cart-api", Some("shop".into()), LineageRelation::Owner);
+        let mut rs = LineageNode::new("ReplicaSet", "cart-api-987", Some("shop".into()), LineageRelation::Owner);
+        let pod = LineageNode::new("Pod", "cart-api-987-xyz", Some("shop".into()), LineageRelation::Target);
+        rs.children.push(pod);
+        root.children.push(rs);
+
+        app.handle_lineage_result("Pod", "cart-api-987-xyz", Ok(root));
+
+        if let ActiveView::Tree(tree) = &app.active_view {
+            assert_eq!(tree.nodes.len(), 3);
+            assert_eq!(tree.selected_node().unwrap().name, "cart-api-987-xyz");
+            let summary = tree.tree_as_text();
+            assert!(summary.contains("Deployment/cart-api"));
+            assert!(summary.contains("ReplicaSet/cart-api-987"));
+            assert!(summary.contains("Pod/cart-api-987-xyz"));
+        } else {
+            panic!("Expected ActiveView::Tree");
+        }
+
+        // 3. Press 'Esc' to pop back to Table view
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Table(_)));
+    }
 }

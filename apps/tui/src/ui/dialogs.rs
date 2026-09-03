@@ -47,6 +47,40 @@ pub enum Modal {
         selected_idx: usize,
         filter: String,
     },
+    ActionPalette {
+        resource_kind: String,
+        resource_name: String,
+        namespace: Option<String>,
+        actions: Vec<QuickActionItem>,
+        selected_idx: usize,
+        filter: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickActionId {
+    AskAi,
+    RelationshipTree,
+    ViewLogs,
+    OpenShell,
+    PortForward,
+    Describe,
+    ViewYaml,
+    EditYaml,
+    Scale,
+    RolloutRestart,
+    JumpToPods,
+    CordonNode,
+    DrainNode,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuickActionItem {
+    pub id: QuickActionId,
+    pub key_hint: String,
+    pub title: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -393,6 +427,106 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let list = List::new(items);
             f.render_widget(list, chunks[1]);
+        }
+        Modal::ActionPalette {
+            resource_kind,
+            resource_name,
+            namespace,
+            actions,
+            selected_idx,
+            filter,
+        } => {
+            let modal_area = centered_rect(65, 65, area);
+            f.render_widget(Clear, modal_area);
+
+            let ns_str = namespace.as_deref().map(|n| format!(" ({})", n)).unwrap_or_default();
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Theme::ACCENT))
+                .title(Span::styled(
+                    format!(" ⚡ Actions: {}/{}{} [Type to filter, ↑/↓ Navigate, Enter Run, Esc Close] ", resource_kind, resource_name, ns_str),
+                    Theme::title(),
+                ));
+
+            let inner = block.inner(modal_area);
+            f.render_widget(block, modal_area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Search box
+                    Constraint::Min(5),    // Actions list
+                    Constraint::Length(1), // Footer hint
+                ])
+                .split(inner);
+
+            // 1. Search box
+            let search_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Theme::CYAN))
+                .title(" Filter Actions ");
+            let search_para = Paragraph::new(Line::from(vec![
+                Span::styled(" / ", Style::default().fg(Theme::DIM)),
+                Span::styled(filter.as_str(), Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)),
+                Span::styled("█", Style::default().fg(Theme::CYAN)),
+            ])).block(search_block);
+            f.render_widget(search_para, chunks[0]);
+
+            // 2. Filtered actions
+            let lower_filter = filter.to_lowercase();
+            let filtered: Vec<&QuickActionItem> = actions
+                .iter()
+                .filter(|a| {
+                    if lower_filter.is_empty() {
+                        true
+                    } else {
+                        a.title.to_lowercase().contains(&lower_filter)
+                            || a.key_hint.to_lowercase().contains(&lower_filter)
+                            || a.description.to_lowercase().contains(&lower_filter)
+                    }
+                })
+                .collect();
+
+            let items: Vec<ListItem> = filtered
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let is_sel = i == *selected_idx;
+                    let prefix = if is_sel { "▶ " } else { "  " };
+
+                    let line1 = Line::from(vec![
+                        Span::styled(prefix, if is_sel { Theme::selected_row() } else { Style::default().fg(Theme::ACCENT) }),
+                        Span::styled(format!("[{}] ", a.key_hint), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+                        Span::styled(a.title.clone(), Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)),
+                    ]);
+
+                    let line2 = Line::from(vec![
+                        Span::raw("      "),
+                        Span::styled(a.description.clone(), Style::default().fg(Theme::DIM)),
+                    ]);
+
+                    let style = if is_sel {
+                        Theme::selected_row()
+                    } else {
+                        Style::default()
+                    };
+
+                    ListItem::new(vec![line1, line2]).style(style)
+                })
+                .collect();
+
+            let list = List::new(items);
+            f.render_widget(list, chunks[1]);
+
+            // 3. Footer hint
+            let footer = Paragraph::new(Line::from(vec![
+                Span::styled(format!(" Showing {}/{} actions  •  ", filtered.len(), actions.len()), Style::default().fg(Theme::DIM)),
+                Span::styled("Enter", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(": Run Action  ", Style::default().fg(Theme::DIM)),
+                Span::styled("Esc", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::styled(": Cancel", Style::default().fg(Theme::DIM)),
+            ])).alignment(Alignment::Center);
+            f.render_widget(footer, chunks[2]);
         }
     }
 }

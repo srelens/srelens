@@ -169,3 +169,4 @@ pub mod statefulsets;
 pub mod storageclasses;
 pub mod watch;
 pub mod workloads;
+pub mod lineage;

@@ -42,6 +42,7 @@ pub enum ActiveView {
     Toolbox(ToolboxViewState),
     Assistant,
     Settings(SettingsViewState),
+    Tree(tree_view::TreeViewState),
 }
 
 pub struct App {
@@ -1154,6 +1155,130 @@ impl App {
                         _ => {}
                     }
                 }
+                Modal::ActionPalette {
+                    resource_kind,
+                    resource_name,
+                    namespace,
+                    actions,
+                    mut selected_idx,
+                    mut filter,
+                } => {
+                    let lower_filter = filter.to_lowercase();
+                    let filtered_count = actions
+                        .iter()
+                        .filter(|a| {
+                            if lower_filter.is_empty() {
+                                true
+                            } else {
+                                a.title.to_lowercase().contains(&lower_filter)
+                                    || a.key_hint.to_lowercase().contains(&lower_filter)
+                                    || a.description.to_lowercase().contains(&lower_filter)
+                            }
+                        })
+                        .count();
+
+                    match key.code {
+                        KeyCode::Up => {
+                            if selected_idx > 0 {
+                                selected_idx -= 1;
+                            } else {
+                                selected_idx = filtered_count.saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Down => {
+                            if selected_idx + 1 < filtered_count {
+                                selected_idx += 1;
+                            } else {
+                                selected_idx = 0;
+                            }
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if selected_idx > 0 {
+                                selected_idx -= 1;
+                            } else {
+                                selected_idx = filtered_count.saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if selected_idx + 1 < filtered_count {
+                                selected_idx += 1;
+                            } else {
+                                selected_idx = 0;
+                            }
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Backspace => {
+                            filter.pop();
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                            filter.push(c);
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Enter => {
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                            self.execute_action_palette().await;
+                        }
+                        KeyCode::Esc => {
+                            self.modal = None;
+                        }
+                        _ => {}
+                    }
+                }
             }
             return;
         }
@@ -1703,6 +1828,32 @@ impl App {
                             self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                         }
                     }
+                    KeyCode::Char('x') => {
+                        // Open Quick Actions & Incident Palette
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_name.is_empty() {
+                                    self.open_action_palette(obj_kind, obj_name, sel_ns.clone());
+                                }
+                            }
+                        } else if let Some(name) = sel_name.clone() {
+                            self.open_action_palette(kind_str.clone(), name, sel_ns.clone());
+                        }
+                    }
+                    KeyCode::Char('t') => {
+                        // Open Resource Relationship Tree
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_name.is_empty() {
+                                    self.open_resource_tree(obj_kind, obj_name, sel_ns.clone());
+                                }
+                            }
+                        } else if let Some(name) = sel_name.clone() {
+                            self.open_resource_tree(kind_str.clone(), name, sel_ns.clone());
+                        }
+                    }
                     KeyCode::Enter => {
                         // Drill-down / Activate resource
                         if table_kind == ResourceKind::Namespaces {
@@ -2239,8 +2390,73 @@ impl App {
                     }
                 }
             }
+            ActiveView::Tree(tree) => {
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => tree.select_next(),
+                        KeyCode::Char('k') | KeyCode::Up => tree.select_prev(),
+                        KeyCode::Char('g') | KeyCode::Home => tree.select_first(),
+                        KeyCode::Char('G') | KeyCode::End => tree.select_last(),
+                        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::SHIFT) && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let Some(node) = tree.selected_node() {
+                                let name = node.name.clone();
+                                let n_clone = name.clone();
+                                tokio::spawn(async move {
+                                    let _ = copy_to_clipboard(&n_clone);
+                                });
+                                self.set_toast(format!("✓ Copied '{}' to clipboard", name), Theme::status_ok());
+                            }
+                        }
+                        KeyCode::Char('C') | KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            let text = tree.tree_as_text();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&text);
+                            });
+                            self.set_toast("✓ Copied resource relationship tree to clipboard".to_string(), Theme::status_ok());
+                        }
+                        KeyCode::Enter => {
+                            if let Some(node) = tree.selected_node() {
+                                let name = node.name.clone();
+                                let kind = node.kind.clone();
+                                let ns = node.namespace.clone();
+                                self.open_describe_view(name, kind, ns).await;
+                            }
+                        }
+                        KeyCode::Char('d') => {
+                            if let Some(node) = tree.selected_node() {
+                                let name = node.name.clone();
+                                let kind = node.kind.clone();
+                                let ns = node.namespace.clone();
+                                self.open_describe_view(name, kind, ns).await;
+                            }
+                        }
+                        KeyCode::Char('y') => {
+                            if let Some(node) = tree.selected_node() {
+                                let name = node.name.clone();
+                                let kind = node.kind.clone();
+                                let ns = node.namespace.clone();
+                                self.open_yaml_view(name, kind, ns).await;
+                            }
+                        }
+                        KeyCode::Char('l') => {
+                            if let Some(node) = tree.selected_node() {
+                                let name = node.name.clone();
+                                let ns = node.namespace.clone();
+                                self.open_logs_view(name, ns, None).await;
+                            }
+                        }
+                        KeyCode::Char('x') => {
+                            if let Some(node) = tree.selected_node() {
+                                let name = node.name.clone();
+                                let kind = node.kind.clone();
+                                let ns = node.namespace.clone();
+                                self.open_action_palette(kind, name, ns);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
-    }
 
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -2412,6 +2628,31 @@ impl App {
         if trimmed == "clear-ai" || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant)) {
             self.assistant_state.clear_conversation();
             self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
+            return;
+        }
+
+        if trimmed == "tree" || trimmed == "lineage" || trimmed == "related" {
+            if let ActiveView::Table(ref table) = self.active_view {
+                if let Some(name) = table.selected_resource_name() {
+                    let kind = table.kind.display_name().to_string();
+                    let ns = table.selected_namespace().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                    self.open_resource_tree(kind, name, ns);
+                    return;
+                }
+            }
+            self.set_toast("Select a resource in table to view its relationship tree".to_string(), Theme::status_warn());
+            return;
+        }
+        if trimmed == "actions" || trimmed == "act" {
+            if let ActiveView::Table(ref table) = self.active_view {
+                if let Some(name) = table.selected_resource_name() {
+                    let kind = table.kind.display_name().to_string();
+                    let ns = table.selected_namespace().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                    self.open_action_palette(kind, name, ns);
+                    return;
+                }
+            }
+            self.set_toast("Select a resource in table to open its actions palette".to_string(), Theme::status_warn());
             return;
         }
 
@@ -2975,6 +3216,449 @@ impl App {
         self.nav_stack.push(old_view);
     }
 
+    pub fn open_resource_tree(&mut self, kind: String, name: String, namespace: Option<String>) {
+        let tree_state = tree_view::TreeViewState::new(kind.clone(), name.clone(), namespace.clone());
+        let old_view = std::mem::replace(&mut self.active_view, ActiveView::Tree(tree_state));
+        self.nav_stack.push(old_view);
+
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let k = kind.clone();
+        let n = name.clone();
+        let ns = namespace.clone();
+
+        tokio::spawn(async move {
+            let res = match cache.get(&ctx).await {
+                Ok(client) => srelens_kube::lineage::resolve_resource_lineage(client, &k, &n, ns.as_deref()).await,
+                Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+            };
+            let _ = event_tx.send(crate::event::AppEvent::LineageResult {
+                kind: k,
+                name: n,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_lineage_result(
+        &mut self,
+        kind: &str,
+        name: &str,
+        result: Result<srelens_kube::lineage::LineageNode, String>,
+    ) {
+        if let ActiveView::Tree(tree) = &mut self.active_view {
+            if tree.root_kind.eq_ignore_ascii_case(kind) && tree.root_name == name {
+                match result {
+                    Ok(node) => tree.set_tree(node),
+                    Err(err) => tree.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn open_action_palette(&mut self, kind: String, name: String, namespace: Option<String>) {
+        use crate::ui::dialogs::{QuickActionId, QuickActionItem};
+
+        let kind_lower = kind.to_lowercase();
+        let actions = match kind_lower.as_str() {
+            "pod" | "pods" => vec![
+                QuickActionItem {
+                    id: QuickActionId::AskAi,
+                    key_hint: "ai".to_string(),
+                    title: "🤖 Ask AI Assistant about this Pod".to_string(),
+                    description: "Inspect pod status, errors, exit codes & recent events".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "Trace owner Deployment/ReplicaSet, Service, ConfigMaps & PVCs".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewLogs,
+                    key_hint: "l".to_string(),
+                    title: "📋 View Live Logs".to_string(),
+                    description: "Stream logs from pod containers with tailing".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::OpenShell,
+                    key_hint: "s".to_string(),
+                    title: "🐚 Open Shell".to_string(),
+                    description: "Attach interactive terminal session inside container".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PortForward,
+                    key_hint: "f".to_string(),
+                    title: "🔌 Port Forward".to_string(),
+                    description: "Forward local port to pod container".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Pod".to_string(),
+                    description: "Formatted Kubernetes describe output & events".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View YAML".to_string(),
+                    description: "Inspect live Kubernetes YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::EditYaml,
+                    key_hint: "e".to_string(),
+                    title: "✏️  Edit YAML".to_string(),
+                    description: "Open in external editor with server-side apply".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete Pod".to_string(),
+                    description: "Gracefully delete pod from the cluster".to_string(),
+                },
+            ],
+            "deployment" | "deployments" | "statefulset" | "statefulsets" | "daemonset" | "daemonsets" => vec![
+                QuickActionItem {
+                    id: QuickActionId::AskAi,
+                    key_hint: "ai".to_string(),
+                    title: format!("🤖 Ask AI Assistant about this {}", kind),
+                    description: "Analyze workload health, failing replicas & recent events".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "Map Workload -> ReplicaSets -> Pods -> Services".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::RolloutRestart,
+                    key_hint: "r".to_string(),
+                    title: "🔄 Rollout Restart".to_string(),
+                    description: "Trigger zero-downtime rolling restart".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Scale,
+                    key_hint: "scale".to_string(),
+                    title: "⚖️  Scale Workload".to_string(),
+                    description: "Adjust replica count inline".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::JumpToPods,
+                    key_hint: "pods".to_string(),
+                    title: "📦 View Pods of this Workload".to_string(),
+                    description: "Navigate to pods matching this workload".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewLogs,
+                    key_hint: "l".to_string(),
+                    title: "📋 Aggregated Logs".to_string(),
+                    description: "Stream logs from workload pods".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Workload".to_string(),
+                    description: "Formatted workload describe output".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View YAML".to_string(),
+                    description: "Inspect live Kubernetes YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::EditYaml,
+                    key_hint: "e".to_string(),
+                    title: "✏️  Edit YAML".to_string(),
+                    description: "Edit workload in external editor".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete Workload".to_string(),
+                    description: "Delete workload resource from the cluster".to_string(),
+                },
+            ],
+            "service" | "services" => vec![
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "View Service -> Ingress -> Endpoints -> Pods".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::JumpToPods,
+                    key_hint: "pods".to_string(),
+                    title: "🎯 Jump to Backend Pods".to_string(),
+                    description: "Navigate to pods matching this service's selector".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PortForward,
+                    key_hint: "f".to_string(),
+                    title: "🔌 Port Forward".to_string(),
+                    description: "Forward local port to service".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Service".to_string(),
+                    description: "Inspect service ports, endpoints & selectors".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View YAML".to_string(),
+                    description: "Inspect live Kubernetes YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete Service".to_string(),
+                    description: "Delete service from the cluster".to_string(),
+                },
+            ],
+            "ingress" | "ingresses" => vec![
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "View Ingress -> Upstream Services -> Pods".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Ingress".to_string(),
+                    description: "Inspect hosts, TLS certificates & backend rules".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View YAML".to_string(),
+                    description: "Inspect live Kubernetes YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete Ingress".to_string(),
+                    description: "Delete ingress from the cluster".to_string(),
+                },
+            ],
+            "node" | "nodes" => vec![
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Tree".to_string(),
+                    description: "View all Pods running on this Node".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::JumpToPods,
+                    key_hint: "pods".to_string(),
+                    title: "📦 View Pods on this Node".to_string(),
+                    description: "Filter pod table to pods on this node".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::OpenShell,
+                    key_hint: "s".to_string(),
+                    title: "🐚 Privileged Node Shell".to_string(),
+                    description: "Launch root debug container on node".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Node".to_string(),
+                    description: "Inspect node capacity, taints & conditions".to_string(),
+                },
+            ],
+            _ => vec![
+                QuickActionItem {
+                    id: QuickActionId::AskAi,
+                    key_hint: "ai".to_string(),
+                    title: "🤖 Ask AI Assistant".to_string(),
+                    description: "Troubleshoot and explain this resource".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "Trace ownerReferences and linked resources".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe".to_string(),
+                    description: "Inspect formatted Kubernetes describe details".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View YAML".to_string(),
+                    description: "Inspect live Kubernetes YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::EditYaml,
+                    key_hint: "e".to_string(),
+                    title: "✏️  Edit YAML".to_string(),
+                    description: "Edit manifest in external editor".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete".to_string(),
+                    description: "Delete this resource from the cluster".to_string(),
+                },
+            ],
+        };
+
+        self.modal = Some(Modal::ActionPalette {
+            resource_kind: kind,
+            resource_name: name,
+            namespace,
+            actions,
+            selected_idx: 0,
+            filter: String::new(),
+        });
+    }
+
+    pub async fn execute_action_palette(&mut self) {
+        if let Some(Modal::ActionPalette {
+            resource_kind,
+            resource_name,
+            namespace,
+            actions,
+            selected_idx,
+            filter,
+        }) = self.modal.take()
+        {
+            let lower_filter = filter.to_lowercase();
+            let filtered: Vec<&crate::ui::dialogs::QuickActionItem> = actions
+                .iter()
+                .filter(|a| {
+                    if lower_filter.is_empty() {
+                        true
+                    } else {
+                        a.title.to_lowercase().contains(&lower_filter)
+                            || a.key_hint.to_lowercase().contains(&lower_filter)
+                            || a.description.to_lowercase().contains(&lower_filter)
+                    }
+                })
+                .collect();
+
+            if let Some(chosen) = filtered.get(selected_idx) {
+                use crate::ui::dialogs::QuickActionId;
+                match chosen.id {
+                    QuickActionId::AskAi => {
+                        let prompt = format!(
+                            "Investigate {} '{}' in namespace '{}': what is its current health status, are there any errors, crash loops or restarts, and what are the recommended fixes?",
+                            resource_kind,
+                            resource_name,
+                            namespace.as_deref().unwrap_or("default")
+                        );
+                        self.assistant_state.input = prompt;
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::RelationshipTree => {
+                        self.open_resource_tree(resource_kind, resource_name, namespace);
+                    }
+                    QuickActionId::ViewLogs => {
+                        self.open_logs_view(resource_name, namespace, None).await;
+                    }
+                    QuickActionId::OpenShell => {
+                        let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                        let query_ns = target_ns.clone().unwrap_or_else(|| "default".to_string());
+                        let ctx = self.active_context.clone();
+                        let cache = self.client_cache.clone();
+
+                        let containers: Vec<String> = if let Ok(client) = cache.get(&ctx).await {
+                            let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &query_ns);
+                            if let Ok(pod) = api.get(&resource_name).await {
+                                pod.spec.map(|s| s.containers.into_iter().map(|c| c.name).collect()).unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
+                        if containers.len() > 1 {
+                            self.modal = Some(Modal::ContainerPicker {
+                                pod_name: resource_name,
+                                namespace: target_ns,
+                                containers,
+                                selected_idx: 0,
+                                action: crate::ui::dialogs::ContainerAction::Shell,
+                            });
+                        } else {
+                            self.requires_terminal_suspend = Some(SuspendAction::PodShell {
+                                pod: resource_name,
+                                container: containers.into_iter().next(),
+                            });
+                        }
+                    }
+                    QuickActionId::PortForward => {
+                        let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
+                        self.modal = Some(Modal::PortForward {
+                            pod_name: resource_name,
+                            namespace: ns,
+                            container_port: 8080,
+                            local_port_input: "8080".to_string(),
+                        });
+                    }
+                    QuickActionId::Describe => {
+                        self.open_describe_view(resource_name, resource_kind, namespace).await;
+                    }
+                    QuickActionId::ViewYaml => {
+                        self.open_yaml_view(resource_name, resource_kind, namespace).await;
+                    }
+                    QuickActionId::EditYaml => {
+                        self.open_yaml_view(resource_name, resource_kind, namespace).await;
+                        self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
+                    }
+                    QuickActionId::RolloutRestart => {
+                        let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
+                        self.modal = Some(Modal::Confirm {
+                            title: "Rollout Restart Workload".to_string(),
+                            message: format!("Trigger zero-downtime rolling restart for {} '{}/{}'?", resource_kind, ns, resource_name),
+                            action_name: format!("restart:{}:{}:{}", resource_kind, ns, resource_name),
+                            is_destructive: false,
+                        });
+                    }
+                    QuickActionId::Scale => {
+                        let cur_replicas = 1;
+                        self.modal = Some(Modal::Scale {
+                            workload_name: resource_name,
+                            current_replicas: cur_replicas,
+                            input: cur_replicas.to_string(),
+                        });
+                    }
+                    QuickActionId::JumpToPods => {
+                        self.switch_view_to_kind(ResourceKind::Pods).await;
+                        self.filter_buffer = resource_name.clone();
+                        if let ActiveView::Table(table) = &mut self.active_view {
+                            table.apply_filter(&resource_name);
+                        }
+                    }
+                    QuickActionId::CordonNode => {
+                        self.set_toast(format!("Cordoned node {}", resource_name), Theme::status_ok());
+                    }
+                    QuickActionId::DrainNode => {
+                        self.set_toast(format!("Draining node {}", resource_name), Theme::status_warn());
+                    }
+                    QuickActionId::Delete => {
+                        let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
+                        self.modal = Some(Modal::Confirm {
+                            title: format!("Delete {}", resource_kind),
+                            message: format!("Are you sure you want to permanently delete {} '{}/{}'?", resource_kind, ns, resource_name),
+                            action_name: format!("delete:{}:{}:{}", resource_kind, ns, resource_name),
+                            is_destructive: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
         if action_name.starts_with("delete:") {
             // Format: "delete:<kind>:<namespace>:<name>"
@@ -3245,6 +3929,7 @@ impl App {
             ActiveView::Toolbox(_) => "Toolbox",
             ActiveView::Assistant => "AI Assistant",
             ActiveView::Settings(_) => "AI Settings",
+            ActiveView::Tree(_) => "Resource Relationship Tree",
         };
 
         let active_pods_count = if let ActiveView::Table(t) = &self.active_view {
@@ -3302,6 +3987,7 @@ impl App {
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
+            ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
         }
 
         // 3. Render Status Bar
@@ -3321,6 +4007,18 @@ impl App {
         let suggestions_prop = suggestions.as_ref().map(|s| (s.as_slice(), self.command_suggestion_idx));
 
         let custom_hints: Option<&[(&str, &str)]> = match &self.active_view {
+            ActiveView::Tree(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<↑/↓>", "Move"),
+                ("<Enter>", "Jump"),
+                ("<x>", "Actions"),
+                ("<l>", "Logs"),
+                ("<y>", "YAML"),
+                ("<d>", "Describe"),
+                ("<c>", "Copy"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Assistant => Some(&[
                 ("<:>", "Cmd"),
                 ("<?>", "Help"),

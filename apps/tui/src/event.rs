@@ -19,6 +19,11 @@ pub enum AppEvent {
         title: String,
         result: Result<String, String>,
     },
+    LineageResult {
+        kind: String,
+        name: String,
+        result: Result<srelens_kube::lineage::LineageNode, String>,
+    },
 }
 
 pub struct EventHandler {

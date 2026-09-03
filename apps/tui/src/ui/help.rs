@@ -100,6 +100,14 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
             Cell::from(""),
         ]),
         Row::new(vec![
+            Cell::from(Span::styled("  x", Theme::key_hint_key())),
+            Cell::from("Open Quick Actions & Incident Palette (AI prompt, restart, scale, tree, logs)"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  t", Theme::key_hint_key())),
+            Cell::from("Resource Relationship Tree (:tree) — ownerReferences, dependents & cross-links"),
+        ]),
+        Row::new(vec![
             Cell::from(Span::styled("  l", Theme::key_hint_key())),
             Cell::from("View Logs (options: p previous, t timestamps, w wrap, f follow, s save)"),
         ]),

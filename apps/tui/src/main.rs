@@ -320,11 +320,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 target_state.append_stream_chunk(&format!("\n[Error: {}]", err));
                                 target_state.finish_turn();
                                 app.set_toast(err, theme::Theme::status_error());
-                            } else {
-                                app.set_toast(err, theme::Theme::status_error());
                             }
                         }
                     }
+                }
+                AppEvent::LineageResult { kind, name, result } => {
+                    app.handle_lineage_result(&kind, &name, result);
                 }
             }
         }
