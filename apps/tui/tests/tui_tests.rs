@@ -1891,5 +1891,14 @@ mod tests {
         } else {
             panic!("Expected ActiveView::Overview");
         }
+
+        // 4. Test copying from Overview: 'c' copies summary report, '<Ctrl+y>' copies cluster deep link
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        let toast = app.toast.as_ref().expect("toast after pressing c in overview");
+        assert_eq!(toast.0, "Copied cluster overview summary to clipboard");
+
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('y'), crossterm::event::KeyModifiers::CONTROL)).await;
+        let toast = app.toast.as_ref().expect("toast after pressing Ctrl+y in overview");
+        assert!(toast.0.contains("Copied deep link: srelens://cluster/data-processing-prod-eu-dus1"));
     }
 }

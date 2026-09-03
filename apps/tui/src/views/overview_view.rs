@@ -31,6 +31,57 @@ pub struct ClusterOverviewData {
     pub used_gpu_mem_mib: i64,
 }
 
+impl ClusterOverviewData {
+    pub fn to_summary_text(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Cluster: {} ({})", self.cluster_name, self.context_name));
+        lines.push(format!("Status: {}", if self.is_reachable { "Reachable / Healthy" } else { "Unreachable" }));
+        if !self.server_url.is_empty() {
+            lines.push(format!("Server: {}", self.server_url));
+        }
+        if !self.k8s_version.is_empty() {
+            lines.push(format!("Kubernetes Version: {}", self.k8s_version));
+        }
+        lines.push(format!("Nodes: {}/{} Ready", self.ready_nodes, self.node_count));
+
+        let cpu_cores_total = self.total_cpu_millicores as f64 / 1000.0;
+        let cpu_cores_used = self.used_cpu_millicores as f64 / 1000.0;
+        let cpu_pct = if self.total_cpu_millicores > 0 {
+            (cpu_cores_used / cpu_cores_total * 100.0).round() as usize
+        } else {
+            0
+        };
+        lines.push(format!("CPU Allocation: {:.1} / {:.1} Cores ({}%)", cpu_cores_used, cpu_cores_total, cpu_pct));
+
+        let mem_gib_total = self.total_mem_mib as f64 / 1024.0;
+        let mem_gib_used = self.used_mem_mib as f64 / 1024.0;
+        let mem_pct = if self.total_mem_mib > 0 {
+            (mem_gib_used / mem_gib_total * 100.0).round() as usize
+        } else {
+            0
+        };
+        lines.push(format!("Memory Allocation: {:.1} / {:.1} GiB ({}%)", mem_gib_used, mem_gib_total, mem_pct));
+
+        if self.total_gpus > 0 || self.used_gpu_mem_mib > 0 {
+            let gpu_pct = if self.total_gpus > 0 {
+                (self.allocated_gpus * 100) / self.total_gpus
+            } else {
+                0
+            };
+            let mut gpu_line = format!("GPU Allocation: {} / {} GPUs ({}%)", self.allocated_gpus, self.total_gpus, gpu_pct);
+            if self.used_gpu_mem_mib > 0 {
+                gpu_line.push_str(&format!(", VRAM Allocated: {:.1} GiB", self.used_gpu_mem_mib as f64 / 1024.0));
+            }
+            lines.push(gpu_line);
+        }
+
+        lines.push(format!("Workloads: {} Total ({} Running, {} Pending, {} Failed/Crash)",
+            self.total_pods, self.running_pods, self.pending_pods, self.failed_pods));
+
+        lines.join("\n")
+    }
+}
+
 pub struct OverviewViewState {
     pub data: ClusterOverviewData,
 }
@@ -55,7 +106,7 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(" Cluster Health & Resource Overview [<r> Refresh, <Esc> Back] ", Theme::title()));
+        .title(Span::styled(" Cluster Health & Resource Overview [<c> Copy, <r> Refresh, <Esc> Back] ", Theme::title()));
 
     let inner = block.inner(area);
     f.render_widget(block, area);

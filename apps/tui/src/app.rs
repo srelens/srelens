@@ -1638,7 +1638,7 @@ impl App {
                     KeyCode::Char('e') => {
                         self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                     }
-                    KeyCode::Char('c') => {
+                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let content = yaml.yaml_content.clone();
                         tokio::spawn(async move {
                             let _ = copy_to_clipboard(&content);
@@ -1710,15 +1710,64 @@ impl App {
                             Err(e) => self.set_toast(format!("Failed to save logs: {}", e), Theme::status_error()),
                         }
                     }
+                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let text = logs.lines.join("\n");
+                        let count = logs.lines.len();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&text);
+                        });
+                        self.set_toast(format!("Copied {} log lines to clipboard", count), Theme::status_ok());
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let link = crate::deep_link::DeepLink::Resource {
+                            context: self.active_context.clone(),
+                            namespace: Some(logs.namespace.clone()),
+                            kind: "Pod".to_string(),
+                            name: logs.pod_name.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
+                        });
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
                     _ => {}
                 }
             }
             ActiveView::PortForwards(pf) => {
+                let sel_entry = pf.selected_forward().cloned();
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => pf.select_next(),
                     KeyCode::Char('k') | KeyCode::Up => pf.select_prev(),
+                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(entry) = sel_entry {
+                            let url = format!("http://127.0.0.1:{}", entry.local_port);
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied forward URL: {}", url), Theme::status_ok());
+                        }
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(entry) = sel_entry {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: self.active_context.clone(),
+                                namespace: Some(entry.namespace.clone()),
+                                kind: entry.target_type.clone(),
+                                name: entry.target_name.clone(),
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                        }
+                    }
                     KeyCode::Char('d') => {
-                        if let Some(entry) = pf.selected_forward() {
+                        if let Some(entry) = sel_entry {
                             let id = entry.id.clone();
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Stop Port Forward [127.0.0.1:{}]", entry.local_port),
@@ -1736,6 +1785,38 @@ impl App {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => helm.select_next(),
                     KeyCode::Char('k') | KeyCode::Up => helm.select_prev(),
+                    KeyCode::Char('c') => {
+                        if let Some(rel) = sel_rel {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: self.active_context.clone(),
+                                namespace: Some(rel.namespace.clone()),
+                                kind: "HelmRelease".to_string(),
+                                name: rel.name.clone(),
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                        }
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(rel) = sel_rel {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: self.active_context.clone(),
+                                namespace: Some(rel.namespace.clone()),
+                                kind: "HelmRelease".to_string(),
+                                name: rel.name.clone(),
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                        }
+                    }
                     KeyCode::Char('v') => {
                         // Inspect Helm values
                         if let Some(rel) = sel_rel {
@@ -1752,16 +1833,52 @@ impl App {
                 }
             }
             ActiveView::Toolbox(tb) => {
+                let sel_tool = tb.tools.get(tb.selected_idx).cloned();
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => tb.select_next(),
                     KeyCode::Char('k') | KeyCode::Up => tb.select_prev(),
+                    KeyCode::Char('c') | KeyCode::Char('y') => {
+                        if let Some(tool) = sel_tool {
+                            let info = if let Some(path) = &tool.path {
+                                path.clone()
+                            } else {
+                                tool.name.clone()
+                            };
+                            let info_clone = info.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&info_clone);
+                            });
+                            self.set_toast(format!("Copied tool info: {}", info), Theme::status_ok());
+                        }
+                    }
                     _ => {}
                 }
             }
-            ActiveView::Overview(_) => {
-                if key.code == KeyCode::Char('r') {
-                    self.refresh_cluster_overview();
-                    self.set_toast("Refreshing cluster overview...".to_string(), Theme::status_ok());
+            ActiveView::Overview(ov) => {
+                match key.code {
+                    KeyCode::Char('r') => {
+                        self.refresh_cluster_overview();
+                        self.set_toast("Refreshing cluster overview...".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let summary = ov.data.to_summary_text();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&summary);
+                        });
+                        self.set_toast("Copied cluster overview summary to clipboard".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let link = crate::deep_link::DeepLink::Cluster {
+                            context: self.active_context.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
+                        });
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
+                    _ => {}
                 }
             }
             ActiveView::Assistant => {
@@ -2848,7 +2965,38 @@ impl App {
             },
             ActiveView::Overview(_) => Some(&[
                 ("<:>", "Cmd"),
+                ("<c>", "Copy"),
                 ("<r>", "Refresh"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Logs(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<c>", "Copy"),
+                ("<f>", "Follow"),
+                ("<t>", "Timestamps"),
+                ("<s>", "Save"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::PortForwards(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<c>", "CopyURL"),
+                ("<d>", "Stop"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Helm(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<c>", "CopyURL"),
+                ("<v>", "Values"),
+                ("<y>", "Manifest"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Toolbox(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<c>", "CopyPath"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
