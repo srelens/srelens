@@ -1235,6 +1235,40 @@ impl App {
                             }
                         }
                     }
+                    KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        // Copy canonical deep link URL (srelens://resource/...)
+                        if let Some(name) = sel_name {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: self.active_context.clone(),
+                                namespace: sel_ns,
+                                kind: kind_str,
+                                name,
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                        }
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Copy canonical deep link URL (Ctrl+y)
+                        if let Some(name) = sel_name {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: self.active_context.clone(),
+                                namespace: sel_ns,
+                                kind: kind_str,
+                                name,
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                        }
+                    }
                     KeyCode::Char('y') | KeyCode::Char('v') => {
                         // View YAML manifest
                         if let Some(name) = sel_name {
@@ -1332,6 +1366,20 @@ impl App {
                         });
                         self.set_toast("Copied YAML to clipboard".to_string(), Theme::status_ok());
                     }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let link = crate::deep_link::DeepLink::Resource {
+                            context: self.active_context.clone(),
+                            namespace: yaml.namespace.clone(),
+                            kind: yaml.resource_kind.clone(),
+                            name: yaml.resource_name.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
+                        });
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
                     _ => {}
                 }
             }
@@ -1343,12 +1391,26 @@ impl App {
                     KeyCode::Char('G') | KeyCode::End => desc.scroll_bottom(),
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => desc.scroll_up(10),
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => desc.scroll_down(10),
-                    KeyCode::Char('c') | KeyCode::Char('y') => {
+                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let content = desc.content.clone();
                         tokio::spawn(async move {
                             let _ = copy_to_clipboard(&content);
                         });
                         self.set_toast("Copied describe output to clipboard".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let link = crate::deep_link::DeepLink::Resource {
+                            context: self.active_context.clone(),
+                            namespace: desc.namespace.clone(),
+                            kind: desc.resource_kind.clone(),
+                            name: desc.resource_name.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
+                        });
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
                     }
                     _ => {}
                 }
@@ -1746,7 +1808,7 @@ impl App {
         });
     }
 
-    pub async fn execute_command_target(&mut self, target: CommandTarget) {
+    pub async fn execute_view_target(&mut self, target: CommandTarget) {
         match target {
             CommandTarget::Resource(kind) => self.switch_view_to_kind(kind).await,
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
@@ -1766,6 +1828,90 @@ impl App {
             }
             CommandTarget::Quit => {
                 self.is_running = false;
+            }
+            CommandTarget::OpenUrl(_) => {}
+        }
+    }
+
+    pub async fn execute_command_target(&mut self, target: CommandTarget) {
+        match target {
+            CommandTarget::OpenUrl(url) => {
+                if url.is_empty() {
+                    self.set_toast("Usage: :open <srelens://... or kind/name>".to_string(), Theme::status_warn());
+                    return;
+                }
+                match crate::deep_link::DeepLink::parse(&url) {
+                    Ok(link) => {
+                        if let Err(err) = self.navigate_deep_link(&link).await {
+                            self.set_toast(format!("Navigation error: {}", err), Theme::status_error());
+                        }
+                    }
+                    Err(err) => {
+                        self.set_toast(format!("Invalid URL: {}", err), Theme::status_error());
+                    }
+                }
+            }
+            other => self.execute_view_target(other).await,
+        }
+    }
+
+    pub async fn navigate_deep_link(&mut self, link: &crate::deep_link::DeepLink) -> Result<(), String> {
+        match link {
+            crate::deep_link::DeepLink::Cluster { context } => {
+                if context != &self.active_context {
+                    self.switch_context(context.clone()).await;
+                }
+                self.set_toast(format!("Switched to cluster '{}'", context), Theme::status_ok());
+                Ok(())
+            }
+            crate::deep_link::DeepLink::View { context, namespace, target } => {
+                if let Some(ctx) = context {
+                    if !ctx.is_empty() && ctx != &self.active_context {
+                        self.switch_context(ctx.clone()).await;
+                    }
+                }
+                if let Some(ns) = namespace {
+                    if ns != &self.active_namespace {
+                        self.switch_namespace(ns.clone()).await;
+                    }
+                }
+                self.execute_view_target(target.clone()).await;
+                Ok(())
+            }
+            crate::deep_link::DeepLink::Resource { context, namespace, kind, name } => {
+                if !context.is_empty() && context != &self.active_context {
+                    self.switch_context(context.clone()).await;
+                }
+                if let Some(ns) = namespace {
+                    if ns != &self.active_namespace {
+                        self.switch_namespace(ns.clone()).await;
+                    }
+                }
+
+                // Resolve kind
+                let target_cmd = crate::commands::resolve_command_with_crds(kind, &self.crds)
+                    .or_else(|| crate::commands::resolve_command_with_crds(format!(":{}", kind).as_str(), &self.crds));
+
+                if let Some(target) = target_cmd {
+                    self.execute_view_target(target).await;
+                } else {
+                    return Err(format!("Unknown resource kind '{}'", kind));
+                }
+
+                // If table view, select or filter for the resource name
+                if let ActiveView::Table(table) = &mut self.active_view {
+                    if let Some(idx) = table.raw_items.iter().position(|item| {
+                        item.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
+                            || item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()) == Some(name.as_str())
+                    }) {
+                        table.selected_idx = idx;
+                    } else {
+                        table.apply_filter(name);
+                    }
+                }
+
+                self.set_toast(format!("Navigated to {} '{}'", kind, name), Theme::status_ok());
+                Ok(())
             }
         }
     }

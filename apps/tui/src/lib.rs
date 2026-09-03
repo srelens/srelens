@@ -4,6 +4,7 @@ pub mod agent;
 pub mod ai_config;
 pub mod app;
 pub mod commands;
+pub mod deep_link;
 pub mod event;
 pub mod sink;
 pub mod theme;
@@ -12,3 +13,4 @@ pub mod views;
 
 pub use ai_config::{AiProvider, AiSettings};
 pub use app::App;
+pub use deep_link::DeepLink;

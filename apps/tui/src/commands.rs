@@ -188,7 +188,7 @@ pub struct CommandDef {
     pub target: CommandTarget,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandTarget {
     Resource(ResourceKind),
     CustomResource(CrdMeta),
@@ -196,6 +196,7 @@ pub enum CommandTarget {
     Namespaces,
     Help,
     Quit,
+    OpenUrl(String),
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -397,6 +398,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         description: "Quit srelens",
         target: CommandTarget::Quit,
     },
+    CommandDef {
+        name: "open",
+        aliases: &["goto", "url"],
+        description: "Open deep link URL or resource (:open <url>)",
+        target: CommandTarget::OpenUrl(String::new()),
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -455,6 +462,18 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
     let trimmed = input.trim().trim_start_matches(':').trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    // Direct deep link URL (e.g. ":srelens://...")
+    if trimmed.starts_with("srelens://") {
+        return Some(CommandTarget::OpenUrl(trimmed.to_string()));
+    }
+
+    // Open command prefix: "open <url>", "goto <url>", "open:<url>"
+    for prefix in &["open ", "open:", "goto ", "goto:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(CommandTarget::OpenUrl(rest.trim().to_string()));
+        }
     }
 
     // 1. Exact match on static commands & aliases

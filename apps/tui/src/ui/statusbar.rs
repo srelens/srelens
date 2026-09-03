@@ -120,6 +120,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
             let default_hints: &[(&str, &str)] = &[
                 ("<:>", "Cmd"),
                 ("</>", "Filter"),
+                ("<c>", "CopyURL"),
                 ("<l>", "Logs"),
                 ("<s>", "Shell"),
                 ("<f>/<F>", "PortForward"),

@@ -1628,4 +1628,138 @@ mod tests {
         assert!(app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
         assert!(!app.assistant_state.messages.iter().any(|m| m.content.contains("7 pods on harvester-amd-eu-dus1")));
     }
+
+    #[tokio::test]
+    async fn test_deep_link_navigation_and_copy_shortcuts() {
+        use tokio::sync::mpsc::unbounded_channel;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use std::collections::{HashMap, HashSet};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use srelens_tui::deep_link::DeepLink;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(
+            vec![
+                serde_json::json!({
+                    "name": "payment-api-pod-1",
+                    "namespace": "production",
+                    "ready": "1/1",
+                    "status": "Running",
+                    "restarts": 0,
+                    "age": "2d"
+                }),
+                serde_json::json!({
+                    "name": "auth-api-pod-2",
+                    "namespace": "production",
+                    "ready": "1/1",
+                    "status": "Running",
+                    "restarts": 0,
+                    "age": "1d"
+                }),
+            ],
+            "",
+        );
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-eu".to_string(),
+            active_namespace: "production".to_string(),
+            contexts: vec![
+                srelens_kube::contexts::ContextDto {
+                    name: "prod-eu".to_string(),
+                    stable_id: "kube/prod".to_string(),
+                    cluster: "prod-cluster".to_string(),
+                    server: "https://127.0.0.1:6443".to_string(),
+                    namespace: "production".to_string(),
+                    is_current: true,
+                    is_local: false,
+                    provider: Some("EKS".to_string()),
+                    source_file: "config".to_string(),
+                    auth_kind: "token".to_string(),
+                },
+                srelens_kube::contexts::ContextDto {
+                    name: "staging-us".to_string(),
+                    stable_id: "kube/staging".to_string(),
+                    cluster: "staging-cluster".to_string(),
+                    server: "https://127.0.0.1:6444".to_string(),
+                    namespace: "staging-ns".to_string(),
+                    is_current: false,
+                    is_local: false,
+                    provider: Some("GKE".to_string()),
+                    source_file: "config".to_string(),
+                    auth_kind: "token".to_string(),
+                },
+            ],
+            namespaces: vec!["default".to_string(), "production".to_string(), "staging-ns".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "production".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod-cluster".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 12,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod-eu"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // 1. Pressing 'c' on the selected row copies the canonical deep link URL!
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(app.toast.is_some());
+        let toast = app.toast.as_ref().unwrap();
+        assert!(toast.0.contains("Copied deep link: srelens://resource/prod-eu/production/Pod/payment-api-pod-1"));
+
+        // 2. In-app navigation via :open <url>
+        let cmd = ":open srelens://resource/staging-us/staging-ns/Deployments/frontend";
+        let target = srelens_tui::commands::resolve_command(cmd).expect("resolve :open");
+        app.execute_command_target(target).await;
+
+        // Context, namespace, and view all switched seamlessly!
+        assert_eq!(app.active_context, "staging-us");
+        assert_eq!(app.active_namespace, "staging-ns");
+        assert!(matches!(app.active_view, ActiveView::Table(ref t) if t.kind == ResourceKind::Deployments));
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().0.contains("Navigated to Deployments 'frontend'"));
+
+        // 3. Cluster deep link: srelens://cluster/prod-eu
+        let link = DeepLink::parse("srelens://cluster/prod-eu").unwrap();
+        app.navigate_deep_link(&link).await.expect("navigate cluster");
+        assert_eq!(app.active_context, "prod-eu");
+    }
 }

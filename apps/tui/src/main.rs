@@ -19,6 +19,7 @@ mod agent;
 mod ai_config;
 mod app;
 mod commands;
+mod deep_link;
 mod event;
 mod sink;
 mod theme;
@@ -27,6 +28,7 @@ mod views;
 
 use app::{App, SuspendAction};
 use commands::ResourceKind;
+use deep_link::DeepLink;
 use event::{AppEvent, EventHandler};
 use srelens_kube::kube;
 
@@ -53,86 +55,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub kubeconfig: Option<PathBuf>,
 
-    /// Direct jump to a specific resource view
-    #[arg(value_enum)]
-    pub resource: Option<CliResourceTarget>,
+    /// Deep link URL (srelens://...) or resource target (e.g. pods, nodes, pods/my-pod)
+    pub target: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<CliCommand>,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-pub enum CliResourceTarget {
-    #[value(alias = "po", alias = "pod")]
-    Pods,
-    #[value(alias = "dp", alias = "deploy")]
-    Deployments,
-    #[value(alias = "sts", alias = "statefulset")]
-    Statefulsets,
-    #[value(alias = "ds", alias = "daemonset")]
-    Daemonsets,
-    #[value(alias = "job")]
-    Jobs,
-    #[value(alias = "cj", alias = "cronjob")]
-    Cronjobs,
-    #[value(alias = "svc", alias = "service")]
-    Services,
-    #[value(alias = "ing", alias = "ingress")]
-    Ingresses,
-    #[value(alias = "no", alias = "node")]
-    Nodes,
-    #[value(alias = "ns", alias = "namespace")]
-    Namespaces,
-    #[value(alias = "cm", alias = "configmap")]
-    Configmaps,
-    #[value(alias = "sec", alias = "secret")]
-    Secrets,
-    #[value(alias = "pvc")]
-    Pvcs,
-    #[value(alias = "pv")]
-    Pvs,
-    #[value(alias = "ev", alias = "event")]
-    Events,
-    #[value(alias = "crd")]
-    Crds,
-    #[value(alias = "releases")]
-    Helm,
-    #[value(alias = "pf")]
-    Portforwards,
-    #[value(alias = "info", alias = "cluster")]
-    Overview,
-    #[value(alias = "tb")]
-    Toolbox,
-    #[value(alias = "chat")]
-    Ai,
-}
-
-impl From<CliResourceTarget> for ResourceKind {
-    fn from(target: CliResourceTarget) -> Self {
-        match target {
-            CliResourceTarget::Pods => ResourceKind::Pods,
-            CliResourceTarget::Deployments => ResourceKind::Deployments,
-            CliResourceTarget::Statefulsets => ResourceKind::StatefulSets,
-            CliResourceTarget::Daemonsets => ResourceKind::DaemonSets,
-            CliResourceTarget::Jobs => ResourceKind::Jobs,
-            CliResourceTarget::Cronjobs => ResourceKind::CronJobs,
-            CliResourceTarget::Services => ResourceKind::Services,
-            CliResourceTarget::Ingresses => ResourceKind::Ingresses,
-            CliResourceTarget::Nodes => ResourceKind::Nodes,
-            CliResourceTarget::Namespaces => ResourceKind::Namespaces,
-            CliResourceTarget::Configmaps => ResourceKind::ConfigMaps,
-            CliResourceTarget::Secrets => ResourceKind::Secrets,
-            CliResourceTarget::Pvcs => ResourceKind::PersistentVolumeClaims,
-            CliResourceTarget::Pvs => ResourceKind::PersistentVolumes,
-            CliResourceTarget::Events => ResourceKind::Events,
-            CliResourceTarget::Crds => ResourceKind::CustomResourceDefinitions,
-            CliResourceTarget::Helm => ResourceKind::HelmReleases,
-            CliResourceTarget::Portforwards => ResourceKind::PortForwards,
-            CliResourceTarget::Overview => ResourceKind::Overview,
-            CliResourceTarget::Toolbox => ResourceKind::Toolbox,
-            CliResourceTarget::Ai => ResourceKind::Assistant,
-        }
-    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -201,11 +128,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize event loop and application state
     let events = EventHandler::new(Duration::from_millis(250));
-    let initial_resource = cli.resource.map(ResourceKind::from);
+
+    // Parse target deep link if provided
+    let parsed_target = cli.target.as_deref().and_then(|t| DeepLink::parse(t).ok());
+
+    let target_context = cli.context.or_else(|| {
+        match &parsed_target {
+            Some(DeepLink::Cluster { context }) => Some(context.clone()),
+            Some(DeepLink::Resource { context, .. }) if !context.is_empty() => Some(context.clone()),
+            Some(DeepLink::View { context, .. }) => context.clone(),
+            _ => None,
+        }
+    });
+
+    let target_namespace = cli.namespace.or_else(|| {
+        match &parsed_target {
+            Some(DeepLink::Resource { namespace, .. }) => namespace.clone(),
+            Some(DeepLink::View { namespace, .. }) => namespace.clone(),
+            _ => None,
+        }
+    });
+
+    let initial_resource = match &parsed_target {
+        Some(DeepLink::Resource { kind, .. }) => {
+            commands::resolve_command(kind).and_then(|t| match t {
+                commands::CommandTarget::Resource(k) => Some(k),
+                _ => None,
+            })
+        }
+        Some(DeepLink::View { target, .. }) => {
+            match target {
+                commands::CommandTarget::Resource(k) => Some(k.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
 
     let mut app = App::new(
-        cli.context,
-        cli.namespace,
+        target_context,
+        target_namespace,
         cli.all_namespaces,
         initial_resource,
         kubeconfig_paths,
@@ -213,6 +175,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    if let Some(link) = parsed_target {
+        let _ = app.navigate_deep_link(&link).await;
+    }
 
     let mut event_rx = events.rx;
 
