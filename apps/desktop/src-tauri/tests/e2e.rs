@@ -1389,6 +1389,62 @@ async fn run_suite() {
     assert_eq!(deploy["desired"], json!(2), "{out}");
     assert_eq!(deploy["health"], json!("ok"), "{out}");
 
+    // --- the topology's optional sources ---------------------------------------
+    // The e2e cluster runs no metrics backend, and that is the ordinary case
+    // the capability is written for: discovery answers an empty list, not an
+    // error. Nothing the fixtures made looks like a query API, so it must not
+    // be listed either.
+    let out = h.ok("k8s.prometheusDiscover", json!({ "context": ctx })).await;
+    let candidates = out["candidates"].as_array().unwrap();
+    assert!(
+        candidates.iter().all(|c| c["namespace"] != json!(NS)),
+        "nothing in the fixture namespace serves PromQL: {out}"
+    );
+    // A query at a Service that does not exist is refused by the API server's
+    // proxy, and the capability reports that as an error rather than as a
+    // graph with no traffic in it.
+    let msg = h
+        .err(
+            "k8s.prometheusQuery",
+            json!({
+                "context": ctx,
+                "namespace": NS,
+                "service": "no-such-prometheus",
+                "port": 9090,
+                "query": "up"
+            }),
+        )
+        .await;
+    assert!(!msg.is_empty());
+    // The socket table of a fixture pod, over exec. busybox has `cat`, so the
+    // pod reads; what it reports is whatever the pod has open, which the test
+    // cannot know — the assertion is that the pod is accounted for, in one
+    // list or the other, and never silently missing from both.
+    let out = h
+        .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
+        .await;
+    let pod = out["pods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY)))
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .expect("a running fixture pod");
+    let out = h
+        .ok(
+            "k8s.podConnections",
+            json!({ "context": ctx, "namespace": NS, "pods": [pod] }),
+        )
+        .await;
+    let read = out["connections"].as_array().unwrap();
+    let unread = out["unreadable"].as_array().unwrap();
+    assert_eq!(
+        read.iter().filter(|c| c["pod"] == json!(pod)).count()
+            + unread.iter().filter(|u| u["pod"] == json!(pod)).count(),
+        1,
+        "the pod must be reported exactly once: {out}"
+    );
+
     // === 4. Access =============================================================
     println!("=== access ===");
     let out = h
