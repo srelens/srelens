@@ -1082,8 +1082,11 @@ impl App {
                     }
                 }
                 Modal::NamespacePicker { namespaces, mut selected_idx, mut filter, current_namespace } => {
-                    let mut all_filtered = vec![String::new()]; // (all namespaces)
-                    all_filtered.extend(namespaces.iter().filter(|n| n.contains(filter.as_str())).cloned());
+                    let all_filtered: Vec<String> = namespaces
+                        .iter()
+                        .filter(|n| n.contains(filter.as_str()))
+                        .cloned()
+                        .collect();
                     let filtered_count = all_filtered.len();
 
                     match key.code {
@@ -1140,11 +1143,7 @@ impl App {
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
                         }
                         KeyCode::Enter => {
-                            let target_ns = if !filter.is_empty() && selected_idx == 0 && all_filtered.len() == 2 {
-                                all_filtered.get(1).cloned()
-                            } else {
-                                all_filtered.get(selected_idx).cloned()
-                            };
+                            let target_ns = all_filtered.get(selected_idx).cloned();
                             self.modal = None;
                             if let Some(ns) = target_ns {
                                 self.switch_namespace(ns).await;
@@ -2993,10 +2992,11 @@ impl App {
                 self.open_context_picker();
             }
             CommandTarget::Namespaces => {
+                let initial_idx = self.namespaces.iter().position(|n| n == &self.active_namespace).unwrap_or(0);
                 self.modal = Some(Modal::NamespacePicker {
                     namespaces: self.namespaces.clone(),
                     current_namespace: self.active_namespace.clone(),
-                    selected_idx: 0,
+                    selected_idx: initial_idx,
                     filter: String::new(),
                 });
             }

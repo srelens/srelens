@@ -405,14 +405,17 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .block(filter_block);
             f.render_widget(filter_widget, chunks[0]);
 
-            let mut all_ns = vec!["(all namespaces)".to_string()];
-            all_ns.extend(namespaces.iter().filter(|n| n.contains(filter.as_str())).cloned());
+            let all_ns: Vec<String> = namespaces
+                .iter()
+                .filter(|n| n.contains(filter.as_str()))
+                .cloned()
+                .collect();
 
             let items: Vec<ListItem> = all_ns
                 .iter()
                 .enumerate()
                 .map(|(i, name)| {
-                    let is_active = (i == 0 && current_namespace.is_empty()) || name == current_namespace;
+                    let is_active = name == current_namespace;
                     let is_sel = i == *selected_idx;
                     let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
                     let style = if is_sel {
