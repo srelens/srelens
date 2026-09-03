@@ -24,6 +24,10 @@ pub enum AppEvent {
         name: String,
         result: Result<srelens_kube::lineage::LineageNode, String>,
     },
+    NodeInspectorResult {
+        node_name: String,
+        result: Result<srelens_kube::node_inspector::NodeInspectorDetails, String>,
+    },
 }
 
 pub struct EventHandler {

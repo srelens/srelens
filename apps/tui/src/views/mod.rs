@@ -9,6 +9,7 @@ pub mod resource_table;
 pub mod settings_view;
 pub mod toolbox_view;
 pub mod tree_view;
+pub mod node_inspector_view;
 pub mod yaml_view;
 
 /// Strip everything from cluster-controlled text that would desynchronise
@@ -76,4 +77,5 @@ pub use resource_table::{render_resource_table, ResourceTableState};
 pub use settings_view::{render_settings_view, SettingField, SettingsViewState};
 pub use toolbox_view::{render_toolbox_view, ToolboxViewState};
 pub use tree_view::{render_tree_view, TreeViewState};
+pub use node_inspector_view::{render_node_inspector_view, NodeInspectorState};
 pub use yaml_view::{render_yaml_view, YamlViewState};

@@ -81,7 +81,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Enter", Theme::key_hint_key())),
-            Cell::from("Drill down (Pod -> Containers; Workload -> Pods; Node -> Pods; CRD -> Instances)"),
+            Cell::from("Drill down (Pod -> Containers; Workload -> Pods; Node -> GPU & Hardware Inspector; CRD -> Instances)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Esc", Theme::key_hint_key())),

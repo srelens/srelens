@@ -2802,4 +2802,192 @@ mod tests {
         app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
         assert!(matches!(app.active_view, ActiveView::Table(_)));
     }
+
+    #[tokio::test]
+    async fn test_node_inspector_enter_navigation_and_pod_jump() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::{InputMode, Modal};
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem, NodeConditionInfo, NodeTaintInfo};
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
+        let node_json = serde_json::json!({
+            "name": "gpu-node-alpha",
+            "status": "Ready",
+            "roles": "worker",
+            "version": "v1.30.2"
+        });
+        node_table.set_items(vec![node_json], "");
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string(), "ai-prod".to_string()],
+            active_view: ActiveView::Table(node_table),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 10,
+            pod_count: 80,
+            is_connected: true,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 1. Pressing 'x' on Node table opens Action Palette with 'InspectNode'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).await;
+        if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
+            assert!(actions.iter().any(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::InspectNode));
+        } else {
+            panic!("Expected ActionPalette modal");
+        }
+        app.modal = None;
+
+        // 2. Pressing Enter on 'gpu-node-alpha' opens Node Inspector
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
+
+        // 3. Deliver Node Inspector results with GPU details
+        let mock_details = NodeInspectorDetails {
+            name: "gpu-node-alpha".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "g4dn.2xlarge".to_string(),
+            zone: Some("eu-west-1b".to_string()),
+            region: Some("eu-west-1".to_string()),
+            nodepool: Some("gpu-pool".to_string()),
+            internal_ip: Some("10.0.1.50".to_string()),
+            external_ip: None,
+            os_image: "Ubuntu 22.04".to_string(),
+            kernel_version: "5.15.0".to_string(),
+            container_runtime: "containerd".to_string(),
+            kubelet_version: "v1.30.2".to_string(),
+            architecture: "amd64".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cpu_capacity_millicores: 8000,
+            cpu_allocatable_millicores: 7800,
+            cpu_requests_millicores: 2500,
+            mem_capacity_mib: 32768,
+            mem_allocatable_mib: 31000,
+            mem_requests_mib: 14000,
+            pods_capacity: 110,
+            pods_allocatable: 110,
+            pods_count: 2,
+            has_gpu: true,
+            gpu_model: Some("Tesla T4".to_string()),
+            gpu_driver_version: Some("535.129".to_string()),
+            gpu_cuda_version: Some("12.2".to_string()),
+            gpu_capacity_count: 1,
+            gpu_allocatable_count: 1,
+            gpu_requests_count: 1,
+            gpu_memory_total_mib: Some(15360),
+            conditions: vec![
+                NodeConditionInfo {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    reason: None,
+                    message: None,
+                },
+            ],
+            taints: vec![
+                NodeTaintInfo {
+                    key: "nvidia.com/gpu".to_string(),
+                    value: Some("present".to_string()),
+                    effect: "NoSchedule".to_string(),
+                }
+            ],
+            pods: vec![
+                NodePodItem {
+                    name: "vllm-serve-7b".to_string(),
+                    namespace: "ai-prod".to_string(),
+                    phase: "Running".to_string(),
+                    ready_containers: "1/1".to_string(),
+                    restarts: 0,
+                    age: "3d".to_string(),
+                    cpu_requests_millicores: 2000,
+                    mem_requests_mib: 12000,
+                    gpu_requests: 1,
+                },
+                NodePodItem {
+                    name: "node-exporter".to_string(),
+                    namespace: "monitoring".to_string(),
+                    phase: "Running".to_string(),
+                    ready_containers: "1/1".to_string(),
+                    restarts: 0,
+                    age: "10d".to_string(),
+                    cpu_requests_millicores: 100,
+                    mem_requests_mib: 128,
+                    gpu_requests: 0,
+                },
+            ],
+        };
+
+        app.handle_node_inspector_result("gpu-node-alpha", Ok(mock_details));
+
+        if let ActiveView::NodeInspector(ni) = &app.active_view {
+            assert_eq!(ni.node_name, "gpu-node-alpha");
+            let d = ni.details.as_ref().unwrap();
+            assert!(d.has_gpu);
+            assert_eq!(d.gpu_model.as_deref(), Some("Tesla T4"));
+            assert_eq!(d.pods.len(), 2);
+            assert_eq!(d.pods[0].name, "vllm-serve-7b");
+            assert_eq!(d.pods[0].gpu_requests, 1);
+        } else {
+            panic!("Expected ActiveView::NodeInspector");
+        }
+
+        // 4. Pressing Enter on selected pod 'vllm-serve-7b' jumps to Pods table
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Table(_)));
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.kind, ResourceKind::Pods);
+        }
+        assert_eq!(app.active_namespace, "ai-prod");
+        assert_eq!(app.filter_buffer, "vllm-serve-7b");
+    }
 }

@@ -170,3 +170,4 @@ pub mod storageclasses;
 pub mod watch;
 pub mod workloads;
 pub mod lineage;
+pub mod node_inspector;

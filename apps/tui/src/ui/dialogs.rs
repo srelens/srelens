@@ -70,6 +70,7 @@ pub enum QuickActionId {
     Scale,
     RolloutRestart,
     JumpToPods,
+    InspectNode,
     CordonNode,
     DrainNode,
     Delete,

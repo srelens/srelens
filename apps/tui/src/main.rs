@@ -327,6 +327,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::LineageResult { kind, name, result } => {
                     app.handle_lineage_result(&kind, &name, result);
                 }
+                AppEvent::NodeInspectorResult { node_name, result } => {
+                    app.handle_node_inspector_result(&node_name, result);
+                }
             }
         }
 

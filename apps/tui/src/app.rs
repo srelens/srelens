@@ -43,6 +43,7 @@ pub enum ActiveView {
     Assistant,
     Settings(SettingsViewState),
     Tree(tree_view::TreeViewState),
+    NodeInspector(node_inspector_view::NodeInspectorState),
 }
 
 pub struct App {
@@ -1945,6 +1946,10 @@ impl App {
                                     }
                                 }
                             }
+                        } else if table_kind == ResourceKind::Nodes {
+                            if let Some(name) = sel_name {
+                                self.open_node_inspector(name);
+                            }
                         } else {
                             if let Some(name) = sel_name {
                                 self.open_describe_view(name, kind_str, sel_ns).await;
@@ -2508,8 +2513,116 @@ impl App {
                         _ => {}
                     }
                 }
+            ActiveView::NodeInspector(inspector) => {
+                let sel_pod = inspector.selected_pod().map(|p| (p.name.clone(), p.namespace.clone()));
+                let node_name = inspector.node_name.clone();
+                let is_unsched = inspector.details.as_ref().map(|d| d.unschedulable).unwrap_or(false);
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::Nodes).await;
+                        }
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => inspector.select_next(),
+                    KeyCode::Char('k') | KeyCode::Up => inspector.select_prev(),
+                    KeyCode::Char('g') | KeyCode::Home => inspector.select_first(),
+                    KeyCode::Char('G') | KeyCode::End => inspector.select_last(),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => inspector.page_down(10),
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => inspector.page_up(10),
+                    KeyCode::Char('r') => {
+                        self.open_node_inspector(node_name);
+                    }
+                    KeyCode::Enter => {
+                        // Jump to highlighted pod
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.switch_namespace(p_ns).await;
+                            self.switch_view_to_kind(ResourceKind::Pods).await;
+                            if let ActiveView::Table(t) = &mut self.active_view {
+                                t.apply_filter(&p_name);
+                            }
+                            self.filter_buffer = p_name.clone();
+                            self.set_toast(format!("Jumped to Pod '{}'", p_name), Theme::status_ok());
+                        }
+                    }
+                    KeyCode::Char('l') => {
+                        // Stream logs of highlighted pod
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.open_logs_view(p_name, Some(p_ns), None).await;
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        // Describe highlighted pod (or node if no pods)
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                        } else {
+                            self.open_describe_view(node_name, "Node".to_string(), None).await;
+                        }
+                    }
+                    KeyCode::Char('D') => {
+                        // Describe node
+                        self.open_describe_view(node_name, "Node".to_string(), None).await;
+                    }
+                    KeyCode::Char('y') => {
+                        // View YAML of highlighted pod (or node if no pods)
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                        } else {
+                            self.open_yaml_view(node_name, "Node".to_string(), None).await;
+                        }
+                    }
+                    KeyCode::Char('Y') => {
+                        // View YAML of node
+                        self.open_yaml_view(node_name, "Node".to_string(), None).await;
+                    }
+                    KeyCode::Char('x') => {
+                        // Open Action Palette
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.open_action_palette("Pod".to_string(), p_name, Some(p_ns));
+                        } else {
+                            self.open_action_palette("Node".to_string(), node_name, None);
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        // Launch root node shell
+                        let cmd_str = format!("kubectl debug node/{} -it --image=busybox", node_name);
+                        self.set_toast(format!("Node debug command: {}", cmd_str), Theme::status_ok());
+                    }
+                    KeyCode::Char('c') => {
+                        // Toggle Cordon / Uncordon
+                        let target_unsched = !is_unsched;
+                        let n_name = node_name.clone();
+                        let ctx = self.active_context.clone();
+                        let cache = self.client_cache.clone();
+                        let event_tx = self.event_tx.clone();
+                        tokio::spawn(async move {
+                            if let Ok(client) = cache.get(&ctx).await {
+                                let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
+                                let patch = serde_json::json!({ "spec": { "unschedulable": target_unsched } });
+                                let res = api.patch(&n_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await;
+                                let msg = if target_unsched {
+                                    format!("Cordoned node '{}'", n_name)
+                                } else {
+                                    format!("Uncordoned node '{}'", n_name)
+                                };
+                                let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                                    title: format!("cordon_node:{}", n_name),
+                                    result: res.map(|_| msg).map_err(|e| e.to_string()),
+                                });
+                            }
+                        });
+                        self.set_toast(
+                            if target_unsched { format!("Cordoning node '{}'...", node_name) } else { format!("Uncordoning node '{}'...", node_name) },
+                            Theme::status_warn(),
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
+    }
 
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -3331,6 +3444,43 @@ impl App {
         }
     }
 
+    pub fn open_node_inspector(&mut self, node_name: String) {
+        let inspector_state = node_inspector_view::NodeInspectorState::new(node_name.clone());
+        let old_view = std::mem::replace(&mut self.active_view, ActiveView::NodeInspector(inspector_state));
+        self.nav_stack.push(old_view);
+
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let n = node_name.clone();
+
+        tokio::spawn(async move {
+            let res = match cache.get(&ctx).await {
+                Ok(client) => srelens_kube::node_inspector::inspect_node(client, &n).await,
+                Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+            };
+            let _ = event_tx.send(crate::event::AppEvent::NodeInspectorResult {
+                node_name: n,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_node_inspector_result(
+        &mut self,
+        node_name: &str,
+        result: Result<srelens_kube::node_inspector::NodeInspectorDetails, String>,
+    ) {
+        if let ActiveView::NodeInspector(inspector) = &mut self.active_view {
+            if inspector.node_name == node_name {
+                match result {
+                    Ok(details) => inspector.set_details(details),
+                    Err(err) => inspector.set_error(err),
+                }
+            }
+        }
+    }
+
     pub fn open_action_palette(&mut self, kind: String, name: String, namespace: Option<String>) {
         use crate::ui::dialogs::{QuickActionId, QuickActionItem};
 
@@ -3519,6 +3669,12 @@ impl App {
                 },
             ],
             "node" | "nodes" => vec![
+                QuickActionItem {
+                    id: QuickActionId::InspectNode,
+                    key_hint: "i".to_string(),
+                    title: "🔍 Deep Node & GPU Inspector".to_string(),
+                    description: "Hardware capacity, GPU cards, VRAM & scheduled pods".to_string(),
+                },
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
                     key_hint: "t".to_string(),
@@ -3712,6 +3868,9 @@ impl App {
                         if let ActiveView::Table(table) = &mut self.active_view {
                             table.apply_filter(&resource_name);
                         }
+                    }
+                    QuickActionId::InspectNode => {
+                        self.open_node_inspector(resource_name);
                     }
                     QuickActionId::CordonNode => {
                         self.set_toast(format!("Cordoned node {}", resource_name), Theme::status_ok());
@@ -4004,6 +4163,7 @@ impl App {
             ActiveView::Assistant => "AI Assistant",
             ActiveView::Settings(_) => "AI Settings",
             ActiveView::Tree(_) => "Resource Relationship Tree",
+            ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
         };
 
         let active_pods_count = if let ActiveView::Table(t) = &self.active_view {
@@ -4062,6 +4222,7 @@ impl App {
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
             ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
+            ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
         }
 
         // 3. Render Status Bar
@@ -4081,6 +4242,27 @@ impl App {
         let suggestions_prop = suggestions.as_ref().map(|s| (s.as_slice(), self.command_suggestion_idx));
 
         let custom_hints: Option<&[(&str, &str)]> = match &self.active_view {
+            ActiveView::NodeInspector(ni) => {
+                let cordon_act = if ni.details.as_ref().map(|d| d.unschedulable).unwrap_or(false) {
+                    "Uncordon"
+                } else {
+                    "Cordon"
+                };
+                Some(&[
+                    ("<:>", "Cmd"),
+                    ("<↑/↓>", "Pod"),
+                    ("<Enter>", "Jump"),
+                    ("<l>", "Logs"),
+                    ("<d>", "PodDesc"),
+                    ("<D>", "NodeDesc"),
+                    ("<y>", "YAML"),
+                    ("<x>", "Actions"),
+                    ("<c>", cordon_act),
+                    ("<s>", "Shell"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..])
+            }
             ActiveView::Tree(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<↑/↓>", "Move"),
@@ -4150,6 +4332,16 @@ impl App {
                     ("<l>", "Logs"),
                     ("<y>", "YAML"),
                     ("<c>", "Copy"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::Nodes => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Inspect"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<x>", "Actions"),
+                    ("<s>", "Shell"),
                     ("<?>", "Help"),
                 ][..]),
                 _ => None,
