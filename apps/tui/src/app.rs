@@ -2278,6 +2278,10 @@ impl App {
                     }
                     KeyCode::Backspace => { ai.input.pop(); },
                     KeyCode::Enter => {
+                        if ai.is_busy {
+                            self.set_toast("⚠️ Assistant is busy processing a query. Please wait or press <Ctrl+l> to clear.".to_string(), Theme::status_warn());
+                            return;
+                        }
                         if !ai.input.trim().is_empty() {
                             let query = ai.input.clone();
                             ai.start_turn(query.clone());

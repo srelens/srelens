@@ -416,96 +416,190 @@ pub async fn run_boxed_cursor_turn(
     );
 
     let mut cmd = tokio::process::Command::new(&cmd_spec.program);
-    cmd.args(&cmd_spec.args);
     for (k, v) in &cmd_spec.env {
         cmd.env(k, v);
     }
     cmd.current_dir(temp_workspace.path());
-    if !model.is_empty() && model != "default" {
-        cmd.arg("--model").arg(&model);
-    }
     if let Some(key) = api_key {
         cmd.env("CURSOR_API_KEY", key);
     }
+
+    // Insert --model and --stream-partial-output BEFORE the trailing "--" and positional prompt
+    let mut final_args = Vec::new();
+    let dash_dash_idx = cmd_spec.args.iter().position(|a| a == "--").unwrap_or(cmd_spec.args.len());
+    for (i, arg) in cmd_spec.args.iter().enumerate() {
+        if i == dash_dash_idx {
+            if !cmd_spec.args.contains(&"--stream-partial-output".to_string()) {
+                final_args.push("--stream-partial-output".to_string());
+            }
+            if !model.is_empty() && model != "default" {
+                final_args.push("--model".to_string());
+                final_args.push(model.clone());
+            }
+        }
+        final_args.push(arg.clone());
+    }
+    cmd.args(&final_args);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
     // 5. Spawn and stream results
-    let mut total_output_chars: usize = 0;
-    let mut has_emitted_usage = false;
-
     match cmd.spawn() {
         Ok(mut child) => {
-            if let Some(stdout) = child.stdout.take() {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut reader = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let trimmed = line.trim();
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) = crate::app::extract_usage_metrics(&v) {
-                            let dur_val = dur_t.unwrap_or_else(|| start_time.elapsed().as_millis() as u64);
-                            let payload = format!("{}|{}|{}|{}|{}", prompt_t, comp_t, cached_t, total_t, dur_val);
-                            let _ = event_tx.send(AppEvent::ActionResult {
-                                title: format!("ai_usage:{}", active_ctx),
-                                result: Ok(payload),
-                            });
-                            has_emitted_usage = true;
+            let stderr_pipe = child.stderr.take();
+            let stderr_task = tokio::spawn(async move {
+                if let Some(stderr) = stderr_pipe {
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let mut reader = BufReader::new(stderr).lines();
+                    let mut lines = Vec::new();
+                    while let Ok(Some(l)) = reader.next_line().await {
+                        let trimmed = l.trim().to_string();
+                        if !trimmed.is_empty() {
+                            lines.push(trimmed);
                         }
+                    }
+                    lines
+                } else {
+                    Vec::new()
+                }
+            });
 
-                        if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
-                            if t == "thinking" {
-                                let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: format!("ai_status:{}", active_ctx),
-                                    result: Ok("Thinking & analyzing cluster query...".to_string()),
+            let stdout_pipe = child.stdout.take();
+            let active_ctx_clone = active_ctx.clone();
+            let event_tx_clone = event_tx.clone();
+            let start_time_copy = start_time;
+
+            let stdout_task = tokio::spawn(async move {
+                let mut chars_count = 0;
+                let mut emitted_usage = false;
+                let mut first_error = None;
+
+                if let Some(stdout) = stdout_pipe {
+                    use tokio::io::{AsyncBufReadExt, BufReader};
+                    let mut reader = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        let trimmed = line.trim();
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) = crate::app::extract_usage_metrics(&v) {
+                                let dur_val = dur_t.unwrap_or_else(|| start_time_copy.elapsed().as_millis() as u64);
+                                let payload = format!("{}|{}|{}|{}|{}", prompt_t, comp_t, cached_t, total_t, dur_val);
+                                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                    title: format!("ai_usage:{}", active_ctx_clone),
+                                    result: Ok(payload),
                                 });
-                            } else if t == "tool_call" {
-                                let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                                if subtype == "started" {
-                                    if let Some((id, tool, args)) = crate::app::extract_tool_call_start_info(&v) {
-                                        let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: format!("ai_status:{}", active_ctx),
-                                            result: Ok(format!("Executing {} query on cluster...", tool)),
-                                        });
-                                        let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: format!("ai_tool_start:{}", active_ctx),
-                                            result: Ok(format!("{}|{}|{}", id, tool, args)),
-                                        });
-                                    }
-                                } else if subtype == "completed" {
-                                    if let Some((id, is_err)) = crate::app::extract_tool_call_completed_info(&v) {
-                                        let status_str = if is_err { "error" } else { "ok" };
-                                        let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: format!("ai_tool_done:{}", active_ctx),
-                                            result: Ok(format!("{}|{}", id, status_str)),
-                                        });
+                                emitted_usage = true;
+                            }
+
+                            if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
+                                if t == "thinking" {
+                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                        title: format!("ai_status:{}", active_ctx_clone),
+                                        result: Ok("Thinking & analyzing cluster query...".to_string()),
+                                    });
+                                } else if t == "tool_call" {
+                                    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                                    if subtype == "started" {
+                                        if let Some((id, tool, args)) = crate::app::extract_tool_call_start_info(&v) {
+                                            let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                                title: format!("ai_status:{}", active_ctx_clone),
+                                                result: Ok(format!("Executing {} query on cluster...", tool)),
+                                            });
+                                            let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                                title: format!("ai_tool_start:{}", active_ctx_clone),
+                                                result: Ok(format!("{}|{}|{}", id, tool, args)),
+                                            });
+                                        }
+                                    } else if subtype == "completed" {
+                                        if let Some((id, is_err)) = crate::app::extract_tool_call_completed_info(&v) {
+                                            let status_str = if is_err { "error" } else { "ok" };
+                                            let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                                title: format!("ai_tool_done:{}", active_ctx_clone),
+                                                result: Ok(format!("{}|{}", id, status_str)),
+                                            });
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    let events = srelens_agent::cursor::parse_line(&line);
-                    for ev in events {
-                        match ev {
-                            srelens_agent::event::AgentEvent::TextDelta { text } => {
-                                total_output_chars += text.len();
-                                let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: format!("ai_chunk:{}", active_ctx),
-                                    result: Ok(text),
-                                });
+                        let events = srelens_agent::cursor::parse_line(&line);
+                        for ev in events {
+                            match ev {
+                                srelens_agent::event::AgentEvent::TextDelta { text } => {
+                                    chars_count += text.len();
+                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                        title: format!("ai_chunk:{}", active_ctx_clone),
+                                        result: Ok(text),
+                                    });
+                                }
+                                srelens_agent::event::AgentEvent::Error { message } => {
+                                    if first_error.is_none() {
+                                        first_error = Some(message.clone());
+                                    }
+                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                        title: format!("ai_chunk:{}", active_ctx_clone),
+                                        result: Ok(format!("\n[Error: {}]", message)),
+                                    });
+                                }
+                                _ => {}
                             }
-                            srelens_agent::event::AgentEvent::Error { message } => {
-                                let _ = event_tx.send(AppEvent::ActionResult {
-                                    title: format!("ai_chunk:{}", active_ctx),
-                                    result: Ok(format!("\n[Error: {}]", message)),
-                                });
-                            }
-                            _ => {}
                         }
                     }
                 }
+                (chars_count, emitted_usage, first_error)
+            });
+
+            // Wait with a 120-second timeout so the UI never hangs indefinitely
+            let timeout_duration = std::time::Duration::from_secs(120);
+            let wait_res = tokio::time::timeout(timeout_duration, child.wait()).await;
+
+            let (total_output_chars, has_emitted_usage, fatal_error_msg) = match stdout_task.await {
+                Ok(res) => res,
+                Err(_) => (0, false, None),
+            };
+
+            let stderr_lines = stderr_task.await.unwrap_or_default();
+
+            match wait_res {
+                Ok(Ok(status)) => {
+                    if !status.success() || (total_output_chars == 0 && fatal_error_msg.is_none()) {
+                        let mut err_detail = if let Some(msg) = fatal_error_msg {
+                            msg
+                        } else if !stderr_lines.is_empty() {
+                            stderr_lines.join(" ")
+                        } else {
+                            format!("Cursor Agent exited with status: {} without generating output.", status)
+                        };
+
+                        if err_detail.contains("resource_exhausted")
+                            || err_detail.contains("503")
+                            || err_detail.contains("Provider Error")
+                        {
+                            err_detail = "Cursor model provider error (503 Service Unavailable / Resource Exhausted). Cursor's upstream API is temporarily failing. Try switching the model in settings (<Ctrl+s>) or try again in a few moments.".to_string();
+                        }
+
+                        let _ = event_tx.send(AppEvent::ActionResult {
+                            title: format!("ai_chunk:{}", active_ctx),
+                            result: Ok(format!("\n[Error: {}]", err_detail)),
+                        });
+                    }
+                }
+                Ok(Err(e)) => {
+                    let _ = event_tx.send(AppEvent::ActionResult {
+                        title: format!("ai_chunk:{}", active_ctx),
+                        result: Ok(format!("\n[Error: Failed waiting for cursor-agent: {}]", e)),
+                    });
+                }
+                Err(_) => {
+                    // Process timed out! Kill it so it doesn't leak in the background
+                    let _ = child.kill().await;
+                    let _ = event_tx.send(AppEvent::ActionResult {
+                        title: format!("ai_chunk:{}", active_ctx),
+                        result: Ok("\n[Error: Cursor Agent timed out after 120 seconds. The upstream provider did not respond. Try switching to another model (e.g. gemini-3-flash) in <Ctrl+s> settings.]".to_string()),
+                    });
+                }
             }
-            let _ = child.wait().await;
+
             let _ = shutdown_tx.send(());
             if !has_emitted_usage {
                 let dur_val = start_time.elapsed().as_millis() as u64;
