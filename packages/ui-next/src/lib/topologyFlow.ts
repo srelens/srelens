@@ -179,6 +179,9 @@ export interface TopologyLayout {
   tiers: Tier[];
   lanes: NamespaceLane[];
   band: Band | null;
+  /** Which column the entry tiers stand in — one behind an Ingress column,
+   *  zero when the picture has no Ingress. */
+  entryRank: number;
   /** Every namespace drawn, sorted. The screen labels nodes with theirs only
    *  when there is more than one, because on a single-namespace graph the
    *  namespace is the title and repeating it on every box is noise. */
@@ -334,8 +337,22 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
    * ranks, a call from a tier to itself is not a hop, and no ordering of
    * cycle-breaking can split what routing joined.
    */
+  /**
+   * An Ingress is not part of the tier it routes to. It is the way in from
+   * outside, and it gets a column of its own, first — a reader asked for
+   * exactly that, having seen ten `login.*` Ingresses drawn as the top of a
+   * Service's tier. So only Service-to-pods routing joins a tier; an Ingress
+   * stands alone, and the tiers it fronts are the entries.
+   */
+  const laneOf = new Map(nodes.map((n) => [n.id, n.lane]));
   const routed: [string, string][] = edges
-    .filter((e) => e.kind === "routes" && present.has(e.from) && present.has(e.to))
+    .filter(
+      (e) =>
+        e.kind === "routes" &&
+        present.has(e.from) &&
+        present.has(e.to) &&
+        laneOf.get(e.from) !== "route",
+    )
     .map((e) => [e.from, e.to]);
   const tierOf = new Map<string, string>();
   for (const group of groupColumn(nodes, routed)) {
@@ -375,8 +392,10 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
    * inside the house.
    */
   const entries = new Set<string>();
-  for (const node of nodes) {
-    if (node.lane === "route") entries.add(tierOf.get(node.id) as string);
+  for (const edge of edges) {
+    if (edge.kind === "routes" && laneOf.get(edge.from) === "route" && present.has(edge.to)) {
+      entries.add(tierOf.get(edge.to) as string);
+    }
   }
   for (const [from, children] of out) {
     out.set(
@@ -405,7 +424,16 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
       if (left === 0) queue.push(to);
     }
   }
-  return new Map(ids.map((id) => [id, tierRank.get(tierOf.get(id) as string) ?? 0]));
+  // With any Ingress in the picture the first column is theirs, and every
+  // tier moves one along: the Services they front, and the Services nothing
+  // calls, together at the entry level behind them.
+  const shift = nodes.some((n) => n.lane === "route") ? 1 : 0;
+  return new Map(
+    ids.map((id) => [
+      id,
+      laneOf.get(id) === "route" ? 0 : (tierRank.get(tierOf.get(id) as string) ?? 0) + shift,
+    ]),
+  );
 }
 
 /**
@@ -513,9 +541,15 @@ export function orderColumn(
   return orderGroups(column, neighbours, placedRows, within).flat();
 }
 
-/** `ENTRY` for the first column, then the hop count. */
-export function columnLabel(rank: number): string {
-  return rank === 0 ? "ENTRY" : `HOP ${rank}`;
+/**
+ * `INGRESS` when there is one, `ENTRY` for the level behind it, then the hop
+ * count from there. `entryRank` is the column the entry tiers stand in: one
+ * when an Ingress column precedes them, zero when nothing does.
+ */
+export function columnLabel(rank: number, entryRank = 0): string {
+  if (rank < entryRank) return "INGRESS";
+  if (rank === entryRank) return "ENTRY";
+  return `HOP ${rank - entryRank}`;
 }
 
 const TOP = PADDING + HEADER_HEIGHT;
@@ -830,6 +864,7 @@ export function layoutFlow(graph: TopologyGraph): TopologyLayout {
     tiers: [...flow.tiers, ...band.tiers],
     lanes: flow.lanes,
     band: band.header,
+    entryRank: flow.entryRank,
     namespaces: [...new Set(placed.map((n) => n.namespace))].filter(Boolean).sort(),
     width: Math.max(flow.right, band.right) + PADDING,
     height: (band.header ? band.bottom : flow.bottom) + PADDING,
@@ -1017,6 +1052,7 @@ function placeFlow(
   tiers: Tier[];
   columns: Column[];
   lanes: NamespaceLane[];
+  entryRank: number;
   bottom: number;
   right: number;
 } {
@@ -1061,9 +1097,12 @@ function placeFlow(
    */
   // The links that hold a tier together — a Service and the pods answering it
   // stand in one column, and those two have to end up adjacent.
+  const isRoute = new Set(nodes.filter((n) => n.lane === "route").map((n) => n.id));
   const within: [string, string][] = edges
-    .filter((edge) => edge.kind === "routes")
+    .filter((edge) => edge.kind === "routes" && !isRoute.has(edge.from))
     .map((edge) => [edge.from, edge.to]);
+  // The Ingresses have the first column to themselves when there are any.
+  const entryIndex = isRoute.size > 0 ? 1 : 0;
 
   let rows = new Map<string, number>();
   let ordered: FlowNode[][][] = members.map((column) => [column]);
@@ -1180,7 +1219,7 @@ function placeFlow(
   const rowsIn = (groups: FlowNode[][]) => groups.reduce((n, g) => n + shapeTier(g).rows, 0);
   const squarish = (n: number) => Math.max(1, Math.ceil(Math.sqrt(n * 1.6)));
   const plans = laneKeys.map((lane) => {
-    const entry = (ordered[0] ?? []).filter((g) => laneOf(g) === lane);
+    const entry = (ordered[entryIndex] ?? []).filter((g) => laneOf(g) === lane);
     const callers = entry.filter(isCaller);
     const leaves = entry.filter((g) => !isCaller(g));
     const kCallers = callers.length > 0 ? Math.min(callers.length, squarish(callers.length)) : 0;
@@ -1209,13 +1248,16 @@ function placeFlow(
       return c + l + (c > 0 && l > 0 ? GRID_GAP : 0);
     }),
   );
-  const entryRight = PADDING + entryWidth;
+  const entryLeft = PADDING + (entryIndex === 1 ? NODE_WIDTH + COLUMN_GAP : 0);
+  const entryRight = entryLeft + entryWidth;
   const colWidth = ordered.map((column, c) =>
-    c === 0 ? entryWidth : Math.max(NODE_WIDTH, ...column.map((g) => shapeTier(g).width)),
+    c === entryIndex
+      ? entryWidth
+      : Math.max(NODE_WIDTH, ...column.map((g) => shapeTier(g).width)),
   );
   const hopX = (c: number) => {
     let x = entryRight + COLUMN_GAP;
-    for (let i = 1; i < c; i++) x += colWidth[i] + COLUMN_GAP;
+    for (let i = entryIndex + 1; i < c; i++) x += colWidth[i] + COLUMN_GAP;
     return x;
   };
 
@@ -1224,18 +1266,30 @@ function placeFlow(
   for (const plan of plans) {
     let bottom = top;
     const inner: PlacedNode[] = [];
+    if (entryIndex === 1) {
+      // The Ingresses, in one stack against the entries they route to.
+      const gates = ordered[0].filter((g) => laneOf(g) === plan.lane);
+      if (gates.length > 0) bottom = Math.max(bottom, pack(gates, 1, PADDING, 0, top).bottom);
+    }
     if (plan.kCallers > 0) {
-      const out = pack(plan.callers, plan.kCallers, entryRight - callersWidth(plan), 0, top, (node, sub) => {
-        if (sub < plan.kCallers - 1) inner.push(node);
-      });
+      const out = pack(
+        plan.callers,
+        plan.kCallers,
+        entryRight - callersWidth(plan),
+        entryIndex,
+        top,
+        (node, sub) => {
+          if (sub < plan.kCallers - 1) inner.push(node);
+        },
+      );
       bottom = Math.max(bottom, out.bottom);
     }
     if (plan.kLeaves > 0) {
       const x0 =
         entryRight - (plan.kCallers > 0 ? callersWidth(plan) + GRID_GAP : 0) - leavesWidth(plan);
-      bottom = Math.max(bottom, pack(plan.leaves, plan.kLeaves, x0, 0, top).bottom);
+      bottom = Math.max(bottom, pack(plan.leaves, plan.kLeaves, x0, entryIndex, top).bottom);
     }
-    for (let c = 1; c < ordered.length; c++) {
+    for (let c = entryIndex + 1; c < ordered.length; c++) {
       const groups = ordered[c].filter((g) => laneOf(g) === plan.lane);
       if (groups.length === 0) continue;
       bottom = Math.max(bottom, pack(groups, 1, hopX(c), c, top).bottom);
@@ -1251,8 +1305,8 @@ function placeFlow(
 
   const columns: Column[] = ordered.map((column, c) => ({
     rank: c,
-    label: columnLabel(c),
-    x: c === 0 ? PADDING : hopX(c),
+    label: columnLabel(c, entryIndex),
+    x: c < entryIndex ? PADDING : c === entryIndex ? entryLeft : hopX(c),
     count: column.reduce((n, g) => n + g.length, 0),
   }));
   const last = lanes.at(-1);
@@ -1270,9 +1324,10 @@ function placeFlow(
     tiers,
     columns,
     lanes: multi ? lanes : [],
+    entryRank: entryIndex,
     bottom: bottom + (bowing ? BACKWARD_CLEARANCE : 0),
     right:
-      ordered.length > 1
+      ordered.length > entryIndex + 1
         ? hopX(ordered.length - 1) + colWidth[ordered.length - 1]
         : entryRight,
   };

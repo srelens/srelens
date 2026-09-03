@@ -93,11 +93,17 @@ describe("rankNodes", () => {
     // drew the demo namespace eight columns wide and two rows tall, every
     // column a Service followed by the one Deployment it fronts — the same
     // tier written twice, and unreadable at the zoom it took to fit.
+    // The Ingress has the first column to itself; the tier it fronts is the
+    // entry level behind it, Service and pods together.
     const g = chain();
     const rank = rankNodes(fold(g).nodes, g.edges);
     expect(rank.get("Ingress/web")).toBe(0);
-    expect(rank.get("Service/checkout")).toBe(0);
-    expect(rank.get("Deployment/checkout")).toBe(0);
+    expect(rank.get("Service/checkout")).toBe(1);
+    expect(rank.get("Deployment/checkout")).toBe(1);
+    // Without any Ingress there is no such column, and entries are rank zero.
+    const bare = rankNodes(fold(twoTiers()).nodes, twoTiers().edges);
+    expect(bare.get("Service/checkout")).toBe(0);
+    expect(bare.get("Service/payments")).toBe(1);
   });
 
   it("carries a cross-service call forward instead of backwards", () => {
@@ -177,8 +183,8 @@ describe("rankNodes", () => {
     );
     const rank = rankNodes(fold(g).nodes, g.edges);
     expect(rank.get("Ingress/login")).toBe(0);
-    expect(rank.get("Service/auth")).toBe(0);
-    expect(rank.get("Deployment/app")).toBe(0);
+    expect(rank.get("Service/auth")).toBe(1);
+    expect(rank.get("Deployment/app")).toBe(1);
   });
 
   it("terminates on a cycle rather than ranking forever", () => {
@@ -287,10 +293,9 @@ describe("layoutFlow", () => {
     );
     const out = layoutFlow(g);
     const at = (id: string) => out.nodes.find((n) => n.id === id)!;
-    // Inside a tier the order is the order traffic passes through: the way in
-    // above the address, what answers beside it.
-    expect(at("Service/checkout").x).toBe(at("Ingress/web").x);
-    expect(at("Service/checkout").y).toBeGreaterThan(at("Ingress/web").y);
+    // The order traffic passes through: the way in, then the address with
+    // what answers beside it.
+    expect(at("Service/checkout").x).toBeGreaterThan(at("Ingress/web").x);
     expect(at("Deployment/checkout").y).toBe(at("Service/checkout").y);
     expect(at("Deployment/checkout").x).toBeGreaterThan(at("Service/checkout").x);
     expect(at("Deployment/other").y).toBe(at("Service/other").y);
@@ -325,35 +330,35 @@ describe("layoutFlow", () => {
     // across more than one sub-column; all of them are still entry points.
     for (const name of ["docs", "status", "legacy"]) {
       expect(x(`Deployment/${name}`)).toBeLessThan(x("Deployment/checkout"));
-      expect(out.nodes.find((n) => n.id === `Deployment/${name}`)!.rank).toBe(0);
+      expect(out.nodes.find((n) => n.id === `Deployment/${name}`)!.rank).toBe(out.entryRank);
+      // And its Ingress stands in the Ingress column, left of everything.
+      expect(x(`Ingress/${name}`)).toBeLessThan(x(`Deployment/${name}`));
     }
     expect(new Set(["docs", "status", "legacy"].map((n) => x(`Deployment/${n}`))).size).toBe(3);
     expect(x("Deployment/checkout")).toBeLessThan(x("Service/payments"));
-    expect(out.columns.map((c) => c.label)).toEqual(["ENTRY", "HOP 1"]);
+    expect(out.columns.map((c) => c.label)).toEqual(["INGRESS", "ENTRY", "HOP 1"]);
     // And the picture is now wider than it is tall.
     expect(out.width).toBeGreaterThan(out.height);
   });
 
-  it("reads a tier left to right: the Ingress over the Service, the pods beside it", () => {
+  it("reads left to right: Ingress, then the Service with its pods beside it", () => {
     // Internet, Ingress, Service, pods, then the call to the next tier — the
-    // order a request takes, and the order the eye should. The Ingress sits
-    // ABOVE the Service rather than left of it, because a Service that is
-    // both Ingress-fronted and called internally would otherwise have its
-    // incoming call drawn through the Ingress card.
+    // order a request takes, and the order the eye should. The Ingress is a
+    // column of its own; the Service and its pods are one tier behind it.
     const out = layoutFlow(chain());
     const at = (id: string) => out.nodes.find((n) => n.id === id)!;
-    expect(at("Ingress/web").x).toBe(at("Service/checkout").x);
-    expect(at("Ingress/web").y).toBeLessThan(at("Service/checkout").y);
+    expect(at("Ingress/web").x).toBeLessThan(at("Service/checkout").x);
+    expect(at("Ingress/web").y).toBe(at("Service/checkout").y);
     expect(at("Deployment/checkout").x).toBeGreaterThan(at("Service/checkout").x);
     expect(at("Deployment/checkout").y).toBe(at("Service/checkout").y);
-    // Ingress to Service is a short stub straight down; Service to pods a
-    // short forward arrow. Neither is a bow.
-    const stub = out.edges.find((e) => e.from === "Ingress/web")!;
-    expect(stub.path).toContain(" L ");
+    // Both links are short forward arrows; neither is a bow.
+    const into = out.edges.find((e) => e.from === "Ingress/web")!;
+    expect(into.path.startsWith(`M ${at("Ingress/web").x + NODE_WIDTH} `)).toBe(true);
     const across = out.edges.find((e) => e.from === "Service/checkout")!;
     expect(across.path.startsWith(`M ${at("Service/checkout").x + NODE_WIDTH} `)).toBe(true);
-    // One panel round the three.
+    // One panel, round the Service and its pods; the Ingress stands outside it.
     expect(out.tiers).toHaveLength(1);
+    expect(out.tiers[0].x).toBeGreaterThan(at("Ingress/web").x);
     expect(out.tiers[0].width).toBeGreaterThan(NODE_WIDTH * 2);
   });
 
@@ -380,7 +385,8 @@ describe("layoutFlow", () => {
   it("keeps an Ingress-fronted tier in the flow even before any call is known", () => {
     // Traffic enters there whether or not anything downstream has been seen.
     const out = layoutFlow(chain());
-    expect(out.columns.map((c) => c.label)).toEqual(["ENTRY"]);
+    expect(out.columns.map((c) => c.label)).toEqual(["INGRESS", "ENTRY"]);
+    expect(out.entryRank).toBe(1);
     expect(out.band).toBeNull();
   });
 

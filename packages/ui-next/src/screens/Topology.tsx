@@ -358,12 +358,41 @@ function Canvas({
   onSelect: (id: string | null) => void;
 }) {
   const frame = useRef<HTMLDivElement>(null);
-  const [view, setView] = useState<Transform>({ k: 1, tx: 0, ty: 0 });
+  const layer = useRef<HTMLDivElement>(null);
+  const grid = useRef<SVGPatternElement>(null);
+  const view = useRef<Transform>({ k: 1, tx: 0, ty: 0 });
+  const [zoom, setZoom] = useState(1);
+
+  /**
+   * The view is a CSS transform on a wrapper, written by hand, not React
+   * state on an SVG group.
+   *
+   * It was the latter, and on a few hundred nodes every wheel tick and every
+   * pointer move re-rendered the component and then had the browser
+   * re-rasterise every path and glyph under a new SVG transform. Memoising the
+   * children fixed the first half and left the second, which is most of it.
+   * A CSS transform on a `will-change` element is applied by the compositor:
+   * the graph is rasterised once and panned and scaled as a texture, and
+   * nothing is re-rendered or re-drawn until the reader stops. The dot grid
+   * behind it gets the same transform on its pattern, one attribute on one
+   * element. The only React state left is the zoom readout.
+   */
+  const apply = useCallback((next: Transform) => {
+    view.current = next;
+    if (layer.current) {
+      layer.current.style.transform = `translate(${next.tx}px, ${next.ty}px) scale(${next.k})`;
+    }
+    grid.current?.setAttribute(
+      "patternTransform",
+      `translate(${next.tx} ${next.ty}) scale(${next.k})`,
+    );
+    setZoom(next.k);
+  }, []);
 
   const fitToFrame = useCallback(() => {
     const box = frame.current?.getBoundingClientRect();
-    setView(fitTransform(layout, { width: box?.width ?? 0, height: box?.height ?? 0 }));
-  }, [layout]);
+    apply(fitTransform(layout, { width: box?.width ?? 0, height: box?.height ?? 0 }));
+  }, [layout, apply]);
 
   /**
    * Whenever the graph itself changes — a different namespace, a reload that
@@ -390,7 +419,7 @@ function Canvas({
     const tryFit = () => {
       const box = node.getBoundingClientRect();
       if (!(box.width > 0) || !(box.height > 0)) return;
-      setView(fitTransform(layout, box));
+      apply(fitTransform(layout, box));
       observer?.disconnect();
     };
     tryFit();
@@ -402,7 +431,7 @@ function Canvas({
       observer.observe(node);
     }
     return () => observer?.disconnect();
-  }, [layout]);
+  }, [layout, apply]);
 
   /**
    * Wheel to zoom, bound by hand rather than through `onWheel`.
@@ -418,13 +447,11 @@ function Canvas({
       event.preventDefault();
       const box = node.getBoundingClientRect();
       const factor = Math.exp(-event.deltaY * 0.0015);
-      setView((current) =>
-        zoomAt(current, factor, event.clientX - box.left, event.clientY - box.top),
-      );
+      apply(zoomAt(view.current, factor, event.clientX - box.left, event.clientY - box.top));
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [apply]);
 
   /**
    * Drag to pan.
@@ -448,7 +475,7 @@ function Canvas({
       at.moved = true;
       at.x = event.clientX;
       at.y = event.clientY;
-      setView((current) => ({ ...current, tx: current.tx + dx, ty: current.ty + dy }));
+      apply({ ...view.current, tx: view.current.tx + dx, ty: view.current.ty + dy });
     };
     const onUp = () => {
       window.setTimeout(() => {
@@ -461,7 +488,7 @@ function Canvas({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, []);
+  }, [apply]);
 
   const dragged = () => drag.current?.moved === true;
 
@@ -522,35 +549,42 @@ function Canvas({
         if (event.key === "Escape") onSelect(null);
       }}
     >
-      <svg
-        role="group"
-        aria-label="Namespace topology"
-        className="h-full w-full select-none"
-        width="100%"
-        height="100%"
-      >
+      {/* The ground, in screen space and behind everything: something for
+          the cards to sit ON. The canvas was the same white as the cards,
+          which is most of why the picture read as a diagram printed on a
+          page rather than as objects on a surface. */}
+      <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
         <defs>
           {/* The grid is a screen-space fill whose PATTERN carries the view
-              transform, not a shape inside the transformed group. Both put the
-              dots in the same place; this way one rectangle covers a pane of
-              any size at any zoom, where a tiled shape would have to be sized
-              to the graph and would run out at the edges of a pan. */}
+              transform. One rectangle covers a pane of any size at any zoom,
+              where a tiled shape inside the graph would have to be sized to
+              it and would run out at the edges of a pan. */}
           <pattern
+            ref={grid}
             id="topo-grid"
             width={24}
             height={24}
             patternUnits="userSpaceOnUse"
-            patternTransform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}
           >
             <circle cx={1} cy={1} r={1} className="fill-rule-strong" opacity={0.55} />
           </pattern>
         </defs>
-        {/* Something for the cards to sit ON. The canvas was the same white as
-            the cards, which is most of why the picture read as a diagram
-            printed on a page rather than as objects on a surface. */}
         <rect width="100%" height="100%" className="fill-canvas" />
         <rect width="100%" height="100%" fill="url(#topo-grid)" />
-        <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
+      </svg>
+      {/* The graph, drawn once at 1:1 and moved as a texture — see `apply`. */}
+      <div
+        ref={layer}
+        className="absolute top-0 left-0 origin-top-left will-change-transform"
+        style={{ width: layout.width, height: layout.height }}
+      >
+        <svg
+          role="group"
+          aria-label="Namespace topology"
+          className="block select-none"
+          width={layout.width}
+          height={layout.height}
+        >
           {layout.columns.map((column) => (
             <g key={column.rank}>
               {column.rank > 0 && (
@@ -648,15 +682,13 @@ function Canvas({
               onSelect={select}
             />
           ))}
-        </g>
-      </svg>
+        </svg>
+      </div>
       <Zoom
-        zoom={view.k}
+        zoom={zoom}
         onZoom={(factor) => {
           const box = frame.current?.getBoundingClientRect();
-          setView((current) =>
-            zoomAt(current, factor, (box?.width ?? 0) / 2, (box?.height ?? 0) / 2),
-          );
+          apply(zoomAt(view.current, factor, (box?.width ?? 0) / 2, (box?.height ?? 0) / 2));
         }}
         onFit={fitToFrame}
       />
@@ -1102,9 +1134,13 @@ function Inspector({
               // declared, routed or measured touches it, which is a different
               // thing from it talking to nobody.
               "On no known path"
-            : node.rank === 0
+            : node.rank < layout.entryRank
               ? "Entry point"
-              : `${node.rank} hop${node.rank === 1 ? "" : "s"} in`}
+              : node.rank === layout.entryRank
+                ? layout.entryRank > 0
+                  ? "Entry service"
+                  : "Entry point"
+                : `${node.rank - layout.entryRank} hop${node.rank - layout.entryRank === 1 ? "" : "s"} in`}
         </dd>
         {node.ready !== null && node.desired !== null && (
           <>

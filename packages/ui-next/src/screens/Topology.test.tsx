@@ -778,6 +778,24 @@ describe("Topology", () => {
     expect(pips.filter((p) => p.getAttribute("class")?.includes("fill-rule"))).toHaveLength(3);
   });
 
+  it("pans and zooms by moving one composited layer, not by re-rendering the graph", async () => {
+    // On a few hundred nodes, a wheel tick that went through React state and
+    // an SVG transform re-rendered the component and re-rasterised every
+    // path. The view is now a CSS transform on the wrapper, written by hand.
+    render(<Topology />);
+    const canvas = await screen.findByRole("group", { name: "Namespace topology" });
+    const layer = canvas.parentElement as HTMLElement;
+    const frame = layer.parentElement as HTMLElement;
+    const before = layer.style.transform;
+
+    frame.dispatchEvent(new WheelEvent("wheel", { deltaY: -240, bubbles: true, cancelable: true }));
+    expect(layer.style.transform).not.toBe(before);
+    expect(layer.style.transform).toMatch(/scale\(1\.\d+\)/);
+    // The graph itself carries no transform of its own any more.
+    expect(canvas.getAttribute("transform")).toBeNull();
+    expect(canvas.querySelector("g[transform]")).toBeNull();
+  });
+
   it("opens showing the whole graph, and can be zoomed off it", async () => {
     // A production namespace does not fit at 1:1, and the version this
     // replaces gave a reader no way to see the shape of one — only to scroll
