@@ -1100,6 +1100,23 @@
     font-size: 8.5px;
     text-anchor: middle;
   }
+  /* Level of detail. What a card says shrinks with it: below 70% the small
+     print — kind, metric, replica squares, edge rates — is unreadable, and
+     below 40% so are the names. Hidden rather than merely tiny, because a
+     glyph nobody can read costs exactly as much to rasterise as one they
+     can, and a zoomed-out graph of a few hundred nodes is thousands of them
+     on every step of the wheel. */
+  [data-lod="mid"] .node-kind,
+  [data-lod="mid"] .node-metric,
+  [data-lod="mid"] .edge-label,
+  [data-lod="mid"] .pips,
+  [data-lod="far"] .node-kind,
+  [data-lod="far"] .node-metric,
+  [data-lod="far"] .edge-label,
+  [data-lod="far"] .pips,
+  [data-lod="far"] .node-label {
+    display: none;
+  }
   .flow {
     stroke-dasharray: 5 4;
     animation: flow 900ms linear infinite;

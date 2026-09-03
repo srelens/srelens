@@ -361,7 +361,7 @@ function Canvas({
   const layer = useRef<HTMLDivElement>(null);
   const grid = useRef<SVGPatternElement>(null);
   const view = useRef<Transform>({ k: 1, tx: 0, ty: 0 });
-  const [zoom, setZoom] = useState(1);
+  const readout = useRef<HTMLSpanElement>(null);
 
   /**
    * The view is a CSS transform on a wrapper, written by hand, not React
@@ -375,18 +375,26 @@ function Canvas({
    * the graph is rasterised once and panned and scaled as a texture, and
    * nothing is re-rendered or re-drawn until the reader stops. The dot grid
    * behind it gets the same transform on its pattern, one attribute on one
-   * element. The only React state left is the zoom readout.
+   * element. Even the zoom readout is written by hand, so a gesture involves
+   * no React at all.
+   *
+   * The layer also carries a level of detail. Zoomed out, a card's small
+   * print is unreadable anyway, and hundreds of glyphs that nobody can read
+   * still cost the same to rasterise as ones they can — the kit's stylesheet
+   * hides them below 70% and the names too below 40%, which is most of what
+   * re-rasterising a zoom step used to cost.
    */
   const apply = useCallback((next: Transform) => {
     view.current = next;
     if (layer.current) {
       layer.current.style.transform = `translate(${next.tx}px, ${next.ty}px) scale(${next.k})`;
+      layer.current.dataset.lod = next.k < 0.4 ? "far" : next.k < 0.7 ? "mid" : "near";
     }
     grid.current?.setAttribute(
       "patternTransform",
       `translate(${next.tx} ${next.ty}) scale(${next.k})`,
     );
-    setZoom(next.k);
+    if (readout.current) readout.current.textContent = `${Math.round(next.k * 100)}%`;
   }, []);
 
   const fitToFrame = useCallback(() => {
@@ -685,7 +693,7 @@ function Canvas({
         </svg>
       </div>
       <Zoom
-        zoom={zoom}
+        readout={readout}
         onZoom={(factor) => {
           const box = frame.current?.getBoundingClientRect();
           apply(zoomAt(view.current, factor, (box?.width ?? 0) / 2, (box?.height ?? 0) / 2));
@@ -808,14 +816,14 @@ function Replicas({ node, x, y }: { node: PlacedNode; x: number; y: number }) {
   if (desired > MAX_PIPS) {
     const share = Math.max(0, Math.min(1, ready / desired));
     return (
-      <g>
+      <g className="pips">
         <rect x={x} y={y} width={92} height={5} rx={2.5} className="fill-rule" />
         <rect x={x} y={y} width={92 * share} height={5} rx={2.5} className={fillFor(node.health)} />
       </g>
     );
   }
   return (
-    <g>
+    <g className="pips">
       {Array.from({ length: desired }, (_, i) => (
         <rect
           key={i}
@@ -960,11 +968,13 @@ const Node = memo(function Node({
  * canvas opens on it.
  */
 function Zoom({
-  zoom,
+  readout,
   onZoom,
   onFit,
 }: {
-  zoom: number;
+  /** Written to directly by the canvas on every change of view, so a zoom
+   *  gesture renders nothing through React. */
+  readout: React.RefObject<HTMLSpanElement | null>;
   onZoom: (factor: number) => void;
   onFit: () => void;
 }) {
@@ -978,7 +988,9 @@ function Zoom({
       >
         −
       </button>
-      <span className="num w-10 text-center text-[11px]">{Math.round(zoom * 100)}%</span>
+      <span ref={readout} className="num w-10 text-center text-[11px]">
+        100%
+      </span>
       <button
         type="button"
         className="text-btn px-2 py-0.5 text-sm"
