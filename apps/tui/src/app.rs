@@ -72,6 +72,7 @@ pub struct App {
     pub crds: Vec<CrdMeta>,
     pub is_running: bool,
     pub requires_terminal_suspend: Option<SuspendAction>,
+    pub context_chip_rects: std::cell::RefCell<Vec<(ratatui::layout::Rect, String)>>,
     // Dynamic Cluster Metrics & Information
     pub cluster_version: String,
     pub cluster_name: String,
@@ -217,6 +218,7 @@ impl App {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "Connecting...".to_string(),
             cluster_name,
             server_url,
@@ -661,26 +663,70 @@ impl App {
                         _ => {}
                     }
                 }
-                Modal::ContextPicker { contexts, mut selected_idx, current_context } => {
+                Modal::ContextPicker { contexts, mut selected_idx, mut filter, current_context } => {
+                    let lower_filter = filter.to_lowercase();
+                    let filtered_indices: Vec<usize> = contexts
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| {
+                            if lower_filter.is_empty() {
+                                true
+                            } else {
+                                c.name.to_lowercase().contains(&lower_filter)
+                                    || c.cluster.to_lowercase().contains(&lower_filter)
+                                    || c.provider.as_deref().unwrap_or("").to_lowercase().contains(&lower_filter)
+                                    || c.source_file.to_lowercase().contains(&lower_filter)
+                            }
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    let filtered_count = filtered_indices.len();
+
                     match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
+                        KeyCode::Up => {
                             if selected_idx > 0 {
                                 selected_idx -= 1;
                             } else {
-                                selected_idx = contexts.len().saturating_sub(1);
+                                selected_idx = filtered_count.saturating_sub(1);
                             }
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, current_context });
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if selected_idx + 1 < contexts.len() {
+                        KeyCode::Down => {
+                            if selected_idx + 1 < filtered_count {
                                 selected_idx += 1;
                             } else {
                                 selected_idx = 0;
                             }
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, current_context });
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if selected_idx > 0 {
+                                selected_idx -= 1;
+                            } else {
+                                selected_idx = filtered_count.saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if selected_idx + 1 < filtered_count {
+                                selected_idx += 1;
+                            } else {
+                                selected_idx = 0;
+                            }
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                            filter.push(c);
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Backspace => {
+                            filter.pop();
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
                         }
                         KeyCode::Enter => {
-                            let target_ctx = contexts.get(selected_idx).cloned();
+                            let target_ctx = filtered_indices.get(selected_idx).and_then(|&orig_idx| contexts.get(orig_idx)).map(|c| c.name.clone());
                             self.modal = None;
                             if let Some(ctx) = target_ctx {
                                 self.switch_context(ctx).await;
@@ -1542,8 +1588,31 @@ impl App {
         }
     }
 
-    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+    pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
+
+        // 1. Check if clicking on header context chips
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let clicked_ctx = self.context_chip_rects.borrow().iter().find_map(|(rect, name)| {
+                if mouse.column >= rect.x && mouse.column < rect.x + rect.width
+                    && mouse.row >= rect.y && mouse.row < rect.y + rect.height
+                {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            });
+
+            if let Some(target) = clicked_ctx {
+                if target == ":ctx" {
+                    self.open_context_picker();
+                } else if target != self.active_context {
+                    self.switch_context(target).await;
+                }
+                return;
+            }
+        }
+
         if let ActiveView::Assistant = &self.active_view {
             let vp = self.assistant_state.last_viewport_rect.get();
             if mouse.column >= vp.x && mouse.column < vp.x + vp.width
@@ -1632,16 +1701,32 @@ impl App {
         }
     }
 
+    pub fn open_context_picker(&mut self) {
+        let items: Vec<crate::ui::dialogs::ContextPickerItem> = self.contexts.iter().map(|c| {
+            crate::ui::dialogs::ContextPickerItem {
+                name: c.name.clone(),
+                cluster: c.cluster.clone(),
+                server: c.server.clone(),
+                namespace: c.namespace.clone(),
+                is_local: c.is_local,
+                provider: c.provider.clone(),
+                source_file: c.source_file.clone(),
+            }
+        }).collect();
+        self.modal = Some(Modal::ContextPicker {
+            contexts: items,
+            current_context: self.active_context.clone(),
+            selected_idx: 0,
+            filter: String::new(),
+        });
+    }
+
     pub async fn execute_command_target(&mut self, target: CommandTarget) {
         match target {
             CommandTarget::Resource(kind) => self.switch_view_to_kind(kind).await,
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
-                self.modal = Some(Modal::ContextPicker {
-                    contexts: self.contexts.iter().map(|c| c.name.clone()).collect(),
-                    current_context: self.active_context.clone(),
-                    selected_idx: 0,
-                });
+                self.open_context_picker();
             }
             CommandTarget::Namespaces => {
                 self.modal = Some(Modal::NamespacePicker {
@@ -2149,7 +2234,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // Top header
+                Constraint::Length(3), // Top header (brand, context hotbar, status)
                 Constraint::Min(10),   // Main view body
                 Constraint::Length(2), // Bottom statusbar & key hints
             ])
@@ -2181,6 +2266,17 @@ impl App {
             self.pod_count
         };
 
+        let context_chips: Vec<crate::ui::header::ContextChipInfo> = self.contexts
+            .iter()
+            .enumerate()
+            .map(|(i, c)| crate::ui::header::ContextChipInfo {
+                name: c.name.clone(),
+                is_current: c.name == self.active_context,
+                is_local: c.is_local,
+                index: i + 1,
+            })
+            .collect();
+
         render_header(
             f,
             chunks[0],
@@ -2194,6 +2290,8 @@ impl App {
                 pod_count: active_pods_count,
                 is_connected: self.is_connected,
                 active_view_name: active_view_title,
+                contexts: &context_chips,
+                context_chip_rects: Some(&self.context_chip_rects),
             },
         );
 

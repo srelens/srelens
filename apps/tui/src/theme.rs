@@ -58,6 +58,19 @@ impl Theme {
         Style::default().fg(Self::RED).add_modifier(Modifier::BOLD)
     }
 
+    pub fn context_color(ctx_name: &str, is_local: bool) -> Color {
+        let lower = ctx_name.to_lowercase();
+        if lower.contains("prod") || lower.contains("prd") || lower.contains("live") {
+            Color::Rgb(255, 110, 110) // Coral red for production
+        } else if lower.contains("stage") || lower.contains("stg") || lower.contains("uat") || lower.contains("qa") {
+            Color::Rgb(255, 200, 80) // Amber gold for staging
+        } else if is_local || lower.contains("dev") || lower.contains("kind") || lower.contains("minikube") || lower.contains("k3d") || lower.contains("local") {
+            Color::Rgb(80, 220, 140) // Mint green for local dev
+        } else {
+            Color::Rgb(100, 200, 255) // Sky blue for general clusters
+        }
+    }
+
     pub fn status_dim() -> Style {
         Style::default().fg(Self::DIM)
     }

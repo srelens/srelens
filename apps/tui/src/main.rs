@@ -249,7 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         _ => {
-                            app.handle_mouse(mouse);
+                            app.handle_mouse(mouse).await;
                         }
                     }
                 }

@@ -177,6 +177,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -258,6 +259,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -347,6 +349,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -471,6 +474,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -670,6 +674,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -851,6 +856,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -976,6 +982,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1057,6 +1064,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.31.7".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1171,6 +1179,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1252,6 +1261,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1325,6 +1335,7 @@ mod tests {
             crds: Vec::new(),
             is_running: true,
             requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1348,11 +1359,11 @@ mod tests {
             row: 2,
             modifiers: KeyModifiers::NONE,
         };
-        app.handle_mouse(click_chip);
+        app.handle_mouse(click_chip).await;
         assert_eq!(app.assistant_state.expand_tools, true);
 
         // Clicking again collapses it
-        app.handle_mouse(click_chip);
+        app.handle_mouse(click_chip).await;
         assert_eq!(app.assistant_state.expand_tools, false);
 
         // 2. Ctrl+t also toggles expand_tools
@@ -1362,5 +1373,129 @@ mod tests {
         // 3. Pressing Tab toggles back to previous view (Nodes)!
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
         assert!(matches!(app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
+    }
+
+    #[tokio::test]
+    async fn test_header_context_chips_mouse_click_and_hotbar() {
+        use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+        use tokio::sync::mpsc::unbounded_channel;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use std::collections::{HashMap, HashSet};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "prod-eu".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![
+                srelens_kube::contexts::ContextDto {
+                    name: "prod-eu".to_string(),
+                    stable_id: "kube/prod-eu".to_string(),
+                    cluster: "prod-cluster".to_string(),
+                    server: "https://127.0.0.1:6443".to_string(),
+                    namespace: "default".to_string(),
+                    is_current: true,
+                    is_local: false,
+                    provider: Some("EKS".to_string()),
+                    source_file: "config".to_string(),
+                    auth_kind: "token".to_string(),
+                },
+                srelens_kube::contexts::ContextDto {
+                    name: "kind-dev".to_string(),
+                    stable_id: "kube/kind-dev".to_string(),
+                    cluster: "kind-cluster".to_string(),
+                    server: "https://127.0.0.1:6444".to_string(),
+                    namespace: "default".to_string(),
+                    is_current: false,
+                    is_local: true,
+                    provider: Some("kind".to_string()),
+                    source_file: "config".to_string(),
+                    auth_kind: "client certificate".to_string(),
+                },
+            ],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod-cluster".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 50,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            pod_metrics_tick_counter: 0,
+        };
+
+        // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
+        app.context_chip_rects.borrow_mut().push((Rect { x: 12, y: 0, width: 14, height: 1 }, "prod-eu".to_string()));
+        app.context_chip_rects.borrow_mut().push((Rect { x: 27, y: 0, width: 14, height: 1 }, "kind-dev".to_string()));
+
+        // Clicking on kind-dev chip switches context!
+        assert_eq!(app.active_context, "prod-eu");
+        let click_kind = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 30,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(click_kind).await;
+        assert_eq!(app.active_context, "kind-dev");
+
+        // Open context picker via :ctx command
+        app.open_context_picker();
+        assert!(matches!(app.modal, Some(Modal::ContextPicker { .. })));
+
+        // Filter contexts by typing 'prod'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE)).await;
+
+        if let Some(Modal::ContextPicker { filter, .. }) = &app.modal {
+            assert_eq!(filter, "prod");
+        } else {
+            panic!("Expected Modal::ContextPicker with filter");
+        }
+
+        // Hitting Enter selects the filtered prod-eu context!
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
+        assert_eq!(app.active_context, "prod-eu");
+        assert!(app.modal.is_none());
     }
 }
