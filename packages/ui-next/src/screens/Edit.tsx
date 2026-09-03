@@ -275,6 +275,9 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
       // say and the next load is the new baseline for "changed elsewhere".
       setDraft(null);
       setConfirming(false);
+      // The panel closes with the draft it was comparing; left open, the
+      // button read "Hide changes" over no panel at all.
+      setShowChanges(false);
       manifest.reload();
     },
   });
