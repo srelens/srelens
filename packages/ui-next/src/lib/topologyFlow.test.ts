@@ -12,6 +12,7 @@ import {
   edgeWidths,
   fitTransform,
   fold,
+  hubCounts,
   layoutFlow,
   orderColumn,
   rankNodes,
@@ -154,6 +155,30 @@ describe("rankNodes", () => {
     expect(rank.get("Service/db")).toBe(1);
     expect(rank.get("Service/db-h")).toBe(1);
     expect(rank.get("StatefulSet/db")).toBe(1);
+  });
+
+  it("keeps an Ingress-fronted tier at the entry however much calls it from inside", () => {
+    // Ten login.* Ingresses fronted an auth Service half the namespace also
+    // called, so the tier ranked one and the front door was drawn a hop in.
+    const g = graph(
+      [
+        node("Ingress/login", "route", "login"),
+        node("Service/auth", "service", "auth"),
+        node("Deployment/auth", "workload", "auth"),
+        node("Service/app", "service", "app"),
+        node("Deployment/app", "workload", "app"),
+      ],
+      [
+        edge("Ingress/login", "Service/auth"),
+        edge("Service/auth", "Deployment/auth"),
+        edge("Service/app", "Deployment/app"),
+        edge("Deployment/app", "Service/auth", { kind: "calls", provenance: "declared" }),
+      ],
+    );
+    const rank = rankNodes(fold(g).nodes, g.edges);
+    expect(rank.get("Ingress/login")).toBe(0);
+    expect(rank.get("Service/auth")).toBe(0);
+    expect(rank.get("Deployment/app")).toBe(0);
   });
 
   it("terminates on a cycle rather than ranking forever", () => {
@@ -590,6 +615,18 @@ describe("edgeWidths", () => {
 
   it("leaves an unmeasured edge out entirely", () => {
     expect(edgeWidths([edge("a", "b")]).size).toBe(0);
+  });
+});
+
+describe("hubCounts", () => {
+  it("names only what more than a handful of things call", () => {
+    const into = (to: string, n: number) =>
+      Array.from({ length: n }, (_, i) => edge(`c${i}`, to, { kind: "calls" }));
+    const hubs = hubCounts([...into("busy", 9), ...into("quiet", 8), edge("a", "b")]);
+    expect(hubs.get("busy")).toBe(9);
+    expect(hubs.has("quiet")).toBe(false);
+    // Routing is not calling: a Service with nine pods behind it is not a hub.
+    expect(hubCounts(Array.from({ length: 9 }, (_, i) => edge("svc", `pod${i}`))).size).toBe(0);
   });
 });
 

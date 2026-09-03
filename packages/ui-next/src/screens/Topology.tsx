@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   prometheusDiscover,
   topologyGraph,
@@ -20,6 +20,7 @@ import { FailureAlert } from "../lib/errorCopy";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { useResource } from "../lib/useResource";
 import {
+  FLOW_ANIMATION_LIMIT,
   LANE_LABEL,
   MAX_PIPS,
   NODE_HEIGHT,
@@ -28,6 +29,7 @@ import {
   clampZoom,
   fit,
   fitTransform,
+  hubCounts,
   layoutFlow,
   traceFrom,
   zoomAt,
@@ -464,8 +466,37 @@ function Canvas({
   const dragged = () => drag.current?.moved === true;
 
   const inTrace = (id: string) => trace === null || trace.nodes.has(id);
-  const edgeShown = (edge: PlacedEdge) => trace === null || trace.edges.has(edge.key);
   const multi = layout.namespaces.length > 1;
+
+  /**
+   * What a real namespace taught about drawing everything.
+   *
+   * Four external hosts each named in forty tiers' configuration made a
+   * hundred and sixty long dashed curves — unreadable, and most of the paint
+   * on every frame. A call into a hub is drawn only when a selection puts it
+   * on a path; the hub itself says how many call it. And past a few dozen
+   * measured edges the flow animation stops: hundreds of paths each
+   * re-rasterising every frame was the rest of the lag.
+   */
+  const hubs = useMemo(() => hubCounts(layout.edges), [layout.edges]);
+  const animate = useMemo(
+    () => layout.edges.filter((e) => e.provenance === "observed").length <= FLOW_ANIMATION_LIMIT,
+    [layout.edges],
+  );
+  const edgeVisible = (edge: PlacedEdge) =>
+    edge.kind !== "calls" || !hubs.has(edge.to) || (trace !== null && trace.edges.has(edge.key));
+  const edgeShown = (edge: PlacedEdge) => trace === null || trace.edges.has(edge.key);
+
+  // Stable, so a memoised node is not re-rendered on every pan for a new
+  // closure — which is what made a graph of a few hundred nodes lag under
+  // the pointer. The drag ref is read at click time, not captured.
+  const select = useCallback(
+    (id: string) => {
+      if (drag.current?.moved) return;
+      onSelect(id);
+    },
+    [onSelect],
+  );
 
   return (
     <div
@@ -598,7 +629,13 @@ function Canvas({
           ))}
           {/* Edges first, so a node always sits on top of the lines into it. */}
           {layout.edges.map((edge) => (
-            <Edge key={edge.key} edge={edge} shown={edgeShown(edge)} />
+            <Edge
+              key={edge.key}
+              edge={edge}
+              visible={edgeVisible(edge)}
+              shown={edgeShown(edge)}
+              animate={animate}
+            />
           ))}
           {layout.nodes.map((node) => (
             <Node
@@ -607,9 +644,8 @@ function Canvas({
               selected={node.id === selectedId}
               dimmed={!inTrace(node.id)}
               showNamespace={multi}
-              onSelect={(id) => {
-                if (!dragged()) onSelect(id);
-              }}
+              callers={hubs.get(node.id)}
+              onSelect={select}
             />
           ))}
         </g>
@@ -629,7 +665,22 @@ function Canvas({
   );
 }
 
-function Edge({ edge, shown }: { edge: PlacedEdge; shown: boolean }) {
+/**
+ * Memoised, as is {@link Node}: a pan changes one transform attribute, and
+ * without this React re-reconciled every edge and node on every pointer move.
+ */
+const Edge = memo(function Edge({
+  edge,
+  visible,
+  shown,
+  animate,
+}: {
+  edge: PlacedEdge;
+  visible: boolean;
+  shown: boolean;
+  animate: boolean;
+}) {
+  if (!visible) return null;
   const tone = edgeTone(edge);
   const opacity = shown ? 1 : DIM;
   return (
@@ -637,7 +688,7 @@ function Edge({ edge, shown }: { edge: PlacedEdge; shown: boolean }) {
       <path
         d={edge.path}
         fill="none"
-        className={`${tone.stroke}${tone.flow ? " flow" : ""}`}
+        className={`${tone.stroke}${tone.flow && animate ? " flow" : ""}`}
         strokeWidth={edge.width}
         strokeDasharray={tone.dash}
         strokeLinecap="round"
@@ -677,7 +728,7 @@ function Edge({ edge, shown }: { edge: PlacedEdge; shown: boolean }) {
       )}
     </g>
   );
-}
+});
 
 /**
  * What kind of thing a node is, as a mark rather than a column.
@@ -748,19 +799,26 @@ function Replicas({ node, x, y }: { node: PlacedNode; x: number; y: number }) {
   );
 }
 
-function Node({
+const Node = memo(function Node({
   node,
   selected,
   dimmed,
   showNamespace,
+  callers,
   onSelect,
 }: {
   node: PlacedNode;
   selected: boolean;
   dimmed: boolean;
   showNamespace: boolean;
+  /** Set when this is a hub whose incoming calls are not drawn until asked. */
+  callers?: number;
   onSelect: (id: string) => void;
 }) {
+  // A hub says in words what its hidden edges would have drawn. It shares
+  // the metric slot with the detail, and for a workload with the replica
+  // squares — so it is cut to what the row has left.
+  const metric = [node.detail, callers ? `${callers} callers` : ""].filter(Boolean).join(" · ");
   /**
    * The top-right slot: the namespace when there is more than one drawn,
    * otherwise the current revision.
@@ -848,17 +906,17 @@ function Node({
         {fit(node.name)}
       </text>
       <Replicas node={node} x={node.x + 14} y={node.y + 46} />
-      {node.detail && (
+      {metric && (
         <text x={node.x + NODE_WIDTH - 12} y={node.y + 51} className="node-metric fill-muted">
           {/* The detail shares its row with the replica squares, so it gets
               what they leave — which for a workload is `9/12` and for the
               Ingress and Service that have no replicas is the whole host. */}
-          {fit(node.detail, node.desired === null || node.desired <= 0 ? 22 : 8)}
+          {fit(metric, node.desired === null || node.desired <= 0 ? 22 : 8)}
         </text>
       )}
     </g>
   );
-}
+});
 
 /**
  * Zoom, because a real namespace does not fit.
@@ -971,6 +1029,9 @@ function Legend() {
         </svg>
         Crosses a namespace
       </li>
+      {/* Said here because it is the one thing the canvas withholds: a hub's
+          callers exist, and a reader has to know that selecting draws them. */}
+      <li className="text-faint normal-case">Hubs draw their callers on selection</li>
     </ul>
   );
 }

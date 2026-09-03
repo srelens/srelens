@@ -302,6 +302,61 @@ describe("Topology", () => {
     expect(within(panel).getByRole("button", { name: /^checkout-api routes/ })).toBeDefined();
   });
 
+  it("withholds a hub's callers until a selection puts them on a path", async () => {
+    // Four external hosts each named by forty tiers drew a hundred and sixty
+    // curves across the whole canvas. The number is the fact; the lines are
+    // detail, and detail is what selecting is for.
+    const callers = Array.from({ length: 9 }, (_, i) => `svc-${i}`);
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          {
+            id: "External//api.example.com",
+            kind: "External",
+            name: "api.example.com",
+            namespace: "",
+            lane: "external",
+            detail: "",
+            ready: null,
+            desired: null,
+            health: "unknown",
+          },
+          ...callers.map((name) => ({
+            id: `Deployment/default/${name}`,
+            kind: "Deployment",
+            name,
+            namespace: "default",
+            lane: "workload" as const,
+            detail: "1/1",
+            ready: 1,
+            desired: 1,
+            health: "ok" as const,
+          })),
+        ],
+        edges: callers.map((name) => ({
+          from: `Deployment/default/${name}`,
+          to: "External//api.example.com",
+          kind: "calls" as const,
+          provenance: "declared" as const,
+          detail: "",
+          health: "unknown" as const,
+          weight: null,
+          unit: null,
+        })),
+      },
+    });
+    render(<Topology />);
+    const hub = await screen.findByRole("button", { name: "External api.example.com" });
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    expect(canvas.querySelectorAll("path").length).toBe(0);
+    expect([...hub.querySelectorAll("text")].map((t) => t.textContent)).toContain("9 callers");
+
+    await userEvent.click(screen.getByRole("button", { name: "Deployment svc-3" }));
+    expect(canvas.querySelectorAll("path")).toHaveLength(1);
+    await userEvent.click(hub);
+    expect(canvas.querySelectorAll("path")).toHaveLength(9);
+  });
+
   it("draws no lane when one namespace is all there is", async () => {
     render(<Topology />);
     await screen.findByRole("button", { name: "Ingress web" });

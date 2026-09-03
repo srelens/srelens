@@ -363,6 +363,28 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
   }
   for (const list of out.values()) list.sort();
 
+  /**
+   * A tier with an Ingress is an entry, whatever else calls it.
+   *
+   * Ten `login.*` Ingresses fronted an auth Service that half the namespace
+   * also called internally, so the tier ranked one and the Ingresses were
+   * drawn a hop in from the edge — which is not where traffic enters. Calls
+   * INTO an Ingress-fronted tier are left out of the ranking, so the tier
+   * stays at zero; they are still drawn, as the backward bows they now are,
+   * which is the honest picture of a front door that is also called from
+   * inside the house.
+   */
+  const entries = new Set<string>();
+  for (const node of nodes) {
+    if (node.lane === "route") entries.add(tierOf.get(node.id) as string);
+  }
+  for (const [from, children] of out) {
+    out.set(
+      from,
+      children.filter((to) => !entries.has(to)),
+    );
+  }
+
   const back = backEdges(tiers, out);
   const forward = new Map<string, string[]>();
   const incoming = new Map<string, number>(tiers.map((id) => [id, 0]));
@@ -539,6 +561,33 @@ export function edgeWidths(edges: TopologyEdge[]): Map<string, number> {
 
 export function edgeKey(edge: Pick<TopologyEdge, "from" | "to" | "kind">): string {
   return `${edge.kind}:${edge.from}->${edge.to}`;
+}
+
+/** More callers than this and a node is a hub: its incoming calls are drawn
+ *  only when something selected puts them on a path. */
+export const HUB_FAN_IN = 8;
+
+/** Above this many measured edges the flow animation is dropped — hundreds
+ *  of paths each re-rasterising every frame is most of what "laggy" was. */
+export const FLOW_ANIMATION_LIMIT = 60;
+
+/**
+ * The nodes that too many things call, and how many.
+ *
+ * A production namespace had four external hosts each named in forty tiers'
+ * configuration. Drawn in full that was a hundred and sixty dashed curves
+ * fanning across the whole canvas — unreadable, most of the paint, and about
+ * a fact better said as a number on the node. The edges still exist: the
+ * inspector lists every caller, and selecting the hub or any caller draws
+ * theirs.
+ */
+export function hubCounts(edges: Pick<TopologyEdge, "to" | "kind">[]): Map<string, number> {
+  const fanIn = new Map<string, number>();
+  for (const edge of edges) {
+    if (edge.kind !== "calls") continue;
+    fanIn.set(edge.to, (fanIn.get(edge.to) ?? 0) + 1);
+  }
+  return new Map([...fanIn].filter(([, n]) => n > HUB_FAN_IN));
 }
 
 /**
