@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ClusterOverviewData {
     pub context_name: String,
     pub cluster_name: String,
@@ -25,6 +25,8 @@ pub struct ClusterOverviewData {
     pub used_cpu_millicores: i64,
     pub total_mem_mib: i64,
     pub used_mem_mib: i64,
+    pub total_gpus: usize,
+    pub allocated_gpus: usize,
 }
 
 pub struct OverviewViewState {
@@ -38,6 +40,10 @@ impl OverviewViewState {
         }
     }
 
+    pub fn with_data(data: ClusterOverviewData) -> Self {
+        Self { data }
+    }
+
     pub fn set_data(&mut self, data: ClusterOverviewData) {
         self.data = data;
     }
@@ -47,26 +53,43 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(" Cluster Health & Resource Overview (<Esc> Back) ", Theme::title()));
+        .title(Span::styled(" Cluster Health & Resource Overview [<r> Refresh, <Esc> Back] ", Theme::title()));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let d = &state.data;
+    let has_gpus = d.total_gpus > 0;
+    let gauges_height = if has_gpus { 10 } else { 7 };
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // Cluster info cards
-            Constraint::Length(8), // Resource allocation gauges (CPU, Mem, Pods)
-            Constraint::Min(10),   // Workload health distribution
+            Constraint::Length(6),            // Cluster info cards
+            Constraint::Length(gauges_height), // Resource allocation gauges (CPU, Mem, [GPU])
+            Constraint::Min(8),               // Workload health distribution
         ])
         .split(inner);
 
     // 1. Cluster info table
-    let d = &state.data;
     let status_span = if d.is_reachable {
         Span::styled("● REACHABLE / HEALTHY", Theme::status_ok())
     } else {
         Span::styled("● UNREACHABLE", Theme::status_error())
+    };
+
+    let k8s_version_display = if d.k8s_version.is_empty() {
+        "Connecting...".to_string()
+    } else if d.k8s_version.starts_with('v') {
+        d.k8s_version.clone()
+    } else {
+        format!("v{}", d.k8s_version)
+    };
+
+    let ready_nodes_display = if d.ready_nodes > 0 || d.node_count > 0 {
+        format!("{}/{} Ready", d.ready_nodes, d.node_count)
+    } else {
+        "Fetching...".to_string()
     };
 
     let info_table = Table::new(
@@ -81,13 +104,13 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
                 Cell::from("Cluster:").style(Theme::header_label()),
                 Cell::from(d.cluster_name.as_str()).style(Theme::header_val()),
                 Cell::from("K8s Version:").style(Theme::header_label()),
-                Cell::from(format!("v{}", d.k8s_version)).style(Theme::header_val()),
+                Cell::from(k8s_version_display).style(Theme::header_val()),
             ]),
             Row::new(vec![
                 Cell::from("Server:").style(Theme::header_label()),
                 Cell::from(d.server_url.as_str()).style(Theme::header_val()),
                 Cell::from("Nodes:").style(Theme::header_label()),
-                Cell::from(format!("{}/{} Ready", d.ready_nodes, d.node_count)).style(Theme::header_val()),
+                Cell::from(ready_nodes_display).style(Theme::header_val()),
             ]),
         ],
         [
@@ -99,13 +122,16 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     );
     f.render_widget(info_table, rows[0]);
 
-    // 2. Resource gauges (CPU & Memory)
+    // 2. Resource gauges (CPU, Memory, optional GPU)
+    let gauge_constraints = if has_gpus {
+        vec![Constraint::Length(3), Constraint::Length(3), Constraint::Length(3)]
+    } else {
+        vec![Constraint::Length(3), Constraint::Length(3)]
+    };
+
     let gauge_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
+        .constraints(gauge_constraints)
         .split(rows[1]);
 
     let cpu_pct = if d.total_cpu_millicores > 0 {
@@ -114,9 +140,23 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
         0
     };
 
+    let cpu_title = if d.total_cpu_millicores >= 1000 {
+        format!(
+            " CPU Allocation: {:.1} / {:.1} Cores ({}%) ",
+            d.used_cpu_millicores as f64 / 1000.0,
+            d.total_cpu_millicores as f64 / 1000.0,
+            cpu_pct
+        )
+    } else {
+        format!(
+            " CPU Allocation: {}m / {}m ({}%) ",
+            d.used_cpu_millicores, d.total_cpu_millicores, cpu_pct
+        )
+    };
+
     let cpu_gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" CPU Allocation: {}m / {}m ({}%) ", d.used_cpu_millicores, d.total_cpu_millicores, cpu_pct)))
-        .gauge_style(Style::default().fg(if cpu_pct > 80 { Theme::RED } else { Theme::CYAN }))
+        .block(Block::default().borders(Borders::ALL).title(cpu_title))
+        .gauge_style(Style::default().fg(if cpu_pct > 85 { Theme::RED } else if cpu_pct > 70 { Theme::YELLOW } else { Theme::CYAN }))
         .percent(cpu_pct.min(100));
     f.render_widget(cpu_gauge, gauge_layout[0]);
 
@@ -126,17 +166,47 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
         0
     };
 
+    let mem_title = if d.total_mem_mib >= 1024 {
+        format!(
+            " Memory Allocation: {:.1} / {:.1} GiB ({}%) ",
+            d.used_mem_mib as f64 / 1024.0,
+            d.total_mem_mib as f64 / 1024.0,
+            mem_pct
+        )
+    } else {
+        format!(
+            " Memory Allocation: {}MiB / {}MiB ({}%) ",
+            d.used_mem_mib, d.total_mem_mib, mem_pct
+        )
+    };
+
     let mem_gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Memory Allocation: {}MiB / {}MiB ({}%) ", d.used_mem_mib, d.total_mem_mib, mem_pct)))
-        .gauge_style(Style::default().fg(if mem_pct > 80 { Theme::RED } else { Theme::ACCENT }))
+        .block(Block::default().borders(Borders::ALL).title(mem_title))
+        .gauge_style(Style::default().fg(if mem_pct > 85 { Theme::RED } else if mem_pct > 70 { Theme::YELLOW } else { Theme::ACCENT }))
         .percent(mem_pct.min(100));
     f.render_widget(mem_gauge, gauge_layout[1]);
+
+    if has_gpus && gauge_layout.len() > 2 {
+        let gpu_pct = if d.total_gpus > 0 {
+            ((d.allocated_gpus as f64 / d.total_gpus as f64) * 100.0) as u16
+        } else {
+            0
+        };
+        let gpu_gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                " GPU Allocation: {} / {} GPUs ({}%) ",
+                d.allocated_gpus, d.total_gpus, gpu_pct
+            )))
+            .gauge_style(Style::default().fg(Theme::ACCENT))
+            .percent(gpu_pct.min(100));
+        f.render_widget(gpu_gauge, gauge_layout[2]);
+    }
 
     // 3. Pods distribution
     let pod_dist_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(" Pod Health Distribution ");
+        .title(" Workload Health Distribution ");
     let pod_dist_inner = pod_dist_block.inner(rows[2]);
     f.render_widget(pod_dist_block, rows[2]);
 
@@ -152,10 +222,20 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
         Line::from(vec![
             Span::styled("● Pending:      ", Theme::status_warn()),
             Span::styled(format!("{}", d.pending_pods), Theme::status_warn()),
+            if d.pending_pods > 0 {
+                Span::styled("  (Unschedulable or waiting for resources/PVC)", Style::default().fg(Theme::DIM))
+            } else {
+                Span::raw("")
+            },
         ]),
         Line::from(vec![
             Span::styled("● Failed/Crash: ", Theme::status_error()),
             Span::styled(format!("{}", d.failed_pods), Theme::status_error()),
+            if d.failed_pods > 0 {
+                Span::styled("  (OOMKilled, CrashLoopBackOff, or Error)", Style::default().fg(Theme::DIM))
+            } else {
+                Span::raw("")
+            },
         ]),
     ];
     f.render_widget(Paragraph::new(dist_lines), pod_dist_inner);

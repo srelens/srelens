@@ -84,6 +84,7 @@ pub struct App {
     pub assistant_state: AssistantViewState,
     pub assistant_states: HashMap<String, AssistantViewState>,
     pub pod_metrics_tick_counter: usize,
+    pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
 }
 
 pub enum SuspendAction {
@@ -230,9 +231,11 @@ impl App {
             assistant_state: AssistantViewState::for_context(&active_context),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         app.refresh_cluster_info();
+        app.refresh_cluster_overview();
         app.refresh_crds();
         app.restart_active_watch().await;
         Ok(app)
@@ -458,7 +461,227 @@ impl App {
             self.node_count = parts[1].parse().unwrap_or(0);
             self.pod_count = parts[2].parse().unwrap_or(0);
             self.is_connected = true;
+
+            if let ActiveView::Overview(ov) = &mut self.active_view {
+                ov.data.context_name = self.active_context.clone();
+                ov.data.cluster_name = self.cluster_name.clone();
+                ov.data.server_url = self.server_url.clone();
+                ov.data.k8s_version = self.cluster_version.clone();
+                ov.data.is_reachable = true;
+                if ov.data.node_count == 0 {
+                    ov.data.node_count = self.node_count;
+                }
+                if ov.data.total_pods == 0 {
+                    ov.data.total_pods = self.pod_count;
+                }
+            }
         }
+    }
+
+    pub fn handle_cluster_overview_update(&mut self, payload: &str) {
+        if let Ok(data) = serde_json::from_str::<crate::views::overview_view::ClusterOverviewData>(payload) {
+            if data.context_name == self.active_context {
+                self.cluster_version = data.k8s_version.clone();
+                self.node_count = data.node_count;
+                self.pod_count = data.total_pods;
+                self.is_connected = data.is_reachable;
+                if let ActiveView::Overview(ov) = &mut self.active_view {
+                    ov.set_data(data.clone());
+                }
+                self.cluster_overview_data = Some(data);
+            }
+        }
+    }
+
+    pub fn refresh_cluster_overview(&self) {
+        let context = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let cluster_name = self.cluster_name.clone();
+        let server_url = self.server_url.clone();
+
+        tokio::spawn(async move {
+            let client = match cache.get(&context).await {
+                Ok(c) => c,
+                Err(_) => {
+                    let data = crate::views::overview_view::ClusterOverviewData {
+                        context_name: context,
+                        cluster_name,
+                        server_url,
+                        k8s_version: String::new(),
+                        is_reachable: false,
+                        node_count: 0,
+                        ready_nodes: 0,
+                        total_pods: 0,
+                        running_pods: 0,
+                        pending_pods: 0,
+                        failed_pods: 0,
+                        total_cpu_millicores: 0,
+                        used_cpu_millicores: 0,
+                        total_mem_mib: 0,
+                        used_mem_mib: 0,
+                        total_gpus: 0,
+                        allocated_gpus: 0,
+                    };
+                    if let Ok(ser) = serde_json::to_string(&data) {
+                        let _ = event_tx.send(AppEvent::ActionResult {
+                            title: "cluster_overview_updated".to_string(),
+                            result: Ok(ser),
+                        });
+                    }
+                    return;
+                }
+            };
+
+            let k8s_version = client
+                .apiserver_version()
+                .await
+                .map(|v| v.git_version)
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            let mut data = crate::views::overview_view::ClusterOverviewData {
+                context_name: context.clone(),
+                cluster_name: cluster_name.clone(),
+                server_url: server_url.clone(),
+                k8s_version,
+                is_reachable: true,
+                node_count: 0,
+                ready_nodes: 0,
+                total_pods: 0,
+                running_pods: 0,
+                pending_pods: 0,
+                failed_pods: 0,
+                total_cpu_millicores: 0,
+                used_cpu_millicores: 0,
+                total_mem_mib: 0,
+                used_mem_mib: 0,
+                total_gpus: 0,
+                allocated_gpus: 0,
+            };
+
+            // Fetch Nodes
+            let node_api = kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone());
+            if let Ok(nodes) = node_api.list(&kube::api::ListParams::default()).await {
+                data.node_count = nodes.items.len();
+                for node in nodes.items {
+                    let summary = srelens_kube::nodes::summarise(node.clone());
+                    if summary.status == "Ready" {
+                        data.ready_nodes += 1;
+                    }
+                    data.total_cpu_millicores += summary.allocatable_cpu_millicores;
+                    data.total_mem_mib += summary.allocatable_memory_mib;
+
+                    if let Some(status) = &node.status {
+                        if let Some(alloc) = &status.allocatable {
+                            for (k, v) in alloc {
+                                if k.contains("gpu") {
+                                    if let Ok(count) = v.0.parse::<usize>() {
+                                        data.total_gpus += count;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check NodeMetrics (if metrics-server is available)
+            let gvk = kube::core::GroupVersionKind::gvk("metrics.k8s.io", "v1beta1", "NodeMetrics");
+            let ar = kube::core::ApiResource::from_gvk(&gvk);
+            let node_metrics_api: kube::Api<kube::core::DynamicObject> = kube::Api::all_with(client.clone(), &ar);
+            let mut got_node_metrics = false;
+            if let Ok(list) = node_metrics_api.list(&kube::api::ListParams::default()).await {
+                if !list.items.is_empty() {
+                    got_node_metrics = true;
+                    for o in list.items {
+                        let usage = &o.data["usage"];
+                        data.used_cpu_millicores += srelens_kube::metrics::cpu_millicores(usage["cpu"].as_str().unwrap_or("0"));
+                        data.used_mem_mib += srelens_kube::metrics::mem_mib(usage["memory"].as_str().unwrap_or("0"));
+                    }
+                }
+            }
+
+            // Fetch Pods
+            let pod_api = kube::Api::<k8s_openapi::api::core::v1::Pod>::all(client.clone());
+            if let Ok(pods) = pod_api.list(&kube::api::ListParams::default()).await {
+                data.total_pods = pods.items.len();
+                let mut pod_req_cpu = 0i64;
+                let mut pod_req_mem = 0i64;
+
+                for pod in pods.items {
+                    let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Unknown");
+                    let mut is_unhealthy = false;
+
+                    if let Some(status) = &pod.status {
+                        if let Some(cs_list) = &status.container_statuses {
+                            for cs in cs_list {
+                                if let Some(state) = &cs.state {
+                                    if let Some(waiting) = &state.waiting {
+                                        let r = waiting.reason.as_deref().unwrap_or_default();
+                                        if r == "CrashLoopBackOff" || r == "OOMKilled" || r == "Error" || r == "ImagePullBackOff" || r == "CreateContainerConfigError" {
+                                            is_unhealthy = true;
+                                            break;
+                                        }
+                                    }
+                                    if let Some(terminated) = &state.terminated {
+                                        if terminated.exit_code != 0 || terminated.reason.as_deref() == Some("OOMKilled") || terminated.reason.as_deref() == Some("Error") {
+                                            is_unhealthy = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if is_unhealthy || phase == "Failed" {
+                        data.failed_pods += 1;
+                    } else if phase == "Pending" {
+                        data.pending_pods += 1;
+                    } else if phase == "Running" {
+                        data.running_pods += 1;
+                    }
+
+                    if let Some(spec) = &pod.spec {
+                        let mut containers = spec.containers.clone();
+                        if let Some(init) = &spec.init_containers {
+                            containers.extend(init.clone());
+                        }
+                        for c in containers {
+                            if let Some(res) = &c.resources {
+                                if let Some(reqs) = &res.requests {
+                                    if let Some(q) = reqs.get("cpu") {
+                                        pod_req_cpu += srelens_kube::metrics::cpu_millicores(&q.0);
+                                    }
+                                    if let Some(q) = reqs.get("memory") {
+                                        pod_req_mem += srelens_kube::metrics::mem_mib(&q.0);
+                                    }
+                                    for (k, v) in reqs {
+                                        if k.contains("gpu") {
+                                            if let Ok(g) = v.0.parse::<usize>() {
+                                                data.allocated_gpus += g;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !got_node_metrics {
+                    data.used_cpu_millicores = pod_req_cpu;
+                    data.used_mem_mib = pod_req_mem;
+                }
+            }
+
+            if let Ok(ser) = serde_json::to_string(&data) {
+                let _ = event_tx.send(AppEvent::ActionResult {
+                    title: "cluster_overview_updated".to_string(),
+                    result: Ok(ser),
+                });
+            }
+        });
     }
 
     pub async fn switch_context(&mut self, new_context: String) {
@@ -497,8 +720,19 @@ impl App {
         }
 
         self.cluster_version = "Connecting...".to_string();
+        self.cluster_overview_data = None;
+        if let ActiveView::Overview(ov) = &mut self.active_view {
+            let mut d = crate::views::overview_view::ClusterOverviewData::default();
+            d.context_name = self.active_context.clone();
+            d.cluster_name = self.cluster_name.clone();
+            d.server_url = self.server_url.clone();
+            d.k8s_version = "Connecting...".to_string();
+            d.is_reachable = true;
+            ov.set_data(d);
+        }
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();
+        self.refresh_cluster_overview();
         self.refresh_crds();
         self.restart_active_watch().await;
     }
@@ -1479,6 +1713,12 @@ impl App {
                     _ => {}
                 }
             }
+            ActiveView::Overview(_) => {
+                if key.code == KeyCode::Char('r') {
+                    self.refresh_cluster_overview();
+                    self.set_toast("Refreshing cluster overview...".to_string(), Theme::status_ok());
+                }
+            }
             ActiveView::Assistant => {
                 let ai = &mut self.assistant_state;
                 if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1671,7 +1911,6 @@ impl App {
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -1998,7 +2237,22 @@ impl App {
         let new_view = match kind {
             ResourceKind::PortForwards => ActiveView::PortForwards(PortForwardViewState::new()),
             ResourceKind::HelmReleases => ActiveView::Helm(HelmViewState::new()),
-            ResourceKind::Overview => ActiveView::Overview(OverviewViewState::new()),
+            ResourceKind::Overview => {
+                let mut initial_data = self.cluster_overview_data.clone().unwrap_or_default();
+                initial_data.context_name = self.active_context.clone();
+                initial_data.cluster_name = self.cluster_name.clone();
+                initial_data.server_url = self.server_url.clone();
+                initial_data.k8s_version = self.cluster_version.clone();
+                initial_data.is_reachable = self.is_connected;
+                if initial_data.node_count == 0 {
+                    initial_data.node_count = self.node_count;
+                }
+                if initial_data.total_pods == 0 {
+                    initial_data.total_pods = self.pod_count;
+                }
+                self.refresh_cluster_overview();
+                ActiveView::Overview(OverviewViewState::with_data(initial_data))
+            }
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
@@ -2547,6 +2801,12 @@ impl App {
                 ][..]),
                 _ => None,
             },
+            ActiveView::Overview(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<r>", "Refresh"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
             _ => None,
         };
 

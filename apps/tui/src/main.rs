@@ -244,6 +244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(msg) => {
                             if title == "cluster_info_updated" {
                                 app.handle_cluster_info_update(&msg);
+                            } else if title == "cluster_overview_updated" {
+                                app.handle_cluster_overview_update(&msg);
                             } else if title == "crds_updated" {
                                 app.handle_crds_update(&msg);
                             } else if title.starts_with("crd_instances:") {

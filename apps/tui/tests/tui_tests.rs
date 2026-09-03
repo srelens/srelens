@@ -188,6 +188,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -271,6 +272,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. Enter command mode by typing ':'
@@ -362,6 +364,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. Switch to settings view via :settings command
@@ -488,6 +491,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -689,6 +693,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. User starts turn in Assistant view
@@ -872,6 +877,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. Enter filter mode with '/'
@@ -999,6 +1005,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
@@ -1082,6 +1089,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // Initially without metrics, extract_field_str returns "-"
@@ -1198,6 +1206,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. Test paste handling into Assistant input
@@ -1281,6 +1290,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // When input is empty, typing '?' opens help modal
@@ -1356,6 +1366,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // Set viewport and simulate tool chip line at index 2
@@ -1472,6 +1483,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
@@ -1592,6 +1604,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("data-processing-prod-eu-dus1"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. In data-processing-prod-eu-dus1, user has a conversation
@@ -1737,6 +1750,7 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod-eu"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
         };
 
         // 1. Pressing 'c' on the selected row copies the canonical deep link URL!
@@ -1761,5 +1775,119 @@ mod tests {
         let link = DeepLink::parse("srelens://cluster/prod-eu").unwrap();
         app.navigate_deep_link(&link).await.expect("navigate cluster");
         assert_eq!(app.active_context, "prod-eu");
+    }
+
+    #[tokio::test]
+    async fn test_live_cluster_overview_and_capacity_gauges() {
+        use tokio::sync::mpsc::unbounded_channel;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use std::collections::{HashMap, HashSet};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use srelens_tui::views::overview_view::ClusterOverviewData;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            kubeconfig_paths: vec![],
+            active_context: "data-processing-prod-eu-dus1".to_string(),
+            active_namespace: "default".to_string(),
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.34.7+rke2r1".to_string(),
+            cluster_name: "prod-cluster-dus1".to_string(),
+            server_url: "https://k8s.prod.dus1:6443".to_string(),
+            node_count: 32,
+            pod_count: 184,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+        };
+
+        // 1. Switch view to Overview
+        app.switch_view_to_kind(ResourceKind::Overview).await;
+
+        // Verify that overview view is immediately initialized with reachable status and real cluster info
+        if let ActiveView::Overview(ref ov) = app.active_view {
+            assert!(ov.data.is_reachable, "Cluster must be marked reachable");
+            assert_eq!(ov.data.context_name, "data-processing-prod-eu-dus1");
+            assert_eq!(ov.data.k8s_version, "v1.34.7+rke2r1");
+            assert_eq!(ov.data.node_count, 32);
+            assert_eq!(ov.data.total_pods, 184);
+        } else {
+            panic!("Expected ActiveView::Overview");
+        }
+
+        // 2. Simulate live background metrics arriving from cluster
+        let live_data = ClusterOverviewData {
+            context_name: "data-processing-prod-eu-dus1".to_string(),
+            cluster_name: "prod-cluster-dus1".to_string(),
+            server_url: "https://k8s.prod.dus1:6443".to_string(),
+            k8s_version: "v1.34.7+rke2r1".to_string(),
+            is_reachable: true,
+            node_count: 32,
+            ready_nodes: 32,
+            total_pods: 184,
+            running_pods: 178,
+            pending_pods: 2,
+            failed_pods: 4,
+            total_cpu_millicores: 64_000,
+            used_cpu_millicores: 28_500,
+            total_mem_mib: 256 * 1024,
+            used_mem_mib: 142 * 1024,
+            total_gpus: 8,
+            allocated_gpus: 6,
+        };
+        let payload = serde_json::to_string(&live_data).unwrap();
+        app.handle_cluster_overview_update(&payload);
+
+        // 3. Verify that overview view and app state updated with full telemetry
+        if let ActiveView::Overview(ref ov) = app.active_view {
+            assert_eq!(ov.data.ready_nodes, 32);
+            assert_eq!(ov.data.running_pods, 178);
+            assert_eq!(ov.data.pending_pods, 2);
+            assert_eq!(ov.data.failed_pods, 4);
+            assert_eq!(ov.data.total_cpu_millicores, 64_000);
+            assert_eq!(ov.data.used_cpu_millicores, 28_500);
+            assert_eq!(ov.data.total_gpus, 8);
+            assert_eq!(ov.data.allocated_gpus, 6);
+        } else {
+            panic!("Expected ActiveView::Overview");
+        }
     }
 }
