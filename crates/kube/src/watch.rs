@@ -728,6 +728,10 @@ pub struct NamespaceSummary {
     pub name: String,
     pub status: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 pub fn summarise_namespace(ns: Namespace) -> NamespaceSummary {
@@ -738,7 +742,13 @@ pub fn summarise_namespace(ns: Namespace) -> NamespaceSummary {
         .and_then(|s| s.phase.clone())
         .unwrap_or_else(|| "Active".to_string());
     let age = crate::humanize_age(ns.metadata.creation_timestamp.as_ref());
-    NamespaceSummary { name, status, age }
+    let created_at = crate::creation_timestamp_iso(ns.metadata.creation_timestamp.as_ref());
+    NamespaceSummary {
+        name,
+        status,
+        age,
+        created_at,
+    }
 }
 
 /// Watch cluster Nodes (cluster-scoped; namespace ignored).
@@ -946,6 +956,7 @@ mod tests {
             node: "n".into(),
             created: None,
             age: "1m".into(),
+            created_at: String::new(),
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
         }

@@ -8,7 +8,7 @@ use kube::{Api, Client, Resource};
 
 /// Format a duration (seconds) as a compact srelens age string (5s, 3m,
 /// 2h, 4d, 1y).
-pub(crate) fn format_age(secs: i64) -> String {
+pub fn format_age(secs: i64) -> String {
     let s = secs.max(0);
     if s < 60 {
         format!("{s}s")
@@ -48,6 +48,17 @@ pub fn humanize_age(creation: Option<&Time>) -> String {
 pub(crate) fn creation_rfc3339(creation: Option<&Time>) -> Option<String> {
     creation.map(|t| t.0.to_string())
 }
+
+/// Return the raw ISO 8601 timestamp string from a `creationTimestamp`
+/// (empty string if unset). The TUI uses this to dynamically recompute
+/// the human-readable age at render time so it never goes stale.
+pub fn creation_timestamp_iso(creation: Option<&Time>) -> String {
+    match creation {
+        Some(t) => t.0.to_string(),
+        None => String::new(),
+    }
+}
+
 
 /// Abbreviate PV/PVC access modes ("ReadWriteOnce" → "RWO"), comma-joined.
 pub(crate) fn abbreviate_access_modes(modes: Option<&Vec<String>>) -> String {

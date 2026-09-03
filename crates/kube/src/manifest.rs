@@ -327,6 +327,10 @@ pub struct ResourceRow {
     pub name: String,
     pub namespace: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -368,6 +372,7 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                         name: o.metadata.name.unwrap_or_default(),
                         namespace: o.metadata.namespace.unwrap_or_default(),
                         age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
+                        created_at: crate::creation_timestamp_iso(o.metadata.creation_timestamp.as_ref()),
                     })
                     .collect();
                 Ok(ListResourceOut { items })

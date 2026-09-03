@@ -615,6 +615,21 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         return eval_crd_json_path(val, path);
     }
 
+    // Dynamic age: when the summary carries a raw ISO 8601 creation timestamp
+    // in `createdAt`, recompute the human-readable age from it so the column
+    // never goes stale between watch re-lists.
+    if key == "age" {
+        if let Some(ts_str) = val.get("createdAt").and_then(|v| v.as_str()) {
+            if !ts_str.is_empty() {
+                if let Ok(ts) = ts_str.parse::<srelens_kube::k8s_openapi::jiff::Timestamp>() {
+                    let now = srelens_kube::k8s_openapi::jiff::Timestamp::now();
+                    let secs = now.duration_since(ts).as_secs();
+                    return srelens_kube::format_age(secs);
+                }
+            }
+        }
+    }
+
     let key_lower = key.to_lowercase();
 
     // 0. Event specific field aliases
@@ -833,7 +848,9 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
             let is_marked = state.marked_indices.contains(&raw_idx);
 
             let cells = state.columns.iter().map(|col| {
-                let text = extract_field_str(item, col.key);
+                // Cluster-controlled text (event messages, annotations, CRD
+                // fields) can carry tabs/escapes that desync the terminal.
+                let text = super::sanitize_span_text(&extract_field_str(item, col.key));
                 let is_crd = matches!(state.kind, ResourceKind::CustomResource(_));
                 let is_status_col = col.key == "status"
                     || (state.kind == ResourceKind::Events && (col.key == "type" || col.key == "reason"))

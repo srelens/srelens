@@ -19,7 +19,9 @@ pub struct DescribeViewState {
 
 impl DescribeViewState {
     pub fn new(name: String, kind: String, namespace: Option<String>, content: String) -> Self {
-        let lines = content.lines().map(String::from).collect();
+        // Describe output embeds cluster data (event messages, annotations)
+        // that can carry tabs/escapes which desync the terminal.
+        let lines = content.lines().map(super::sanitize_span_text).collect();
         Self {
             resource_name: name,
             resource_kind: kind,

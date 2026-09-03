@@ -2377,4 +2377,89 @@ mod tests {
             panic!("Expected Modal::Confirm for restart");
         }
     }
+
+    /// The age column must recompute from `createdAt` at render time, so a
+    /// row whose watch snapshot was taken long ago never shows a stale age.
+    #[test]
+    fn test_age_recomputed_live_from_created_at() {
+        use srelens_tui::views::resource_table::extract_field_str;
+
+        // A pod created ~2 hours ago whose cached age string is stale ("2s").
+        let two_hours_ago = srelens_kube::k8s_openapi::jiff::Timestamp::now()
+            - std::time::Duration::from_secs(2 * 60 * 60);
+        let item = serde_json::json!({
+            "name": "web-0",
+            "age": "2s",
+            "createdAt": two_hours_ago.to_string(),
+        });
+        assert_eq!(extract_field_str(&item, "age"), "2h");
+
+        // Without createdAt the cached string is all we have — fall through.
+        let legacy = serde_json::json!({ "name": "web-0", "age": "70d" });
+        assert_eq!(extract_field_str(&legacy, "age"), "70d");
+
+        // An empty createdAt must not shadow the cached age either.
+        let empty_ts = serde_json::json!({ "name": "web-0", "age": "5m", "createdAt": "" });
+        assert_eq!(extract_field_str(&empty_ts, "age"), "5m");
+    }
+
+    /// Raw tabs / ANSI escapes / control chars in a log line desync ratatui's
+    /// buffer from the terminal (ghost text after leaving the logs view), so
+    /// every pushed line must come out clean.
+    #[test]
+    fn test_log_lines_sanitized_on_push() {
+        use srelens_tui::views::logs_view::{sanitize_log_line, LogsViewState};
+
+        // istio-proxy style tab-delimited line: tabs expand to 8-col stops.
+        assert_eq!(
+            sanitize_log_line("info\tsds\tStarting"),
+            "info    sds     Starting"
+        );
+        // ANSI color escapes are dropped, carriage returns removed.
+        assert_eq!(
+            sanitize_log_line("\u{1b}[31merror\u{1b}[0m done\r"),
+            "error done"
+        );
+        // Plain lines pass through untouched.
+        assert_eq!(sanitize_log_line("2026-09-03 INFO ok"), "2026-09-03 INFO ok");
+
+        let mut state = LogsViewState::new("p".into(), "ns".into(), None, "ch".into());
+        state.push_line("a\tb".to_string());
+        assert_eq!(state.lines[0], "a       b");
+    }
+
+    /// Any cluster-controlled text rendered as a Span — event messages,
+    /// describe output, YAML lines — must be sanitized the same way log
+    /// lines are, or embedded tabs/escapes corrupt the terminal.
+    #[test]
+    fn test_cluster_text_sanitized_in_views() {
+        use srelens_tui::views::describe_view::DescribeViewState;
+        use srelens_tui::views::sanitize_span_text;
+        use srelens_tui::views::yaml_view::YamlViewState;
+
+        // Event-message shaped text: tabs expand, newlines flatten to spaces
+        // (table cells are one line tall), escapes and controls are dropped.
+        assert_eq!(
+            sanitize_span_text("Back-off\trestarting\ncontainer \u{1b}[31mfailed\u{1b}[0m\u{7}"),
+            "Back-off        restarting container failed"
+        );
+        // Plain text takes the fast path untouched.
+        assert_eq!(sanitize_span_text("Scaled up replica set"), "Scaled up replica set");
+
+        let desc = DescribeViewState::new(
+            "web-0".into(),
+            "Pod".into(),
+            Some("default".into()),
+            "Name:\tweb-0\nMessage: ok\u{1b}[0m".into(),
+        );
+        assert_eq!(desc.lines, vec!["Name:   web-0", "Message: ok"]);
+
+        let yaml = YamlViewState::new(
+            "web-0".into(),
+            "Pod".into(),
+            Some("default".into()),
+            "note: a\tb".into(),
+        );
+        assert_eq!(yaml.lines, vec!["note: a b"]);
+    }
 }

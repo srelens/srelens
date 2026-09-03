@@ -43,6 +43,10 @@ pub struct PodSummary {
     /// stale (#405). Prefer this; `age` stays for callers that have no clock.
     pub created: Option<String>,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
     /// Container image(s) the pod runs, e.g. `acme/checkout-api:118a7e`.
     /// A pod with several containers joins them as `"img-a, img-b"`; a pod
     /// with no containers (or no status yet) is `""`.
@@ -161,6 +165,7 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         node,
         created: crate::creation_rfc3339(pod.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(pod.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(pod.metadata.creation_timestamp.as_ref()),
         image,
         waiting_reason,
     }

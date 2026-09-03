@@ -26,7 +26,9 @@ pub struct YamlViewState {
 
 impl YamlViewState {
     pub fn new(name: String, kind: String, namespace: Option<String>, yaml_content: String) -> Self {
-        let lines = yaml_content.lines().map(String::from).collect();
+        // Serialized manifests can embed cluster-authored strings with
+        // tabs/escapes that desync the terminal when rendered raw.
+        let lines = yaml_content.lines().map(super::sanitize_span_text).collect();
         Self {
             resource_name: name,
             resource_kind: kind,

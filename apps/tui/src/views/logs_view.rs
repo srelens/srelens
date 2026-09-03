@@ -40,7 +40,7 @@ impl LogsViewState {
     }
 
     pub fn push_line(&mut self, line: String) {
-        self.lines.push(line);
+        self.lines.push(sanitize_log_line(&line));
         if self.follow {
             self.scroll_to_bottom();
         }
@@ -95,6 +95,10 @@ impl LogsViewState {
         Ok(path.to_string_lossy().into_owned())
     }
 }
+
+/// Shared sanitizer for cluster-controlled Span text; see
+/// [`crate::views::sanitize_span_text`].
+pub use super::sanitize_span_text as sanitize_log_line;
 
 fn chrono_timestamp() -> String {
     use std::time::SystemTime;

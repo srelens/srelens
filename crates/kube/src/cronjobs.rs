@@ -75,6 +75,10 @@ pub struct CronJobSummary {
     #[serde(rename = "lastSchedule")]
     pub last_schedule: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -97,6 +101,7 @@ pub(crate) fn summarise(cj: CronJob) -> CronJobSummary {
         active: status.map(|s| s.active.as_ref().map_or(0, |a| a.len() as i32)).unwrap_or(0),
         last_schedule,
         age: crate::humanize_age(cj.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(cj.metadata.creation_timestamp.as_ref()),
     }
 }
 

@@ -39,6 +39,10 @@ pub struct EventSummary {
     pub object: String,
     pub message: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
     /// How many times this event has fired. Absent means once, not none.
     pub count: i32,
 }
@@ -55,6 +59,7 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         ev.involved_object.name.clone().unwrap_or_default()
     );
     let age = crate::humanize_age(ev.last_timestamp.as_ref());
+    let created_at = crate::creation_timestamp_iso(ev.last_timestamp.as_ref());
     let namespace = ev.metadata.namespace.clone().unwrap_or_default();
     let own_name = ev.metadata.name.clone().unwrap_or_default();
     // One derivation, so the reported namespace and the key it is prefixed to
@@ -72,6 +77,7 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         object,
         message: ev.message.clone().unwrap_or_default(),
         age,
+        created_at,
         count: ev.count.unwrap_or(1),
     }
 }

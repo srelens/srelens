@@ -54,6 +54,10 @@ pub struct SecretSummary {
     /// stale (#405). Prefer this; `age` stays for callers that have no clock.
     pub created: Option<String>,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -71,6 +75,7 @@ pub(crate) fn summarise(secret: Secret) -> SecretSummary {
         keys: keys as i32,
         created: crate::creation_rfc3339(secret.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(secret.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(secret.metadata.creation_timestamp.as_ref()),
     }
 }
 

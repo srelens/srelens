@@ -2566,6 +2566,10 @@ impl App {
                                     if let Some(ts) = &item.metadata.creation_timestamp {
                                         let age = srelens_kube::humanize_age(Some(ts));
                                         obj.insert("age".to_string(), serde_json::Value::String(age));
+                                        obj.insert(
+                                            "createdAt".to_string(),
+                                            serde_json::Value::String(srelens_kube::creation_timestamp_iso(Some(ts))),
+                                        );
                                     }
                                 }
                             }
@@ -3225,7 +3229,9 @@ impl App {
             },
         );
 
-        // 2. Render Main View Body
+        // 2. Render Main View Body — Clear first to prevent ghosting artifacts
+        //    (e.g. log lines lingering below the table when switching views)
+        f.render_widget(ratatui::widgets::Clear, chunks[1]);
         match &self.active_view {
             ActiveView::Table(table) => render_resource_table(f, chunks[1], table),
             ActiveView::Yaml(yaml) => render_yaml_view(f, chunks[1], yaml),
