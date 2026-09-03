@@ -97,6 +97,11 @@ export interface TopologyProbe {
    *  no `cat`, a timeout. Reported so a graph missing edges is never taken
    *  for one where those pods talk to nothing. */
   unreadable: { pod: string; reason: string }[];
+  /** Namespaces whose pods could not be listed at all; nothing in them was
+   *  probed. */
+  unlisted: { namespace: string; reason: string }[];
+  /** Eligible pods left unread because the cap was reached. */
+  skipped: number;
 }
 
 export interface TopologyGraph {

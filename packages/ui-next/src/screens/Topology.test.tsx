@@ -584,13 +584,28 @@ describe("Topology", () => {
             { pod: "coredns-7db6d8ff4d-x2mzp", reason: "no cat in the image" },
             { pod: "kube-proxy-abc12", reason: "exec timed out" },
           ],
+          unlisted: [{ namespace: "payments", reason: "forbidden" }],
+          skipped: 12,
         },
       },
     });
     render(<Topology />);
     const note = await screen.findByTestId("probe-report");
-    expect(note.textContent).toContain("Probed 3 pods; 2 could not be read");
-    expect(note.textContent).toContain("coredns-7db6d8ff4d-x2mzp: no cat in the image");
+    // Read, unreadable and skipped add up to what was eligible; a clean
+    // forty-pod sample must not pass for the whole of a sixty-pod namespace.
+    expect(note.textContent).toContain("Probed 3 of 17 pods");
+    expect(note.textContent).toContain("2 could not be read — coredns-7db6d8ff4d-x2mzp: no cat in the image");
+    expect(note.textContent).toContain("12 left unread past the cap");
+    expect(note.textContent).toContain("pods in payments could not be listed");
+  });
+
+  it("says nothing about a probe that read everything", async () => {
+    core.topologyGraph.mockResolvedValue({
+      graph: { ...graph(), probe: { read: 5, unreadable: [], unlisted: [], skipped: 0 } },
+    });
+    render(<Topology />);
+    await screen.findByRole("button", { name: "Ingress web" });
+    expect(screen.queryByTestId("probe-report")).toBeNull();
   });
 
   it("says in words that an external node is config, not observed traffic", async () => {

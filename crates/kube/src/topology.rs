@@ -304,6 +304,19 @@ pub struct ProbeReport {
     pub read: usize,
     /// Pods that could not be read, and why.
     pub unreadable: Vec<crate::connections::Unreadable>,
+    /// Namespaces whose pods could not be listed at all, and why. Their
+    /// workloads were never probed, which is a different thing from having
+    /// been probed and found idle.
+    pub unlisted: Vec<Unlisted>,
+    /// Eligible pods left unread because the cap was reached. Non-zero means
+    /// the sample is a sample.
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct Unlisted {
+    pub namespace: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -429,7 +442,7 @@ fn push_edge(
     kind: EdgeKind,
     provenance: Provenance,
 ) {
-    push_edge_labelled(edges, from, to, kind, provenance, String::new(), None)
+    push_edge_labelled(edges, from, to, kind, provenance, String::new(), None);
 }
 
 /// As [`push_edge`], with something to write along the line and the quantity
@@ -441,6 +454,8 @@ fn push_edge(
 /// opposite. The observed provenance, its rate and its weight replace the
 /// declared ones together — a stale weight left beside a fresh label would be
 /// drawn at the wrong thickness.
+/// Answers whether the graph changed — a caller trying several telemetry
+/// sources needs to know that a batch of samples actually landed on it.
 fn push_edge_labelled(
     edges: &mut Vec<TopologyEdge>,
     from: String,
@@ -449,33 +464,34 @@ fn push_edge_labelled(
     provenance: Provenance,
     detail: String,
     measure: Option<(f64, Unit)>,
-) {
+) -> bool {
     if let Some(existing) = edges
         .iter_mut()
         .find(|e| e.from == from && e.to == to && e.kind == kind)
     {
-        if provenance == Provenance::Observed {
-            match (existing.unit, measure) {
-                // A rate is the better measurement and is never replaced by a
-                // socket count: enabling the probe on a graph Prometheus had
-                // already measured used to overwrite every rate with `3 conns`.
-                (Some(Unit::Rps), Some((_, Unit::Connections))) => return,
-                // Replicas each report their own sockets; the workload's edge
-                // is the total, not whichever pod the API listed last.
-                (Some(Unit::Connections), Some((more, Unit::Connections))) => {
-                    let total = existing.weight.unwrap_or(0.0) + more;
-                    existing.weight = Some(total);
-                    existing.detail = connection_label(total as u32);
-                    return;
-                }
-                _ => {}
-            }
-            existing.provenance = provenance;
-            existing.detail = detail;
-            existing.weight = measure.map(|(w, _)| w);
-            existing.unit = measure.map(|(_, u)| u);
+        if provenance != Provenance::Observed {
+            return false;
         }
-        return;
+        match (existing.unit, measure) {
+            // A rate is the better measurement and is never replaced by a
+            // socket count: enabling the probe on a graph Prometheus had
+            // already measured used to overwrite every rate with `3 conns`.
+            (Some(Unit::Rps), Some((_, Unit::Connections))) => return false,
+            // Replicas each report their own sockets; the workload's edge is
+            // the total, not whichever pod the API listed last.
+            (Some(Unit::Connections), Some((more, Unit::Connections))) => {
+                let total = existing.weight.unwrap_or(0.0) + more;
+                existing.weight = Some(total);
+                existing.detail = connection_label(total as u32);
+                return true;
+            }
+            _ => {}
+        }
+        existing.provenance = provenance;
+        existing.detail = detail;
+        existing.weight = measure.map(|(w, _)| w);
+        existing.unit = measure.map(|(_, u)| u);
+        return true;
     }
     edges.push(TopologyEdge {
         from,
@@ -485,11 +501,11 @@ fn push_edge_labelled(
         detail,
         weight: measure.map(|(w, _)| w),
         unit: measure.map(|(_, u)| u),
-        // A declared dependency says nothing about how the target is doing —
-        // the target's own node carries that, and copying an unrelated health
-        // onto the edge would colour a line with a fact it does not hold.
+        // Filled in by `resolve_call_health` once every source has run; a
+        // pair that never resolves to a drawn target stays unknown.
         health: Health::Unknown,
     });
+    true
 }
 
 /// A host something was configured to reach.
@@ -1837,13 +1853,43 @@ pub fn apply_allowed(
     // meant adding an allow-all could remove an edge. A peer that selects
     // whole namespaces is taken as open too; that is a little generous, and
     // generous is the right way to be wrong about intent.
+    // `*_open` is open to everything; `*_open_from` is open to everything in
+    // a named namespace, which is what a peer with a `namespaceSelector` and
+    // no `podSelector` means — and no more than that: admitting all of
+    // namespace A does not admit a caller in B.
     let mut ingress_open: BTreeSet<String> = BTreeSet::new();
     let mut egress_open: BTreeSet<String> = BTreeSet::new();
-    let wildcard = |peers: &[k8s_openapi::api::networking::v1::NetworkPolicyPeer]| {
-        peers.is_empty()
-            || peers.iter().any(|p| {
-                p.ip_block.is_none() && !p.pod_selector.as_ref().is_some_and(names_something)
-            })
+    let mut ingress_open_from: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut egress_open_from: BTreeSet<(String, String)> = BTreeSet::new();
+    let namespace_of: BTreeMap<String, String> = workloads
+        .iter()
+        .map(|w| (node_id(w.kind, &w.namespace, &w.name), w.namespace.clone()))
+        .collect();
+    // What a rule's peers open, beyond the pairs they name: everything, the
+    // named namespaces, or nothing.
+    enum Open {
+        All,
+        Namespaces(Vec<String>),
+    }
+    let openness = |peers: &[k8s_openapi::api::networking::v1::NetworkPolicyPeer], own: &str| -> Option<Open> {
+        if peers.is_empty() {
+            return Some(Open::All);
+        }
+        let mut namespaces: Vec<String> = Vec::new();
+        for p in peers {
+            if p.ip_block.is_some() || p.pod_selector.as_ref().is_some_and(names_something) {
+                continue;
+            }
+            match p.namespace_selector.as_ref().filter(|s| names_something(s)) {
+                None => return Some(Open::All),
+                Some(_) => namespaces.extend(
+                    peer_namespaces(p.namespace_selector.as_ref(), own, &in_view)
+                        .into_iter()
+                        .map(str::to_string),
+                ),
+            }
+        }
+        (!namespaces.is_empty()).then_some(Open::Namespaces(namespaces))
     };
     for policy in policies {
         let Some(spec) = policy.spec.as_ref() else {
@@ -1877,8 +1923,16 @@ pub fn apply_allowed(
         }
         for rule in spec.ingress.iter().flatten() {
             let peers = rule.from.as_deref().unwrap_or(&[]);
-            if wildcard(peers) {
-                ingress_open.extend(subjects.iter().cloned());
+            match openness(peers, &namespace) {
+                Some(Open::All) => ingress_open.extend(subjects.iter().cloned()),
+                Some(Open::Namespaces(nss)) => {
+                    for to in &subjects {
+                        for ns in &nss {
+                            ingress_open_from.insert((to.clone(), ns.clone()));
+                        }
+                    }
+                }
+                None => {}
             }
             for peer in peers {
                 let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
@@ -1894,8 +1948,16 @@ pub fn apply_allowed(
         }
         for rule in spec.egress.iter().flatten() {
             let peers = rule.to.as_deref().unwrap_or(&[]);
-            if wildcard(peers) {
-                egress_open.extend(subjects.iter().cloned());
+            match openness(peers, &namespace) {
+                Some(Open::All) => egress_open.extend(subjects.iter().cloned()),
+                Some(Open::Namespaces(nss)) => {
+                    for from in &subjects {
+                        for ns in &nss {
+                            egress_open_from.insert((from.clone(), ns.clone()));
+                        }
+                    }
+                }
+                None => {}
             }
             for peer in peers {
                 let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
@@ -1918,11 +1980,14 @@ pub fn apply_allowed(
             continue;
         }
         let pair = (from.clone(), to.clone());
+        let ns_of = |id: &String| namespace_of.get(id).cloned().unwrap_or_default();
         let out_ok = !egress_isolated.contains(from)
             || egress_open.contains(from)
+            || egress_open_from.contains(&(from.clone(), ns_of(to)))
             || egress_allowed.contains(&pair);
         let in_ok = !ingress_isolated.contains(to)
             || ingress_open.contains(to)
+            || ingress_open_from.contains(&(to.clone(), ns_of(from)))
             || ingress_allowed.contains(&pair);
         if !(out_ok && in_ok) {
             continue;
@@ -1940,12 +2005,13 @@ pub fn apply_observed(
     graph: &mut TopologyGraphOut,
     samples: &[crate::prometheus::Sample],
     schema: CallSchema,
-) {
+) -> usize {
+    let mut applied = 0;
     for sample in samples {
         let Some((from, to, detail, rps)) = observed_edge(sample, graph, schema) else {
             continue;
         };
-        push_edge_labelled(
+        if push_edge_labelled(
             &mut graph.edges,
             from,
             to,
@@ -1953,8 +2019,11 @@ pub fn apply_observed(
             Provenance::Observed,
             detail,
             Some((rps, Unit::Rps)),
-        );
+        ) {
+            applied += 1;
+        }
     }
+    applied
 }
 
 /// Everything the graph is built from, accumulated across the namespaces asked
@@ -2059,11 +2128,13 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         else {
                             continue;
                         };
-                        if samples.is_empty() {
-                            continue;
+                        // Taken only when something LANDED on this graph: a
+                        // shard full of series about other namespaces answers
+                        // with plenty and applies nothing, and must not stop
+                        // the next candidate being asked.
+                        if apply_observed(&mut graph, &samples, *schema) > 0 {
+                            break 'sources;
                         }
-                        apply_observed(&mut graph, &samples, *schema);
-                        break 'sources;
                     }
                 }
                 // Observed connections, when the reader asked for them.
@@ -2075,15 +2146,27 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     // only the first namespace left every other tier without
                     // an observed edge while the button said otherwise.
                     let mut pods: Vec<k8s_openapi::api::core::v1::Pod> = Vec::new();
+                    let mut unlisted = Vec::new();
                     for ns in &input.namespaces {
+                        // A namespace that could not be listed is REPORTED,
+                        // not read as empty: forbidden or timed out, its
+                        // workloads would otherwise be drawn as talking to
+                        // nothing with no sign anything was skipped.
                         let listed = tokio::time::timeout(
                             request_timeout(),
                             list_of::<k8s_openapi::api::core::v1::Pod>(client.clone(), ns, "pods"),
                         )
                         .await
-                        .unwrap_or_else(|_| Ok(Vec::new()))
-                        .unwrap_or_default();
-                        pods.extend(listed);
+                        .unwrap_or_else(|_| {
+                            Err(CapabilityError::Handler("listing pods timed out".into()))
+                        });
+                        match listed {
+                            Ok(list) => pods.extend(list),
+                            Err(e) => unlisted.push(Unlisted {
+                                namespace: ns.clone(),
+                                reason: format!("{e:?}"),
+                            }),
+                        }
                     }
                     let book = AddressBook::new(&all_services, &pods, &graph.nodes);
                     let mut read = Vec::new();
@@ -2091,12 +2174,15 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     // Only pods that belong to a drawn workload count against
                     // the cap. A namespace whose first forty pods are Jobs
                     // would otherwise spend the whole budget on pods the
-                    // graph could not have used.
-                    let candidates = pods
+                    // graph could not have used. What falls past the cap is
+                    // counted, so a clean forty-pod sample cannot pass for
+                    // the whole of a sixty-pod namespace.
+                    let eligible: Vec<&k8s_openapi::api::core::v1::Pod> = pods
                         .iter()
                         .filter(|p| workload_of_pod(p, &graph.nodes).is_some())
-                        .take(CONNECTION_POD_LIMIT);
-                    for pod in candidates {
+                        .collect();
+                    let skipped = eligible.len().saturating_sub(CONNECTION_POD_LIMIT);
+                    for pod in eligible.into_iter().take(CONNECTION_POD_LIMIT) {
                         let (Some(name), Some(namespace)) =
                             (pod.metadata.name.clone(), pod.metadata.namespace.clone())
                         else {
@@ -2126,7 +2212,12 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         }
                     }
                     apply_connections(&mut graph, &book, &read);
-                    graph.probe = Some(ProbeReport { read: read.len(), unreadable });
+                    graph.probe = Some(ProbeReport {
+                        read: read.len(),
+                        unreadable,
+                        unlisted,
+                        skipped,
+                    });
                 }
                 // Last, over every source: a call's line is coloured by how the
                 // thing it points at is doing, and a measured call into a
@@ -2912,6 +3003,62 @@ mod tests {
         let mut g = demo_graph();
         apply_allowed(&mut g, &[deny, allow_in, allow_out], &demo_labels());
         assert!(has_edge(&g, "Deployment/checkout/checkout", "Service/checkout/payments", EdgeKind::Calls));
+    }
+
+    #[test]
+    fn a_namespace_wide_peer_opens_a_direction_only_to_that_namespace() {
+        // payments admits every pod from namespace `shop`, and nothing else.
+        // A caller in shop with a specific egress rule is allowed; the same
+        // caller in checkout is not, however specific its egress rule.
+        let mut shop_caller = deployment("caller", 1, 1, &[("app", "caller")]);
+        shop_caller.metadata.namespace = Some("shop".into());
+        let checkout_caller = deployment("caller", 1, 1, &[("app", "caller")]);
+        let payments = deployment("payments", 1, 1, &[("app", "payments")]);
+        let labels = workload_labels(&[shop_caller.clone(), checkout_caller.clone(), payments.clone()], &[], &[]);
+        let build = || {
+            build_graph(
+                vec![],
+                vec![service("payments", &[("app", "payments")], 8080)],
+                vec![shop_caller.clone(), checkout_caller.clone(), payments.clone()],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            )
+        };
+        let mut admit_shop = policy("checkout", &[("app", "payments")], vec![], vec![]);
+        {
+            let spec = admit_shop.spec.as_mut().unwrap();
+            spec.policy_types = Some(vec!["Ingress".into()]);
+            spec.ingress = Some(vec![k8s_openapi::api::networking::v1::NetworkPolicyIngressRule {
+                from: Some(vec![k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+                    namespace_selector: Some(selector(&[("kubernetes.io/metadata.name", "shop")])),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }]);
+        }
+        let from_shop = {
+            let mut p = policy("shop", &[("app", "caller")], vec![], vec![policy_peer(&[("app", "payments")], Some("checkout"))]);
+            p.metadata.namespace = Some("shop".into());
+            p
+        };
+        let from_checkout = policy("checkout", &[("app", "caller")], vec![], vec![policy_peer(&[("app", "payments")], None)]);
+
+        let mut g = build();
+        apply_allowed(&mut g, &[admit_shop.clone(), from_shop, from_checkout], &labels);
+        assert!(has_edge(&g, "Deployment/shop/caller", "Service/checkout/payments", EdgeKind::Calls), "{:?}", g.edges);
+        assert!(!has_edge(&g, "Deployment/checkout/caller", "Service/checkout/payments", EdgeKind::Calls), "{:?}", g.edges);
+    }
+
+    #[test]
+    fn telemetry_that_lands_on_nothing_is_not_taken() {
+        // A shard full of series about other namespaces answers with plenty
+        // and applies nothing; the caller must go on to the next candidate.
+        let mut g = demo_graph();
+        assert_eq!(apply_observed(&mut g, &[sample("other", "stranger", "elsewhere", "svc", 5.0)], CallSchema::Istio), 0);
+        assert_eq!(apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 5.0)], CallSchema::Istio), 1);
     }
 
     #[test]

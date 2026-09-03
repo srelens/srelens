@@ -6,6 +6,7 @@ import {
   type TopologyEdge,
   type TopologyHealth,
   type TopologyLane,
+  type TopologyProbe,
 } from "@srelens/core";
 import { Button, EmptyState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
 import { useNamespaceOptions } from "@srelens/core/react";
@@ -232,16 +233,12 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
                 Showing {NAMESPACE_LIMIT} of {all.length} namespaces. Pick the ones you want to see.
               </p>
             )}
-            {graph.data?.probe && graph.data.probe.unreadable.length > 0 && (
+            {graph.data?.probe && probeIncomplete(graph.data.probe) && (
               // The probe's own account of itself. Without it the button reads
               // "Probing connections" over a graph missing edges, and a reader
               // takes the gaps for pods that talk to nothing.
               <p className="text-sm text-muted" data-testid="probe-report">
-                Probed {graph.data.probe.read}{" "}
-                {graph.data.probe.read === 1 ? "pod" : "pods"};{" "}
-                {graph.data.probe.unreadable.length} could not be read —{" "}
-                {graph.data.probe.unreadable[0].pod}: {graph.data.probe.unreadable[0].reason}
-                {graph.data.probe.unreadable.length > 1 ? ", and others." : "."}
+                {probeSummary(graph.data.probe)}
               </p>
             )}
           </div>
@@ -286,6 +283,43 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
       </div>
     </Screen>
   );
+}
+
+/** Whether the probe has anything to confess. */
+function probeIncomplete(probe: TopologyProbe): boolean {
+  return probe.unreadable.length > 0 || probe.unlisted.length > 0 || probe.skipped > 0;
+}
+
+/**
+ * The probe's report, in one sentence a reader can act on.
+ *
+ * Three ways a probe falls short, each said plainly: pods it could not read
+ * (with the first reason, since they are usually all the same one), namespaces
+ * it could not list at all, and eligible pods it left unread because the cap
+ * was reached — that last one being the difference between a sample and the
+ * whole, which a reader has to know before trusting a missing edge.
+ */
+function probeSummary(probe: TopologyProbe): string {
+  const parts: string[] = [];
+  const total = probe.read + probe.unreadable.length + probe.skipped;
+  parts.push(`Probed ${probe.read} of ${total} ${total === 1 ? "pod" : "pods"}`);
+  if (probe.unreadable.length > 0) {
+    const first = probe.unreadable[0];
+    parts.push(
+      `${probe.unreadable.length} could not be read — ${first.pod}: ${first.reason}${
+        probe.unreadable.length > 1 ? ", and others" : ""
+      }`,
+    );
+  }
+  if (probe.skipped > 0) {
+    parts.push(`${probe.skipped} left unread past the cap of ${probe.read + probe.unreadable.length}`);
+  }
+  if (probe.unlisted.length > 0) {
+    parts.push(
+      `pods in ${probe.unlisted.map((u) => u.namespace).join(", ")} could not be listed and were not probed`,
+    );
+  }
+  return `${parts.join("; ")}.`;
 }
 
 /** The kit's tone for a node's health. */
