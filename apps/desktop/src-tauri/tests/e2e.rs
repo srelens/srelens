@@ -668,7 +668,7 @@ async fn run_suite() {
             .reg
             .invoke(
                 "k8s.listPersistentVolumeClaims",
-                json!({ "context": ctx, "namespaces": [NS] }),
+                json!({ "context": ctx, "namespace": NS }),
             )
             .await
             .unwrap();
@@ -1340,10 +1340,13 @@ async fn run_suite() {
     // Service selector, the Deployment template labels the controller copies
     // onto its pods, and the ownerReference the Deployment controller writes
     // on the ReplicaSet it makes.
+    // The full input, spelled out: several namespaces at once is the
+    // capability's shape, and the two optional sources are named as absent
+    // rather than left to a default that may not exist.
     let out = h
         .ok(
             "k8s.topologyGraph",
-            json!({ "context": ctx, "namespace": NS }),
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": null, "connections": false }),
         )
         .await;
     let nodes = out["nodes"].as_array().unwrap();
