@@ -253,6 +253,61 @@ describe("Topology", () => {
     expect(canvas.querySelectorAll('path[stroke-dasharray="2 4"]')).toHaveLength(1);
   });
 
+  it("draws a policy-allowed call as neither traffic nor config", async () => {
+    // A NetworkPolicy says the call would be let through if made. That is
+    // weaker than a host in an env var and much weaker than a measurement,
+    // and the line and the inspector both have to say so.
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          {
+            id: "Deployment/default/checkout",
+            kind: "Deployment",
+            name: "checkout",
+            namespace: "default",
+            lane: "workload",
+            detail: "1/1",
+            ready: 1,
+            desired: 1,
+            health: "ok",
+          },
+          {
+            id: "Service/default/payments",
+            kind: "Service",
+            name: "payments",
+            namespace: "default",
+            lane: "service",
+            detail: ":80",
+            ready: null,
+            desired: null,
+            health: "ok",
+          },
+        ],
+        edges: [
+          {
+            from: "Deployment/default/checkout",
+            to: "Service/default/payments",
+            kind: "calls",
+            provenance: "allowed",
+            detail: "",
+            health: "unknown",
+            weight: null,
+            unit: null,
+          },
+        ],
+      },
+    });
+    render(<Topology />);
+    const caller = await screen.findByRole("button", { name: "Deployment checkout" });
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    expect(canvas.querySelectorAll('path[stroke-dasharray="7 4"]')).toHaveLength(1);
+    expect(canvas.querySelectorAll('path[stroke-dasharray="2 4"]')).toHaveLength(0);
+
+    await userEvent.click(caller);
+    const panel = screen.getByRole("complementary", { name: "Selected node" });
+    expect(within(panel).getByRole("button", { name: /payments allowed/ })).toBeDefined();
+  });
+
   it("feeds a discovered metrics backend to the graph, and draws its rates", async () => {
     // A measured edge is accented and solid where a declared one is faint and
     // dotted, and it is the only kind that carries a number.

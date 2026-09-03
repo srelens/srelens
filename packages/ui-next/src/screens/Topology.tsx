@@ -330,6 +330,13 @@ function edgeTone(edge: TopologyEdge): { stroke: string; fill: string; dash?: st
   if (edge.provenance === "declared") {
     return { stroke: "stroke-faint", fill: "fill-faint", dash: "2 4", flow: false };
   }
+  if (edge.provenance === "allowed") {
+    // A NetworkPolicy permitting it: weaker still than a host in a config
+    // file, because it says only that the call would be let through if made.
+    // The same faint ink as declared and a longer dash, so the two read as
+    // kin — neither is traffic — but not as the same thing.
+    return { stroke: "stroke-faint", fill: "fill-faint", dash: "7 4", flow: false };
+  }
   return { stroke: strokeFor(edge.health), fill: fillFor(edge.health), flow: false };
 }
 
@@ -911,6 +918,9 @@ function Legend() {
       <Key dash="2 4" className="stroke-faint">
         Declared in config
       </Key>
+      <Key dash="7 4" className="stroke-faint">
+        Allowed by policy
+      </Key>
       <Key className="stroke-accent" width={2.5} flow>
         Observed traffic
       </Key>
@@ -1087,7 +1097,12 @@ function Connections({
             >
               <span className="min-w-0 flex-1 break-all">{label(other(edge))}</span>
               <span className="shrink-0 text-[10px] uppercase text-faint">
-                {edge.provenance === "declared" ? "declared" : edge.kind}
+                {/* How the link is KNOWN, where that is weaker than the edge
+                    kind implies: a "call" that is only permitted by policy
+                    must not be listed as a call. */}
+                {edge.provenance === "declared" || edge.provenance === "allowed"
+                  ? edge.provenance
+                  : edge.kind}
               </span>
               {edge.detail && (
                 <span className="num shrink-0 text-xs text-muted">{edge.detail}</span>

@@ -109,7 +109,8 @@ use std::sync::Arc;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::{ConfigMap, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use k8s_openapi::api::networking::v1::Ingress;
+use k8s_openapi::api::networking::v1::{Ingress, NetworkPolicy};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::ListParams;
 use kube::core::NamespaceResourceScope;
 use kube::{Api, Resource};
@@ -1178,6 +1179,48 @@ pub const CONNECTION_POD_LIMIT: usize = 40;
 
 pub const ISTIO_CALL_GRAPH: &str = "sum by (source_workload, source_workload_namespace, destination_service_name, destination_service_namespace) (rate(istio_requests_total[5m]))";
 
+/// Cilium's Hubble, where its HTTP visibility is on.
+///
+/// `hubble_http_requests_total` and not `hubble_flows_processed_total`,
+/// deliberately. The flow counter is what Hubble always exports, and it counts
+/// FLOWS — packet-level events, several per request and a steady trickle per
+/// idle connection — so a rate of it written as `rpm` would be a number nobody
+/// measured. The HTTP counter is a request rate, the same quantity Istio
+/// reports and the same unit on the screen, and it exists only where an
+/// operator turned L7 visibility on. A cluster without that gets no observed
+/// edges from Hubble, which is the honest answer.
+///
+/// The per-workload labels are the `labelsContext` set Cilium's own Helm
+/// example configures for `httpV2`. A Hubble configured without them answers
+/// this with no series at all, and the graph simply stays declared. Where the
+/// `traffic_direction` label exists the ingress side is taken, so one request
+/// is not counted once leaving its caller and once arriving.
+pub const HUBBLE_HTTP_CALL_GRAPH: &str = "sum by (source_workload, source_namespace, destination_workload, destination_namespace) (rate(hubble_http_requests_total{traffic_direction=~\"ingress|\"}[5m]))";
+
+/// Which telemetry a batch of samples came from, and so which labels name the
+/// two ends of a call and what kind of thing each end is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSchema {
+    /// `istio_requests_total`: the source is a workload, the destination a
+    /// Service — Istio reports the address that was called.
+    Istio,
+    /// `hubble_http_requests_total`: both ends are workloads. Hubble watches
+    /// pod to pod, below the Service abstraction, so the address is worked
+    /// back out from the graph; see [`fronting_service`].
+    Hubble,
+}
+
+/// Every call-graph query, best evidence first.
+///
+/// One mesh per cluster is the working assumption: the first query that
+/// returns any series is taken and the rest are not asked, so a cluster that
+/// somehow runs both is not drawn with each edge's rate overwritten by the
+/// other's.
+pub const CALL_GRAPH_QUERIES: &[(CallSchema, &str)] = &[
+    (CallSchema::Istio, ISTIO_CALL_GRAPH),
+    (CallSchema::Hubble, HUBBLE_HTTP_CALL_GRAPH),
+];
+
 /// Where a metrics backend lives, as `k8s.prometheusDiscover` reported it.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct PrometheusSource {
@@ -1210,31 +1253,68 @@ pub fn rate_label(per_second: f64) -> String {
 /// time a service they do not care about took traffic.
 fn observed_edge(
     sample: &crate::prometheus::Sample,
-    nodes: &[TopologyNode],
+    graph: &TopologyGraphOut,
+    schema: CallSchema,
 ) -> Option<(String, String, String, f64)> {
     let label = |key: &str| sample.labels.get(key).cloned().unwrap_or_default();
-    let source_ns = label("source_workload_namespace");
-    let source = label("source_workload");
-    let dest_ns = label("destination_service_namespace");
-    let dest = label("destination_service_name");
+    let (source_ns, source, dest_ns, dest) = match schema {
+        CallSchema::Istio => (
+            label("source_workload_namespace"),
+            label("source_workload"),
+            label("destination_service_namespace"),
+            label("destination_service_name"),
+        ),
+        CallSchema::Hubble => (
+            label("source_namespace"),
+            label("source_workload"),
+            label("destination_namespace"),
+            label("destination_workload"),
+        ),
+    };
     if source.is_empty() || dest.is_empty() {
         return None;
     }
+    let nodes = &graph.nodes;
     // The workload's kind is not in the metric, so it is found rather than
     // assumed: Istio reports `source_workload` for a Deployment, a StatefulSet
     // and a DaemonSet alike.
     let from = nodes
         .iter()
         .find(|n| n.lane == Lane::Workload && n.name == source && n.namespace == source_ns)?;
-    let to = nodes
+    let to = match schema {
+        CallSchema::Istio => nodes
+            .iter()
+            .find(|n| n.lane == Lane::Service && n.name == dest && n.namespace == dest_ns)?
+            .id
+            .clone(),
+        CallSchema::Hubble => {
+            let workload = nodes
+                .iter()
+                .find(|n| n.lane == Lane::Workload && n.name == dest && n.namespace == dest_ns)?;
+            fronting_service(graph, &workload.id).unwrap_or_else(|| workload.id.clone())
+        }
+    };
+    Some((from.id.clone(), to, rate_label(sample.value), sample.value))
+}
+
+/// The one Service that routes to a workload, if there is exactly one.
+///
+/// Hubble and a NetworkPolicy both speak of pods, not Services, and the graph
+/// draws a call to the address its caller used. Where one Service fronts the
+/// workload that address is not in doubt. Where none does the edge lands on
+/// the workload itself, and where several do it does too — picking one would
+/// be a guess drawn as a fact.
+pub fn fronting_service(graph: &TopologyGraphOut, workload_id: &str) -> Option<String> {
+    let mut found = graph
+        .edges
         .iter()
-        .find(|n| n.lane == Lane::Service && n.name == dest && n.namespace == dest_ns)?;
-    Some((
-        from.id.clone(),
-        to.id.clone(),
-        rate_label(sample.value),
-        sample.value,
-    ))
+        .filter(|e| e.kind == EdgeKind::Routes && e.to == workload_id && e.from.starts_with("Service/"))
+        .map(|e| e.from.clone());
+    let first = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 /// What a pod's socket table says, ready to be mapped onto the graph.
@@ -1351,13 +1431,200 @@ pub fn apply_connections(graph: &mut TopologyGraphOut, book: &AddressBook, pods:
     }
 }
 
+/// A workload reduced to what a selector can be judged against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadLabels {
+    pub kind: &'static str,
+    pub namespace: String,
+    pub name: String,
+    pub labels: BTreeMap<String, String>,
+}
+
+/// The pod-template labels of every workload, for the policy pass.
+///
+/// Taken BEFORE [`build_graph`] consumes the objects, and from the same
+/// mappers it uses, so a policy is judged against exactly the labels the
+/// Service selectors were.
+pub fn workload_labels(
+    deployments: &[Deployment],
+    statefulsets: &[StatefulSet],
+    daemonsets: &[DaemonSet],
+) -> Vec<WorkloadLabels> {
+    deployments
+        .iter()
+        .map(deployment_workload)
+        .chain(statefulsets.iter().map(statefulset_workload))
+        .chain(daemonsets.iter().map(daemonset_workload))
+        .map(|w| WorkloadLabels {
+            kind: w.kind,
+            namespace: w.namespace,
+            name: w.name,
+            labels: w.labels,
+        })
+        .collect()
+}
+
+/// Whether a `LabelSelector` picks out a set of labels.
+///
+/// An EMPTY selector matches everything here — the opposite of a Service
+/// selector, and exactly what Kubernetes means by `podSelector: {}` on a
+/// policy. Callers that need a peer to be a specific thing check
+/// [`names_something`] first rather than relying on this.
+pub fn label_selector_matches(selector: &LabelSelector, labels: &BTreeMap<String, String>) -> bool {
+    if let Some(wanted) = selector.match_labels.as_ref() {
+        if !wanted.iter().all(|(k, v)| labels.get(k) == Some(v)) {
+            return false;
+        }
+    }
+    for expr in selector.match_expressions.iter().flatten() {
+        let have = labels.get(&expr.key);
+        let values: &[String] = expr.values.as_deref().unwrap_or(&[]);
+        let ok = match expr.operator.as_str() {
+            "In" => have.is_some_and(|v| values.contains(v)),
+            "NotIn" => !have.is_some_and(|v| values.contains(v)),
+            "Exists" => have.is_some(),
+            "DoesNotExist" => have.is_none(),
+            // An operator this code does not know cannot be said to match.
+            _ => false,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a selector singles anything out, as opposed to matching everything.
+pub fn names_something(selector: &LabelSelector) -> bool {
+    selector.match_labels.as_ref().is_some_and(|m| !m.is_empty())
+        || selector.match_expressions.as_ref().is_some_and(|e| !e.is_empty())
+}
+
+/// The namespaces a peer's `namespaceSelector` reaches, out of those in view.
+///
+/// Judged against the one label every namespace is guaranteed to carry,
+/// `kubernetes.io/metadata.name`, which is what a cross-namespace policy
+/// almost always selects on — and which means no Namespace list is needed to
+/// draw one. A selector on any other namespace label matches nothing here,
+/// which drops an edge rather than inventing one.
+fn peer_namespaces<'a>(
+    selector: Option<&LabelSelector>,
+    own: &'a str,
+    in_view: &'a [String],
+) -> Vec<&'a str> {
+    let Some(selector) = selector else {
+        return vec![own];
+    };
+    in_view
+        .iter()
+        .filter(|ns| {
+            let labels =
+                BTreeMap::from([("kubernetes.io/metadata.name".to_string(), (*ns).clone())]);
+            label_selector_matches(selector, &labels)
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// Fold what NetworkPolicies permit into a graph already built from the API.
+///
+/// Intent, not traffic, and drawn as such — [`Provenance::Allowed`]. A rule
+/// that names BOTH ends, a `podSelector` on the policy and a `podSelector` on
+/// the peer, is a statement that these two things are meant to talk, and that
+/// is worth an edge. A rule that names only one end is not: `from` left out,
+/// an empty peer selector or a bare `namespaceSelector` all mean "anything in
+/// there", and drawing that as a dependency would wire every pair in the
+/// namespace together. An `ipBlock` is a CIDR, not a workload, and is skipped.
+///
+/// The policy's own selector MAY be empty — `podSelector: {}` is how a
+/// namespace-wide allow-from is written, and its peers are still specific.
+///
+/// Where a config reference already declared the same pair, the declared edge
+/// stands: a host in an environment variable is better evidence than a policy
+/// that would let the call through. Telemetry later upgrades either.
+pub fn apply_allowed(
+    graph: &mut TopologyGraphOut,
+    policies: &[NetworkPolicy],
+    workloads: &[WorkloadLabels],
+) {
+    let in_view: Vec<String> = {
+        let mut seen: Vec<String> = workloads.iter().map(|w| w.namespace.clone()).collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    };
+    let matching = |selector: &LabelSelector, namespaces: &[&str]| -> Vec<String> {
+        workloads
+            .iter()
+            .filter(|w| {
+                namespaces.contains(&w.namespace.as_str())
+                    && label_selector_matches(selector, &w.labels)
+            })
+            .map(|w| node_id(w.kind, &w.namespace, &w.name))
+            .collect()
+    };
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for policy in policies {
+        let Some(spec) = policy.spec.as_ref() else {
+            continue;
+        };
+        let namespace = policy.metadata.namespace.clone().unwrap_or_default();
+        // Absent and `{}` both mean every pod in the namespace.
+        let subject = spec.pod_selector.clone().unwrap_or_default();
+        let subjects = matching(&subject, &[namespace.as_str()]);
+        if subjects.is_empty() {
+            continue;
+        }
+        for rule in spec.ingress.iter().flatten() {
+            for peer in rule.from.iter().flatten() {
+                let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
+                    continue;
+                };
+                let namespaces = peer_namespaces(peer.namespace_selector.as_ref(), &namespace, &in_view);
+                for from in matching(selector, &namespaces) {
+                    for to in &subjects {
+                        pairs.push((from.clone(), to.clone()));
+                    }
+                }
+            }
+        }
+        for rule in spec.egress.iter().flatten() {
+            for peer in rule.to.iter().flatten() {
+                let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
+                    continue;
+                };
+                let namespaces = peer_namespaces(peer.namespace_selector.as_ref(), &namespace, &in_view);
+                for to in matching(selector, &namespaces) {
+                    for from in &subjects {
+                        pairs.push((from.clone(), to.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    for (from, to) in pairs {
+        // Pods of one workload talking among themselves is not a dependency.
+        if from == to {
+            continue;
+        }
+        let to = fronting_service(graph, &to).unwrap_or(to);
+        push_edge(&mut graph.edges, from, to, EdgeKind::Calls, Provenance::Allowed);
+    }
+}
+
 /// Fold measured traffic into a graph already built from the API.
 ///
 /// Separated and public so the merge is testable without a cluster or a
 /// Prometheus — it is the part that can be wrong, and the query is not.
-pub fn apply_observed(graph: &mut TopologyGraphOut, samples: &[crate::prometheus::Sample]) {
+pub fn apply_observed(
+    graph: &mut TopologyGraphOut,
+    samples: &[crate::prometheus::Sample],
+    schema: CallSchema,
+) {
     for sample in samples {
-        let Some((from, to, detail, rps)) = observed_edge(sample, &graph.nodes) else {
+        let Some((from, to, detail, rps)) = observed_edge(sample, graph, schema) else {
             continue;
         };
         push_edge_labelled(
@@ -1384,6 +1651,7 @@ struct Fetched {
     replicasets: Vec<ReplicaSet>,
     config_maps: Vec<ConfigMap>,
     endpointslices: Vec<EndpointSlice>,
+    policies: Vec<NetworkPolicy>,
 }
 
 /// `k8s.topologyGraph` — the route/service/workload/revision/dependency graph
@@ -1407,7 +1675,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     // Namespaces are walked in order because a reader picks a
                     // handful, not fifty, and a burst of 7n concurrent requests
                     // against one API server is a worse trade than the wait.
-                    let (ingresses, services, deployments, statefulsets, daemonsets, replicasets, config_maps, endpointslices) = tokio::try_join!(
+                    let (ingresses, services, deployments, statefulsets, daemonsets, replicasets, config_maps, endpointslices, policies) = tokio::try_join!(
                         list_of::<Ingress>(client.clone(), ns, "ingresses"),
                         list_of::<Service>(client.clone(), ns, "services"),
                         list_of::<Deployment>(client.clone(), ns, "deployments"),
@@ -1416,6 +1684,7 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         list_of::<ReplicaSet>(client.clone(), ns, "replicasets"),
                         list_of::<ConfigMap>(client.clone(), ns, "configmaps"),
                         list_of::<EndpointSlice>(client.clone(), ns, "endpointslices"),
+                        list_of::<NetworkPolicy>(client.clone(), ns, "networkpolicies"),
                     )?;
                     all.ingresses.extend(ingresses);
                     all.services.extend(services);
@@ -1425,12 +1694,16 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     all.replicasets.extend(replicasets);
                     all.config_maps.extend(config_maps);
                     all.endpointslices.extend(endpointslices);
+                    all.policies.extend(policies);
                 }
                 // Built once over everything, not once per namespace and merged:
                 // a `checkout` that calls `payments-api.payments.svc` only
                 // resolves to the real Service when both namespaces are in the
                 // same pass.
                 let all_services = all.services.clone();
+                // Read off before the objects are handed over, from the same
+                // mappers the graph uses.
+                let labels = workload_labels(&all.deployments, &all.statefulsets, &all.daemonsets);
                 let mut graph = build_graph(
                     all.ingresses,
                     all.services,
@@ -1446,17 +1719,29 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                 // graph down with it: the structural half is still true and
                 // still worth drawing, so a failure here leaves the edges
                 // declared rather than observed.
+                // Before telemetry, so a measurement upgrades a permitted edge
+                // the same way it upgrades a declared one.
+                apply_allowed(&mut graph, &all.policies, &labels);
                 if let Some(source) = input.prometheus.as_ref() {
-                    if let Ok(samples) = crate::prometheus::instant_query(
-                        &client,
-                        &source.namespace,
-                        &source.service,
-                        source.port,
-                        ISTIO_CALL_GRAPH,
-                    )
-                    .await
-                    {
-                        apply_observed(&mut graph, &samples);
+                    for (schema, query) in CALL_GRAPH_QUERIES {
+                        let Ok(samples) = crate::prometheus::instant_query(
+                            &client,
+                            &source.namespace,
+                            &source.service,
+                            source.port,
+                            query,
+                        )
+                        .await
+                        else {
+                            continue;
+                        };
+                        // The first mesh that answers is the mesh this cluster
+                        // runs; a query that returns no series is asked past.
+                        if samples.is_empty() {
+                            continue;
+                        }
+                        apply_observed(&mut graph, &samples, *schema);
+                        break;
                     }
                 }
                 // Observed connections, when the reader asked for them.
@@ -1988,6 +2273,263 @@ mod tests {
         )
     }
 
+    // ---- allowed: what a NetworkPolicy would let through ----
+
+    fn selector(pairs: &[(&str, &str)]) -> LabelSelector {
+        LabelSelector {
+            match_labels: Some(labels(pairs)),
+            ..Default::default()
+        }
+    }
+
+    fn policy_peer(pods: &[(&str, &str)], namespace: Option<&str>) -> k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+        k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+            pod_selector: Some(selector(pods)),
+            namespace_selector: namespace.map(|ns| selector(&[("kubernetes.io/metadata.name", ns)])),
+            ..Default::default()
+        }
+    }
+
+    /// A policy on `subject`'s pods in `namespace`, allowing ingress from and
+    /// egress to the given peers.
+    fn policy(
+        namespace: &str,
+        subject: &[(&str, &str)],
+        from: Vec<k8s_openapi::api::networking::v1::NetworkPolicyPeer>,
+        to: Vec<k8s_openapi::api::networking::v1::NetworkPolicyPeer>,
+    ) -> NetworkPolicy {
+        use k8s_openapi::api::networking::v1 as net;
+        let mut metadata = meta("policy");
+        metadata.namespace = Some(namespace.into());
+        NetworkPolicy {
+            metadata,
+            spec: Some(net::NetworkPolicySpec {
+                pod_selector: Some(selector(subject)),
+                ingress: (!from.is_empty()).then(|| {
+                    vec![net::NetworkPolicyIngressRule {
+                        from: Some(from),
+                        ..Default::default()
+                    }]
+                }),
+                egress: (!to.is_empty()).then(|| {
+                    vec![net::NetworkPolicyEgressRule {
+                        to: Some(to),
+                        ..Default::default()
+                    }]
+                }),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn demo_labels() -> Vec<WorkloadLabels> {
+        workload_labels(
+            &[
+                deployment("checkout", 1, 1, &[("app", "checkout")]),
+                deployment("payments", 1, 1, &[("app", "payments")]),
+            ],
+            &[],
+            &[],
+        )
+    }
+
+    #[test]
+    fn an_ingress_rule_naming_both_ends_is_an_allowed_call_to_the_fronting_service() {
+        let mut g = demo_graph();
+        apply_allowed(
+            &mut g,
+            &[policy("checkout", &[("app", "payments")], vec![policy_peer(&[("app", "checkout")], None)], vec![])],
+            &demo_labels(),
+        );
+        // Drawn to the Service, which is the address the caller would use,
+        // not to the pods the policy is literally about.
+        let edge = g.edges.iter().find(|e| e.kind == EdgeKind::Calls).expect("an allowed call");
+        assert_eq!(edge.from, "Deployment/checkout/checkout");
+        assert_eq!(edge.to, "Service/checkout/payments");
+        assert_eq!(edge.provenance, Provenance::Allowed);
+        assert_eq!(edge.detail, "");
+        assert_eq!(edge.weight, None);
+    }
+
+    #[test]
+    fn an_egress_rule_points_the_other_way() {
+        let mut g = demo_graph();
+        apply_allowed(
+            &mut g,
+            &[policy("checkout", &[("app", "checkout")], vec![], vec![policy_peer(&[("app", "payments")], None)])],
+            &demo_labels(),
+        );
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "Service/checkout/payments", EdgeKind::Calls));
+    }
+
+    #[test]
+    fn a_peer_that_names_nothing_specific_draws_nothing() {
+        // `podSelector: {}` on a peer is every pod in the namespace. Wiring
+        // that up would join every pair in the namespace.
+        let mut g = demo_graph();
+        let mut anyone = policy_peer(&[], None);
+        anyone.pod_selector = Some(LabelSelector::default());
+        let mut by_cidr = policy_peer(&[], None);
+        by_cidr.pod_selector = None;
+        by_cidr.ip_block = Some(k8s_openapi::api::networking::v1::IPBlock {
+            cidr: "10.0.0.0/8".into(),
+            except: None,
+        });
+        apply_allowed(
+            &mut g,
+            &[policy("checkout", &[("app", "payments")], vec![anyone, by_cidr], vec![])],
+            &demo_labels(),
+        );
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
+    }
+
+    #[test]
+    fn a_cross_namespace_peer_is_found_by_the_namespace_name_label() {
+        // No Namespace list is fetched; the selector is judged against the
+        // one label every namespace is guaranteed to carry.
+        let mut ledger = deployment("ledger", 1, 1, &[("app", "ledger")]);
+        ledger.metadata.namespace = Some("payments".into());
+        let checkout = deployment("checkout", 1, 1, &[("app", "checkout")]);
+        let labels = workload_labels(&[checkout.clone(), ledger.clone()], &[], &[]);
+        let mut g = build_graph(vec![], vec![], vec![checkout, ledger], vec![], vec![], vec![], vec![], vec![]);
+        apply_allowed(
+            &mut g,
+            &[policy("payments", &[("app", "ledger")], vec![policy_peer(&[("app", "checkout")], Some("checkout"))], vec![])],
+            &labels,
+        );
+        // Nothing fronts `ledger`, so the edge lands on the workload itself
+        // rather than on a Service that was guessed.
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "Deployment/payments/ledger", EdgeKind::Calls));
+
+        // And a selector on any OTHER namespace label matches nothing here.
+        let mut g = build_graph(
+            vec![],
+            vec![],
+            vec![deployment("checkout", 1, 1, &[("app", "checkout")]), {
+                let mut l = deployment("ledger", 1, 1, &[("app", "ledger")]);
+                l.metadata.namespace = Some("payments".into());
+                l
+            }],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mut by_team = policy_peer(&[("app", "checkout")], None);
+        by_team.namespace_selector = Some(selector(&[("team", "shop")]));
+        apply_allowed(&mut g, &[policy("payments", &[("app", "ledger")], vec![by_team], vec![])], &labels);
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls));
+    }
+
+    #[test]
+    fn a_declared_edge_is_not_downgraded_to_allowed() {
+        // A host in an environment variable says the workload was built to
+        // call this; a policy says only that it could. The better evidence
+        // stands, and there is still one edge.
+        let mut g = demo_graph();
+        push_edge(
+            &mut g.edges,
+            "Deployment/checkout/checkout".into(),
+            "Service/checkout/payments".into(),
+            EdgeKind::Calls,
+            Provenance::Declared,
+        );
+        apply_allowed(
+            &mut g,
+            &[policy("checkout", &[("app", "payments")], vec![policy_peer(&[("app", "checkout")], None)], vec![])],
+            &demo_labels(),
+        );
+        let calls: Vec<&TopologyEdge> = g.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provenance, Provenance::Declared);
+    }
+
+    #[test]
+    fn a_selector_expression_is_honoured() {
+        let ok = labels(&[("app", "checkout"), ("tier", "web")]);
+        let sel = LabelSelector {
+            match_expressions: Some(vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                    key: "tier".into(),
+                    operator: "In".into(),
+                    values: Some(vec!["web".into(), "api".into()]),
+                },
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement {
+                    key: "canary".into(),
+                    operator: "DoesNotExist".into(),
+                    values: None,
+                },
+            ]),
+            ..Default::default()
+        };
+        assert!(label_selector_matches(&sel, &ok));
+        assert!(!label_selector_matches(&sel, &labels(&[("app", "checkout"), ("tier", "db")])));
+        assert!(!label_selector_matches(&sel, &labels(&[("tier", "web"), ("canary", "yes")])));
+        // Empty matches everything — the opposite of a Service selector.
+        assert!(label_selector_matches(&LabelSelector::default(), &ok));
+        assert!(!names_something(&LabelSelector::default()));
+    }
+
+    // ---- observed, from Hubble: pod to pod, below the Service ----
+
+    fn hubble_sample(source_ns: &str, source: &str, dest_ns: &str, dest: &str, per_second: f64) -> crate::prometheus::Sample {
+        crate::prometheus::Sample {
+            labels: labels(&[
+                ("source_namespace", source_ns),
+                ("source_workload", source),
+                ("destination_namespace", dest_ns),
+                ("destination_workload", dest),
+            ]),
+            value: per_second,
+        }
+    }
+
+    #[test]
+    fn a_hubble_request_lands_on_the_service_fronting_the_destination_workload() {
+        // Hubble reports the pod that answered; the graph draws the address
+        // that was called. With one Service fronting the workload there is no
+        // doubt which that was.
+        let mut g = demo_graph();
+        apply_observed(&mut g, &[hubble_sample("checkout", "checkout", "checkout", "payments", 2.0)], CallSchema::Hubble);
+        let edge = g.edges.iter().find(|e| e.kind == EdgeKind::Calls).expect("an observed call");
+        assert_eq!(edge.from, "Deployment/checkout/checkout");
+        assert_eq!(edge.to, "Service/checkout/payments");
+        assert_eq!(edge.provenance, Provenance::Observed);
+        assert_eq!(edge.detail, "120 rpm");
+        assert_eq!(edge.unit, Some(Unit::Rps));
+    }
+
+    #[test]
+    fn a_hubble_request_to_an_unfronted_workload_lands_on_the_workload() {
+        let mut g = build_graph(
+            vec![],
+            vec![],
+            vec![
+                deployment("checkout", 1, 1, &[("app", "checkout")]),
+                deployment("payments", 1, 1, &[("app", "payments")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        apply_observed(&mut g, &[hubble_sample("checkout", "checkout", "checkout", "payments", 2.0)], CallSchema::Hubble);
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "Deployment/checkout/payments", EdgeKind::Calls));
+    }
+
+    #[test]
+    fn istio_labels_mean_nothing_to_the_hubble_schema_and_vice_versa() {
+        // Each query's labels are read under its own schema only; a sample
+        // from the wrong one is dropped rather than half-matched.
+        let mut g = demo_graph();
+        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 1.0)], CallSchema::Hubble);
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls));
+        apply_observed(&mut g, &[hubble_sample("checkout", "checkout", "checkout", "payments", 1.0)], CallSchema::Istio);
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls));
+    }
+
     // ---- observed connections: what the kernel has open ----
 
     fn pod(name: &str, ip: &str, owner: &str) -> k8s_openapi::api::core::v1::Pod {
@@ -2148,7 +2690,7 @@ mod tests {
     #[test]
     fn measured_traffic_becomes_an_observed_edge_with_its_rate() {
         let mut g = demo_graph();
-        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 0.6867)]);
+        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 0.6867)], CallSchema::Istio);
         let edge = g
             .edges
             .iter()
@@ -2196,7 +2738,7 @@ mod tests {
         let declared = g.edges.iter().filter(|e| e.kind == EdgeKind::Calls).count();
         assert_eq!(declared, 1, "the config reference alone");
 
-        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 1.0)]);
+        apply_observed(&mut g, &[sample("checkout", "checkout", "checkout", "payments", 1.0)], CallSchema::Istio);
         let calls: Vec<&TopologyEdge> = g.edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
         assert_eq!(calls.len(), 1, "still one dependency: {calls:?}");
         assert_eq!(calls[0].provenance, Provenance::Observed);
@@ -2216,6 +2758,7 @@ mod tests {
                 sample("other", "stranger", "checkout", "payments", 5.0),
                 sample("checkout", "checkout", "elsewhere", "unknown-svc", 5.0),
             ],
+            CallSchema::Istio,
         );
         assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
     }
@@ -2225,7 +2768,7 @@ mod tests {
         let mut g = demo_graph();
         let mut half = sample("checkout", "checkout", "checkout", "payments", 5.0);
         half.labels.remove("destination_service_name");
-        apply_observed(&mut g, &[half]);
+        apply_observed(&mut g, &[half], CallSchema::Istio);
         assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls));
     }
 
