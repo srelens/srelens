@@ -1,5 +1,6 @@
 import {
   asRecord,
+  formatStorageSize,
   formatTaint,
   orderTaints,
   parseTaints,
@@ -54,7 +55,7 @@ function CapacitySection({ object }: { object: K8sObject }) {
   return (
     <Section title="Capacity">
       <KV k="CPU" v={`${str(allocatable.cpu)} / ${str(capacity.cpu)}`} />
-      <KV k="Memory" v={`${str(allocatable.memory)} / ${str(capacity.memory)}`} />
+      <KV k="Memory" v={`${formatStorageSize(str(allocatable.memory))} / ${formatStorageSize(str(capacity.memory))}`} />
       <KV k="Pods" v={`${str(allocatable.pods)} / ${str(capacity.pods)}`} />
     </Section>
   );
