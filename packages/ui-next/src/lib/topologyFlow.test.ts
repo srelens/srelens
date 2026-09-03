@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { TopologyEdge, TopologyGraph, TopologyLane, TopologyNode } from "@srelens/core";
 import {
+  GRID_GAP,
   MAX_EDGE_WIDTH,
   MIN_EDGE_WIDTH,
   MIN_ZOOM,
+  NODE_HEIGHT,
   NODE_WIDTH,
   arrowPoints,
   backEdges,
@@ -243,25 +245,34 @@ describe("layoutFlow", () => {
     // adjacent rows: the same two six rows apart, joined by a line running
     // past four unrelated boxes, would be worse than the layout with twice the
     // columns.
+    // Both Ingress-fronted, so both stand in ENTRY rather than one of them
+    // going to the band for having no known call.
     const g = graph(
       [
         ...chain().nodes,
+        node("Ingress/other", "route", "other"),
         node("Service/other", "service", "other"),
         node("Deployment/other", "workload", "other"),
       ],
-      [...chain().edges, edge("Service/other", "Deployment/other")],
+      [
+        ...chain().edges,
+        edge("Ingress/other", "Service/other"),
+        edge("Service/other", "Deployment/other"),
+      ],
     );
     const out = layoutFlow(g);
-    const rows = out.nodes
-      .slice()
-      .sort((a, b) => a.x - b.x || a.y - b.y)
-      .map((n) => n.id);
-    // Each tier is consecutive, and inside one the order is the order traffic
-    // passes through: the way in, then the address, then what answers.
-    const at = (id: string) => rows.indexOf(id);
-    expect(at("Service/checkout")).toBe(at("Ingress/web") + 1);
-    expect(at("Deployment/checkout")).toBe(at("Ingress/web") + 2);
-    expect(at("Deployment/other")).toBe(at("Service/other") + 1);
+    const at = (id: string) => out.nodes.find((n) => n.id === id)!;
+    // Inside a tier the order is the order traffic passes through: the way in
+    // above the address, what answers beside it.
+    expect(at("Service/checkout").x).toBe(at("Ingress/web").x);
+    expect(at("Service/checkout").y).toBeGreaterThan(at("Ingress/web").y);
+    expect(at("Deployment/checkout").y).toBe(at("Service/checkout").y);
+    expect(at("Deployment/checkout").x).toBeGreaterThan(at("Service/checkout").x);
+    expect(at("Deployment/other").y).toBe(at("Service/other").y);
+    // Two tiers, two panels, and they do not overlap.
+    expect(out.tiers).toHaveLength(2);
+    const [a, b] = out.tiers.slice().sort((p, q) => p.x - q.x);
+    expect(b.x).toBeGreaterThanOrEqual(a.x + a.width);
   });
 
   it("fans the entry tiers that call nothing out beside the ones that do", () => {
@@ -298,16 +309,27 @@ describe("layoutFlow", () => {
     expect(out.width).toBeGreaterThan(out.height);
   });
 
-  it("joins a tier with a short stub rather than a backward bow", () => {
-    // The one line on the diagram that is not a network call. It reads as a
-    // bracket holding a group together, and it must not be mistaken for the
-    // bow that means a cycle.
+  it("reads a tier left to right: the Ingress over the Service, the pods beside it", () => {
+    // Internet, Ingress, Service, pods, then the call to the next tier — the
+    // order a request takes, and the order the eye should. The Ingress sits
+    // ABOVE the Service rather than left of it, because a Service that is
+    // both Ingress-fronted and called internally would otherwise have its
+    // incoming call drawn through the Ingress card.
     const out = layoutFlow(chain());
-    const stub = out.edges.find((e) => e.from === "Service/checkout")!;
-    const from = out.nodes.find((n) => n.id === "Service/checkout")!;
-    // Straight down the middle of the column, not out to the side and back.
-    expect(stub.path.startsWith(`M ${from.x + NODE_WIDTH / 2} `)).toBe(true);
+    const at = (id: string) => out.nodes.find((n) => n.id === id)!;
+    expect(at("Ingress/web").x).toBe(at("Service/checkout").x);
+    expect(at("Ingress/web").y).toBeLessThan(at("Service/checkout").y);
+    expect(at("Deployment/checkout").x).toBeGreaterThan(at("Service/checkout").x);
+    expect(at("Deployment/checkout").y).toBe(at("Service/checkout").y);
+    // Ingress to Service is a short stub straight down; Service to pods a
+    // short forward arrow. Neither is a bow.
+    const stub = out.edges.find((e) => e.from === "Ingress/web")!;
     expect(stub.path).toContain(" L ");
+    const across = out.edges.find((e) => e.from === "Service/checkout")!;
+    expect(across.path.startsWith(`M ${at("Service/checkout").x + NODE_WIDTH} `)).toBe(true);
+    // One panel round the three.
+    expect(out.tiers).toHaveLength(1);
+    expect(out.tiers[0].width).toBeGreaterThan(NODE_WIDTH * 2);
   });
 
   it("puts a tier no call touches in the band, not in a column", () => {
@@ -345,30 +367,124 @@ describe("layoutFlow", () => {
     const out = layoutFlow(graph([...g.nodes, ...loose], g.edges));
     const flowRight = Math.max(...out.nodes.filter((n) => n.rank !== null).map((n) => n.x));
     const bandRight = Math.max(...out.nodes.filter((n) => n.rank === null).map((n) => n.x));
-    expect(bandRight).toBeGreaterThanOrEqual(flowRight);
+    // As wide as it can be without a column running past the flow.
+    expect(bandRight).toBeGreaterThan(flowRight - (NODE_WIDTH + GRID_GAP));
     // And it sits below the flow, not beside it.
     const flowBottom = Math.max(...out.nodes.filter((n) => n.rank !== null).map((n) => n.y));
     expect(out.band?.y).toBeGreaterThan(flowBottom);
   });
 
-  it("places a tier beside the one that calls it", () => {
-    // Without the barycentre pass the called tiers would sit in name order — b
-    // above a — and both calls would cross.
+  it("places a called tier beside its caller down a hop column", () => {
+    // Without the barycentre pass the called tiers at HOP 2 would sit in name
+    // order — b above a — and both calls would cross.
+    const call = { kind: "calls" as const };
+    const out = layoutFlow(
+      graph(
+        [
+          node("Entry/e", "workload", "e"),
+          node("Mid/a", "service", "a"),
+          node("Mid/b", "service", "b"),
+          node("Far/b", "service", "b"),
+          node("Far/a", "service", "a"),
+        ],
+        [
+          edge("Entry/e", "Mid/a", call),
+          edge("Entry/e", "Mid/b", call),
+          edge("Mid/a", "Far/a", call),
+          edge("Mid/b", "Far/b", call),
+        ],
+      ),
+    );
+    const y = (id: string) => out.nodes.find((n) => n.id === id)!.y;
+    expect(y("Far/a")).toBe(y("Mid/a"));
+    expect(y("Far/b")).toBe(y("Mid/b"));
+  });
+
+  it("stands ENTRY's calling tiers side by side, and routes the inner one round", () => {
+    // Two same-named tiers from two namespaces stacked five rows tall in
+    // ENTRY. Side by side is what a reader asked for; a curve drawn straight
+    // out of the inner one would run through its neighbour, so it leaves
+    // downwards along a channel under the lane and turns up past the block.
     const call = { kind: "calls" as const };
     const out = layoutFlow(
       graph(
         [
           node("Caller/a", "workload", "a"),
           node("Caller/b", "workload", "b"),
-          node("Called/b", "service", "b"),
-          node("Called/a", "service", "a"),
+          node("Called/c", "service", "c"),
         ],
-        [edge("Caller/a", "Called/a", call), edge("Caller/b", "Called/b", call)],
+        [edge("Caller/a", "Called/c", call), edge("Caller/b", "Called/c", call)],
       ),
     );
+    const at = (id: string) => out.nodes.find((n) => n.id === id)!;
+    expect(at("Caller/a").y).toBe(at("Caller/b").y);
+    expect(at("Caller/a").x).not.toBe(at("Caller/b").x);
+    const [inner, outer] = [at("Caller/a"), at("Caller/b")].sort((p, q) => p.x - q.x);
+    expect(inner.detour).toBeDefined();
+    expect(outer.detour).toBeUndefined();
+    const via = out.edges.find((e) => e.from === inner.id)!;
+    const straight = out.edges.find((e) => e.from === outer.id)!;
+    expect(via.path.startsWith(`M ${inner.x + NODE_WIDTH / 2} ${inner.y + NODE_HEIGHT}`)).toBe(true);
+    expect(via.path).toContain(" Q ");
+    expect(straight.path).not.toContain(" Q ");
+    // The channel lies under the lane and the box makes room for it.
+    expect(inner.detour!.y).toBeGreaterThan(inner.y + NODE_HEIGHT);
+    expect(out.height).toBeGreaterThan(inner.detour!.y);
+  });
+
+  it("gives each namespace its own lane, and marks the calls between them", () => {
+    const call = { kind: "calls" as const, provenance: "declared" as const };
+    const inPayments = (n: TopologyNode) => ({ ...n, namespace: "payments" });
+    const out = layoutFlow(
+      graph(
+        [
+          node("Service/checkout", "service", "checkout"),
+          node("Deployment/checkout", "workload", "checkout"),
+          inPayments(node("Service/payments", "service", "payments")),
+          inPayments(node("Deployment/payments", "workload", "payments")),
+        ],
+        [
+          edge("Service/checkout", "Deployment/checkout"),
+          edge("Service/payments", "Deployment/payments"),
+          edge("Deployment/checkout", "Service/payments", call),
+        ],
+      ),
+    );
+    expect(out.lanes.map((l) => l.namespace)).toEqual(["checkout", "payments"]);
+    expect(out.lanes[1].y).toBeGreaterThan(out.lanes[0].y + out.lanes[0].height);
     const y = (id: string) => out.nodes.find((n) => n.id === id)!.y;
-    expect(y("Called/a")).toBe(y("Caller/a"));
-    expect(y("Called/b")).toBe(y("Caller/b"));
+    expect(y("Service/payments")).toBeGreaterThanOrEqual(out.lanes[1].y);
+    expect(y("Deployment/checkout")).toBeLessThan(out.lanes[1].y);
+    // The call crosses; the routing inside a tier does not.
+    expect(out.edges.find((e) => e.kind === "calls")!.crossesNamespace).toBe(true);
+    expect(out.edges.filter((e) => e.kind === "routes").every((e) => !e.crossesNamespace)).toBe(true);
+    // And a single namespace gets no lane at all — it is the heading.
+    expect(layoutFlow(twoTiers()).lanes).toEqual([]);
+  });
+
+  it("puts a host outside the cluster in the lane of what calls it", () => {
+    const call = { kind: "calls" as const, provenance: "declared" as const };
+    const out = layoutFlow(
+      graph(
+        [
+          node("Deployment/checkout", "workload", "checkout"),
+          { ...node("Deployment/other", "workload", "other"), namespace: "payments" },
+          { ...node("External//db", "external", "db"), namespace: "" },
+        ],
+        [
+          edge("Deployment/checkout", "External//db", call),
+          edge("Deployment/other", "External//db", call),
+        ],
+      ),
+    );
+    // Two namespaces call it; it goes with the first by name, and is drawn
+    // once. Neither call is a cross-namespace one — the host is outside.
+    const lane = out.lanes.find((l) => l.namespace === "checkout")!;
+    const db = out.nodes.find((n) => n.id === "External//db")!;
+    expect(db.y).toBeGreaterThanOrEqual(lane.y);
+    expect(db.y).toBeLessThan(lane.y + lane.height);
+    expect(out.lanes.some((l) => l.namespace === "")).toBe(false);
+    expect(out.edges.every((e) => !e.crossesNamespace)).toBe(true);
   });
 
   it("keeps a node nothing points at", () => {

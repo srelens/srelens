@@ -975,9 +975,13 @@ pub fn build_graph(
         let selector: BTreeMap<String, String> =
             spec.and_then(|s| s.selector.clone()).unwrap_or_default();
 
+        // Its own namespace only. A selector never reaches across one, and
+        // matching it against every workload in view joined two namespaces'
+        // same-named `storefront` tiers — identical labels, as copies of a
+        // chart always have — into one five-row tier on a real cluster.
         let backing: Vec<&Workload> = workloads
             .iter()
-            .filter(|w| selector_matches(&selector, &w.labels))
+            .filter(|w| w.namespace == namespace && selector_matches(&selector, &w.labels))
             .collect();
         // As healthy as the worst thing behind it. With nothing behind it there
         // is no reading to take rather than a failure — an ExternalName Service
@@ -2363,6 +2367,27 @@ mod tests {
             vec![],
             vec![],
         )
+    }
+
+    #[test]
+    fn a_service_selects_only_in_its_own_namespace() {
+        // Two namespaces installed from the same chart carry identical labels.
+        // Matching a selector across both joined their two `storefront`
+        // tiers into one five-row tier on a real cluster.
+        let mut copy = deployment("storefront", 1, 1, &[("app", "storefront")]);
+        copy.metadata.namespace = Some("shop".into());
+        let g = build_graph(
+            vec![],
+            vec![service("storefront", &[("app", "storefront")], 80)],
+            vec![deployment("storefront", 1, 1, &[("app", "storefront")]), copy],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(has_edge(&g, "Service/checkout/storefront", "Deployment/checkout/storefront", EdgeKind::Routes));
+        assert!(!has_edge(&g, "Service/checkout/storefront", "Deployment/shop/storefront", EdgeKind::Routes));
     }
 
     // ---- internal hosts that only look external ----

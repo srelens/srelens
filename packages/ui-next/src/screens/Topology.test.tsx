@@ -253,6 +253,63 @@ describe("Topology", () => {
     expect(canvas.querySelectorAll('path[stroke-dasharray="2 4"]')).toHaveLength(1);
   });
 
+  it("lanes the namespaces apart, and marks the call that crosses between them", async () => {
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        nodes: [
+          ...graph().nodes,
+          {
+            id: "Service/payments/payments-api",
+            kind: "Service",
+            name: "payments-api",
+            namespace: "payments",
+            lane: "service",
+            detail: ":443",
+            ready: null,
+            desired: null,
+            health: "ok",
+          },
+        ],
+        edges: [
+          ...graph().edges,
+          {
+            from: "Deployment/checkout/checkout-api",
+            to: "Service/payments/payments-api",
+            kind: "calls",
+            provenance: "declared",
+            detail: "",
+            health: "unknown",
+            weight: null,
+            unit: null,
+          },
+        ],
+      },
+    });
+    render(<Topology />);
+    await screen.findByRole("button", { name: "Service payments-api" });
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    expect([...canvas.querySelectorAll("[data-lane]")].map((t) => t.textContent)).toEqual([
+      "checkout",
+      "payments",
+    ]);
+    expect(canvas.querySelectorAll("[data-crossing]")).toHaveLength(1);
+
+    // The inspector says which namespace the other end is in, only because
+    // it differs.
+    await userEvent.click(screen.getByRole("button", { name: "Deployment checkout-api" }));
+    const panel = screen.getByRole("complementary", { name: "Selected node" });
+    expect(within(panel).getByRole("button", { name: /payments-api · payments/ })).toBeDefined();
+    expect(within(panel).getByRole("button", { name: /^checkout-api routes/ })).toBeDefined();
+  });
+
+  it("draws no lane when one namespace is all there is", async () => {
+    render(<Topology />);
+    await screen.findByRole("button", { name: "Ingress web" });
+    const canvas = screen.getByRole("group", { name: "Namespace topology" });
+    expect(canvas.querySelectorAll("[data-lane]")).toHaveLength(0);
+    expect(canvas.querySelectorAll("[data-crossing]")).toHaveLength(0);
+  });
+
   it("draws a policy-allowed call as neither traffic nor config", async () => {
     // A NetworkPolicy says the call would be let through if made. That is
     // weaker than a host in an env var and much weaker than a measurement,

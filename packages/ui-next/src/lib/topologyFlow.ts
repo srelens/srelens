@@ -40,8 +40,19 @@ export const TIER_GAP = 34;
 export const TIER_PAD = 9;
 /** Between grid columns in the band. No edges run there, so no room for any. */
 export const GRID_GAP = 28;
+/** Between a tier's Service lane and its workload lane — just room for the
+ *  short arrow from one to the other. */
+export const INNER_GAP = 44;
 /** Between the bottom of the flow and the band's heading. */
 export const BAND_GAP = 64;
+/** Room above a namespace lane's first row for its name. */
+export const LANE_LABEL = 26;
+/** Between one namespace lane and the next, divider included. */
+export const LANE_GAP = 58;
+/** How far under a lane's last row the detour channel runs, and how much
+ *  room it keeps below itself. */
+export const CHANNEL_DROP = 24;
+export const CHANNEL_CLEARANCE = 20;
 /** Room above the first row for the column headings. */
 export const HEADER_HEIGHT = 30;
 /** Room under the last row for the edges that still have to bow below it. */
@@ -70,12 +81,27 @@ export interface FlowNode extends TopologyNode {
   revisions: string[];
 }
 
+/**
+ * How an edge leaves a node that has other tiers standing to its right.
+ *
+ * ENTRY's calling tiers stand side by side, and a curve drawn straight out
+ * of an inner one runs through its neighbour. So it goes down instead, along
+ * a channel under the block at `y`, and only turns up towards its target once
+ * it is past `until` — the right edge of the last tier in the way.
+ */
+export interface Detour {
+  y: number;
+  until: number;
+}
+
 export interface PlacedNode extends FlowNode {
   x: number;
   y: number;
   /** Hops from where traffic enters. Zero is an entry point; `null` is a node
    *  on no known path at all, drawn in the band below the flow. */
   rank: number | null;
+  /** Set on a node whose outgoing edges must go round rather than through. */
+  detour?: Detour;
 }
 
 export interface PlacedEdge extends TopologyEdge {
@@ -90,6 +116,25 @@ export interface PlacedEdge extends TopologyEdge {
   /** Where the edge's own label goes, for the edges that have one. */
   labelX: number;
   labelY: number;
+  /** A point on the line halfway along, for a marker to sit on. */
+  midX: number;
+  midY: number;
+  /** Whether the two ends are in different namespaces — a call leaving one
+   *  team's territory for another's, which is worth a mark of its own. A
+   *  call to something outside the cluster is not this. */
+  crossesNamespace: boolean;
+}
+
+/**
+ * One namespace's horizontal lane through the flow.
+ *
+ * Empty when only one namespace is drawn: the namespace is the heading then,
+ * and a lane round everything would be a box drawn round the page.
+ */
+export interface NamespaceLane {
+  namespace: string;
+  y: number;
+  height: number;
 }
 
 export interface Column {
@@ -132,6 +177,7 @@ export interface TopologyLayout {
   edges: PlacedEdge[];
   columns: Column[];
   tiers: Tier[];
+  lanes: NamespaceLane[];
   band: Band | null;
   /** Every namespace drawn, sorted. The screen labels nodes with theirs only
    *  when there is more than one, because on a single-namespace graph the
@@ -515,9 +561,34 @@ export function edgeKey(edge: Pick<TopologyEdge, "from" | "to" | "kind">): strin
  * column between the two and reads as noise.
  */
 export function edgeGeometry(
-  from: { x: number; y: number },
+  from: { x: number; y: number; detour?: Detour },
   to: { x: number; y: number },
-): { path: string; arrow: string; labelX: number; labelY: number } {
+): { path: string; arrow: string; labelX: number; labelY: number; midX: number; midY: number } {
+  if (from.detour && to.x > from.detour.until) {
+    // Down out of the tier, right along the channel under the block, then up
+    // and in as any forward edge would arrive. The corner is rounded so the
+    // line reads as one route and not as two lines meeting.
+    const cx = from.x + NODE_WIDTH / 2;
+    const yc = from.detour.y;
+    const turn = from.detour.until + COLUMN_GAP * 0.35;
+    const x2 = to.x - ARROW_SIZE;
+    const y2 = to.y + NODE_HEIGHT / 2;
+    const bend = Math.max((x2 - turn) / 2, 24);
+    return {
+      path: [
+        `M ${r(cx)} ${r(from.y + NODE_HEIGHT)}`,
+        `L ${r(cx)} ${r(yc - 10)}`,
+        `Q ${r(cx)} ${r(yc)}, ${r(cx + 10)} ${r(yc)}`,
+        `L ${r(turn)} ${r(yc)}`,
+        `C ${r(turn + bend)} ${r(yc)}, ${r(x2 - bend)} ${r(y2)}, ${r(x2)} ${r(y2)}`,
+      ].join(" "),
+      arrow: arrowPoints(to.x, y2, 1, 0),
+      labelX: r((cx + turn) / 2),
+      labelY: r(yc - 7),
+      midX: r((cx + turn) / 2),
+      midY: r(yc),
+    };
+  }
   if (to.x === from.x) {
     const down = to.y > from.y;
     const x = from.x + NODE_WIDTH / 2;
@@ -531,6 +602,8 @@ export function edgeGeometry(
       arrow: arrowPoints(x, down ? to.y : to.y + NODE_HEIGHT, 0, down ? 1 : -1, STUB_ARROW),
       labelX: r(x + 8),
       labelY: r((y1 + y2) / 2),
+      midX: r(x),
+      midY: r((y1 + y2) / 2),
     };
   }
   const forward = to.x > from.x;
@@ -549,6 +622,9 @@ export function edgeGeometry(
       // Clear of the line rather than on it. A busy edge is drawn thick, and
       // at six pixels the first render had `2.4k rpm` sitting in the stroke.
       labelY: r((y1 + y2) / 2 - 9),
+      // The halfway point of this cubic is exactly the midpoint of its ends.
+      midX: r((x1 + x2) / 2),
+      midY: r((y1 + y2) / 2),
     };
   }
   const x1 = from.x + NODE_WIDTH / 2;
@@ -563,6 +639,9 @@ export function edgeGeometry(
     arrow: arrowPoints(to.x + NODE_WIDTH / 2, to.y + NODE_HEIGHT, 0, -1),
     labelX: r((x1 + x2) / 2),
     labelY: r(Math.max(y1, y2) + drop * 0.62),
+    midX: r((x1 + x2) / 2),
+    // Halfway along a bow whose control points both hang `drop` below.
+    midY: r((y1 + y2) / 2 + drop * 0.75),
   };
 }
 
@@ -690,6 +769,8 @@ export function layoutFlow(graph: TopologyGraph): TopologyLayout {
       key,
       ...edgeGeometry(from, to),
       width: widths.get(key) ?? MIN_EDGE_WIDTH,
+      crossesNamespace:
+        from.namespace !== "" && to.namespace !== "" && from.namespace !== to.namespace,
     });
   }
 
@@ -698,11 +779,119 @@ export function layoutFlow(graph: TopologyGraph): TopologyLayout {
     edges: drawn,
     columns: flow.columns,
     tiers: [...flow.tiers, ...band.tiers],
+    lanes: flow.lanes,
     band: band.header,
     namespaces: [...new Set(placed.map((n) => n.namespace))].filter(Boolean).sort(),
     width: Math.max(flow.right, band.right) + PADDING,
     height: (band.header ? band.bottom : flow.bottom) + PADDING,
   };
+}
+
+/**
+ * How a tier is laid out inside its panel.
+ *
+ * The Ingress, if any, on top; beneath it the Service lane on the left and the
+ * workload lane on the right, each a short stack. So a tier reads the way a
+ * request goes — in at the top, to the address, across to the pods — and a
+ * call to the next tier leaves from the pods on the right, which is where the
+ * next tier is. The first version stacked all three down one column, which
+ * made the eye go down and then right at every tier.
+ *
+ * The Ingress is ABOVE the Service rather than left of it on purpose: a
+ * Service that is both Ingress-fronted and called internally would otherwise
+ * have its incoming call drawn straight through the Ingress card.
+ */
+export interface TierShape {
+  routes: FlowNode[];
+  left: FlowNode[];
+  right: FlowNode[];
+  /** In pixels: one node, or two and the gap between. */
+  width: number;
+  rows: number;
+}
+
+export function shapeTier(group: FlowNode[]): TierShape {
+  const routes = group.filter((n) => n.lane === "route");
+  const services = group.filter((n) => n.lane === "service");
+  const others = group.filter((n) => n.lane !== "route" && n.lane !== "service");
+  // Without a Service the pods take the left lane themselves; without pods the
+  // Service stands alone. An external host or an orphan ReplicaSet is a tier
+  // of one and goes left too.
+  const left = services.length > 0 ? services : others;
+  const right = services.length > 0 ? others : [];
+  return {
+    routes,
+    left,
+    right,
+    width: right.length > 0 ? NODE_WIDTH * 2 + INNER_GAP : NODE_WIDTH,
+    rows: routes.length + Math.max(left.length, right.length),
+  };
+}
+
+/** Place one tier with its top-left at (`x`, `top`). Answers its bottom. */
+function placeTier(
+  group: FlowNode[],
+  x: number,
+  top: number,
+  rank: number | null,
+  placed: PlacedNode[],
+  tiers: Tier[],
+): { nodes: PlacedNode[]; bottom: number } {
+  const shape = shapeTier(group);
+  const nodes: PlacedNode[] = [];
+  const put = (node: FlowNode, px: number, py: number) => {
+    const at: PlacedNode = { ...node, x: px, y: py, rank };
+    placed.push(at);
+    nodes.push(at);
+  };
+  let y = top;
+  for (const node of shape.routes) {
+    put(node, x, y);
+    y += NODE_HEIGHT + ROW_GAP;
+  }
+  let yl = y;
+  let yr = y;
+  for (const node of shape.left) {
+    put(node, x, yl);
+    yl += NODE_HEIGHT + ROW_GAP;
+  }
+  for (const node of shape.right) {
+    put(node, x + NODE_WIDTH + INNER_GAP, yr);
+    yr += NODE_HEIGHT + ROW_GAP;
+  }
+  const bottom = nodes.length > 0 ? Math.max(y, yl, yr) - ROW_GAP : top;
+  // A tier of one is just a node; a panel round it would be a box drawn twice.
+  if (group.length > 1) {
+    tiers.push({
+      x: x - TIER_PAD,
+      y: top - TIER_PAD,
+      width: shape.width + TIER_PAD * 2,
+      height: bottom - top + TIER_PAD * 2,
+    });
+  }
+  return { nodes, bottom };
+}
+
+/**
+ * Deal tiers into `k` sub-columns, each going to whichever is shortest, and
+ * say how wide each sub-column has to be. Deterministic: the same tiers in
+ * the same order deal the same way every render.
+ */
+function assign(groups: FlowNode[][], k: number): { groups: FlowNode[][]; width: number }[] {
+  const subs = Array.from({ length: Math.max(1, k) }, () => ({
+    groups: [] as FlowNode[][],
+    rows: 0,
+    width: 0,
+  }));
+  for (const group of groups) {
+    let s = 0;
+    for (let i = 1; i < subs.length; i++) if (subs[i].rows < subs[s].rows) s = i;
+    const shape = shapeTier(group);
+    subs[s].groups.push(group);
+    subs[s].rows += shape.rows;
+    subs[s].width = Math.max(subs[s].width, shape.width);
+  }
+  return subs.filter((s) => s.groups.length > 0).map((s) => ({ groups: s.groups, width: s.width }));
 }
 
 /**
@@ -737,37 +926,25 @@ function placeBand(
       a[0].id.localeCompare(b[0].id),
   );
 
-  const pitch = NODE_WIDTH + GRID_GAP;
+  const widest = Math.max(...groups.map((g) => shapeTier(g).width));
   const squarish = Math.ceil(Math.sqrt(groups.length * 1.6));
-  const fillsFlow = Math.floor((minRight - PADDING + GRID_GAP) / pitch);
+  const fillsFlow = Math.floor((minRight - PADDING + GRID_GAP) / (widest + GRID_GAP));
   const cols = Math.max(1, Math.min(groups.length, Math.max(squarish, fillsFlow)));
 
   const y = below === null ? PADDING : below + BAND_GAP;
   const top = y + HEADER_HEIGHT;
-  const heights: number[] = new Array<number>(cols).fill(top);
   const placed: PlacedNode[] = [];
   const tiers: Tier[] = [];
-  for (const group of groups) {
-    let column = 0;
-    for (let i = 1; i < cols; i++) if (heights[i] < heights[column]) column = i;
-    const x = PADDING + column * pitch;
-    let at = heights[column];
-    if (at > top) at += TIER_GAP;
-    const groupTop = at;
-    group.forEach((node, row) => {
-      if (row > 0) at += ROW_GAP;
-      placed.push({ ...node, x, y: at, rank: null });
-      at += NODE_HEIGHT;
-    });
-    if (group.length > 1) {
-      tiers.push({
-        x: x - TIER_PAD,
-        y: groupTop - TIER_PAD,
-        width: NODE_WIDTH + TIER_PAD * 2,
-        height: at - groupTop + TIER_PAD * 2,
-      });
+  let x = PADDING;
+  let end = top;
+  for (const sub of assign(groups, cols)) {
+    let at = top;
+    for (const group of sub.groups) {
+      if (at > top) at += TIER_GAP;
+      at = placeTier(group, x, at, null, placed, tiers).bottom;
     }
-    heights[column] = at;
+    end = Math.max(end, at);
+    x += sub.width + GRID_GAP;
   }
   return {
     placed,
@@ -777,8 +954,8 @@ function placeBand(
       label: `NO KNOWN CALLS · ${groups.length}`,
       count: nodes.length,
     },
-    bottom: Math.max(...heights),
-    right: PADDING + cols * pitch - GRID_GAP,
+    bottom: end,
+    right: x - GRID_GAP,
   };
 }
 
@@ -786,7 +963,14 @@ function placeBand(
 function placeFlow(
   nodes: FlowNode[],
   edges: TopologyEdge[],
-): { placed: PlacedNode[]; tiers: Tier[]; columns: Column[]; bottom: number; right: number } {
+): {
+  placed: PlacedNode[];
+  tiers: Tier[];
+  columns: Column[];
+  lanes: NamespaceLane[];
+  bottom: number;
+  right: number;
+} {
   const rank = rankNodes(nodes, edges);
 
   /**
@@ -854,91 +1038,176 @@ function placeFlow(
    */
   const placed: PlacedNode[] = [];
   const tiers: Tier[] = [];
-  let bottom = TOP;
+
   /**
-   * Stack tiers into `k` sub-columns from `x0`, each tier going to whichever
-   * is shortest, and answer the right edge of the last one. One sub-column is
-   * the ordinary hop column; several is how ENTRY spreads out.
+   * Stack tiers into `k` sub-columns from `x0`, down from `top`, each tier
+   * going to whichever sub-column is shortest. One sub-column is the ordinary
+   * hop column; several is how ENTRY spreads out. A sub-column is as wide as
+   * the widest tier in it. `mark` hears about every node placed and which
+   * sub-column it landed in. Answers the right edge and the bottom.
    */
-  const pack = (groups: FlowNode[][], k: number, x0: number, pitch: number, rankIndex: number) => {
-    const heights: number[] = new Array<number>(k).fill(TOP);
-    for (const group of groups) {
-      let s = 0;
-      for (let i = 1; i < k; i++) if (heights[i] < heights[s]) s = i;
-      const x = x0 + s * pitch;
-      let y = heights[s];
-      if (y > TOP) y += TIER_GAP;
-      const top = y;
-      group.forEach((node, row) => {
-        if (row > 0) y += ROW_GAP;
-        placed.push({ ...node, x, y, rank: rankIndex });
-        y += NODE_HEIGHT;
-      });
-      // A tier of one is just a node; a panel round it would be a box drawn
-      // twice.
-      if (group.length > 1) {
-        tiers.push({
-          x: x - TIER_PAD,
-          y: top - TIER_PAD,
-          width: NODE_WIDTH + TIER_PAD * 2,
-          height: y - top + TIER_PAD * 2,
-        });
+  const pack = (
+    groups: FlowNode[][],
+    k: number,
+    x0: number,
+    rankIndex: number,
+    top: number,
+    mark?: (node: PlacedNode, sub: number) => void,
+  ): { right: number; bottom: number } => {
+    const subs = assign(groups, k);
+    let x = x0;
+    let bottom = top;
+    subs.forEach((sub, s) => {
+      let y = top;
+      for (const group of sub.groups) {
+        if (y > top) y += TIER_GAP;
+        const out = placeTier(group, x, y, rankIndex, placed, tiers);
+        for (const node of out.nodes) mark?.(node, s);
+        y = out.bottom;
       }
-      heights[s] = y;
       bottom = Math.max(bottom, y);
-    }
-    return x0 + k * pitch - (pitch - NODE_WIDTH);
+      x += sub.width + GRID_GAP;
+    });
+    return { right: x - GRID_GAP, bottom };
+  };
+  const blockWidth = (groups: FlowNode[][], k: number) =>
+    assign(groups, k).reduce((w, sub, i) => w + sub.width + (i > 0 ? GRID_GAP : 0), 0);
+
+  /**
+   * One lane per namespace, top to bottom.
+   *
+   * Several namespaces drawn together used to interleave down every column,
+   * which put `checkout`'s storefront directly under `shop`'s and left the
+   * reader to sort them apart by the small print. Each namespace now has its
+   * own horizontal lane, the hop columns run through all of them, and a call
+   * that leaves one lane for another is marked as the thing it is. A host
+   * outside the cluster has no namespace and goes in the lane of whichever
+   * namespace calls it first, by name, so it sits beside its caller.
+   */
+  const callersOf = new Map<string, Set<string>>();
+  const nsOf = new Map(nodes.map((n) => [n.id, n.namespace]));
+  for (const edge of edges) {
+    if (edge.kind !== "calls") continue;
+    const from = nsOf.get(edge.from);
+    if (!from) continue;
+    const set = callersOf.get(edge.to);
+    if (set) set.add(from);
+    else callersOf.set(edge.to, new Set([from]));
+  }
+  const laneOf = (group: FlowNode[]): string => {
+    const own = group[0]?.namespace ?? "";
+    if (own) return own;
+    const callers = [...new Set(group.flatMap((n) => [...(callersOf.get(n.id) ?? [])]))].sort();
+    return callers[0] ?? "";
+  };
+  const laneKeys = [...new Set(ordered.flat().map(laneOf))].sort(
+    // Anything left without a namespace goes last.
+    (a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)),
+  );
+  const multi = laneKeys.length > 1;
+
+  /**
+   * ENTRY spreads sideways.
+   *
+   * It is the one column nothing arrives at from the left, and it is where
+   * the height went: on a real namespace three Ingress-fronted tiers stacked
+   * ten rows tall beside a two-hop flow. The tiers that call nothing fan out
+   * to the LEFT of the ones that do, in as many sub-columns as it takes to
+   * come no taller than them. The callers stand side by side too, against
+   * HOP 1 — and because a curve drawn straight out of an inner one would run
+   * through its neighbour, an inner caller's edges leave downwards, along a
+   * channel under the lane, and only turn up once past the block. All of it
+   * is still rank zero, and the heading spans the lot.
+   *
+   * The block is right-aligned against a common edge across every lane, so
+   * the hop columns line up however wide one lane's ENTRY is.
+   */
+  const callsOut = new Set(
+    edges
+      .filter((e) => e.kind === "calls" && (rank.get(e.from) ?? 0) !== (rank.get(e.to) ?? 0))
+      .map((e) => e.from),
+  );
+  const isCaller = (group: FlowNode[]) => group.some((n) => callsOut.has(n.id));
+  const rowsIn = (groups: FlowNode[][]) => groups.reduce((n, g) => n + shapeTier(g).rows, 0);
+  const squarish = (n: number) => Math.max(1, Math.ceil(Math.sqrt(n * 1.6)));
+  const plans = laneKeys.map((lane) => {
+    const entry = (ordered[0] ?? []).filter((g) => laneOf(g) === lane);
+    const callers = entry.filter(isCaller);
+    const leaves = entry.filter((g) => !isCaller(g));
+    const kCallers = callers.length > 0 ? Math.min(callers.length, squarish(callers.length)) : 0;
+    const callerRows = kCallers > 0 ? Math.ceil(rowsIn(callers) / kCallers) : 0;
+    const kLeaves =
+      leaves.length > 0
+        ? Math.min(
+            leaves.length,
+            callerRows > 0 ? Math.ceil(rowsIn(leaves) / callerRows) : squarish(leaves.length),
+          )
+        : 0;
+    return { lane, callers, leaves, kCallers, kLeaves };
+  });
+  // Every lane's ENTRY block is right-aligned against one edge, so the hop
+  // columns line up however wide one lane's block is; and each hop column is
+  // as wide as the widest tier in it, across every lane.
+  const callersWidth = (p: (typeof plans)[number]) =>
+    p.kCallers > 0 ? blockWidth(p.callers, p.kCallers) : 0;
+  const leavesWidth = (p: (typeof plans)[number]) =>
+    p.kLeaves > 0 ? blockWidth(p.leaves, p.kLeaves) : 0;
+  const entryWidth = Math.max(
+    0,
+    ...plans.map((p) => {
+      const c = callersWidth(p);
+      const l = leavesWidth(p);
+      return c + l + (c > 0 && l > 0 ? GRID_GAP : 0);
+    }),
+  );
+  const entryRight = PADDING + entryWidth;
+  const colWidth = ordered.map((column, c) =>
+    c === 0 ? entryWidth : Math.max(NODE_WIDTH, ...column.map((g) => shapeTier(g).width)),
+  );
+  const hopX = (c: number) => {
+    let x = entryRight + COLUMN_GAP;
+    for (let i = 1; i < c; i++) x += colWidth[i] + COLUMN_GAP;
+    return x;
   };
 
-  const columns: Column[] = [];
-  let x = PADDING;
-  let right = PADDING;
-  ordered.forEach((column, index) => {
-    const count = column.reduce((n, group) => n + group.length, 0);
-    if (index > 0) {
-      columns.push({ rank: index, label: columnLabel(index), x, count });
-      right = pack(column, 1, x, NODE_WIDTH + COLUMN_GAP, index);
-      x = right + COLUMN_GAP;
-      return;
+  const lanes: NamespaceLane[] = [];
+  let top = TOP + (multi ? LANE_LABEL : 0);
+  for (const plan of plans) {
+    let bottom = top;
+    const inner: PlacedNode[] = [];
+    if (plan.kCallers > 0) {
+      const out = pack(plan.callers, plan.kCallers, entryRight - callersWidth(plan), 0, top, (node, sub) => {
+        if (sub < plan.kCallers - 1) inner.push(node);
+      });
+      bottom = Math.max(bottom, out.bottom);
     }
+    if (plan.kLeaves > 0) {
+      const x0 =
+        entryRight - (plan.kCallers > 0 ? callersWidth(plan) + GRID_GAP : 0) - leavesWidth(plan);
+      bottom = Math.max(bottom, pack(plan.leaves, plan.kLeaves, x0, 0, top).bottom);
+    }
+    for (let c = 1; c < ordered.length; c++) {
+      const groups = ordered[c].filter((g) => laneOf(g) === plan.lane);
+      if (groups.length === 0) continue;
+      bottom = Math.max(bottom, pack(groups, 1, hopX(c), c, top).bottom);
+    }
+    if (inner.length > 0) {
+      const y = bottom + CHANNEL_DROP;
+      for (const node of inner) node.detour = { y, until: entryRight };
+      bottom = y + CHANNEL_CLEARANCE;
+    }
+    lanes.push({ namespace: plan.lane, y: top, height: bottom - top });
+    top = bottom + (multi ? LANE_GAP : 0);
+  }
 
-    /**
-     * ENTRY spreads sideways.
-     *
-     * It is the one column that nothing arrives at from the left, so tiers
-     * can stand beside it without a single edge crossing them — and it is
-     * where the height goes: on a real namespace three Ingress-fronted tiers
-     * stacked ten rows tall beside a two-hop flow, a picture taller than it
-     * was wide with most of it empty. The tiers that CALL something stay
-     * against HOP 1, where their edges leave from; the tiers that call
-     * nothing fan out to their left, in as many sub-columns as it takes to
-     * come no taller than the callers. All of them are still rank zero, and
-     * the heading spans the lot.
-     */
-    const callsOut = new Set(
-      edges
-        .filter((e) => e.kind === "calls" && (rank.get(e.from) ?? 0) !== (rank.get(e.to) ?? 0))
-        .map((e) => e.from),
-    );
-    const callers = column.filter((group) => group.some((n) => callsOut.has(n.id)));
-    const leaves = column.filter((group) => !group.some((n) => callsOut.has(n.id)));
-    columns.push({ rank: 0, label: columnLabel(0), x: PADDING, count });
-    const grid = NODE_WIDTH + GRID_GAP;
-    if (leaves.length > 0) {
-      const rows = (groups: FlowNode[][]) => groups.reduce((n, g) => n + g.length, 0);
-      const k =
-        callers.length > 0
-          ? Math.ceil(rows(leaves) / rows(callers))
-          : Math.ceil(Math.sqrt(leaves.length * 1.6));
-      const sub = Math.max(1, Math.min(leaves.length, k));
-      right = pack(leaves, sub, x, grid, 0);
-      x = right + GRID_GAP;
-    }
-    if (callers.length > 0) {
-      right = pack(callers, 1, x, grid, 0);
-    }
-    x = right + COLUMN_GAP;
-  });
+  const columns: Column[] = ordered.map((column, c) => ({
+    rank: c,
+    label: columnLabel(c),
+    x: c === 0 ? PADDING : hopX(c),
+    count: column.reduce((n, g) => n + g.length, 0),
+  }));
+  const last = lanes.at(-1);
+  const bottom = last ? last.y + last.height : TOP;
 
   // Only a genuinely backward edge bows under the last row — a link inside a
   // tier is a short stub between two adjacent rows and needs no clearance —
@@ -951,8 +1220,12 @@ function placeFlow(
     placed,
     tiers,
     columns,
+    lanes: multi ? lanes : [],
     bottom: bottom + (bowing ? BACKWARD_CLEARANCE : 0),
-    right: columns.length > 0 ? right : PADDING,
+    right:
+      ordered.length > 1
+        ? hopX(ordered.length - 1) + colWidth[ordered.length - 1]
+        : entryRight,
   };
 }
 

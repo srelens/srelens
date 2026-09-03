@@ -20,6 +20,7 @@ import { FailureAlert } from "../lib/errorCopy";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { useResource } from "../lib/useResource";
 import {
+  LANE_LABEL,
   MAX_PIPS,
   NODE_HEIGHT,
   NODE_WIDTH,
@@ -560,6 +561,26 @@ function Canvas({
               </text>
             </g>
           )}
+          {/* One lane per namespace when several are drawn: its name above
+              its first row, and a rule between it and the next. The hop
+              columns run through every lane, so a reader can still read
+              depth straight down the page. */}
+          {layout.lanes.map((lane, i) => (
+            <g key={lane.namespace || "outside"}>
+              {i > 0 && (
+                <line
+                  x1={PADDING}
+                  y1={lane.y - LANE_LABEL - 16}
+                  x2={layout.width - PADDING}
+                  y2={lane.y - LANE_LABEL - 16}
+                  className="stroke-rule-strong"
+                />
+              )}
+              <text x={PADDING} y={lane.y - 9} className="lane fill-soft" data-lane={lane.namespace}>
+                {lane.namespace || "outside the cluster"}
+              </text>
+            </g>
+          ))}
           {/* One panel per tier — the address and the pods that answer it,
               which now share a column and have to read as one thing. Behind
               everything, and quiet: it groups, it does not decorate. */}
@@ -624,6 +645,22 @@ function Edge({ edge, shown }: { edge: PlacedEdge; shown: boolean }) {
       {/* Drawn as a polygon rather than an SVG marker, so it takes the same
           theme colour as the line and fades with it. */}
       <polygon points={edge.arrow} className={tone.fill} />
+      {edge.crossesNamespace && (
+        // A call leaving one namespace for another, marked halfway along.
+        // A mark rather than a colour, because colour on an edge already
+        // says how it is known, and a cross-namespace call can be any of
+        // those.
+        <rect
+          x={edge.midX - 4}
+          y={edge.midY - 4}
+          width={8}
+          height={8}
+          transform={`rotate(45 ${edge.midX} ${edge.midY})`}
+          className="fill-info stroke-canvas"
+          strokeWidth={1.5}
+          data-crossing="true"
+        />
+      )}
       {edge.detail && (
         // Stroked in the ground colour and painted underneath, so a rate is
         // readable where it crosses its own line — which on a steep curve is
@@ -927,6 +964,13 @@ function Legend() {
       <Key dash="6 3" className="stroke-sev" width={2}>
         Failing
       </Key>
+      <li className="flex items-center gap-1.5">
+        <svg width="22" height="10" aria-hidden="true">
+          <path d="M 0 5 L 22 5" fill="none" strokeWidth={1.5} className="stroke-rule" />
+          <rect x={7} y={1} width={8} height={8} transform="rotate(45 11 5)" className="fill-info" />
+        </svg>
+        Crosses a namespace
+      </li>
     </ul>
   );
 }
@@ -955,7 +999,16 @@ function Inspector({
   // someone tracing a dependency actually has.
   const reaches = layout.edges.filter((e) => e.from === node?.id);
   const reachedBy = layout.edges.filter((e) => e.to === node?.id);
-  const label = (id: string) => layout.nodes.find((n) => n.id === id)?.name ?? id;
+  // The other end's namespace is said only when it differs — a call across
+  // namespaces is the one a reader most needs to place, and on a
+  // single-namespace graph the suffix would be on every row.
+  const label = (id: string) => {
+    const other = layout.nodes.find((n) => n.id === id);
+    if (!other) return id;
+    return other.namespace && other.namespace !== node?.namespace
+      ? `${other.name} · ${other.namespace}`
+      : other.name;
+  };
 
   if (!node) {
     return (
