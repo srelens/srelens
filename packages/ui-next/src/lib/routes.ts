@@ -12,6 +12,7 @@ import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { EditResource } from "../screens/Edit";
 import { Settings } from "../screens/Settings";
 import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
@@ -264,6 +265,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // never a second conversation.
   "/agent": Agent,
   "/resources": Workloads,
+  // The editor's create half. The row menu's `Edit` reaches the same screen
+  // through `parseEditRoute` in `screenFor` — one screen, two shapes, as
+  // `/logs` is. Without these two the menu opened a correctly titled tab
+  // onto the Placeholder, which is what "Edit does nothing" was.
+  "/new": EditResource,
   "/events": Events,
   "/overview": Overview,
   // The bare route. Its deeper `/logs/<kind>/<namespace>/<name>` shape reaches
@@ -333,6 +339,11 @@ export function screenFor(route: string): ScreenComponent | null {
   // were just another kind slug. Matched by parse rather than by adding a
   // second `/k/` entry to `PREFIXED`, which cannot tell the two apart at all.
   if (parseDetailRoute(route)) return ResourceDetailScreen;
+  // The editor's edit half, by the same means and for the same reason: a
+  // whole subject or nothing, so `/edit/` on its own and the legacy
+  // one-segment `/edit/<name>` stay a Placeholder rather than an editor with
+  // no resource in it.
+  if (parseEditRoute(route)) return EditResource;
   // A logs subject route, for the same reason and by the same means: matched
   // by parse rather than by a `/logs/` prefix entry, so `/logs/` on its own —
   // and anything else under the prefix that is not a whole subject — stays a
