@@ -70,6 +70,27 @@ describe("openTabs persistence (web mode)", () => {
     expect(restored!.activeTabId).toBe(1);
   });
 
+  it("never writes transient editor YAML to session storage", () => {
+    const sensitive = "stringData:\n  token: do-not-persist";
+    saveOpenTabs(
+      [
+        tab({ id: 1, kind: "pods" }),
+        tab({
+          id: 2,
+          kind: "newresource",
+          create: { initialKind: "Secret", draft: { template: "Secret", yaml: sensitive } },
+        }),
+        tab({
+          id: 3,
+          kind: "editresource",
+          edit: { kind: "Secret", namespace: "default", name: "api", draft: sensitive },
+        }),
+      ],
+      2,
+    );
+    expect(localStorage.getItem(KEY)).not.toContain("do-not-persist");
+  });
+
   it("falls back to the first tab when the stored active id is gone", () => {
     saveOpenTabs([tab({ id: 5 }), tab({ id: 6 })], 999);
     expect(loadOpenTabs()!.activeTabId).toBe(5);

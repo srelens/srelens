@@ -18,8 +18,8 @@ export interface PersistedWorkspace {
   activeTabId: number | null;
 }
 
-/** Transient editor tabs carry unsaved content that lives outside App state,
- * so restoring them would show a blank editor — drop them from persistence. */
+/** Transient editor tabs can carry Secret YAML in their in-memory tab state.
+ * Never serialize those drafts into settings.json or localStorage. */
 function isRestorable(t: ViewTab): boolean {
   return !t.create && !t.edit;
 }

@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React from "react";
 import { FilePlus2 } from "lucide-react";
+import type { NewResourceDraft } from "@srelens/core";
 import { Combobox } from "../ui";
 import { ManifestEditor } from "./ManifestEditor";
 
@@ -98,29 +99,35 @@ export function NewResourceEditor({
   context,
   namespace = "default",
   initialKind,
+  draft,
+  onDraftChange,
   onCreated,
 }: {
   context: string;
   namespace?: string;
   /** k8s Kind (e.g. "Deployment") to preselect a template. */
   initialKind?: string;
+  /** The working copy owned by this tab; absent until the first change. */
+  draft?: NewResourceDraft;
+  onDraftChange: (draft: NewResourceDraft) => void;
   onCreated?: () => void;
 }) {
   const ns = namespace || "default";
   const startTemplate = initialKind && TEMPLATES[initialKind] ? initialKind : "Deployment";
-  const [template, setTemplate] = useState(startTemplate);
-  const [yaml, setYaml] = useState(() => TEMPLATES[startTemplate](ns));
+  const current = draft ?? {
+    template: startTemplate,
+    yaml: TEMPLATES[startTemplate](ns),
+  };
 
   function pickTemplate(t: string) {
-    setTemplate(t);
-    setYaml(TEMPLATES[t](ns));
+    onDraftChange({ template: t, yaml: TEMPLATES[t](ns) });
   }
 
   return (
     <ManifestEditor
       context={context}
-      yaml={yaml}
-      onYamlChange={setYaml}
+      yaml={current.yaml}
+      onYamlChange={(yaml) => onDraftChange({ ...current, yaml })}
       ariaLabel="New resource YAML"
       fill
       headerLabel="New resource"
@@ -132,7 +139,7 @@ export function NewResourceEditor({
         <>
           <span className="mx-1 text-xs text-muted-foreground">Template</span>
           <Combobox
-            value={template}
+            value={current.template}
             onValueChange={pickTemplate}
             options={TEMPLATE_ORDER.map((t) => ({ value: t }))}
             ariaLabel="Template"
