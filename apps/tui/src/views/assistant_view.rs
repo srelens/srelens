@@ -762,12 +762,24 @@ pub fn render_assistant_view(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Calculate dynamic input box height based on wrapped lines
+    let input_inner_width = (inner.width.saturating_sub(2).max(10)) as usize;
+    let input_full_text = format!("{}█", state.input);
+    let mut input_lines = 0;
+    for raw_line in input_full_text.split('\n') {
+        let line = Line::from(raw_line.to_string());
+        input_lines += wrap_line(line, input_inner_width).len().max(1);
+    }
+    let input_lines = input_lines.max(1);
+    let max_box_height = (inner.height / 3).clamp(3, 8);
+    let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),    // Messages history
             Constraint::Length(1), // Blank separator between chat history and input window
-            Constraint::Length(3), // Input prompt
+            Constraint::Length(input_box_height), // Dynamic input prompt
         ])
         .split(inner);
 
@@ -1019,8 +1031,13 @@ pub fn render_assistant_view(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::CYAN))
         .title(input_title);
-    let input_widget = Paragraph::new(format!("{}█", state.input))
-        .block(input_block);
+    let visible_input_rows = input_box_height.saturating_sub(2);
+    let scroll_y = (input_lines as u16).saturating_sub(visible_input_rows);
+
+    let input_widget = Paragraph::new(input_full_text)
+        .block(input_block)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0));
     f.render_widget(input_widget, chunks[2]);
 }
 
@@ -1856,5 +1873,27 @@ Done.";
         let table_row = Line::from("│ data-processing-prod-gpu-t4-jt8ld │ gpu-t4 │ 2x T4 (15 GiB each) │");
         let wrapped_table = wrap_line(table_row, 30);
         assert_eq!(wrapped_table.len(), 1);
+    }
+
+    #[test]
+    fn test_assistant_long_input_prompt_wrapping_and_dynamic_box_height() {
+        let prompt = "Investigate Pod 'istio-ingress-internal-79dfbc7c48-fzp4k' in namespace 'istio-system': what is its current health status, are there any errors, crash loops or restarts, and what are the recommended fixes?";
+        let full_text = format!("{}█", prompt);
+        let inner_width = 80;
+
+        let mut input_lines = 0;
+        for raw_line in full_text.split('\n') {
+            let line = Line::from(raw_line.to_string());
+            input_lines += wrap_line(line, inner_width).len().max(1);
+        }
+
+        // At 80 columns, the ~182 character prompt wraps across at least 3 lines
+        assert!(input_lines >= 3);
+
+        // Height is line count + 2 borders
+        let max_box_height = 8;
+        let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
+        assert!(input_box_height >= 5);
+        assert!(input_box_height <= 8);
     }
 }
