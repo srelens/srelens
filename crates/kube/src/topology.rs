@@ -292,10 +292,26 @@ pub struct TopologyEdge {
     pub health: Health,
 }
 
+/// What the connection probe managed, when it ran.
+///
+/// Carried on the graph because the screen has to be able to say it: a probe
+/// that was refused `pods/exec`, or met a distroless image with no `cat`, or
+/// timed out, draws a graph missing edges — and without this the button reads
+/// "Probing connections" over a picture a reader would take as complete.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ProbeReport {
+    /// Pods whose socket table was read.
+    pub read: usize,
+    /// Pods that could not be read, and why.
+    pub unreadable: Vec<crate::connections::Unreadable>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TopologyGraphOut {
     pub nodes: Vec<TopologyNode>,
     pub edges: Vec<TopologyEdge>,
+    /// Present only when the reader asked for the connection probe.
+    pub probe: Option<ProbeReport>,
 }
 
 /// Ready and desired, reduced to a verdict.
@@ -551,6 +567,18 @@ fn host_of(token: &str) -> Option<(String, bool)> {
         _ => (rest, false),
     };
     let host = host.trim_end_matches('.');
+    // An IP literal — `postgres://10.20.30.40:5432/db`, or a bracketed IPv6
+    // — is as unambiguous a host as configuration gets, and the hostname rule
+    // below would have thrown it out for having no letter in it. Taken only
+    // with a scheme or a port, as a bare name is, and never when it names
+    // this machine or no machine.
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>() {
+        if !(had_scheme || had_port) || ip.is_loopback() || ip.is_unspecified() {
+            return None;
+        }
+        return Some((literal.to_string(), true));
+    }
     if !plausible_host(host) {
         return None;
     }
@@ -1310,7 +1338,7 @@ pub fn build_graph(
 
     nodes.extend(externals.into_values());
 
-    let mut graph = TopologyGraphOut { nodes, edges };
+    let mut graph = TopologyGraphOut { nodes, edges, probe: None };
     resolve_call_health(&mut graph);
     graph
 }
@@ -1575,7 +1603,13 @@ pub fn workload_of_pod<'a>(
     nodes: &'a [TopologyNode],
 ) -> Option<&'a TopologyNode> {
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
-    let owner = pod.metadata.owner_references.as_ref()?.first()?;
+    // The controller, not whichever owner was listed first: the API marks the
+    // managing owner with `controller: true` and promises nothing about order.
+    let refs = pod.metadata.owner_references.as_ref()?;
+    let owner = refs
+        .iter()
+        .find(|o| o.controller == Some(true))
+        .or_else(|| refs.first())?;
     let (kind, name): (&str, &str) = match owner.kind.as_str() {
         "ReplicaSet" => ("Deployment", owner.name.rsplit_once('-')?.0),
         "StatefulSet" | "DaemonSet" => (owner.kind.as_str(), owner.name.as_str()),
@@ -1796,6 +1830,21 @@ pub fn apply_allowed(
     let mut egress_allowed: BTreeSet<(String, String)> = BTreeSet::new();
     let mut ingress_isolated: BTreeSet<String> = BTreeSet::new();
     let mut egress_isolated: BTreeSet<String> = BTreeSet::new();
+    // Subjects with a rule that admits EVERYTHING in a direction — `ingress:
+    // [{}]`, or a peer that names no pods. Such a rule draws no pair of its
+    // own (there is no second name to draw to), but it satisfies its
+    // direction for any pair the other side's rules name, and skipping it
+    // meant adding an allow-all could remove an edge. A peer that selects
+    // whole namespaces is taken as open too; that is a little generous, and
+    // generous is the right way to be wrong about intent.
+    let mut ingress_open: BTreeSet<String> = BTreeSet::new();
+    let mut egress_open: BTreeSet<String> = BTreeSet::new();
+    let wildcard = |peers: &[k8s_openapi::api::networking::v1::NetworkPolicyPeer]| {
+        peers.is_empty()
+            || peers.iter().any(|p| {
+                p.ip_block.is_none() && !p.pod_selector.as_ref().is_some_and(names_something)
+            })
+    };
     for policy in policies {
         let Some(spec) = policy.spec.as_ref() else {
             continue;
@@ -1827,7 +1876,11 @@ pub fn apply_allowed(
             egress_isolated.extend(subjects.iter().cloned());
         }
         for rule in spec.ingress.iter().flatten() {
-            for peer in rule.from.iter().flatten() {
+            let peers = rule.from.as_deref().unwrap_or(&[]);
+            if wildcard(peers) {
+                ingress_open.extend(subjects.iter().cloned());
+            }
+            for peer in peers {
                 let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
                     continue;
                 };
@@ -1840,7 +1893,11 @@ pub fn apply_allowed(
             }
         }
         for rule in spec.egress.iter().flatten() {
-            for peer in rule.to.iter().flatten() {
+            let peers = rule.to.as_deref().unwrap_or(&[]);
+            if wildcard(peers) {
+                egress_open.extend(subjects.iter().cloned());
+            }
+            for peer in peers {
                 let Some(selector) = peer.pod_selector.as_ref().filter(|s| names_something(s)) else {
                     continue;
                 };
@@ -1861,8 +1918,12 @@ pub fn apply_allowed(
             continue;
         }
         let pair = (from.clone(), to.clone());
-        let out_ok = !egress_isolated.contains(from) || egress_allowed.contains(&pair);
-        let in_ok = !ingress_isolated.contains(to) || ingress_allowed.contains(&pair);
+        let out_ok = !egress_isolated.contains(from)
+            || egress_open.contains(from)
+            || egress_allowed.contains(&pair);
+        let in_ok = !ingress_isolated.contains(to)
+            || ingress_open.contains(to)
+            || ingress_allowed.contains(&pair);
         if !(out_ok && in_ok) {
             continue;
         }
@@ -2026,7 +2087,16 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                     }
                     let book = AddressBook::new(&all_services, &pods, &graph.nodes);
                     let mut read = Vec::new();
-                    for pod in pods.iter().take(CONNECTION_POD_LIMIT) {
+                    let mut unreadable = Vec::new();
+                    // Only pods that belong to a drawn workload count against
+                    // the cap. A namespace whose first forty pods are Jobs
+                    // would otherwise spend the whole budget on pods the
+                    // graph could not have used.
+                    let candidates = pods
+                        .iter()
+                        .filter(|p| workload_of_pod(p, &graph.nodes).is_some())
+                        .take(CONNECTION_POD_LIMIT);
+                    for pod in candidates {
                         let (Some(name), Some(namespace)) =
                             (pod.metadata.name.clone(), pod.metadata.namespace.clone())
                         else {
@@ -2039,17 +2109,24 @@ pub fn topology_graph_capability(cache: Arc<ClientCache>) -> Capability {
                         // distroless sidecar would otherwise take the whole
                         // read with it — and neither may one that hangs: the
                         // exec is bounded, or a stalled stream left the screen
-                        // loading forever and every later pod unread.
-                        let peers = tokio::time::timeout(
+                        // loading forever and every later pod unread. Either
+                        // way the pod is REPORTED, not dropped: a reader has
+                        // to be able to tell a graph missing half its pods
+                        // from one where those pods talk to nothing.
+                        let outcome = tokio::time::timeout(
                             request_timeout(),
                             crate::connections::read_pod_connections(client.clone(), &namespace, &name),
                         )
-                        .await;
-                        if let Ok(Ok(peers)) = peers {
-                            read.push(PodPeers { from: from.id.clone(), peers });
+                        .await
+                        .unwrap_or_else(|_| Err("exec timed out".to_string()));
+                        match outcome {
+                            Ok(peers) => read.push(PodPeers { from: from.id.clone(), peers }),
+                            Err(reason) => unreadable
+                                .push(crate::connections::Unreadable { pod: name, reason }),
                         }
                     }
                     apply_connections(&mut graph, &book, &read);
+                    graph.probe = Some(ProbeReport { read: read.len(), unreadable });
                 }
                 // Last, over every source: a call's line is coloured by how the
                 // thing it points at is doing, and a measured call into a
@@ -2835,6 +2912,73 @@ mod tests {
         let mut g = demo_graph();
         apply_allowed(&mut g, &[deny, allow_in, allow_out], &demo_labels());
         assert!(has_edge(&g, "Deployment/checkout/checkout", "Service/checkout/payments", EdgeKind::Calls));
+    }
+
+    #[test]
+    fn an_allow_all_rule_satisfies_its_direction() {
+        // payments isolates ingress with `ingress: [{}]` — everyone may come
+        // in — and checkout has a specific egress rule to payments. Both
+        // directions agree, and the edge is drawn; without the allow-all,
+        // payments' isolation blocks it.
+        let mut open = policy("checkout", &[("app", "payments")], vec![], vec![]);
+        {
+            let spec = open.spec.as_mut().unwrap();
+            spec.policy_types = Some(vec!["Ingress".into()]);
+            spec.ingress = Some(vec![k8s_openapi::api::networking::v1::NetworkPolicyIngressRule::default()]);
+        }
+        let out = policy("checkout", &[("app", "checkout")], vec![], vec![policy_peer(&[("app", "payments")], None)]);
+        let mut g = demo_graph();
+        apply_allowed(&mut g, &[open.clone(), out.clone()], &demo_labels());
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "Service/checkout/payments", EdgeKind::Calls));
+
+        let mut closed = open;
+        closed.spec.as_mut().unwrap().ingress = None;
+        let mut g = demo_graph();
+        apply_allowed(&mut g, &[closed, out], &demo_labels());
+        assert!(g.edges.iter().all(|e| e.kind != EdgeKind::Calls), "{:?}", g.edges);
+    }
+
+    #[test]
+    fn an_ip_literal_with_a_scheme_or_port_is_a_host() {
+        assert_eq!(
+            references_in("DATABASE_URL=postgres://10.20.30.40:5432/db", &[]),
+            vec![Reference::External { host: "10.20.30.40".into() }],
+        );
+        assert_eq!(
+            references_in("CACHE=redis://[fd00::10]:6379", &[]),
+            vec![Reference::External { host: "fd00::10".into() }],
+        );
+        // Loopback, unspecified, and a bare literal with neither scheme nor
+        // port are not dependencies.
+        assert!(references_in("http://127.0.0.1:8080 0.0.0.0:80 10.20.30.40", &[]).is_empty());
+    }
+
+    #[test]
+    fn the_controller_owner_is_preferred_over_the_first_listed() {
+        let g = build_graph(
+            vec![],
+            vec![],
+            vec![deployment("api", 1, 1, &[("app", "api")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let mut p = pod("api-5bc6575d7-abcde", "10.0.0.10", "api-5bc6575d7");
+        let controller = p.metadata.owner_references.as_ref().unwrap()[0].clone();
+        p.metadata.owner_references = Some(vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                kind: "Backup".into(),
+                name: "nightly".into(),
+                ..Default::default()
+            },
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                controller: Some(true),
+                ..controller
+            },
+        ]);
+        assert_eq!(workload_of_pod(&p, &g.nodes).map(|n| n.id.as_str()), Some("Deployment/checkout/api"));
     }
 
     // ---- allowed: what a NetworkPolicy would let through ----

@@ -232,6 +232,18 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
                 Showing {NAMESPACE_LIMIT} of {all.length} namespaces. Pick the ones you want to see.
               </p>
             )}
+            {graph.data?.probe && graph.data.probe.unreadable.length > 0 && (
+              // The probe's own account of itself. Without it the button reads
+              // "Probing connections" over a graph missing edges, and a reader
+              // takes the gaps for pods that talk to nothing.
+              <p className="text-sm text-muted" data-testid="probe-report">
+                Probed {graph.data.probe.read}{" "}
+                {graph.data.probe.read === 1 ? "pod" : "pods"};{" "}
+                {graph.data.probe.unreadable.length} could not be read —{" "}
+                {graph.data.probe.unreadable[0].pod}: {graph.data.probe.unreadable[0].reason}
+                {graph.data.probe.unreadable.length > 1 ? ", and others." : "."}
+              </p>
+            )}
           </div>
           <div className="relative min-h-0 flex-1">
             {graph.status === "loading" && (

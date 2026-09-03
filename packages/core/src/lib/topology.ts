@@ -89,9 +89,21 @@ export interface TopologyEdge {
   health: TopologyHealth;
 }
 
+/** What the connection probe managed, when it ran. */
+export interface TopologyProbe {
+  /** Pods whose socket table was read. */
+  read: number;
+  /** Pods that could not be read, and why — a refused exec, an image with
+   *  no `cat`, a timeout. Reported so a graph missing edges is never taken
+   *  for one where those pods talk to nothing. */
+  unreadable: { pod: string; reason: string }[];
+}
+
 export interface TopologyGraph {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+  /** Present only when the reader asked for the connection probe. */
+  probe?: TopologyProbe | null;
 }
 
 /**
@@ -123,7 +135,7 @@ export async function topologyGraph(
       prometheus,
       connections,
     });
-    return { graph: { nodes: out.nodes, edges: out.edges } };
+    return { graph: { nodes: out.nodes, edges: out.edges, probe: out.probe ?? null } };
   } catch (e) {
     return { error: String(e) };
   }

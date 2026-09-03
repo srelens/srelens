@@ -572,6 +572,27 @@ describe("Topology", () => {
     expect(screen.getByRole("button", { name: "Probing connections" })).toBeDefined();
   });
 
+  it("says which pods the connection probe could not read", async () => {
+    // A refused exec or a distroless image draws a graph missing edges. The
+    // screen has to say so, or the gaps read as pods that talk to nothing.
+    core.topologyGraph.mockResolvedValue({
+      graph: {
+        ...graph(),
+        probe: {
+          read: 3,
+          unreadable: [
+            { pod: "coredns-7db6d8ff4d-x2mzp", reason: "no cat in the image" },
+            { pod: "kube-proxy-abc12", reason: "exec timed out" },
+          ],
+        },
+      },
+    });
+    render(<Topology />);
+    const note = await screen.findByTestId("probe-report");
+    expect(note.textContent).toContain("Probed 3 pods; 2 could not be read");
+    expect(note.textContent).toContain("coredns-7db6d8ff4d-x2mzp: no cat in the image");
+  });
+
   it("says in words that an external node is config, not observed traffic", async () => {
     // A dotted line is not enough on its own — the panel must not let a reader
     // believe srelens watched a byte go to this host.

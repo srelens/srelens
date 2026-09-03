@@ -85,7 +85,7 @@ describe("topologyGraph", () => {
     const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
     const out = await topologyGraph("c", ["empty"], undefined, false, invoke);
     expect(out.error).toBeUndefined();
-    expect(out.graph).toEqual({ nodes: [], edges: [] });
+    expect(out.graph).toEqual({ nodes: [], edges: [], probe: null });
   });
 });
 
