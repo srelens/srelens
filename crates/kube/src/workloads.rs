@@ -65,6 +65,9 @@ pub struct PodSummary {
     /// is waiting.
     #[serde(rename = "waitingReason")]
     pub waiting_reason: String,
+    /// Pod IP address from `status.podIP`.
+    #[serde(rename = "podIp", default)]
+    pub pod_ip: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -156,6 +159,12 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         })
         .unwrap_or_default();
 
+    let pod_ip = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.pod_ip.clone())
+        .unwrap_or_default();
+
     PodSummary {
         name,
         namespace,
@@ -168,6 +177,7 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         created_at: crate::creation_timestamp_iso(pod.metadata.creation_timestamp.as_ref()),
         image,
         waiting_reason,
+        pod_ip,
     }
 }
 

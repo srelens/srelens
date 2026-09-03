@@ -45,6 +45,7 @@ pub struct NodeInspectorDetails {
     pub gpu_allocatable_count: i64,
     pub gpu_requests_count: i64,
     pub gpu_memory_total_mib: Option<i64>,
+    pub gpu_memory_requests_mib: i64,
 
     pub conditions: Vec<NodeConditionInfo>,
     pub taints: Vec<NodeTaintInfo>,
@@ -77,6 +78,8 @@ pub struct NodePodItem {
     pub cpu_requests_millicores: i64,
     pub mem_requests_mib: i64,
     pub gpu_requests: i64,
+    pub gpu_mem_requests_mib: i64,
+    pub pod_ip: String,
 }
 
 /// Query and inspect a live node and all pods scheduled on it.
@@ -221,16 +224,14 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     let mut gpu_capacity_count: i64 = 0;
     let mut gpu_allocatable_count: i64 = 0;
 
-    // Check standard and vendor keys for GPU capacity & allocatable
-    let gpu_keys = [
+    // Discrete GPU keys
+    let discrete_gpu_keys = [
         "nvidia.com/gpu",
         "amd.com/gpu",
         "google.com/tpu",
-        "nvidia.com/gpumem",
-        "nvidia.com/gpucores",
     ];
 
-    for key in &gpu_keys {
+    for key in &discrete_gpu_keys {
         if let Some(cap) = capacity.and_then(|c| c.get(*key)) {
             if let Ok(count) = cap.0.trim().parse::<i64>() {
                 gpu_capacity_count = gpu_capacity_count.max(count);
@@ -287,12 +288,41 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             .cloned()
     });
 
-    let gpu_memory_total_mib = labels.and_then(|l| {
+    let mut gpu_memory_total_mib = labels.and_then(|l| {
         l.get("nvidia.com/gpu.memory")
             .and_then(|m| m.parse::<i64>().ok())
     });
 
-    let has_gpu = gpu_capacity_count > 0 || gpu_model.is_some() || labels.map(|l| l.contains_key("nvidia.com/gpu.present")).unwrap_or(false);
+    // Check capacity / allocatable for "nvidia.com/gpumem" (HAMi virtual memory)
+    if gpu_memory_total_mib.is_none() {
+        if let Some(mem_cap) = capacity.and_then(|c| c.get("nvidia.com/gpumem")) {
+            if let Ok(val) = mem_cap.0.trim().parse::<i64>() {
+                gpu_memory_total_mib = Some(val);
+            }
+        }
+    }
+
+    // If still none, fallback based on well-known GPU models
+    if gpu_memory_total_mib.is_none() {
+        if let Some(model) = &gpu_model {
+            let m_lower = model.to_lowercase();
+            if m_lower.contains("t4") {
+                gpu_memory_total_mib = Some(15360); // 15 GiB
+            } else if m_lower.contains("a100") {
+                gpu_memory_total_mib = Some(81920); // 80 GiB
+            } else if m_lower.contains("h100") {
+                gpu_memory_total_mib = Some(81920); // 80 GiB
+            } else if m_lower.contains("a10") || m_lower.contains("l40") {
+                gpu_memory_total_mib = Some(24576); // 24 GiB
+            } else if m_lower.contains("v100") {
+                gpu_memory_total_mib = Some(16384); // 16 GiB
+            }
+        }
+    }
+
+    let has_gpu = gpu_capacity_count > 0
+        || gpu_model.is_some()
+        || labels.map(|l| l.contains_key("nvidia.com/gpu.present") || l.contains_key("trivago.com/gpu") || l.contains_key("gpu.trivago.com/model")).unwrap_or(false);
 
     // 8. Conditions
     let conditions = node
@@ -333,6 +363,7 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     let mut cpu_requests_millicores = 0;
     let mut mem_requests_mib = 0;
     let mut gpu_requests_count = 0;
+    let mut gpu_memory_requests_mib = 0;
 
     for pod in pods {
         let p_name = pod.metadata.name.clone().unwrap_or_default();
@@ -365,6 +396,7 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         let mut pod_cpu_req = 0;
         let mut pod_mem_req = 0;
         let mut pod_gpu_req = 0;
+        let mut pod_gpu_mem_req = 0;
 
         if let Some(spec) = &pod.spec {
             for c in &spec.containers {
@@ -376,20 +408,44 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
                         if let Some(mem) = reqs.get("memory") {
                             pod_mem_req += crate::metrics::mem_mib(&mem.0);
                         }
-                        for key in &gpu_keys {
+                        for key in &discrete_gpu_keys {
                             if let Some(gpu) = reqs.get(*key) {
                                 if let Ok(val) = gpu.0.trim().parse::<i64>() {
                                     pod_gpu_req += val;
                                 }
                             }
                         }
+                        if let Some(gpumem) = reqs.get("nvidia.com/gpumem") {
+                            if let Ok(val) = gpumem.0.trim().parse::<i64>() {
+                                pod_gpu_mem_req += val;
+                            }
+                        }
+                        for (k, v) in reqs {
+                            if k.starts_with("nvidia.com/mig-") {
+                                if let Ok(val) = v.0.trim().parse::<i64>() {
+                                    pod_gpu_req += val;
+                                }
+                            }
+                        }
                     }
-                    // Fallback to limits if requests not specified for GPU
-                    if pod_gpu_req == 0 {
+                    // Fallback to limits if requests not specified
+                    if pod_gpu_req == 0 && pod_gpu_mem_req == 0 {
                         if let Some(limits) = &res.limits {
-                            for key in &gpu_keys {
+                            for key in &discrete_gpu_keys {
                                 if let Some(gpu) = limits.get(*key) {
                                     if let Ok(val) = gpu.0.trim().parse::<i64>() {
+                                        pod_gpu_req += val;
+                                    }
+                                }
+                            }
+                            if let Some(gpumem) = limits.get("nvidia.com/gpumem") {
+                                if let Ok(val) = gpumem.0.trim().parse::<i64>() {
+                                    pod_gpu_mem_req += val;
+                                }
+                            }
+                            for (k, v) in limits {
+                                if k.starts_with("nvidia.com/mig-") {
+                                    if let Ok(val) = v.0.trim().parse::<i64>() {
                                         pod_gpu_req += val;
                                     }
                                 }
@@ -400,9 +456,21 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             }
         }
 
+        // If pod requested GPU VRAM (HAMi) but not discrete GPU count, count it as 1 slice
+        if pod_gpu_mem_req > 0 && pod_gpu_req == 0 {
+            pod_gpu_req = 1;
+        }
+
+        let p_ip = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.pod_ip.clone())
+            .unwrap_or_default();
+
         cpu_requests_millicores += pod_cpu_req;
         mem_requests_mib += pod_mem_req;
         gpu_requests_count += pod_gpu_req;
+        gpu_memory_requests_mib += pod_gpu_mem_req;
 
         pod_items.push(NodePodItem {
             name: p_name,
@@ -414,13 +482,19 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             cpu_requests_millicores: pod_cpu_req,
             mem_requests_mib: pod_mem_req,
             gpu_requests: pod_gpu_req,
+            gpu_mem_requests_mib: pod_gpu_mem_req,
+            pod_ip: p_ip,
         });
     }
 
-    // Sort pods: GPU consumers first, then by CPU requests descending
+    // Sort pods: GPU/VRAM consumers first, then by CPU requests descending
     pod_items.sort_by(|a, b| {
-        b.gpu_requests
-            .cmp(&a.gpu_requests)
+        let a_has_gpu = a.gpu_requests > 0 || a.gpu_mem_requests_mib > 0;
+        let b_has_gpu = b.gpu_requests > 0 || b.gpu_mem_requests_mib > 0;
+        b_has_gpu
+            .cmp(&a_has_gpu)
+            .then_with(|| b.gpu_mem_requests_mib.cmp(&a.gpu_mem_requests_mib))
+            .then_with(|| b.gpu_requests.cmp(&a.gpu_requests))
             .then_with(|| b.cpu_requests_millicores.cmp(&a.cpu_requests_millicores))
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -461,6 +535,7 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         gpu_allocatable_count,
         gpu_requests_count,
         gpu_memory_total_mib,
+        gpu_memory_requests_mib,
         conditions,
         taints,
         pods: pod_items,

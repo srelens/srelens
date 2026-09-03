@@ -17,6 +17,8 @@ pub struct NodeInspectorState {
     pub scroll_offset: usize,
     pub is_loading: bool,
     pub error: Option<String>,
+    pub last_pods_table_rect: std::cell::Cell<Rect>,
+    pub last_scroll_offset: std::cell::Cell<usize>,
 }
 
 impl NodeInspectorState {
@@ -28,6 +30,8 @@ impl NodeInspectorState {
             scroll_offset: 0,
             is_loading: true,
             error: None,
+            last_pods_table_rect: std::cell::Cell::new(Rect::default()),
+            last_scroll_offset: std::cell::Cell::new(0),
         }
     }
 
@@ -329,12 +333,28 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
 
     // 4. GPU Gauge (if present)
     if has_gpu {
-        let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
-        let gpu_pct = if gpu_alloc > 0 {
-            ((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u16
+        let model_label = d.gpu_model.as_deref().unwrap_or("GPU");
+
+        let (gpu_title, gpu_pct) = if d.gpu_memory_requests_mib > 0 && d.gpu_memory_total_mib.unwrap_or(0) > 0 {
+            let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(15360);
+            let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
+            let total_vram_gib = total_vram_mib as f64 / 1024.0;
+            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib as f64) * 100.0).round() as u64).min(999) as u16;
+            (
+                format!(" ⚡ {}: {:.1}/{:.1} GiB VRAM ({}%) ", model_label, req_vram_gib, total_vram_gib, pct),
+                pct,
+            )
         } else {
-            0
+            let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
+            let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u64).min(999) as u16;
+            let title = if d.gpu_allocatable_count > 1 {
+                format!(" ⚡ {}: {}/{} Slices ({}%) ", model_label, d.gpu_requests_count, gpu_alloc, pct)
+            } else {
+                format!(" ⚡ {}: {}/{} ({}%) ", model_label, d.gpu_requests_count, gpu_alloc, pct)
+            };
+            (title, pct)
         };
+
         let gpu_color = if gpu_pct > 90 {
             Theme::RED
         } else if gpu_pct > 75 {
@@ -343,8 +363,6 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
             Theme::YELLOW
         };
 
-        let model_label = d.gpu_model.as_deref().unwrap_or("GPU");
-        let gpu_title = format!(" ⚡ {}: {}/{} ({}%) ", model_label, d.gpu_requests_count, gpu_alloc, gpu_pct);
         let gpu_gauge = Gauge::default()
             .block(
                 Block::default()
@@ -368,48 +386,44 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
 
     let mut spans = Vec::new();
 
-    // 1. Conditions
-    spans.push(Span::styled("Conditions: ", Style::default().fg(Theme::DIM)));
-    for cond in &d.conditions {
-        let is_ok = match cond.type_.as_str() {
-            "Ready" => cond.status == "True",
-            "MemoryPressure" | "DiskPressure" | "PIDPressure" | "NetworkUnavailable" => cond.status == "False",
-            _ => true,
-        };
-        let color = if is_ok { Theme::GREEN } else { Theme::RED };
-        spans.push(Span::styled(format!("{}:{} ", cond.type_, cond.status), Style::default().fg(color)));
-    }
-
-    spans.push(Span::raw(" │ "));
-
-    // 2. Taints
-    spans.push(Span::styled("Taints: ", Style::default().fg(Theme::DIM)));
-    if d.taints.is_empty() {
-        spans.push(Span::styled("<none>", Style::default().fg(Theme::DIM)));
+    // Conditions
+    spans.push(Span::styled("Conditions: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
+    if d.conditions.is_empty() {
+        spans.push(Span::styled("None", Style::default().fg(Theme::DIM)));
     } else {
-        for (i, t) in d.taints.iter().enumerate() {
+        for (i, cond) in d.conditions.iter().enumerate() {
             if i > 0 {
-                spans.push(Span::raw(" "));
+                spans.push(Span::styled(" ", Style::default()));
             }
-            let taint_str = match &t.value {
-                Some(v) => format!("{}={}:{}", t.key, v, t.effect),
-                None => format!("{}:{}", t.key, t.effect),
-            };
-            let color = if t.key.contains("gpu") {
-                Theme::YELLOW
-            } else if t.effect == "NoExecute" {
-                Theme::RED
+            let is_ok = (cond.type_ == "Ready" && cond.status == "True")
+                || (cond.type_ != "Ready" && cond.status == "False");
+            let style = if is_ok {
+                Style::default().fg(Theme::GREEN)
             } else {
-                Theme::CYAN
+                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)
             };
-            spans.push(Span::styled(taint_str, Style::default().fg(color)));
+            spans.push(Span::styled(format!("{}:{}", cond.type_, cond.status), style));
         }
     }
 
-    // Driver & CUDA details if present
-    if let (Some(drv), Some(cuda)) = (&d.gpu_driver_version, &d.gpu_cuda_version) {
-        spans.push(Span::raw(" │ "));
-        spans.push(Span::styled(format!("Driver: {} (CUDA {})", drv, cuda), Style::default().fg(Theme::YELLOW)));
+    spans.push(Span::styled("  │  ", Style::default().fg(Theme::DIM)));
+
+    // Taints
+    spans.push(Span::styled("Taints: ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)));
+    if d.taints.is_empty() {
+        spans.push(Span::styled("None", Style::default().fg(Theme::DIM)));
+    } else {
+        for (i, taint) in d.taints.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" ", Style::default()));
+            }
+            let t_str = if let Some(val) = &taint.value {
+                format!("{}={}:{}", taint.key, val, taint.effect)
+            } else {
+                format!("{}:{}", taint.key, taint.effect)
+            };
+            spans.push(Span::styled(t_str, Style::default().fg(Theme::YELLOW)));
+        }
     }
 
     let p = Paragraph::new(Line::from(spans));
@@ -417,7 +431,7 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
 }
 
 fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &NodeInspectorDetails) {
-    let gpu_pod_count = d.pods.iter().filter(|p| p.gpu_requests > 0).count();
+    let gpu_pod_count = d.pods.iter().filter(|p| p.gpu_requests > 0 || p.gpu_mem_requests_mib > 0).count();
     let table_title = if gpu_pod_count > 0 {
         format!(" Scheduled Pods ({} Total | ⚡ {} GPU Workloads) ", d.pods.len(), gpu_pod_count)
     } else {
@@ -438,8 +452,6 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
         return;
     }
 
-    // Column widths:
-    // Marker (2), NS (18), Name (32), Status (12), Ready (6), Restarts (5), CPU (10), Mem (10), GPU (12), Age (6)
     let visible_rows = inner.height.saturating_sub(1) as usize; // header takes 1
     if visible_rows == 0 {
         return;
@@ -453,20 +465,24 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
         scroll = state.selected_pod_idx - visible_rows + 1;
     }
 
+    state.last_pods_table_rect.set(inner);
+    state.last_scroll_offset.set(scroll);
+
     let mut lines = Vec::new();
 
     // Table Header
     let header_line = Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(format!("{:<18}", "NAMESPACE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<34}", "NAME"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<12}", "STATUS"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<16}", "NAMESPACE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<28}", "NAME"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<15}", "IP"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<10}", "STATUS"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:<6}", "READY"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<6}", "REST"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<10}", "CPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<10}", "MEM REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<12}", "GPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<6}", "AGE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<5}", "REST"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<8}", "CPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<9}", "MEM REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<11}", "GPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<5}", "AGE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
     ]);
     lines.push(header_line);
 
@@ -486,8 +502,9 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
             Style::default().bg(row_bg)
         };
 
-        let ns_str = truncate_str(&pod.namespace, 17);
-        let name_str = truncate_str(&pod.name, 33);
+        let ns_str = truncate_str(&pod.namespace, 15);
+        let name_str = truncate_str(&pod.name, 27);
+        let ip_str = truncate_str(if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip }, 14);
 
         let status_color = match pod.phase.as_str() {
             "Running" => Theme::GREEN,
@@ -498,7 +515,7 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
         };
 
         let cpu_str = if pod.cpu_requests_millicores >= 1000 {
-            format!("{:.1} cores", pod.cpu_requests_millicores as f64 / 1000.0)
+            format!("{:.1}c", pod.cpu_requests_millicores as f64 / 1000.0)
         } else if pod.cpu_requests_millicores > 0 {
             format!("{}m", pod.cpu_requests_millicores)
         } else {
@@ -513,7 +530,17 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
             "-".to_string()
         };
 
-        let (gpu_str, gpu_style) = if pod.gpu_requests > 0 {
+        let (gpu_str, gpu_style) = if pod.gpu_mem_requests_mib > 0 {
+            let vram_str = if pod.gpu_mem_requests_mib >= 1024 {
+                format!("⚡ {:.1} GiB", pod.gpu_mem_requests_mib as f64 / 1024.0)
+            } else {
+                format!("⚡ {} MiB", pod.gpu_mem_requests_mib)
+            };
+            (
+                vram_str,
+                Style::default().fg(Theme::YELLOW).bg(row_bg).add_modifier(Modifier::BOLD),
+            )
+        } else if pod.gpu_requests > 0 {
             (
                 format!("⚡ {} GPU", pod.gpu_requests),
                 Style::default().fg(Theme::YELLOW).bg(row_bg).add_modifier(Modifier::BOLD),
@@ -524,15 +551,16 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
 
         let row = Line::from(vec![
             Span::styled(marker, marker_style),
-            Span::styled(format!("{:<18}", ns_str), Style::default().fg(Theme::CYAN).bg(row_bg)),
-            Span::styled(format!("{:<34}", name_str), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
-            Span::styled(format!("{:<12}", pod.phase), Style::default().fg(status_color).bg(row_bg)),
+            Span::styled(format!("{:<16}", ns_str), Style::default().fg(Theme::CYAN).bg(row_bg)),
+            Span::styled(format!("{:<28}", name_str), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(format!("{:<15}", ip_str), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<10}", pod.phase), Style::default().fg(status_color).bg(row_bg)),
             Span::styled(format!("{:<6}", pod.ready_containers), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<6}", pod.restarts), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
-            Span::styled(format!("{:<10}", cpu_str), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<10}", mem_str), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<12}", gpu_str), gpu_style),
-            Span::styled(format!("{:<6}", pod.age), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<5}", pod.restarts), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
+            Span::styled(format!("{:<8}", cpu_str), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<9}", mem_str), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<11}", gpu_str), gpu_style),
+            Span::styled(format!("{:<5}", pod.age), Style::default().fg(Theme::DIM).bg(row_bg)),
         ]);
         lines.push(row);
     }
@@ -629,6 +657,7 @@ mod tests {
             gpu_allocatable_count: 0,
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
+            gpu_memory_requests_mib: 0,
             conditions: vec![],
             taints: vec![],
             pods: vec![
@@ -642,6 +671,8 @@ mod tests {
                     cpu_requests_millicores: 500,
                     mem_requests_mib: 1024,
                     gpu_requests: 0,
+                    gpu_mem_requests_mib: 0,
+                    pod_ip: "10.244.0.10".to_string(),
                 },
                 NodePodItem {
                     name: "pod-2".to_string(),
@@ -653,6 +684,8 @@ mod tests {
                     cpu_requests_millicores: 700,
                     mem_requests_mib: 3072,
                     gpu_requests: 0,
+                    gpu_mem_requests_mib: 0,
+                    pod_ip: "10.244.0.11".to_string(),
                 },
             ],
         };

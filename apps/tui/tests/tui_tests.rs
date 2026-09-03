@@ -2926,6 +2926,7 @@ mod tests {
             gpu_allocatable_count: 1,
             gpu_requests_count: 1,
             gpu_memory_total_mib: Some(15360),
+            gpu_memory_requests_mib: 7168,
             conditions: vec![
                 NodeConditionInfo {
                     type_: "Ready".to_string(),
@@ -2952,6 +2953,8 @@ mod tests {
                     cpu_requests_millicores: 2000,
                     mem_requests_mib: 12000,
                     gpu_requests: 1,
+                    gpu_mem_requests_mib: 7168,
+                    pod_ip: "10.244.1.5".to_string(),
                 },
                 NodePodItem {
                     name: "node-exporter".to_string(),
@@ -2963,6 +2966,8 @@ mod tests {
                     cpu_requests_millicores: 100,
                     mem_requests_mib: 128,
                     gpu_requests: 0,
+                    gpu_mem_requests_mib: 0,
+                    pod_ip: "10.244.1.6".to_string(),
                 },
             ],
         };
@@ -2989,5 +2994,209 @@ mod tests {
         }
         assert_eq!(app.active_namespace, "ai-prod");
         assert_eq!(app.filter_buffer, "vllm-serve-7b");
+    }
+
+    #[tokio::test]
+    async fn test_mouse_row_selection_and_scrolling_in_table_and_node_inspector() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::layout::Rect;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
+        let mut items = Vec::new();
+        for i in 0..20 {
+            items.push(serde_json::json!({
+                "name": format!("node-{}", i),
+                "status": "Ready",
+                "podIp": format!("10.0.0.{}", i),
+            }));
+        }
+        node_table.set_items(items, "");
+        // Simulate rendered table viewport at y=3, height=20
+        node_table.last_viewport_rect.set(Rect::new(0, 3, 100, 20));
+        node_table.last_start_idx.set(0);
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(node_table),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: std::collections::HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 20,
+            pod_count: 50,
+            is_connected: true,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 1. Click on row at y = 3 + 2 + 5 = 10 -> row 5
+        let click_row_5 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(click_row_5).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.selected_idx, 5);
+        }
+
+        // 2. Mouse ScrollDown -> moves forward by 3
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 15,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(scroll_down).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.selected_idx, 8);
+        }
+
+        // 3. Mouse ScrollUp -> moves back by 3
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 15,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(scroll_up).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.selected_idx, 5);
+        }
+
+        // 4. Test Node Inspector mouse selection
+        let mut ni_state = srelens_tui::views::node_inspector_view::NodeInspectorState::new("node-1".to_string());
+        let mock_pods = vec![
+            NodePodItem {
+                name: "pod-0".to_string(),
+                namespace: "default".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "1/1".to_string(),
+                restarts: 0,
+                age: "1d".to_string(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.0.0.1".to_string(),
+            },
+            NodePodItem {
+                name: "pod-1".to_string(),
+                namespace: "default".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "1/1".to_string(),
+                restarts: 0,
+                age: "1d".to_string(),
+                cpu_requests_millicores: 200,
+                mem_requests_mib: 256,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.0.0.2".to_string(),
+            },
+        ];
+        let mut details = NodeInspectorDetails {
+            name: "node-1".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "m5.large".to_string(),
+            zone: None,
+            region: None,
+            nodepool: None,
+            internal_ip: None,
+            external_ip: None,
+            os_image: "Ubuntu".to_string(),
+            kernel_version: "5.15".to_string(),
+            container_runtime: "containerd".to_string(),
+            kubelet_version: "v1.30.0".to_string(),
+            architecture: "amd64".to_string(),
+            created_at: "".to_string(),
+            cpu_capacity_millicores: 2000,
+            cpu_allocatable_millicores: 1900,
+            cpu_requests_millicores: 300,
+            mem_capacity_mib: 8192,
+            mem_allocatable_mib: 8000,
+            mem_requests_mib: 384,
+            pods_capacity: 110,
+            pods_allocatable: 110,
+            pods_count: 2,
+            has_gpu: false,
+            gpu_model: None,
+            gpu_driver_version: None,
+            gpu_cuda_version: None,
+            gpu_capacity_count: 0,
+            gpu_allocatable_count: 0,
+            gpu_requests_count: 0,
+            gpu_memory_total_mib: None,
+            gpu_memory_requests_mib: 0,
+            conditions: vec![],
+            taints: vec![],
+            pods: mock_pods,
+        };
+        ni_state.set_details(details);
+        ni_state.last_pods_table_rect.set(Rect::new(0, 10, 100, 15));
+        ni_state.last_scroll_offset.set(0);
+        app.active_view = ActiveView::NodeInspector(ni_state);
+
+        // Click on second pod (header is row 10, data starts at 11, so row 12 is offset 1)
+        let click_pod_1 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 12,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(click_pod_1).await;
+        if let ActiveView::NodeInspector(ni) = &app.active_view {
+            assert_eq!(ni.selected_pod_idx, 1);
+        }
     }
 }

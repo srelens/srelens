@@ -2705,10 +2705,117 @@ impl App {
                             self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
                         }
                     }
+                    MouseEventKind::ScrollDown => {
+                        yaml.scroll_down(3);
+                    }
+                    MouseEventKind::ScrollUp => {
+                        yaml.scroll_up(3);
+                    }
                     _ => {}
                 }
             } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 yaml.clear_selection();
+            }
+        }
+
+        // Table mouse row selection and scrolling
+        if let ActiveView::Table(table) = &mut self.active_view {
+            let vp = table.last_viewport_rect.get();
+            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let data_start_y = vp.y + 2;
+                        if mouse.row >= data_start_y {
+                            let screen_row = (mouse.row - data_start_y) as usize;
+                            let target_idx = table.last_start_idx.get() + screen_row;
+                            if target_idx < table.filtered_indices.len() {
+                                table.selected_idx = target_idx;
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        for _ in 0..3 {
+                            table.select_next();
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        for _ in 0..3 {
+                            table.select_prev();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Node Inspector pods table mouse selection and scrolling
+        if let ActiveView::NodeInspector(inspector) = &mut self.active_view {
+            let vp = inspector.last_pods_table_rect.get();
+            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let data_start_y = vp.y + 1; // pods header is 1 line
+                        if mouse.row >= data_start_y {
+                            let screen_row = (mouse.row - data_start_y) as usize;
+                            let target_idx = inspector.last_scroll_offset.get() + screen_row;
+                            if let Some(d) = &inspector.details {
+                                if target_idx < d.pods.len() {
+                                    inspector.selected_pod_idx = target_idx;
+                                }
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        inspector.select_next();
+                    }
+                    MouseEventKind::ScrollUp => {
+                        inspector.select_prev();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Tree view scrolling
+        if let ActiveView::Tree(tree) = &mut self.active_view {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    tree.select_next();
+                }
+                MouseEventKind::ScrollUp => {
+                    tree.select_prev();
+                }
+                _ => {}
+            }
+        }
+
+        // Logs view scrolling
+        if let ActiveView::Logs(logs) = &mut self.active_view {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    logs.scroll_down(3);
+                }
+                MouseEventKind::ScrollUp => {
+                    logs.scroll_up(3);
+                }
+                _ => {}
+            }
+        }
+
+        // Describe view scrolling
+        if let ActiveView::Describe(desc) = &mut self.active_view {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    desc.scroll_down(3);
+                }
+                MouseEventKind::ScrollUp => {
+                    desc.scroll_up(3);
+                }
+                _ => {}
             }
         }
 

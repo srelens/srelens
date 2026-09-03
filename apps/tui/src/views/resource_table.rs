@@ -31,6 +31,8 @@ pub struct ResourceTableState {
     pub sort_ascending: bool,
     pub is_loading: bool,
     pub warning_triage: bool,
+    pub last_viewport_rect: std::cell::Cell<Rect>,
+    pub last_start_idx: std::cell::Cell<usize>,
 }
 
 impl ResourceTableState {
@@ -48,6 +50,8 @@ impl ResourceTableState {
             sort_ascending: true,
             is_loading: true,
             warning_triage: false,
+            last_viewport_rect: std::cell::Cell::new(Rect::default()),
+            last_start_idx: std::cell::Cell::new(0),
         }
     }
 
@@ -839,6 +843,9 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
         0
     };
     let end_idx = (start_idx + visible_rows_count).min(state.filtered_indices.len());
+
+    state.last_viewport_rect.set(inner);
+    state.last_start_idx.set(start_idx);
 
     let rows: Vec<Row> = (start_idx..end_idx)
         .map(|display_idx| {
