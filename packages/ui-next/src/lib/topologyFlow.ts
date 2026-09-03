@@ -141,32 +141,6 @@ export interface TopologyLayout {
   height: number;
 }
 
-/** An edge that carries traffic. `owns` is a fact about who built a thing. */
-function isFlow(edge: TopologyEdge): boolean {
-  return edge.kind === "routes" || edge.kind === "calls";
-}
-
-/**
- * What an edge costs in hops.
- *
- * **Only a call is a hop.** `routes` is an address being resolved — an Ingress
- * naming a Service, a Service selecting the pods behind it — and none of those
- * is a network call the application makes. Charging them a column each was the
- * first version of this layout and it drew the demo namespace 3112 pixels wide
- * and 220 tall: eight columns, every one of them a Service directly followed
- * by the single Deployment it fronts, and the whole thing fitted to 37% before
- * it would go in a pane. Unreadable, and about nothing — half those columns
- * were the same tier written twice.
- *
- * Zero-costing them turns a column into a SERVICE TIER: the way in, the
- * address, and the pods that answer it, all standing together, with the
- * arrows between columns being exactly the calls one tier makes on the next.
- * Which is the thing the diagram is for.
- */
-function hopCost(edge: TopologyEdge): number {
-  return edge.kind === "calls" ? 1 : 0;
-}
-
 /** Within a tier, top to bottom: the way in, then the address, then what
  *  answers, then anything hanging off it. */
 const LANE_ORDER: Record<string, number> = {
@@ -301,47 +275,69 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
   // mid-trace would be worse than a slightly old one.
   const ids = nodes.map((n) => n.id).sort();
   const present = new Set(ids);
+
+  /**
+   * Tiers are contracted BEFORE anything is ranked.
+   *
+   * Ranking nodes with `routes` costing zero was the first version, and a
+   * real namespace broke it: a StatefulSet named its own headless Service in
+   * its config, so the Service was called (rank one) while the StatefulSet
+   * it routes to sat at rank zero beside the other Service fronting it. One
+   * tier drawn across two columns, joined by a bow. Every `routes` edge is a
+   * statement that its two ends are one tier, so the tier is the unit that
+   * ranks, a call from a tier to itself is not a hop, and no ordering of
+   * cycle-breaking can split what routing joined.
+   */
+  const routed: [string, string][] = edges
+    .filter((e) => e.kind === "routes" && present.has(e.from) && present.has(e.to))
+    .map((e) => [e.from, e.to]);
+  const tierOf = new Map<string, string>();
+  for (const group of groupColumn(nodes, routed)) {
+    const key = group.map((n) => n.id).sort()[0];
+    for (const node of group) tierOf.set(node.id, key);
+  }
+  const tiers = [...new Set(tierOf.values())].sort();
+
+  // Only a CALL is a hop. Routing is an address being resolved — an Ingress
+  // naming a Service, a Service selecting its pods — and none of that is a
+  // network call the application makes. Charging it a column each drew the
+  // demo namespace eight columns wide and two rows tall.
   const out = new Map<string, string[]>();
-  const cost = new Map<string, number>();
   for (const edge of edges) {
-    if (!isFlow(edge)) continue;
-    if (!present.has(edge.from) || !present.has(edge.to)) continue;
-    const pair = `${edge.from}->${edge.to}`;
-    if (edge.from === edge.to) continue;
-    // A pair joined twice is one arc as far as ranking is concerned, and it
-    // costs the most any of them costs: a Service both routed to and called is
-    // being called, and the call is what moves it along.
-    cost.set(pair, Math.max(cost.get(pair) ?? 0, hopCost(edge)));
-    if (out.has(edge.from)) {
-      if (!out.get(edge.from)?.includes(edge.to)) out.get(edge.from)?.push(edge.to);
+    if (edge.kind !== "calls" || !present.has(edge.from) || !present.has(edge.to)) continue;
+    const from = tierOf.get(edge.from) as string;
+    const to = tierOf.get(edge.to) as string;
+    if (from === to) continue;
+    const list = out.get(from);
+    if (list) {
+      if (!list.includes(to)) list.push(to);
     } else {
-      out.set(edge.from, [edge.to]);
+      out.set(from, [to]);
     }
   }
   for (const list of out.values()) list.sort();
 
-  const back = backEdges(ids, out);
+  const back = backEdges(tiers, out);
   const forward = new Map<string, string[]>();
-  const incoming = new Map<string, number>(ids.map((id) => [id, 0]));
+  const incoming = new Map<string, number>(tiers.map((id) => [id, 0]));
   for (const [from, children] of out) {
     const kept = children.filter((to) => !back.has(`${from}->${to}`));
     forward.set(from, kept);
     for (const to of kept) incoming.set(to, (incoming.get(to) ?? 0) + 1);
   }
 
-  const rank = new Map<string, number>(ids.map((id) => [id, 0]));
-  const queue = ids.filter((id) => (incoming.get(id) ?? 0) === 0);
+  const tierRank = new Map<string, number>(tiers.map((id) => [id, 0]));
+  const queue = tiers.filter((id) => (incoming.get(id) ?? 0) === 0);
   while (queue.length > 0) {
     const id = queue.shift() as string;
     for (const to of forward.get(id) ?? []) {
-      const step = cost.get(`${id}->${to}`) ?? 1;
-      rank.set(to, Math.max(rank.get(to) ?? 0, (rank.get(id) ?? 0) + step));
+      tierRank.set(to, Math.max(tierRank.get(to) ?? 0, (tierRank.get(id) ?? 0) + 1));
       const left = (incoming.get(to) ?? 0) - 1;
       incoming.set(to, left);
       if (left === 0) queue.push(to);
     }
   }
-  return rank;
+  return new Map(ids.map((id) => [id, tierRank.get(tierOf.get(id) as string) ?? 0]));
 }
 
 /**
@@ -452,10 +448,6 @@ export function orderColumn(
 /** `ENTRY` for the first column, then the hop count. */
 export function columnLabel(rank: number): string {
   return rank === 0 ? "ENTRY" : `HOP ${rank}`;
-}
-
-function columnX(rank: number): number {
-  return PADDING + rank * (NODE_WIDTH + COLUMN_GAP);
 }
 
 const TOP = PADDING + HEADER_HEIGHT;
@@ -835,9 +827,9 @@ function placeFlow(
    * keeps the layout deterministic.
    */
   // The links that hold a tier together — a Service and the pods answering it
-  // now stand in one column, and those two have to end up adjacent.
+  // stand in one column, and those two have to end up adjacent.
   const within: [string, string][] = edges
-    .filter((edge) => (rank.get(edge.from) ?? 0) === (rank.get(edge.to) ?? 0))
+    .filter((edge) => edge.kind === "routes")
     .map((edge) => [edge.from, edge.to]);
 
   let rows = new Map<string, number>();
@@ -863,22 +855,23 @@ function placeFlow(
   const placed: PlacedNode[] = [];
   const tiers: Tier[] = [];
   let bottom = TOP;
-  const columns: Column[] = [];
-  ordered.forEach((column, index) => {
-    const x = columnX(index);
-    columns.push({
-      rank: index,
-      label: columnLabel(index),
-      x,
-      count: column.reduce((n, group) => n + group.length, 0),
-    });
-    let y = TOP;
-    column.forEach((group, g) => {
-      if (g > 0) y += TIER_GAP;
+  /**
+   * Stack tiers into `k` sub-columns from `x0`, each tier going to whichever
+   * is shortest, and answer the right edge of the last one. One sub-column is
+   * the ordinary hop column; several is how ENTRY spreads out.
+   */
+  const pack = (groups: FlowNode[][], k: number, x0: number, pitch: number, rankIndex: number) => {
+    const heights: number[] = new Array<number>(k).fill(TOP);
+    for (const group of groups) {
+      let s = 0;
+      for (let i = 1; i < k; i++) if (heights[i] < heights[s]) s = i;
+      const x = x0 + s * pitch;
+      let y = heights[s];
+      if (y > TOP) y += TIER_GAP;
       const top = y;
       group.forEach((node, row) => {
         if (row > 0) y += ROW_GAP;
-        placed.push({ ...node, x, y, rank: index });
+        placed.push({ ...node, x, y, rank: rankIndex });
         y += NODE_HEIGHT;
       });
       // A tier of one is just a node; a panel round it would be a box drawn
@@ -891,8 +884,60 @@ function placeFlow(
           height: y - top + TIER_PAD * 2,
         });
       }
-    });
-    bottom = Math.max(bottom, y);
+      heights[s] = y;
+      bottom = Math.max(bottom, y);
+    }
+    return x0 + k * pitch - (pitch - NODE_WIDTH);
+  };
+
+  const columns: Column[] = [];
+  let x = PADDING;
+  let right = PADDING;
+  ordered.forEach((column, index) => {
+    const count = column.reduce((n, group) => n + group.length, 0);
+    if (index > 0) {
+      columns.push({ rank: index, label: columnLabel(index), x, count });
+      right = pack(column, 1, x, NODE_WIDTH + COLUMN_GAP, index);
+      x = right + COLUMN_GAP;
+      return;
+    }
+
+    /**
+     * ENTRY spreads sideways.
+     *
+     * It is the one column that nothing arrives at from the left, so tiers
+     * can stand beside it without a single edge crossing them — and it is
+     * where the height goes: on a real namespace three Ingress-fronted tiers
+     * stacked ten rows tall beside a two-hop flow, a picture taller than it
+     * was wide with most of it empty. The tiers that CALL something stay
+     * against HOP 1, where their edges leave from; the tiers that call
+     * nothing fan out to their left, in as many sub-columns as it takes to
+     * come no taller than the callers. All of them are still rank zero, and
+     * the heading spans the lot.
+     */
+    const callsOut = new Set(
+      edges
+        .filter((e) => e.kind === "calls" && (rank.get(e.from) ?? 0) !== (rank.get(e.to) ?? 0))
+        .map((e) => e.from),
+    );
+    const callers = column.filter((group) => group.some((n) => callsOut.has(n.id)));
+    const leaves = column.filter((group) => !group.some((n) => callsOut.has(n.id)));
+    columns.push({ rank: 0, label: columnLabel(0), x: PADDING, count });
+    const grid = NODE_WIDTH + GRID_GAP;
+    if (leaves.length > 0) {
+      const rows = (groups: FlowNode[][]) => groups.reduce((n, g) => n + g.length, 0);
+      const k =
+        callers.length > 0
+          ? Math.ceil(rows(leaves) / rows(callers))
+          : Math.ceil(Math.sqrt(leaves.length * 1.6));
+      const sub = Math.max(1, Math.min(leaves.length, k));
+      right = pack(leaves, sub, x, grid, 0);
+      x = right + GRID_GAP;
+    }
+    if (callers.length > 0) {
+      right = pack(callers, 1, x, grid, 0);
+    }
+    x = right + COLUMN_GAP;
   });
 
   // Only a genuinely backward edge bows under the last row — a link inside a
@@ -907,7 +952,7 @@ function placeFlow(
     tiers,
     columns,
     bottom: bottom + (bowing ? BACKWARD_CLEARANCE : 0),
-    right: (columns.at(-1)?.x ?? PADDING) + (columns.length > 0 ? NODE_WIDTH : 0),
+    right: columns.length > 0 ? right : PADDING,
   };
 }
 

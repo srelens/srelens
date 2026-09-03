@@ -566,6 +566,83 @@ pub fn classify(host: &str, services_here: &[String]) -> Reference {
     Reference::External { host: host.to_string() }
 }
 
+/// The hosts this cluster's Ingresses answer to, each mapped to the Service
+/// behind it: `(namespace, name)` of the first backend named for that host.
+///
+/// A host with several path backends is mapped to the first. That is a
+/// simplification and a deliberate one — a config value names the host, not
+/// the path, and one edge to the front door of that host is what the value
+/// actually says; drawing one to every backend behind it would claim more.
+pub fn ingress_host_backends(ingresses: &[Ingress]) -> BTreeMap<String, (String, String)> {
+    let mut out: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for ingress in ingresses {
+        let namespace = ingress.metadata.namespace.clone().unwrap_or_default();
+        let Some(spec) = ingress.spec.as_ref() else {
+            continue;
+        };
+        for rule in spec.rules.iter().flatten() {
+            let Some(host) = rule.host.as_ref().filter(|h| !h.is_empty()) else {
+                continue;
+            };
+            let backend = rule
+                .http
+                .as_ref()
+                .and_then(|http| http.paths.iter().find_map(|p| p.backend.service.as_ref()))
+                .or_else(|| spec.default_backend.as_ref().and_then(|b| b.service.as_ref()));
+            if let Some(service) = backend {
+                out.entry(host.to_lowercase())
+                    .or_insert((namespace.clone(), service.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Turn a host that only LOOKS external back into the Service it is.
+///
+/// Two spellings of an in-cluster address are not cluster DNS and so came out
+/// of [`classify`] as external, and on a real namespace both drew the
+/// cluster's own services as outside dependencies:
+///
+/// - **The cluster's own public host.** A workload configured with
+///   `https://portal.example.com/api` is calling this cluster's Ingress, and
+///   the dependency it has is on the Service behind that host — which is what
+///   is drawn, so the picture shows the call landing where it does rather
+///   than leaving for the internet and coming back.
+/// - **`name.namespace`, without `.svc`.** Kubernetes resolves it through the
+///   search domains, and people write it. It is read as that Service only
+///   when a Service of that name exists in that namespace among the ones in
+///   view; otherwise `db.example` and `payments.payments` cannot be told apart
+///   and the host stays external, which is the safer wrong answer.
+pub fn internalise(
+    reference: Reference,
+    ingress_hosts: &BTreeMap<String, (String, String)>,
+    service_pairs: &[(String, String)],
+) -> Reference {
+    let Reference::External { host } = reference else {
+        return reference;
+    };
+    if let Some((namespace, name)) = ingress_hosts.get(&host.to_lowercase()) {
+        return Reference::Service {
+            name: name.clone(),
+            namespace: Some(namespace.clone()),
+        };
+    }
+    if let Some((name, namespace)) = host.split_once('.') {
+        if !namespace.contains('.')
+            && service_pairs
+                .iter()
+                .any(|(ns, n)| ns == namespace && n == name)
+        {
+            return Reference::Service {
+                name: name.to_string(),
+                namespace: Some(namespace.to_string()),
+            };
+        }
+    }
+    Reference::External { host }
+}
+
 /// Every host named in one blob of configuration, in the order they appear and
 /// without repeats.
 ///
@@ -861,6 +938,20 @@ pub fn build_graph(
         .chain(daemonsets.iter().map(daemonset_workload))
         .collect();
 
+    // What the cluster answers to from the outside and the inside, read off
+    // before anything below takes the objects: a host found in configuration
+    // is checked against both before it is called external.
+    let ingress_hosts = ingress_host_backends(&ingresses);
+    let service_pairs: Vec<(String, String)> = services
+        .iter()
+        .map(|s| {
+            (
+                s.metadata.namespace.clone().unwrap_or_default(),
+                s.metadata.name.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+
     // Services are built first: an Ingress edge needs its Service node to
     // exist, and a Service's own health is the health of what stands behind it.
     // Keyed by (namespace, name): drawing several namespaces at once means two
@@ -1052,6 +1143,7 @@ pub fn build_graph(
         }
         for blob in blobs {
             for reference in references_in(blob, &service_names) {
+                let reference = internalise(reference, &ingress_hosts, &service_pairs);
                 match reference {
                     Reference::Service { name, namespace: ns } => {
                         let ns = ns.unwrap_or_else(|| w.namespace.clone());
@@ -2271,6 +2363,113 @@ mod tests {
             vec![],
             vec![],
         )
+    }
+
+    // ---- internal hosts that only look external ----
+
+    fn with_env(name: &str, pairs: &[(&str, &str)], env: &[(&str, &str)]) -> Deployment {
+        let mut d = deployment(name, 1, 1, pairs);
+        let container = k8s_openapi::api::core::v1::Container {
+            name: "app".into(),
+            env: Some(
+                env.iter()
+                    .map(|(k, v)| k8s_openapi::api::core::v1::EnvVar {
+                        name: (*k).into(),
+                        value: Some((*v).into()),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        d.spec.as_mut().unwrap().template.spec =
+            Some(k8s_openapi::api::core::v1::PodSpec { containers: vec![container], ..Default::default() });
+        d
+    }
+
+    #[test]
+    fn the_clusters_own_public_host_is_the_service_behind_it_not_an_external() {
+        // A workload calling `https://portal.example.com/api` is calling this
+        // cluster's Ingress, and the dependency it has is on what answers
+        // there. Drawing the portal as an outside system sends the call out to
+        // the internet and back on the diagram.
+        let g = build_graph(
+            vec![ingress("web", "portal.example.com", &["storefront"])],
+            vec![
+                service("storefront", &[("app", "storefront")], 80),
+                service("webapp", &[("app", "webapp")], 80),
+            ],
+            vec![
+                deployment("storefront", 1, 1, &[("app", "storefront")]),
+                with_env("webapp", &[("app", "webapp")], &[("API_BASE", "https://portal.example.com/api/v1")]),
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(has_edge(&g, "Deployment/checkout/webapp", "Service/checkout/storefront", EdgeKind::Calls));
+        assert!(!g.nodes.iter().any(|n| n.lane == Lane::External), "{:?}", g.nodes);
+    }
+
+    #[test]
+    fn name_dot_namespace_is_a_service_when_that_service_is_in_view() {
+        // Kubernetes resolves `payments-api.payments` through the search
+        // domains and people write it. Without `.svc` it is only a dotted
+        // host, so it is read as the Service exactly when one by that name
+        // exists in that namespace here.
+        let mut api = service("payments-api", &[("app", "payments-api")], 8080);
+        api.metadata.namespace = Some("payments".into());
+        let g = build_graph(
+            vec![],
+            vec![api],
+            vec![with_env("checkout", &[("app", "checkout")], &[("PAYMENTS", "http://payments-api.payments:8080")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(has_edge(&g, "Deployment/checkout/checkout", "Service/payments/payments-api", EdgeKind::Calls));
+        assert!(!g.nodes.iter().any(|n| n.lane == Lane::External), "{:?}", g.nodes);
+
+        // And when it is not in view, `payments-api.payments` cannot be told
+        // from `db.example`, and stays external — the safer wrong answer.
+        let g = build_graph(
+            vec![],
+            vec![],
+            vec![with_env("checkout", &[("app", "checkout")], &[("PAYMENTS", "http://payments-api.payments:8080")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(g.nodes.iter().any(|n| n.lane == Lane::External && n.name == "payments-api.payments"));
+    }
+
+    #[test]
+    fn an_ingress_host_maps_to_its_first_backend_case_insensitively() {
+        let hosts = ingress_host_backends(&[ingress("web", "Portal.Example.com", &["storefront", "assets"])]);
+        assert_eq!(
+            hosts.get("portal.example.com"),
+            Some(&("checkout".to_string(), "storefront".to_string()))
+        );
+        let back = internalise(
+            Reference::External { host: "PORTAL.example.com".into() },
+            &hosts,
+            &[],
+        );
+        assert_eq!(
+            back,
+            Reference::Service { name: "storefront".into(), namespace: Some("checkout".into()) }
+        );
+        // A real external host passes through untouched.
+        assert_eq!(
+            internalise(Reference::External { host: "accounts.cidaas.com".into() }, &hosts, &[]),
+            Reference::External { host: "accounts.cidaas.com".into() }
+        );
     }
 
     // ---- allowed: what a NetworkPolicy would let through ----

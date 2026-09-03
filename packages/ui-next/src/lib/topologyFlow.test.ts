@@ -126,14 +126,32 @@ describe("rankNodes", () => {
     expect(rank.get("late")).toBe(3);
   });
 
-  it("moves a Service along when it is called as well as routed to", () => {
-    // The same pair joined both ways takes the higher cost. A Service someone
-    // calls is a tier of its own however it is also reached.
+  it("does not let a call inside a tier split the tier", () => {
+    // A real namespace: a StatefulSet names its own headless Service in its
+    // config. Ranked node by node, the Service was called — rank one — while
+    // the StatefulSet it routes to sat at rank zero beside the other Service
+    // fronting it: one tier drawn across two columns, joined by a bow. The
+    // tier is the unit that ranks, and a call from a tier to itself is not a
+    // hop.
     const g = graph(
-      [node("a", "workload"), node("b", "service")],
-      [edge("a", "b"), edge("a", "b", { kind: "calls" })],
+      [
+        node("Service/db", "service", "db"),
+        node("Service/db-h", "service", "db-h"),
+        node("StatefulSet/db", "workload", "db"),
+        node("Deployment/app", "workload", "app"),
+      ],
+      [
+        edge("Service/db", "StatefulSet/db"),
+        edge("Service/db-h", "StatefulSet/db"),
+        edge("StatefulSet/db", "Service/db-h", { kind: "calls", provenance: "declared" }),
+        edge("Deployment/app", "Service/db-h", { kind: "calls", provenance: "declared" }),
+      ],
     );
-    expect(rankNodes(fold(g).nodes, g.edges).get("b")).toBe(1);
+    const rank = rankNodes(fold(g).nodes, g.edges);
+    expect(rank.get("Deployment/app")).toBe(0);
+    expect(rank.get("Service/db")).toBe(1);
+    expect(rank.get("Service/db-h")).toBe(1);
+    expect(rank.get("StatefulSet/db")).toBe(1);
   });
 
   it("terminates on a cycle rather than ranking forever", () => {
@@ -236,7 +254,7 @@ describe("layoutFlow", () => {
     const out = layoutFlow(g);
     const rows = out.nodes
       .slice()
-      .sort((a, b) => a.y - b.y)
+      .sort((a, b) => a.x - b.x || a.y - b.y)
       .map((n) => n.id);
     // Each tier is consecutive, and inside one the order is the order traffic
     // passes through: the way in, then the address, then what answers.
@@ -244,6 +262,40 @@ describe("layoutFlow", () => {
     expect(at("Service/checkout")).toBe(at("Ingress/web") + 1);
     expect(at("Deployment/checkout")).toBe(at("Ingress/web") + 2);
     expect(at("Deployment/other")).toBe(at("Service/other") + 1);
+  });
+
+  it("fans the entry tiers that call nothing out beside the ones that do", () => {
+    // Three Ingress-fronted tiers stacked ten rows tall beside a two-hop flow
+    // was a picture taller than it was wide. Nothing arrives at ENTRY from
+    // the left, so its leaf tiers can stand there without crossing an edge.
+    const flow = twoTiers();
+    const leaf = (name: string) => ({
+      nodes: [
+        node(`Ingress/${name}`, "route", name),
+        node(`Service/${name}`, "service", name),
+        node(`Deployment/${name}`, "workload", name),
+      ],
+      edges: [edge(`Ingress/${name}`, `Service/${name}`), edge(`Service/${name}`, `Deployment/${name}`)],
+    });
+    const leaves = ["docs", "status", "legacy"].map(leaf);
+    const out = layoutFlow(
+      graph(
+        [...flow.nodes, ...leaves.flatMap((l) => l.nodes)],
+        [...flow.edges, ...leaves.flatMap((l) => l.edges)],
+      ),
+    );
+    const x = (id: string) => out.nodes.find((n) => n.id === id)!.x;
+    // The caller stays against HOP 1; every leaf stands to its left, spread
+    // across more than one sub-column; all of them are still entry points.
+    for (const name of ["docs", "status", "legacy"]) {
+      expect(x(`Deployment/${name}`)).toBeLessThan(x("Deployment/checkout"));
+      expect(out.nodes.find((n) => n.id === `Deployment/${name}`)!.rank).toBe(0);
+    }
+    expect(new Set(["docs", "status", "legacy"].map((n) => x(`Deployment/${n}`))).size).toBe(3);
+    expect(x("Deployment/checkout")).toBeLessThan(x("Service/payments"));
+    expect(out.columns.map((c) => c.label)).toEqual(["ENTRY", "HOP 1"]);
+    // And the picture is now wider than it is tall.
+    expect(out.width).toBeGreaterThan(out.height);
   });
 
   it("joins a tier with a short stub rather than a backward bow", () => {
