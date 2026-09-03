@@ -909,7 +909,7 @@ pub fn render_assistant_view(
         // 1b. Format message body (rich rendered markdown)
         if !msg.content.trim().is_empty() {
             let mut msg_lines = Vec::new();
-            format_message_content(&mut msg_lines, &msg.content);
+            format_message_content_with_width(&mut msg_lines, &msg.content, Some(content_width));
             for l in msg_lines {
                 let wrapped = wrap_line(l, content_width);
                 rendered_lines.extend(wrapped);
@@ -1050,6 +1050,14 @@ pub fn render_assistant_view(
 /// - Horizontal dividers (───)
 /// - Inline markdown: `code`, **bold**, *italic*, [link](url), ~~strikethrough~~
 pub fn format_message_content(out: &mut Vec<Line<'static>>, content: &str) {
+    format_message_content_with_width(out, content, None);
+}
+
+pub fn format_message_content_with_width(
+    out: &mut Vec<Line<'static>>,
+    content: &str,
+    max_width: Option<usize>,
+) {
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
 
@@ -1082,7 +1090,7 @@ pub fn format_message_content(out: &mut Vec<Line<'static>>, content: &str) {
                 row_lines.push(lines[i]);
                 i += 1;
             }
-            render_markdown_table(out, header_line, &row_lines);
+            render_markdown_table(out, header_line, &row_lines, max_width);
             continue;
         }
 
@@ -1291,15 +1299,116 @@ fn parse_cells(line: &str) -> Vec<String> {
 }
 
 fn clean_cell_text(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() >= 2 {
-        trimmed[1..trimmed.len() - 1].trim().to_string()
-    } else {
-        trimmed.to_string()
+    let mut cleaned = s.trim().to_string();
+    if cleaned.contains('`') {
+        cleaned = cleaned.replace('`', "");
     }
+    if (cleaned.starts_with('\'') && cleaned.ends_with('\''))
+        || (cleaned.starts_with('"') && cleaned.ends_with('"'))
+    {
+        if cleaned.len() >= 2 {
+            cleaned = cleaned[1..cleaned.len() - 1].trim().to_string();
+        }
+    }
+    cleaned
 }
 
-pub fn render_markdown_table(out: &mut Vec<Line<'static>>, header_line: &str, row_lines: &[&str]) {
+fn wrap_cell_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(3);
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let trimmed = paragraph.trim();
+        if trimmed.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut tokens = Vec::new();
+        let mut current_token = String::new();
+        for ch in trimmed.chars() {
+            current_token.push(ch);
+            if ch == ' ' || ch == ',' || ch == '/' || ch == '-' {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+        }
+        if !current_token.is_empty() {
+            tokens.push(current_token);
+        }
+
+        let mut current_line = String::new();
+        let mut current_len = 0;
+
+        for token in tokens {
+            let token_w = unicode_width::UnicodeWidthStr::width(token.as_str());
+            if current_len == 0 {
+                if token_w <= width {
+                    current_line.push_str(&token);
+                    current_len += token_w;
+                } else {
+                    for ch in token.chars() {
+                        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                        if current_len + ch_w > width && !current_line.is_empty() {
+                            lines.push(current_line);
+                            current_line = String::new();
+                            current_len = 0;
+                        }
+                        current_line.push(ch);
+                        current_len += ch_w;
+                    }
+                }
+            } else if current_len + token_w <= width {
+                current_line.push_str(&token);
+                current_len += token_w;
+            } else {
+                let trimmed_line = current_line.trim_end().to_string();
+                if !trimmed_line.is_empty() {
+                    lines.push(trimmed_line);
+                }
+                current_line = String::new();
+                current_len = 0;
+                let token_trimmed = token.trim_start();
+                let token_trimmed_w = unicode_width::UnicodeWidthStr::width(token_trimmed);
+                if token_trimmed_w <= width {
+                    current_line.push_str(token_trimmed);
+                    current_len += token_trimmed_w;
+                } else {
+                    for ch in token_trimmed.chars() {
+                        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                        if current_len + ch_w > width && !current_line.is_empty() {
+                            lines.push(current_line);
+                            current_line = String::new();
+                            current_len = 0;
+                        }
+                        current_line.push(ch);
+                        current_len += ch_w;
+                    }
+                }
+            }
+        }
+
+        let final_line = current_line.trim_end().to_string();
+        if !final_line.is_empty() {
+            lines.push(final_line);
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+pub fn render_markdown_table(
+    out: &mut Vec<Line<'static>>,
+    header_line: &str,
+    row_lines: &[&str],
+    max_width: Option<usize>,
+) {
     let raw_headers = parse_cells(header_line);
     let headers: Vec<String> = raw_headers.into_iter().map(|h| clean_cell_text(&h)).collect();
     if headers.is_empty() {
@@ -1314,7 +1423,7 @@ pub fn render_markdown_table(out: &mut Vec<Line<'static>>, header_line: &str, ro
         }
     }
 
-    let _num_cols = headers.len();
+    let num_cols = headers.len();
     let mut col_widths: Vec<usize> = headers
         .iter()
         .map(|h| unicode_width::UnicodeWidthStr::width(h.as_str()).max(3))
@@ -1324,6 +1433,23 @@ pub fn render_markdown_table(out: &mut Vec<Line<'static>>, header_line: &str, ro
         for (c_idx, cell) in r.iter().enumerate() {
             if c_idx < col_widths.len() {
                 col_widths[c_idx] = col_widths[c_idx].max(unicode_width::UnicodeWidthStr::width(cell.as_str()));
+            }
+        }
+    }
+
+    // Overhead: "  " (2) + "┌" (1) + per col: "──" (2 padding) + "┬" (1 border) => 2 + 1 + num_cols * 3
+    let overhead = 2 + 1 + num_cols * 3;
+    if let Some(max_w) = max_width {
+        let available = max_w.saturating_sub(overhead);
+        if available >= num_cols * 4 {
+            while col_widths.iter().sum::<usize>() > available {
+                let max_width_val = *col_widths.iter().max().unwrap_or(&0);
+                if max_width_val <= 6 {
+                    break;
+                }
+                if let Some(idx) = col_widths.iter().position(|&w| w == max_width_val) {
+                    col_widths[idx] -= 1;
+                }
             }
         }
     }
@@ -1343,18 +1469,27 @@ pub fn render_markdown_table(out: &mut Vec<Line<'static>>, header_line: &str, ro
     }
     out.push(Line::from(top_spans));
 
-    // 2. Header row: │ Header 1 │ Header 2 │
-    let mut hdr_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
-    for (i, w) in col_widths.iter().enumerate() {
-        let title = headers.get(i).map(String::as_str).unwrap_or("");
-        let title_len = unicode_width::UnicodeWidthStr::width(title);
-        let pad = w.saturating_sub(title_len);
-        hdr_spans.push(Span::raw(" "));
-        hdr_spans.push(Span::styled(title.to_string(), header_style));
-        hdr_spans.push(Span::raw(" ".repeat(pad + 1)));
-        hdr_spans.push(Span::styled("│", border_style));
+    // 2. Header row (multi-line wrapped if needed)
+    let header_cells_lines: Vec<Vec<String>> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| wrap_cell_text(h, col_widths.get(i).copied().unwrap_or(10)))
+        .collect();
+    let header_height = header_cells_lines.iter().map(|lines| lines.len()).max().unwrap_or(1);
+
+    for sub_idx in 0..header_height {
+        let mut hdr_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
+        for (i, w) in col_widths.iter().enumerate() {
+            let title = header_cells_lines.get(i).and_then(|lines| lines.get(sub_idx)).map(String::as_str).unwrap_or("");
+            let title_len = unicode_width::UnicodeWidthStr::width(title);
+            let pad = w.saturating_sub(title_len);
+            hdr_spans.push(Span::raw(" "));
+            hdr_spans.push(Span::styled(title.to_string(), header_style));
+            hdr_spans.push(Span::raw(" ".repeat(pad + 1)));
+            hdr_spans.push(Span::styled("│", border_style));
+        }
+        out.push(Line::from(hdr_spans));
     }
-    out.push(Line::from(hdr_spans));
 
     // 3. Header-Data divider: ├────────┼────────┤
     let mut mid_spans = vec![Span::raw("  "), Span::styled("├", border_style)];
@@ -1368,30 +1503,44 @@ pub fn render_markdown_table(out: &mut Vec<Line<'static>>, header_line: &str, ro
     }
     out.push(Line::from(mid_spans));
 
-    // 4. Data rows
+    // 4. Data rows (multi-line wrapped)
     for row in rows {
-        let mut row_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
-        for (i, w) in col_widths.iter().enumerate() {
-            let val = row.get(i).map(String::as_str).unwrap_or("");
-            let val_len = unicode_width::UnicodeWidthStr::width(val);
-            let pad = w.saturating_sub(val_len);
-            row_spans.push(Span::raw(" "));
+        let row_cells_lines: Vec<Vec<String>> = col_widths
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                let cell_raw = row.get(i).map(String::as_str).unwrap_or("");
+                wrap_cell_text(cell_raw, w)
+            })
+            .collect();
+        let row_height = row_cells_lines.iter().map(|lines| lines.len()).max().unwrap_or(1);
 
-            let cell_style = if val.chars().all(|c| c.is_numeric() || c == '.') {
-                Style::default().fg(Theme::YELLOW)
-            } else if val.ends_with("GiB") || val.ends_with("MiB") || val.ends_with("GB") || val.ends_with("MB") {
-                Style::default().fg(Theme::GREEN)
-            } else if val.contains('/') || val.starts_with("data-") || val.starts_with("gpu-") {
-                Style::default().fg(Theme::CYAN)
-            } else {
-                Style::default().fg(Theme::FG)
-            };
+        for sub_idx in 0..row_height {
+            let mut row_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
+            for (i, w) in col_widths.iter().enumerate() {
+                let val = row_cells_lines.get(i).and_then(|lines| lines.get(sub_idx)).map(String::as_str).unwrap_or("");
+                let val_len = unicode_width::UnicodeWidthStr::width(val);
+                let pad = w.saturating_sub(val_len);
+                row_spans.push(Span::raw(" "));
 
-            row_spans.push(Span::styled(val.to_string(), cell_style));
-            row_spans.push(Span::raw(" ".repeat(pad + 1)));
-            row_spans.push(Span::styled("│", border_style));
+                let cell_style = if val.chars().all(|c| c.is_numeric() || c == '.') {
+                    Style::default().fg(Theme::YELLOW)
+                } else if val.ends_with("GiB") || val.ends_with("MiB") || val.ends_with("GB") || val.ends_with("MB") {
+                    Style::default().fg(Theme::GREEN)
+                } else if val.contains('/') || val.starts_with("data-") || val.starts_with("gpu-") {
+                    Style::default().fg(Theme::CYAN)
+                } else if val == "Ready" || val == "True" {
+                    Style::default().fg(Theme::GREEN)
+                } else {
+                    Style::default().fg(Theme::FG)
+                };
+
+                row_spans.push(Span::styled(val.to_string(), cell_style));
+                row_spans.push(Span::raw(" ".repeat(pad + 1)));
+                row_spans.push(Span::styled("│", border_style));
+            }
+            out.push(Line::from(row_spans));
         }
-        out.push(Line::from(row_spans));
     }
 
     // 5. Bottom border: └────────┴────────┘
@@ -1639,6 +1788,41 @@ All nodes nominal.";
         assert!(text_dump.contains("│ gpu-node-1"));
         assert!(text_dump.contains("15 GiB"));
         assert!(text_dump.contains("└"));
+    }
+
+    #[test]
+    fn test_format_message_content_with_wide_table_wrapping_and_budget() {
+        let content = "\
+| Node | Node pool | Physical GPU | GPU model | 'nvidia.com/gpu' (allocatable) | Status | Taints |
+|---|---|---|---|---|---|---|
+| data-processing-prod-gpu-flink-t4x1-3ueps | data-processing-prod-gpu-flink-t4x1 | 1x T4 | NVIDIA Tesla T4 | 10 | Ready | `trivago.com/gpu=true`, `gpu.trivago.com/dedicated=true` |
+";
+
+        let mut lines = Vec::new();
+        // Constrain table to 90 columns width
+        format_message_content_with_width(&mut lines, content, Some(90));
+
+        let text_dump: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for l in &lines {
+            let line_w: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+            assert!(line_w <= 90, "line exceeded 90 chars: '{}' (width {})", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), line_w);
+        }
+
+        assert!(text_dump.contains("trivago"));
+        assert!(text_dump.contains("dedicated"));
+        assert!(text_dump.contains("┐"));
+        assert!(text_dump.contains("┘"));
     }
 
     #[test]
