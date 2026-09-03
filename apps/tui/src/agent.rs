@@ -435,16 +435,24 @@ pub async fn run_boxed_cursor_turn(
     for (k, v) in &cmd_spec.env {
         cmd.env(k, v);
     }
-    cmd.current_dir(temp_workspace.path());
-    if let Some(key) = api_key {
+    let effective_key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::env::var("CURSOR_API_KEY").ok().filter(|k| !k.trim().is_empty()));
+
+    if let Some(ref key) = effective_key {
         cmd.env("CURSOR_API_KEY", key);
+        std::env::set_var("CURSOR_API_KEY", key);
     }
 
-    // Insert --model BEFORE the trailing "--" and positional prompt
+    // Insert --api-key and --model BEFORE the trailing "--" and positional prompt
     let mut final_args = Vec::new();
     let dash_dash_idx = cmd_spec.args.iter().position(|a| a == "--").unwrap_or(cmd_spec.args.len());
     for (i, arg) in cmd_spec.args.iter().enumerate() {
         if i == dash_dash_idx {
+            if let Some(ref key) = effective_key {
+                final_args.push("--api-key".to_string());
+                final_args.push(key.clone());
+            }
             if !model.is_empty() && model != "default" {
                 final_args.push("--model".to_string());
                 final_args.push(model.clone());

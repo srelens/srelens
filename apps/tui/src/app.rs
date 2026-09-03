@@ -2379,7 +2379,15 @@ impl App {
                 if settings.is_editing {
                     match key.code {
                         KeyCode::Esc => settings.cancel_editing(),
-                        KeyCode::Enter => settings.finish_editing(),
+                        KeyCode::Enter => {
+                            settings.finish_editing();
+                            self.ai_settings = settings.settings.clone();
+                            if let Err(e) = settings.save() {
+                                self.set_toast(format!("Failed to save settings: {}", e), Theme::status_error());
+                            } else {
+                                self.set_toast("✓ Setting updated and saved".to_string(), Theme::status_ok());
+                            }
+                        }
                         _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut settings.edit_buffer);
                         }
@@ -2400,6 +2408,8 @@ impl App {
                 } else {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => {
+                            self.ai_settings = settings.settings.clone();
+                            let _ = settings.save();
                             if let Some(prev) = self.nav_stack.pop() {
                                 self.active_view = prev;
                             } else {
@@ -2410,7 +2420,13 @@ impl App {
                         KeyCode::Char('k') | KeyCode::Up => settings.select_prev_provider(),
                         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => settings.select_next_field(),
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => settings.select_prev_field(),
-                        KeyCode::Char(' ') => settings.set_active_provider(),
+                        KeyCode::Char(' ') => {
+                            settings.set_active_provider();
+                            self.ai_settings = settings.settings.clone();
+                            let _ = settings.save();
+                            let prov_name = crate::ai_config::provider_display_name(settings.settings.default_provider);
+                            self.set_toast(format!("✓ Active provider set to {}", prov_name), Theme::status_ok());
+                        }
                         KeyCode::Char('e') | KeyCode::Enter => settings.start_editing(),
                         KeyCode::Char('s') => {
                             match settings.save() {
