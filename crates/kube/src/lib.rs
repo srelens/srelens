@@ -124,6 +124,7 @@ pub mod cronjobs;
 pub mod daemonsets;
 pub mod deployments;
 pub mod endpointslices;
+pub mod endpoint_query;
 pub mod events;
 pub mod exec;
 pub mod forward;
