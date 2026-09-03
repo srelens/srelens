@@ -1347,6 +1347,12 @@ impl App {
                     self.assistant_state.clear_selection();
                     return;
                 }
+                if let ActiveView::Yaml(ref mut yaml) = self.active_view {
+                    if yaml.selection.is_some() {
+                        yaml.clear_selection();
+                        return;
+                    }
+                }
                 let has_table_filter = if let ActiveView::Table(t) = &self.active_view {
                     t.filtered_indices.len() != t.raw_items.len()
                 } else {
@@ -1422,23 +1428,26 @@ impl App {
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Ctrl+d -> Delete resource confirmation
                         if let Some(name) = sel_name {
-                            let ns = sel_ns.unwrap_or_else(|| self.active_namespace.clone());
+                            let ns = sel_ns.clone().unwrap_or_else(|| self.active_namespace.clone());
+                            let query_ns = if ns.is_empty() { "default".to_string() } else { ns };
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Delete {} [{}]", table_kind, name),
-                                message: format!("Are you sure you want to delete {} '{}' in namespace '{}'?", table_kind, name, ns),
-                                action_name: "delete".to_string(),
+                                message: format!("Are you sure you want to delete {} '{}' in namespace '{}'?", table_kind, name, query_ns),
+                                action_name: format!("delete:{}:{}:{}", kind_str, query_ns, name),
                                 is_destructive: true,
                             });
                         }
                     }
                     KeyCode::Char(' ') => table.toggle_mark_selected(),
-                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Rollout restart (Ctrl+r)
+                    KeyCode::Char('r') => {
+                        // Rollout restart (r or Ctrl+r)
                         if let Some(name) = sel_name {
+                            let ns = sel_ns.clone().unwrap_or_else(|| self.active_namespace.clone());
+                            let query_ns = if ns.is_empty() { "default".to_string() } else { ns };
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Restart Workload [{}]", name),
-                                message: format!("Trigger zero-downtime rollout restart for {} '{}'?", table_kind, name),
-                                action_name: "restart".to_string(),
+                                message: format!("Trigger zero-downtime rollout restart for {} '{}' in namespace '{}'?", table_kind, name, query_ns),
+                                action_name: format!("restart:{}:{}:{}", kind_str, query_ns, name),
                                 is_destructive: false,
                             });
                         }
@@ -1574,21 +1583,43 @@ impl App {
                                 tokio::spawn(async move {
                                     let _ = copy_to_clipboard(&sum_clone);
                                 });
-                                self.set_toast("Copied event message to clipboard".to_string(), Theme::status_ok());
+                                self.set_toast("✓ Copied event message to clipboard".to_string(), Theme::status_ok());
                             }
-                        } else if let Some(name) = sel_name.clone() {
-                            let link = crate::deep_link::DeepLink::Resource {
-                                context: self.active_context.clone(),
-                                namespace: sel_ns.clone(),
-                                kind: kind_str.clone(),
-                                name,
+                        } else {
+                            let names_to_copy: Vec<String> = if !table.marked_indices.is_empty() {
+                                table.marked_indices.iter().filter_map(|&idx| {
+                                    table.raw_items.get(idx).and_then(|item| {
+                                        item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).map(String::from)
+                                    })
+                                }).collect()
+                            } else if let Some(name) = sel_name.clone() {
+                                vec![name]
+                            } else {
+                                Vec::new()
                             };
-                            let url = link.to_url();
-                            let url_clone = url.clone();
+
+                            if !names_to_copy.is_empty() {
+                                let text = names_to_copy.join("\n");
+                                let count = names_to_copy.len();
+                                let first_name = names_to_copy[0].clone();
+                                tokio::spawn(async move {
+                                    let _ = copy_to_clipboard(&text);
+                                });
+                                if count == 1 {
+                                    self.set_toast(format!("✓ Copied '{}' to clipboard", first_name), Theme::status_ok());
+                                } else {
+                                    self.set_toast(format!("✓ Copied {} resource names to clipboard", count), Theme::status_ok());
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::NONE) => {
+                        if let Some(item) = table.selected_item() {
+                            let yaml_str = serde_yaml::to_string(item).unwrap_or_default();
                             tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&url_clone);
+                                let _ = copy_to_clipboard(&yaml_str);
                             });
-                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast("✓ Copied resource YAML to clipboard".to_string(), Theme::status_ok());
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1607,7 +1638,7 @@ impl App {
                                     tokio::spawn(async move {
                                         let _ = copy_to_clipboard(&url_clone);
                                     });
-                                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                                    self.set_toast(format!("✓ Copied deep link: {}", url), Theme::status_ok());
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
@@ -1622,7 +1653,7 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast(format!("✓ Copied deep link: {}", url), Theme::status_ok());
                         }
                     }
                     KeyCode::Char('y') | KeyCode::Char('v') => {
@@ -1753,11 +1784,18 @@ impl App {
                         self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                     }
                     KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let content = yaml.yaml_content.clone();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&content);
-                        });
-                        self.set_toast("Copied YAML to clipboard".to_string(), Theme::status_ok());
+                        if let Some(selected) = yaml.selected_text() {
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&selected);
+                            });
+                            self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
+                        } else {
+                            let content = yaml.yaml_content.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&content);
+                            });
+                            self.set_toast("✓ Copied YAML to clipboard".to_string(), Theme::status_ok());
+                        }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let link = crate::deep_link::DeepLink::Resource {
@@ -2245,6 +2283,36 @@ impl App {
                 }
             } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.assistant_state.clear_selection();
+            }
+        }
+
+        if let ActiveView::Yaml(yaml) = &mut self.active_view {
+            let vp = yaml.last_viewport_rect.get();
+            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            {
+                let screen_row = mouse.row.saturating_sub(vp.y) as usize;
+                let line_idx = yaml.scroll_offset + screen_row;
+
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        yaml.start_selection(line_idx);
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        yaml.update_selection(line_idx);
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(selected) = yaml.finish_selection(line_idx) {
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&selected);
+                            });
+                            self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
+                        }
+                    }
+                    _ => {}
+                }
+            } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                yaml.clear_selection();
             }
         }
     }
@@ -2845,17 +2913,173 @@ impl App {
     }
 
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
-        if action_name == "delete" {
-            self.set_toast("Resource deleted successfully".to_string(), Theme::status_ok());
-        } else if action_name == "restart" {
-            self.set_toast("Rollout restart triggered".to_string(), Theme::status_ok());
+        if action_name.starts_with("delete:") {
+            // Format: "delete:<kind>:<namespace>:<name>"
+            let parts: Vec<&str> = action_name.splitn(4, ':').collect();
+            if parts.len() == 4 {
+                let kind = parts[1].to_string();
+                let ns = parts[2].to_string();
+                let name = parts[3].to_string();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+
+                match cache.get(&ctx).await {
+                    Ok(client) => {
+                        let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&kind) {
+                            Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                        } else if let Some(crd) = self.crds.iter().find(|c| c.kind.eq_ignore_ascii_case(&kind) || c.plural.eq_ignore_ascii_case(&kind)) {
+                            let api_version = if crd.group.is_empty() { crd.version.clone() } else { format!("{}/{}", crd.group, crd.version) };
+                            Some((kube::core::ApiResource {
+                                group: crd.group.clone(),
+                                version: crd.version.clone(),
+                                api_version,
+                                kind: crd.kind.clone(),
+                                plural: crd.plural.clone(),
+                            }, crd.namespaced))
+                        } else {
+                            None
+                        };
+
+                        if let Some((ar, namespaced)) = maybe_ar {
+                            let api: kube::Api<kube::core::DynamicObject> = if namespaced && !ns.is_empty() {
+                                kube::Api::namespaced_with(client, &ns, &ar)
+                            } else {
+                                kube::Api::all_with(client, &ar)
+                            };
+
+                            match api.delete(&name, &kube::api::DeleteParams::default()).await {
+                                Ok(_) => {
+                                    self.set_toast(format!("✓ Deleted {} '{}' in '{}'", kind, name, ns), Theme::status_ok());
+                                    // Remove from active table immediately
+                                    if let ActiveView::Table(table) = &mut self.active_view {
+                                        table.raw_items.retain(|item| {
+                                            let item_name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
+                                            let item_ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
+                                            !(item_name == name && (item_ns == ns || item_ns.is_empty() || ns.is_empty()))
+                                        });
+                                        let filter = self.filter_buffer.clone();
+                                        table.apply_filter(&filter);
+                                    }
+                                }
+                                Err(err) => {
+                                    self.set_toast(format!("Delete failed: {}", err), Theme::status_error());
+                                }
+                            }
+                        } else {
+                            self.set_toast(format!("Cannot resolve resource kind '{}'", kind), Theme::status_error());
+                        }
+                    }
+                    Err(err) => {
+                        self.set_toast(format!("Connection error: {}", err), Theme::status_error());
+                    }
+                }
+            } else {
+                self.set_toast("Resource deleted successfully".to_string(), Theme::status_ok());
+            }
+        } else if action_name.starts_with("restart:") {
+            // Format: "restart:<kind>:<namespace>:<name>"
+            let parts: Vec<&str> = action_name.splitn(4, ':').collect();
+            if parts.len() == 4 {
+                let kind = parts[1].to_string();
+                let ns = parts[2].to_string();
+                let name = parts[3].to_string();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+
+                match cache.get(&ctx).await {
+                    Ok(client) => {
+                        let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&kind) {
+                            Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                        } else {
+                            None
+                        };
+
+                        if let Some((ar, namespaced)) = maybe_ar {
+                            let api: kube::Api<kube::core::DynamicObject> = if namespaced && !ns.is_empty() {
+                                kube::Api::namespaced_with(client, &ns, &ar)
+                            } else {
+                                kube::Api::all_with(client, &ar)
+                            };
+
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let patch = serde_json::json!({
+                                "spec": {
+                                    "template": {
+                                        "metadata": {
+                                            "annotations": {
+                                                "kubectl.kubernetes.io/restartedAt": now
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+
+                            let patch_params = kube::api::PatchParams::default();
+                            match api.patch(&name, &patch_params, &kube::api::Patch::Merge(&patch)).await {
+                                Ok(_) => {
+                                    self.set_toast(format!("✓ Rollout restart triggered for {} '{}'", kind, name), Theme::status_ok());
+                                }
+                                Err(err) => {
+                                    self.set_toast(format!("Restart failed: {}", err), Theme::status_error());
+                                }
+                            }
+                        } else {
+                            self.set_toast(format!("Cannot restart resource kind '{}'", kind), Theme::status_error());
+                        }
+                    }
+                    Err(err) => {
+                        self.set_toast(format!("Connection error: {}", err), Theme::status_error());
+                    }
+                }
+            } else {
+                self.set_toast("Rollout restart triggered".to_string(), Theme::status_ok());
+            }
         } else if action_name.starts_with("stop-pf:") {
             self.set_toast("Port forward stopped".to_string(), Theme::status_ok());
         }
     }
 
     pub async fn execute_scale_workload(&mut self, name: String, replicas: i32) {
-        self.set_toast(format!("Scaled workload '{}' to {} replicas", name, replicas), Theme::status_ok());
+        let (kind, ns) = if let ActiveView::Table(table) = &self.active_view {
+            let k = table.kind.to_string();
+            let ns = table.selected_item().and_then(|i| {
+                i.get("namespace").or_else(|| i.pointer("/metadata/namespace")).and_then(|v| v.as_str()).map(String::from)
+            }).unwrap_or_else(|| self.active_namespace.clone());
+            (k, ns)
+        } else {
+            ("Deployment".to_string(), self.active_namespace.clone())
+        };
+
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+
+        match cache.get(&ctx).await {
+            Ok(client) => {
+                let query_ns = if ns.is_empty() { "default".to_string() } else { ns };
+                if let Some((gvk, _)) = srelens_kube::manifest::gvk_for(&kind) {
+                    let ar = kube::core::ApiResource::from_gvk(&gvk);
+                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(client, &query_ns, &ar);
+                    let patch = serde_json::json!({
+                        "spec": {
+                            "replicas": replicas
+                        }
+                    });
+                    match api.patch(&name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await {
+                        Ok(_) => {
+                            self.set_toast(format!("✓ Scaled {} '{}' to {} replicas", kind, name, replicas), Theme::status_ok());
+                        }
+                        Err(err) => {
+                            self.set_toast(format!("Scale failed: {}", err), Theme::status_error());
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                self.set_toast(format!("Connection error: {}", err), Theme::status_error());
+            }
+        }
     }
 
     pub async fn execute_start_port_forward(&mut self, pod: String, _ns: String, local_port: u16, target_port: u16) {
@@ -3157,14 +3381,56 @@ impl App {
     }
 }
 
+fn base64_encode_bytes(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(b2 & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub fn copy_via_osc52(text: &str) {
+    use std::io::Write;
+    let b64 = base64_encode_bytes(text.as_bytes());
+    let osc52 = format!("\x1b]52;c;{}\x07", b64);
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = tty.write_all(osc52.as_bytes());
+        let _ = tty.flush();
+    } else {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(osc52.as_bytes());
+        let _ = stdout.flush();
+    }
+}
+
 pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    // 1. Emit OSC 52 sequence directly to terminal emulator (works on macOS, Linux, Windows, iTerm2, Alacritty, Kitty, WezTerm, Ghostty, tmux, SSH)
+    copy_via_osc52(text);
+
+    // 2. Native OS clipboard command
     #[cfg(target_os = "macos")]
     {
         use std::io::Write;
         use std::process::{Command, Stdio};
         if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(text.as_bytes())?;
+                let _ = stdin.write_all(text.as_bytes());
+                drop(stdin); // Explicitly close stdin so pbcopy gets EOF and doesn't hang!
             }
             let _ = child.wait();
         }
@@ -3177,6 +3443,7 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
         if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
+                drop(stdin);
             }
             let _ = child.wait();
             return Ok(());
@@ -3184,6 +3451,7 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
         if let Ok(mut child) = Command::new("xclip").arg("-selection").arg("clipboard").stdin(Stdio::piped()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
+                drop(stdin);
             }
             let _ = child.wait();
             return Ok(());

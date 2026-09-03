@@ -19,6 +19,9 @@ pub struct YamlViewState {
     pub scroll_offset: usize,
     pub search_query: String,
     pub is_diff: bool,
+    pub selection: Option<(usize, usize)>,
+    pub is_selecting: bool,
+    pub last_viewport_rect: std::cell::Cell<Rect>,
 }
 
 impl YamlViewState {
@@ -33,7 +36,52 @@ impl YamlViewState {
             scroll_offset: 0,
             search_query: String::new(),
             is_diff: false,
+            selection: None,
+            is_selecting: false,
+            last_viewport_rect: std::cell::Cell::new(Rect::default()),
         }
+    }
+
+    pub fn start_selection(&mut self, line_idx: usize) {
+        if self.lines.is_empty() { return; }
+        let valid_line = line_idx.min(self.lines.len() - 1);
+        self.selection = Some((valid_line, valid_line));
+        self.is_selecting = true;
+    }
+
+    pub fn update_selection(&mut self, line_idx: usize) {
+        if self.is_selecting && !self.lines.is_empty() {
+            if let Some((start, _)) = self.selection {
+                let valid_line = line_idx.min(self.lines.len() - 1);
+                self.selection = Some((start, valid_line));
+            }
+        }
+    }
+
+    pub fn finish_selection(&mut self, line_idx: usize) -> Option<String> {
+        self.is_selecting = false;
+        if self.lines.is_empty() { return None; }
+        if let Some((start, _)) = self.selection {
+            let valid_line = line_idx.min(self.lines.len() - 1);
+            self.selection = Some((start, valid_line));
+            self.selected_text()
+        } else {
+            None
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.is_selecting = false;
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection?;
+        if self.lines.is_empty() { return None; }
+        let min_l = start.min(end);
+        let max_l = start.max(end).min(self.lines.len() - 1);
+        let selected_lines = &self.lines[min_l..=max_l];
+        Some(selected_lines.join("\n"))
     }
 
     pub fn scroll_down(&mut self, n: usize) {
@@ -94,13 +142,20 @@ impl YamlViewState {
 }
 
 pub fn render_yaml_view(f: &mut Frame, area: Rect, state: &YamlViewState) {
+    let copy_hint = if state.selection.is_some() {
+        "[c: Copy Selection, Esc: Clear Selection]"
+    } else {
+        "[e: Edit, c: Copy, Esc: Back]"
+    };
+
     let title = format!(
-        " YAML: {}/{} {} (Line {}/{}) [e: Edit, c: Copy, Esc: Back] ",
+        " YAML: {}/{} {} (Line {}/{}) {} ",
         state.resource_kind,
         state.resource_name,
         state.namespace.as_deref().map(|ns| format!("({})", ns)).unwrap_or_default(),
         state.scroll_offset + 1,
-        state.lines.len()
+        state.lines.len(),
+        copy_hint,
     );
 
     let block = Block::default()
@@ -109,17 +164,23 @@ pub fn render_yaml_view(f: &mut Frame, area: Rect, state: &YamlViewState) {
         .title(Span::styled(title, Theme::title()));
 
     let inner = block.inner(area);
+    state.last_viewport_rect.set(inner);
     f.render_widget(block, area);
 
     let visible_lines = inner.height as usize;
     let end_idx = (state.scroll_offset + visible_lines).min(state.lines.len());
 
+    let (sel_min, sel_max) = state.selection
+        .map(|(s, e)| (s.min(e), s.max(e)))
+        .unwrap_or((usize::MAX, usize::MAX));
+
     let mut rendered_lines = Vec::new();
 
     for (i, line) in state.lines.iter().enumerate().take(end_idx).skip(state.scroll_offset) {
+        let is_selected = i >= sel_min && i <= sel_max;
         let line_num = Span::styled(
             format!("{:4} │ ", i + 1),
-            Style::default().fg(Theme::DIM),
+            Style::default().fg(if is_selected { Theme::CYAN } else { Theme::DIM }),
         );
 
         let mut spans = vec![line_num];
@@ -168,7 +229,12 @@ pub fn render_yaml_view(f: &mut Frame, area: Rect, state: &YamlViewState) {
             spans.push(Span::styled(trimmed.to_string(), Style::default().fg(Theme::FG)));
         }
 
-        rendered_lines.push(Line::from(spans));
+        let line_style = if is_selected {
+            Style::default().bg(Color::Rgb(35, 55, 95))
+        } else {
+            Style::default()
+        };
+        rendered_lines.push(Line::from(spans).style(line_style));
     }
 
     let paragraph = Paragraph::new(rendered_lines);

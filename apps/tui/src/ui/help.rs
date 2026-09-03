@@ -136,7 +136,19 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
             Cell::from("Start Port Forwarding to Pod / Service"),
         ]),
         Row::new(vec![
-            Cell::from(Span::styled("  c / u", Theme::key_hint_key())),
+            Cell::from(Span::styled("  c", Theme::key_hint_key())),
+            Cell::from("Copy resource name (or all marked names) to clipboard"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  C / Shift+c", Theme::key_hint_key())),
+            Cell::from("Copy resource full YAML to clipboard"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  Ctrl+y", Theme::key_hint_key())),
+            Cell::from("Copy resource srelens:// deep link URL"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  c / u (Nodes)", Theme::key_hint_key())),
             Cell::from("Cordon / Drain Node"),
         ]),
         Row::new(vec![

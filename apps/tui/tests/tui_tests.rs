@@ -1754,8 +1754,14 @@ mod tests {
             cluster_overview_data: None,
         };
 
-        // 1. Pressing 'c' on the selected row copies the canonical deep link URL!
+        // 1. Pressing 'c' on the selected row copies the resource name!
         app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(app.toast.is_some());
+        let toast = app.toast.as_ref().unwrap();
+        assert!(toast.0.contains("Copied 'payment-api-pod-1' to clipboard"));
+
+        // Pressing '<Ctrl+y>' copies the canonical deep link URL!
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)).await;
         assert!(app.toast.is_some());
         let toast = app.toast.as_ref().unwrap();
         assert!(toast.0.contains("Copied deep link: srelens://resource/prod-eu/production/Pod/payment-api-pod-1"));
@@ -1971,7 +1977,7 @@ mod tests {
         // 3. Test Copy on Event: 'c' copies event message, '<Ctrl+y>' copies deep link
         app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
         let toast = app.toast.as_ref().expect("toast after pressing c on event");
-        assert_eq!(toast.0, "Copied event message to clipboard");
+        assert!(toast.0.contains("Copied event message to clipboard"));
 
         app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('y'), crossterm::event::KeyModifiers::CONTROL)).await;
         let toast = app.toast.as_ref().expect("toast after pressing Ctrl+y on event");
@@ -2165,9 +2171,210 @@ mod tests {
 
         // Press Esc to clear filter and restore all items
         app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
-        if let ActiveView::Table(ref table) = app.active_view {
+        if let srelens_tui::app::ActiveView::Table(ref table) = app.active_view {
             assert_eq!(table.filtered_indices.len(), 2);
             assert_eq!(table.raw_items.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_table_copy_and_bulk_mark_copy() {
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![
+            serde_json::json!({
+                "metadata": { "name": "pod-1", "namespace": "default" }
+            }),
+            serde_json::json!({
+                "metadata": { "name": "pod-2", "namespace": "default" }
+            }),
+        ], "");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: vec![],
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            input_mode: InputMode::Normal,
+            toast: None,
+            modal: None,
+            show_help: false,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            requires_terminal_suspend: None,
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            is_running: true,
+            resource_cache: HashMap::new(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            crds: vec![],
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 1,
+            pod_count: 2,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+        };
+
+        // 1. Press 'c' -> Copies selected pod name
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied 'pod-1' to clipboard"));
+
+        // 2. Mark both pods with Space and press 'c' -> Copies both names
+        if let ActiveView::Table(ref mut t) = app.active_view {
+            t.toggle_mark_selected();
+            t.select_next();
+            t.toggle_mark_selected();
+        }
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied 2 resource names to clipboard"));
+
+        // 3. Press 'C' (Shift+c) -> Copies full YAML
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('C'), crossterm::event::KeyModifiers::SHIFT)).await;
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied resource YAML to clipboard"));
+    }
+
+    #[tokio::test]
+    async fn test_yaml_view_mouse_drag_selection_and_copy() {
+        use srelens_tui::views::yaml_view::YamlViewState;
+        let yaml_text = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod\nspec:\n  containers: []";
+        let mut yaml_state = YamlViewState::new("test-pod".to_string(), "Pod".to_string(), Some("default".to_string()), yaml_text.to_string());
+
+        // 1. Initial state: no selection
+        assert!(yaml_state.selected_text().is_none());
+
+        // 2. Start selection at line 1, drag to line 3
+        yaml_state.start_selection(1);
+        yaml_state.update_selection(3);
+        assert!(yaml_state.is_selecting);
+        assert_eq!(yaml_state.selection, Some((1, 3)));
+
+        // 3. Finish selection
+        let selected = yaml_state.finish_selection(3).expect("selected text");
+        assert_eq!(selected, "kind: Pod\nmetadata:\n  name: test-pod");
+
+        // 4. Clear selection
+        yaml_state.clear_selection();
+        assert!(yaml_state.selection.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_resource_and_rollout_restart_modal_action_format() {
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::ui::InputMode;
+
+        let mut table = ResourceTableState::new(ResourceKind::Deployments);
+        table.set_items(vec![
+            serde_json::json!({
+                "metadata": { "name": "nginx-deploy", "namespace": "prod" }
+            }),
+        ], "");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "prod".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["prod".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: vec![],
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            input_mode: InputMode::Normal,
+            toast: None,
+            modal: None,
+            show_help: false,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            requires_terminal_suspend: None,
+            active_log_channel: None,
+            last_active_namespace: "prod".to_string(),
+            is_running: true,
+            resource_cache: HashMap::new(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            crds: vec![],
+            cluster_version: "v1.30.0".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 1,
+            pod_count: 2,
+            is_connected: true,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            cluster_overview_data: None,
+        };
+
+        // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('d'), crossterm::event::KeyModifiers::CONTROL)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { action_name, is_destructive, .. }) = &app.modal {
+            assert_eq!(action_name, "delete:Deployment:prod:nginx-deploy");
+            assert!(is_destructive);
+        } else {
+            panic!("Expected Modal::Confirm for delete");
+        }
+
+        // Close modal
+        app.modal = None;
+
+        // 2. Press 'r' on Deployment -> Restart confirmation modal
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { action_name, is_destructive, .. }) = &app.modal {
+            assert_eq!(action_name, "restart:Deployment:prod:nginx-deploy");
+            assert!(!is_destructive);
+        } else {
+            panic!("Expected Modal::Confirm for restart");
         }
     }
 }
