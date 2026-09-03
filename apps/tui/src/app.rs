@@ -522,6 +522,8 @@ impl App {
                         used_mem_mib: 0,
                         total_gpus: 0,
                         allocated_gpus: 0,
+                        total_gpu_mem_mib: 0,
+                        used_gpu_mem_mib: 0,
                     };
                     if let Ok(ser) = serde_json::to_string(&data) {
                         let _ = event_tx.send(AppEvent::ActionResult {
@@ -557,6 +559,8 @@ impl App {
                 used_mem_mib: 0,
                 total_gpus: 0,
                 allocated_gpus: 0,
+                total_gpu_mem_mib: 0,
+                used_gpu_mem_mib: 0,
             };
 
             // Fetch Nodes
@@ -574,10 +578,13 @@ impl App {
                     if let Some(status) = &node.status {
                         if let Some(alloc) = &status.allocatable {
                             for (k, v) in alloc {
-                                if k.contains("gpu") {
+                                let lower = k.to_lowercase();
+                                if lower == "nvidia.com/gpu" || lower == "amd.com/gpu" || lower == "intel.com/gpu" || (lower.ends_with("/gpu") && !lower.contains("mem") && !lower.contains("core") && !lower.contains("vgpu")) {
                                     if let Ok(count) = v.0.parse::<usize>() {
                                         data.total_gpus += count;
                                     }
+                                } else if lower.contains("gpu") && (lower.contains("mem") || lower.contains("vram")) {
+                                    data.total_gpu_mem_mib += srelens_kube::metrics::mem_mib(&v.0);
                                 }
                             }
                         }
@@ -657,10 +664,13 @@ impl App {
                                         pod_req_mem += srelens_kube::metrics::mem_mib(&q.0);
                                     }
                                     for (k, v) in reqs {
-                                        if k.contains("gpu") {
+                                        let lower = k.to_lowercase();
+                                        if lower == "nvidia.com/gpu" || lower == "amd.com/gpu" || lower == "intel.com/gpu" || (lower.ends_with("/gpu") && !lower.contains("mem") && !lower.contains("core") && !lower.contains("vgpu")) {
                                             if let Ok(g) = v.0.parse::<usize>() {
                                                 data.allocated_gpus += g;
                                             }
+                                        } else if lower.contains("gpu") && (lower.contains("mem") || lower.contains("vram")) {
+                                            data.used_gpu_mem_mib += srelens_kube::metrics::mem_mib(&v.0);
                                         }
                                     }
                                 }

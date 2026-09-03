@@ -1872,6 +1872,8 @@ mod tests {
             used_mem_mib: 142 * 1024,
             total_gpus: 8,
             allocated_gpus: 6,
+            total_gpu_mem_mib: 128 * 1024,
+            used_gpu_mem_mib: 35 * 1024,
         };
         let payload = serde_json::to_string(&live_data).unwrap();
         app.handle_cluster_overview_update(&payload);
