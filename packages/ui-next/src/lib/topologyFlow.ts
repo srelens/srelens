@@ -38,6 +38,10 @@ export const ROW_GAP = 10;
 export const TIER_GAP = 34;
 /** How far a tier's panel stands off the boxes inside it. */
 export const TIER_PAD = 9;
+/** Between grid columns in the band. No edges run there, so no room for any. */
+export const GRID_GAP = 28;
+/** Between the bottom of the flow and the band's heading. */
+export const BAND_GAP = 64;
 /** Room above the first row for the column headings. */
 export const HEADER_HEIGHT = 30;
 /** Room under the last row for the edges that still have to bow below it. */
@@ -69,8 +73,9 @@ export interface FlowNode extends TopologyNode {
 export interface PlacedNode extends FlowNode {
   x: number;
   y: number;
-  /** Hops from where traffic enters. Zero is an entry point. */
-  rank: number;
+  /** Hops from where traffic enters. Zero is an entry point; `null` is a node
+   *  on no known path at all, drawn in the band below the flow. */
+  rank: number | null;
 }
 
 export interface PlacedEdge extends TopologyEdge {
@@ -110,11 +115,24 @@ export interface Tier {
   height: number;
 }
 
+/**
+ * The heading over the band of tiers that are on no known path.
+ *
+ * `null` when every tier is on one — which, without a mesh, a metrics
+ * backend or the connection probe, is almost never.
+ */
+export interface Band {
+  y: number;
+  label: string;
+  count: number;
+}
+
 export interface TopologyLayout {
   nodes: PlacedNode[];
   edges: PlacedEdge[];
   columns: Column[];
   tiers: Tier[];
+  band: Band | null;
   /** Every namespace drawn, sorted. The screen labels nodes with theirs only
    *  when there is more than one, because on a single-namespace graph the
    *  namespace is the title and repeating it on every box is noise. */
@@ -592,14 +610,191 @@ export function arrowPoints(
 }
 
 /**
+ * Which nodes stand on a path anyone knows about.
+ *
+ * Touched by a `calls` edge from either end, or an Ingress — traffic enters
+ * there whether or not anything downstream has been seen — and then everything
+ * a `routes` edge joins to those, so a tier goes into the flow whole rather
+ * than its Service going one way and its pods the other.
+ *
+ * Everything else is what the first real cluster showed up: on a cluster with
+ * no mesh, no metrics backend and the probe off, almost no calls are known, so
+ * almost every tier ranked zero and the picture was one column, twenty tiers
+ * tall, with a ragged two-column flow off to its right. Every one of those
+ * placements was correct, and the picture said nothing. A tier no call touches
+ * has no hop to be at — it belongs in the band below, packed to the pane,
+ * where it reads as the inventory it is instead of as the start of a chain.
+ */
+export function onAPath(nodes: FlowNode[], edges: TopologyEdge[]): Set<string> {
+  const present = new Set(nodes.map((n) => n.id));
+  const found = new Set<string>();
+  for (const edge of edges) {
+    if (edge.kind !== "calls") continue;
+    if (present.has(edge.from)) found.add(edge.from);
+    if (present.has(edge.to)) found.add(edge.to);
+  }
+  for (const node of nodes) if (node.lane === "route") found.add(node.id);
+
+  const routed = new Map<string, string[]>();
+  const join = (a: string, b: string) => {
+    const list = routed.get(a);
+    if (list) list.push(b);
+    else routed.set(a, [b]);
+  };
+  for (const edge of edges) {
+    if (edge.kind !== "routes") continue;
+    join(edge.from, edge.to);
+    join(edge.to, edge.from);
+  }
+  const queue = [...found];
+  while (queue.length > 0) {
+    const at = queue.shift() as string;
+    for (const next of routed.get(at) ?? []) {
+      if (found.has(next) || !present.has(next)) continue;
+      found.add(next);
+      queue.push(next);
+    }
+  }
+  return found;
+}
+
+/**
  * Place a whole graph.
  *
  * Every node the backend returned is placed, ReplicaSets aside: a Service
  * fronting nothing and a workload no Service selects are both real findings,
- * and dropping them would quietly answer "there is nothing there".
+ * and dropping them would quietly answer "there is nothing there". The tiers
+ * on a known path are laid out by hop; the rest go in a band beneath, see
+ * {@link onAPath} for why.
  */
 export function layoutFlow(graph: TopologyGraph): TopologyLayout {
   const { nodes, edges } = fold(graph);
+  const routed = onAPath(nodes, edges);
+  const flow = placeFlow(
+    nodes.filter((n) => routed.has(n.id)),
+    edges.filter((e) => routed.has(e.from) && routed.has(e.to)),
+  );
+  const band = placeBand(
+    nodes.filter((n) => !routed.has(n.id)),
+    edges.filter((e) => !routed.has(e.from) && !routed.has(e.to)),
+    flow.placed.length === 0 ? null : flow.bottom,
+    flow.right,
+  );
+
+  const placed = [...flow.placed, ...band.placed];
+  const byId = new Map(placed.map((n) => [n.id, n]));
+  const widths = edgeWidths(edges);
+  const drawn: PlacedEdge[] = [];
+  for (const edge of edges) {
+    const from = byId.get(edge.from);
+    const to = byId.get(edge.to);
+    // An edge with an endpoint that is not drawn has nothing to connect. The
+    // backend does not emit these; drawing a line into empty space if it ever
+    // did would be worse than dropping it.
+    if (!from || !to) continue;
+    const key = edgeKey(edge);
+    drawn.push({
+      ...edge,
+      key,
+      ...edgeGeometry(from, to),
+      width: widths.get(key) ?? MIN_EDGE_WIDTH,
+    });
+  }
+
+  return {
+    nodes: placed,
+    edges: drawn,
+    columns: flow.columns,
+    tiers: [...flow.tiers, ...band.tiers],
+    band: band.header,
+    namespaces: [...new Set(placed.map((n) => n.namespace))].filter(Boolean).sort(),
+    width: Math.max(flow.right, band.right) + PADDING,
+    height: (band.header ? band.bottom : flow.bottom) + PADDING,
+  };
+}
+
+/**
+ * The tiers on no known path, packed into a grid under the flow.
+ *
+ * As wide as the flow above it when there is one, so the two read as one
+ * picture, and otherwise roughly square-ish in tiers — the shape that fits a
+ * pane, which is the whole reason these are not a column. Each tier goes into
+ * whichever grid column is shortest, in namespace-then-name order, so the same
+ * namespace's tiers sit near each other and the same graph packs identically
+ * every render.
+ */
+function placeBand(
+  nodes: FlowNode[],
+  edges: TopologyEdge[],
+  /** Where the flow ends, or `null` when there is no flow above. */
+  below: number | null,
+  /** The flow's right edge, which the band grows to meet. */
+  minRight: number,
+): { placed: PlacedNode[]; tiers: Tier[]; header: Band | null; bottom: number; right: number } {
+  const bottom = below ?? TOP;
+  if (nodes.length === 0) {
+    return { placed: [], tiers: [], header: null, bottom, right: minRight };
+  }
+  const groups = groupColumn(
+    nodes,
+    edges.map((e) => [e.from, e.to]),
+  ).sort(
+    (a, b) =>
+      a[0].namespace.localeCompare(b[0].namespace) ||
+      a[0].name.localeCompare(b[0].name) ||
+      a[0].id.localeCompare(b[0].id),
+  );
+
+  const pitch = NODE_WIDTH + GRID_GAP;
+  const squarish = Math.ceil(Math.sqrt(groups.length * 1.6));
+  const fillsFlow = Math.floor((minRight - PADDING + GRID_GAP) / pitch);
+  const cols = Math.max(1, Math.min(groups.length, Math.max(squarish, fillsFlow)));
+
+  const y = below === null ? PADDING : below + BAND_GAP;
+  const top = y + HEADER_HEIGHT;
+  const heights: number[] = new Array<number>(cols).fill(top);
+  const placed: PlacedNode[] = [];
+  const tiers: Tier[] = [];
+  for (const group of groups) {
+    let column = 0;
+    for (let i = 1; i < cols; i++) if (heights[i] < heights[column]) column = i;
+    const x = PADDING + column * pitch;
+    let at = heights[column];
+    if (at > top) at += TIER_GAP;
+    const groupTop = at;
+    group.forEach((node, row) => {
+      if (row > 0) at += ROW_GAP;
+      placed.push({ ...node, x, y: at, rank: null });
+      at += NODE_HEIGHT;
+    });
+    if (group.length > 1) {
+      tiers.push({
+        x: x - TIER_PAD,
+        y: groupTop - TIER_PAD,
+        width: NODE_WIDTH + TIER_PAD * 2,
+        height: at - groupTop + TIER_PAD * 2,
+      });
+    }
+    heights[column] = at;
+  }
+  return {
+    placed,
+    tiers,
+    header: {
+      y,
+      label: `NO KNOWN CALLS · ${groups.length}`,
+      count: nodes.length,
+    },
+    bottom: Math.max(...heights),
+    right: PADDING + cols * pitch - GRID_GAP,
+  };
+}
+
+/** The tiers on a known path, by hop. */
+function placeFlow(
+  nodes: FlowNode[],
+  edges: TopologyEdge[],
+): { placed: PlacedNode[]; tiers: Tier[]; columns: Column[]; bottom: number; right: number } {
   const rank = rankNodes(nodes, edges);
 
   /**
@@ -700,37 +895,19 @@ export function layoutFlow(graph: TopologyGraph): TopologyLayout {
     bottom = Math.max(bottom, y);
   });
 
-  const byId = new Map(placed.map((n) => [n.id, n]));
-  const widths = edgeWidths(edges);
-  const drawn: PlacedEdge[] = [];
-  let bowing = false;
-  for (const edge of edges) {
-    const from = byId.get(edge.from);
-    const to = byId.get(edge.to);
-    // An edge with an endpoint that is not drawn has nothing to connect. The
-    // backend does not emit these; drawing a line into empty space if it ever
-    // did would be worse than dropping it.
-    if (!from || !to) continue;
-    // Only a genuinely backward edge bows under the last row; a link inside a
-    // tier is a short stub between two adjacent rows and needs no clearance.
-    if (to.x < from.x) bowing = true;
-    const key = edgeKey(edge);
-    drawn.push({
-      ...edge,
-      key,
-      ...edgeGeometry(from, to),
-      width: widths.get(key) ?? MIN_EDGE_WIDTH,
-    });
-  }
-
+  // Only a genuinely backward edge bows under the last row — a link inside a
+  // tier is a short stub between two adjacent rows and needs no clearance —
+  // and the room for it is claimed here, above the band, or the bow would run
+  // straight through it.
+  const bowing = edges.some(
+    (edge) => (rank.get(edge.to) ?? 0) < (rank.get(edge.from) ?? 0),
+  );
   return {
-    nodes: placed,
-    edges: drawn,
-    columns,
+    placed,
     tiers,
-    namespaces: [...new Set(placed.map((n) => n.namespace))].filter(Boolean).sort(),
-    width: (columns.at(-1)?.x ?? PADDING) + NODE_WIDTH + PADDING,
-    height: bottom + (bowing ? BACKWARD_CLEARANCE : 0) + PADDING,
+    columns,
+    bottom: bottom + (bowing ? BACKWARD_CLEARANCE : 0),
+    right: (columns.at(-1)?.x ?? PADDING) + (columns.length > 0 ? NODE_WIDTH : 0),
   };
 }
 

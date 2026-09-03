@@ -283,7 +283,7 @@ function strokeFor(health: TopologyHealth): string {
   if (health === "ok") return "stroke-ok";
   if (health === "degraded") return "stroke-warn";
   if (health === "failing") return "stroke-sev";
-  return "stroke-rule";
+  return "stroke-rule-strong";
 }
 
 function fillFor(health: TopologyHealth): string {
@@ -291,6 +291,22 @@ function fillFor(health: TopologyHealth): string {
   if (health === "degraded") return "fill-warn";
   if (health === "failing") return "fill-sev";
   return "fill-rule";
+}
+
+/**
+ * The card's own ground.
+ *
+ * Healthy is plain white, because healthy is the background state of a cluster
+ * and tinting every node its own colour would leave nothing standing out. What
+ * is NOT healthy takes the matching wash, so a failing workload is a coloured
+ * card in a field of white ones rather than the same card with a different
+ * hairline round it — which, at the zoom a real namespace needs, was no
+ * difference at all.
+ */
+function cardFill(health: TopologyHealth): string {
+  if (health === "degraded") return "fill-warn-wash";
+  if (health === "failing") return "fill-sev-wash";
+  return "fill-raised";
 }
 
 /**
@@ -339,13 +355,44 @@ function Canvas({
     setView(fitTransform(layout, { width: box?.width ?? 0, height: box?.height ?? 0 }));
   }, [layout]);
 
-  // Whenever the graph itself changes — a different namespace, a reload that
-  // added nodes — the view goes back to showing all of it. Holding a pan across
-  // a graph that is no longer the same one leaves the reader looking at empty
-  // space and wondering where the cluster went.
+  /**
+   * Whenever the graph itself changes — a different namespace, a reload that
+   * added nodes — the view goes back to showing all of it. Holding a pan
+   * across a graph that is no longer the same one leaves the reader looking at
+   * empty space and wondering where the cluster went.
+   *
+   * **Waits for the pane to have a size.** Measuring it in the layout effect
+   * and fitting to whatever came back was the first version, and it silently
+   * did nothing: the pane reads as zero by zero at that moment, `fitTransform`
+   * answers 1:1 to an unmeasurable frame rather than dividing by zero, and the
+   * graph opened at 100% — three times the width of the pane it was supposed
+   * to fit inside. The Fit button worked, which is exactly why this survived
+   * being looked at: the only broken case was the one nobody clicks.
+   *
+   * A resize observer answers both halves — it reports the first real size and
+   * every later one — and it is disconnected on the first fit so that a reader
+   * who has since panned is not yanked back when the window is dragged.
+   */
   useLayoutEffect(() => {
-    fitToFrame();
-  }, [fitToFrame]);
+    const node = frame.current;
+    if (!node) return;
+    let observer: ResizeObserver | undefined;
+    const tryFit = () => {
+      const box = node.getBoundingClientRect();
+      if (!(box.width > 0) || !(box.height > 0)) return;
+      setView(fitTransform(layout, box));
+      observer?.disconnect();
+    };
+    tryFit();
+    // `ResizeObserver` is not in every environment this renders in; without it
+    // the direct measurement above is all there is, which is what the Fit
+    // button is for.
+    if (typeof ResizeObserver === "function") {
+      observer = new ResizeObserver(tryFit);
+      observer.observe(node);
+    }
+    return () => observer?.disconnect();
+  }, [layout]);
 
   /**
    * Wheel to zoom, bound by hand rather than through `onWheel`.
@@ -417,8 +464,21 @@ function Canvas({
       ref={frame}
       className="relative h-full w-full touch-none overflow-hidden"
       onPointerDown={startPan}
-      // Clearing on the backdrop rather than on the frame, so a click that
-      // lands on a node is not first undone by its own container.
+      /**
+       * Clicking the ground lets a selection go.
+       *
+       * On the frame, and asking what was actually hit, rather than on a
+       * backdrop rectangle behind the graph — which was the first version and
+       * only covered the graph's own bounding box, so the empty canvas around
+       * it, which is most of the pane on a small namespace, did nothing at
+       * all. A click that landed on a node, or on the zoom controls, is
+       * theirs; so is one at the end of a drag.
+       */
+      onClick={(event) => {
+        if (dragged()) return;
+        if ((event.target as Element).closest("[role='button'],button")) return;
+        onSelect(null);
+      }}
       onKeyDown={(event) => {
         if (event.key === "Escape") onSelect(null);
       }}
@@ -430,19 +490,28 @@ function Canvas({
         width="100%"
         height="100%"
       >
+        <defs>
+          {/* The grid is a screen-space fill whose PATTERN carries the view
+              transform, not a shape inside the transformed group. Both put the
+              dots in the same place; this way one rectangle covers a pane of
+              any size at any zoom, where a tiled shape would have to be sized
+              to the graph and would run out at the edges of a pan. */}
+          <pattern
+            id="topo-grid"
+            width={24}
+            height={24}
+            patternUnits="userSpaceOnUse"
+            patternTransform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}
+          >
+            <circle cx={1} cy={1} r={1} className="fill-rule-strong" opacity={0.55} />
+          </pattern>
+        </defs>
+        {/* Something for the cards to sit ON. The canvas was the same white as
+            the cards, which is most of why the picture read as a diagram
+            printed on a page rather than as objects on a surface. */}
+        <rect width="100%" height="100%" className="fill-canvas" />
+        <rect width="100%" height="100%" fill="url(#topo-grid)" />
         <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
-          {/* A surface to click on. Sized to the drawing rather than the frame,
-              because the frame's own click would fire before a node's. */}
-          <rect
-            x={0}
-            y={0}
-            width={layout.width}
-            height={layout.height}
-            fill="transparent"
-            onClick={() => {
-              if (!dragged()) onSelect(null);
-            }}
-          />
           {layout.columns.map((column) => (
             <g key={column.rank}>
               {column.rank > 0 && (
@@ -464,6 +533,26 @@ function Canvas({
               </text>
             </g>
           ))}
+          {layout.band && (
+            // The inventory under the flow: every tier no known call touches.
+            // Headed like a column, because to a reader it is the answer to
+            // the same question — "where does this stand?" — and the answer
+            // is "nowhere anyone has measured".
+            <g>
+              {layout.columns.length > 0 && (
+                <line
+                  x1={PADDING}
+                  y1={layout.band.y - 22}
+                  x2={layout.width - PADDING}
+                  y2={layout.band.y - 22}
+                  className="stroke-rule-strong"
+                />
+              )}
+              <text x={PADDING} y={layout.band.y + 10} className="lane">
+                {layout.band.label}
+              </text>
+            </g>
+          )}
           {/* One panel per tier — the address and the pods that answer it,
               which now share a column and have to read as one thing. Behind
               everything, and quiet: it groups, it does not decorate. */}
@@ -475,8 +564,8 @@ function Canvas({
               width={tier.width}
               height={tier.height}
               rx={12}
-              className="fill-sunk stroke-rule"
-              opacity={0.65}
+              className="fill-surface stroke-rule"
+              opacity={0.5}
             />
           ))}
           {/* Edges first, so a node always sits on top of the lines into it. */}
@@ -661,27 +750,44 @@ function Node({
       {/* The full name, for a pointer and for anything reading the tree — the
           drawn one is cut to the box. */}
       <title>{`${node.kind} ${node.name}${node.detail ? ` · ${node.detail}` : ""}`}</title>
+      {/* The card's own shadow, and the whole of what lifts it off the ground.
+          An offset rectangle rather than a `feDropShadow`: a filter is a raster
+          pass per node, and a namespace draws hundreds. An external host casts
+          none — it is not a thing this cluster runs, and it should not sit at
+          the same height as the things that are. */}
+      {node.lane !== "external" && (
+        <rect
+          x={node.x}
+          y={node.y + 1.5}
+          width={NODE_WIDTH}
+          height={NODE_HEIGHT}
+          rx={8}
+          className="fill-rule"
+          opacity={0.55}
+        />
+      )}
       <rect
         x={node.x}
         y={node.y}
         width={NODE_WIDTH}
         height={NODE_HEIGHT}
         rx={8}
-        className={`fill-surface ${selected ? "stroke-accent" : strokeFor(node.health)}`}
+        className={`${cardFill(node.health)} ${selected ? "stroke-accent" : strokeFor(node.health)}`}
         strokeWidth={selected ? 2 : 1}
         // A dependency is drawn as a broken outline because it is not a thing
         // this cluster runs — srelens knows its name and nothing else about it.
         strokeDasharray={node.lane === "external" ? "4 3" : undefined}
       />
-      {/* A health spine down the leading edge. A 1px outline is not enough to
-          find a failing node by at a glance. */}
+      {/* A health spine down the leading edge, the full height of the card
+          rather than a floating tick inside it — the short version read as a
+          detail on the card, and this reads as the card's own edge. */}
       {node.health !== "unknown" && (
         <rect
-          x={node.x + 1}
-          y={node.y + 8}
-          width={3.5}
-          height={NODE_HEIGHT - 16}
-          rx={1.75}
+          x={node.x + 1.5}
+          y={node.y + 5}
+          width={4}
+          height={NODE_HEIGHT - 10}
+          rx={2}
           className={fillFor(node.health)}
         />
       )}
@@ -866,7 +972,16 @@ function Inspector({
       )}
       <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <dt className="text-muted">Depth</dt>
-        <dd>{node.rank === 0 ? "Entry point" : `${node.rank} hop${node.rank === 1 ? "" : "s"} in`}</dd>
+        <dd>
+          {node.rank === null
+            ? // Said as a fact about what is KNOWN, not about the node: nothing
+              // declared, routed or measured touches it, which is a different
+              // thing from it talking to nobody.
+              "On no known path"
+            : node.rank === 0
+              ? "Entry point"
+              : `${node.rank} hop${node.rank === 1 ? "" : "s"} in`}
+        </dd>
         {node.ready !== null && node.desired !== null && (
           <>
             <dt className="text-muted">Ready</dt>
@@ -959,16 +1074,24 @@ function Connections({
       <ul className="mt-1 space-y-0.5">
         {edges.map((edge) => (
           <li key={edge.key}>
+            {/* Not the kit's `text-btn`, which is an `inline-flex` of fixed
+                height with `nowrap`: it ate the spaces between these three
+                parts outright — `payments-apicalls88 rpm` — and a host that
+                does not fit on one line has nowhere to go in it. Laid out
+                instead, so the name takes the room and the rate keeps to the
+                right where it can be read down the column. */}
             <button
               type="button"
-              className="text-btn w-full text-left text-sm"
+              className="flex w-full items-baseline gap-2 rounded px-1.5 py-1 text-left text-sm hover:bg-sunk"
               onClick={() => onSelect(other(edge))}
             >
-              <span className="break-all">{label(other(edge))}</span>{" "}
-              <span className="text-faint">
+              <span className="min-w-0 flex-1 break-all">{label(other(edge))}</span>
+              <span className="shrink-0 text-[10px] uppercase text-faint">
                 {edge.provenance === "declared" ? "declared" : edge.kind}
               </span>
-              {edge.detail && <span className="num text-muted"> {edge.detail}</span>}
+              {edge.detail && (
+                <span className="num shrink-0 text-xs text-muted">{edge.detail}</span>
+              )}
             </button>
           </li>
         ))}

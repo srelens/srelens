@@ -258,12 +258,45 @@ describe("layoutFlow", () => {
     expect(stub.path).toContain(" L ");
   });
 
-  it("has no column for a hop nothing stands at", () => {
-    // The old layout drew all five kind columns always, empty ones included.
-    // A hop count cannot be empty in the middle — there is nothing to say.
+  it("puts a tier no call touches in the band, not in a column", () => {
+    // The first real cluster: no mesh, no metrics, probe off, so almost no
+    // calls were known and every tier ranked zero. Every placement was
+    // correct and the picture was one column twenty tiers tall.
     const out = layoutFlow(graph([node("a", "service"), node("b", "service")]));
-    expect(out.columns).toHaveLength(1);
-    expect(out.columns[0].count).toBe(2);
+    expect(out.columns).toEqual([]);
+    expect(out.band?.count).toBe(2);
+    expect(out.nodes.every((n) => n.rank === null)).toBe(true);
+  });
+
+  it("packs the band into a grid rather than a column", () => {
+    const many = Array.from({ length: 12 }, (_, i) => node(`s${i}`, "service", `svc-${i}`));
+    const out = layoutFlow(graph(many));
+    const xs = new Set(out.nodes.map((n) => n.x));
+    const ys = new Set(out.nodes.map((n) => n.y));
+    expect(xs.size).toBeGreaterThan(1);
+    expect(ys.size).toBeLessThan(12);
+    expect(out.width).toBeGreaterThan(out.height);
+  });
+
+  it("keeps an Ingress-fronted tier in the flow even before any call is known", () => {
+    // Traffic enters there whether or not anything downstream has been seen.
+    const out = layoutFlow(chain());
+    expect(out.columns.map((c) => c.label)).toEqual(["ENTRY"]);
+    expect(out.band).toBeNull();
+  });
+
+  it("grows the band to the width of the flow above it", () => {
+    // So the two read as one picture rather than a wide flow over a narrow
+    // stack.
+    const g = twoTiers();
+    const loose = Array.from({ length: 4 }, (_, i) => node(`l${i}`, "service", `loose-${i}`));
+    const out = layoutFlow(graph([...g.nodes, ...loose], g.edges));
+    const flowRight = Math.max(...out.nodes.filter((n) => n.rank !== null).map((n) => n.x));
+    const bandRight = Math.max(...out.nodes.filter((n) => n.rank === null).map((n) => n.x));
+    expect(bandRight).toBeGreaterThanOrEqual(flowRight);
+    // And it sits below the flow, not beside it.
+    const flowBottom = Math.max(...out.nodes.filter((n) => n.rank !== null).map((n) => n.y));
+    expect(out.band?.y).toBeGreaterThan(flowBottom);
   });
 
   it("places a tier beside the one that calls it", () => {
