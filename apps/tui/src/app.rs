@@ -1447,10 +1447,34 @@ impl App {
                             });
                         }
                     }
+                    KeyCode::Char('w') if table_kind == ResourceKind::Events => {
+                        let active = table.toggle_warning_triage(&self.filter_buffer);
+                        let count = table.filtered_indices.len();
+                        if active {
+                            self.set_toast(format!("Warning Triage: ON ({} warnings)", count), Theme::status_warn());
+                        } else {
+                            self.set_toast(format!("Warning Triage: OFF (all {} events)", count), Theme::status_ok());
+                        }
+                    }
                     KeyCode::Char('l') => {
                         // Logs
-                        if let Some(pod_name) = sel_name {
-                            let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                        let (pod_name, target_ns) = if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if obj_kind.eq_ignore_ascii_case("Pod") {
+                                    (Some(obj_name), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                                } else {
+                                    self.set_toast(format!("Logs only available for Pods (event target is {})", obj_kind), Theme::status_warn());
+                                    (None, None)
+                                }
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (sel_name.clone(), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                        };
+
+                        if let Some(pod_name) = pod_name {
                             let query_ns = target_ns.clone().unwrap_or_else(|| "default".to_string());
                             let ctx = self.active_context.clone();
                             let cache = self.client_cache.clone();
@@ -1515,12 +1539,20 @@ impl App {
                         }
                     }
                     KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                        // Copy canonical deep link URL (srelens://resource/...)
-                        if let Some(name) = sel_name {
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let summary = format_event_summary(item);
+                                let sum_clone = summary.clone();
+                                tokio::spawn(async move {
+                                    let _ = copy_to_clipboard(&sum_clone);
+                                });
+                                self.set_toast("Copied event message to clipboard".to_string(), Theme::status_ok());
+                            }
+                        } else if let Some(name) = sel_name.clone() {
                             let link = crate::deep_link::DeepLink::Resource {
                                 context: self.active_context.clone(),
-                                namespace: sel_ns,
-                                kind: kind_str,
+                                namespace: sel_ns.clone(),
+                                kind: kind_str.clone(),
                                 name,
                             };
                             let url = link.to_url();
@@ -1532,12 +1564,29 @@ impl App {
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Copy canonical deep link URL (Ctrl+y)
-                        if let Some(name) = sel_name {
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_name.is_empty() {
+                                    let link = crate::deep_link::DeepLink::Resource {
+                                        context: self.active_context.clone(),
+                                        namespace: sel_ns.clone(),
+                                        kind: obj_kind,
+                                        name: obj_name,
+                                    };
+                                    let url = link.to_url();
+                                    let url_clone = url.clone();
+                                    tokio::spawn(async move {
+                                        let _ = copy_to_clipboard(&url_clone);
+                                    });
+                                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                                }
+                            }
+                        } else if let Some(name) = sel_name.clone() {
                             let link = crate::deep_link::DeepLink::Resource {
                                 context: self.active_context.clone(),
-                                namespace: sel_ns,
-                                kind: kind_str,
+                                namespace: sel_ns.clone(),
+                                kind: kind_str.clone(),
                                 name,
                             };
                             let url = link.to_url();
@@ -1550,20 +1599,34 @@ impl App {
                     }
                     KeyCode::Char('y') | KeyCode::Char('v') => {
                         // View YAML manifest
-                        if let Some(name) = sel_name {
-                            self.open_yaml_view(name, kind_str, sel_ns).await;
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_name.is_empty() {
+                                    self.open_yaml_view(obj_name, obj_kind, sel_ns.clone()).await;
+                                }
+                            }
+                        } else if let Some(name) = sel_name.clone() {
+                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone()).await;
                         }
                     }
                     KeyCode::Char('d') => {
                         // Describe resource
-                        if let Some(name) = sel_name {
-                            self.open_describe_view(name, kind_str, sel_ns).await;
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_name.is_empty() {
+                                    self.open_describe_view(obj_name, obj_kind, sel_ns.clone()).await;
+                                }
+                            }
+                        } else if let Some(name) = sel_name.clone() {
+                            self.open_describe_view(name, kind_str.clone(), sel_ns.clone()).await;
                         }
                     }
                     KeyCode::Char('e') => {
                         // Edit YAML in $EDITOR
-                        if let Some(name) = sel_name {
-                            self.open_yaml_view(name, kind_str, sel_ns).await;
+                        if let Some(name) = sel_name.clone() {
+                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone()).await;
                             self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                         }
                     }
@@ -1617,6 +1680,29 @@ impl App {
                                     t.apply_filter(&name);
                                 }
                                 self.filter_buffer = name;
+                            }
+                        } else if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_kind.is_empty() && !obj_name.is_empty() {
+                                    if obj_kind.eq_ignore_ascii_case("Pod") {
+                                        self.switch_view_to_kind(ResourceKind::Pods).await;
+                                        if let ActiveView::Table(t) = &mut self.active_view {
+                                            t.apply_filter(&obj_name);
+                                        }
+                                        self.filter_buffer = obj_name.clone();
+                                        self.set_toast(format!("Jumped to Pod '{}'", obj_name), Theme::status_ok());
+                                    } else if let Some(target_cmd) = crate::commands::resolve_command_with_crds(&obj_kind, &self.crds) {
+                                        self.execute_view_target(target_cmd).await;
+                                        if let ActiveView::Table(t) = &mut self.active_view {
+                                            t.apply_filter(&obj_name);
+                                        }
+                                        self.filter_buffer = obj_name.clone();
+                                        self.set_toast(format!("Jumped to {} '{}'", obj_kind, obj_name), Theme::status_ok());
+                                    } else {
+                                        self.open_describe_view(obj_name, obj_kind, sel_ns.clone()).await;
+                                    }
+                                }
                             }
                         } else {
                             if let Some(name) = sel_name {
@@ -2961,6 +3047,17 @@ impl App {
                     ("<^d>", "Delete"),
                     ("<?>", "Help"),
                 ][..]),
+                ResourceKind::Events => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<w>", "Triage"),
+                    ("<Enter>", "Resource"),
+                    ("<d>", "Describe"),
+                    ("<l>", "Logs"),
+                    ("<y>", "YAML"),
+                    ("<c>", "Copy"),
+                    ("<?>", "Help"),
+                ][..]),
                 _ => None,
             },
             ActiveView::Overview(_) => Some(&[
@@ -3142,6 +3239,34 @@ pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String
         .and_then(|b| b.as_bool())
         .unwrap_or(false);
     Some((call_id, is_error))
+}
+
+pub fn parse_involved_object(item: &serde_json::Value) -> (String, String) {
+    if let Some(obj_str) = item.get("object").and_then(|v| v.as_str()) {
+        if let Some((kind, name)) = obj_str.split_once('/') {
+            return (kind.to_string(), name.to_string());
+        }
+    }
+    if let Some(inv) = item.get("involvedObject") {
+        let kind = inv.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let name = inv.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if !kind.is_empty() || !name.is_empty() {
+            return (kind.to_string(), name.to_string());
+        }
+    }
+    ("".to_string(), "".to_string())
+}
+
+pub fn format_event_summary(item: &serde_json::Value) -> String {
+    let age = item.get("age").and_then(|v| v.as_str()).unwrap_or("");
+    let type_str = item.get("type").or_else(|| item.get("type_")).and_then(|v| v.as_str()).unwrap_or("");
+    let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    let (obj_kind, obj_name) = parse_involved_object(item);
+    let obj = if !obj_kind.is_empty() { format!("{}/{}", obj_kind, obj_name) } else { "".to_string() };
+    let ns = item.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let msg = item.get("message").and_then(|v| v.as_str()).unwrap_or("");
+
+    format!("[{}] [{}] {} {} ({}): {}", age, type_str, reason, obj, ns, msg)
 }
 
 pub(crate) fn extract_usage_metrics(v: &serde_json::Value) -> Option<(usize, usize, usize, usize, Option<u64>)> {

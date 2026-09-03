@@ -1901,4 +1901,108 @@ mod tests {
         let toast = app.toast.as_ref().expect("toast after pressing Ctrl+y in overview");
         assert!(toast.0.contains("Copied deep link: srelens://cluster/data-processing-prod-eu-dus1"));
     }
+
+    #[tokio::test]
+    async fn test_cluster_events_stream_and_warning_triage() {
+        use srelens_tui::app::{ActiveView, App};
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("prod".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // 1. Switch to Events view
+        app.switch_view_to_kind(ResourceKind::Events).await;
+
+        let ev1 = serde_json::json!({
+            "name": "default/pod-normal.17b",
+            "namespace": "default",
+            "type": "Normal",
+            "reason": "Scheduled",
+            "object": "Pod/frontend-web",
+            "message": "Successfully assigned default/frontend-web to node-1",
+            "age": "3m"
+        });
+
+        let ev2 = serde_json::json!({
+            "name": "prod/pod-crash.17c",
+            "namespace": "prod",
+            "type": "Warning",
+            "reason": "CrashLoopBackOff",
+            "object": "Pod/api-backend-xyz",
+            "message": "Back-off restarting failed container",
+            "age": "30s"
+        });
+
+        let ev3 = serde_json::json!({
+            "name": "prod/pod-oom.17d",
+            "namespace": "prod",
+            "type": "Warning",
+            "reason": "OOMKilled",
+            "object": "Pod/ml-worker-gpu-0",
+            "message": "Container exceeded 32Gi memory limit and was killed",
+            "age": "10s"
+        });
+
+        let events_payload = serde_json::json!([ev1, ev2, ev3]);
+        app.handle_stream_event("watch:prod-cluster:prod:events".to_string(), events_payload);
+
+        if let ActiveView::Table(ref table) = app.active_view {
+            assert_eq!(table.filtered_indices.len(), 3);
+        } else {
+            panic!("Expected ActiveView::Table(Events)");
+        }
+
+        // 2. Press 'w' to toggle Warning Triage ON
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('w'), crossterm::event::KeyModifiers::NONE)).await;
+        let toast = app.toast.as_ref().expect("toast after toggling warning triage");
+        assert!(toast.0.contains("Warning Triage: ON (2 warnings)"));
+
+        if let ActiveView::Table(ref table) = app.active_view {
+            assert_eq!(table.filtered_indices.len(), 2);
+            assert!(table.warning_triage);
+        }
+
+        // 3. Test Copy on Event: 'c' copies event message, '<Ctrl+y>' copies deep link
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        let toast = app.toast.as_ref().expect("toast after pressing c on event");
+        assert_eq!(toast.0, "Copied event message to clipboard");
+
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('y'), crossterm::event::KeyModifiers::CONTROL)).await;
+        let toast = app.toast.as_ref().expect("toast after pressing Ctrl+y on event");
+        assert!(toast.0.contains("Copied deep link: srelens://resource/prod-cluster/prod/Pod/api-backend-xyz"));
+
+        // 4. Press Enter on the event row -> jumps to Pod table with filter applied!
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
+        if let ActiveView::Table(ref table) = app.active_view {
+            assert_eq!(table.kind, ResourceKind::Pods);
+            assert_eq!(app.filter_buffer, "api-backend-xyz");
+        } else {
+            panic!("Expected ActiveView::Table(Pods) after Enter on Pod event");
+        }
+
+        // 5. First Esc clears filter, second Esc pops nav stack back to Events view
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        assert_eq!(app.filter_buffer, "");
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        if let ActiveView::Table(ref table) = app.active_view {
+            assert_eq!(table.kind, ResourceKind::Events);
+        } else {
+            panic!("Expected to return to Events view after Esc");
+        }
+
+        // 6. Press 'w' again to toggle Warning Triage OFF
+        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('w'), crossterm::event::KeyModifiers::NONE)).await;
+        let toast = app.toast.as_ref().expect("toast after toggling warning triage off");
+        assert!(toast.0.contains("Warning Triage: OFF (all 3 events)"));
+
+        if let ActiveView::Table(ref table) = app.active_view {
+            assert_eq!(table.filtered_indices.len(), 3);
+            assert!(!table.warning_triage);
+        }
+    }
 }

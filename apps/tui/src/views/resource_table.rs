@@ -30,6 +30,7 @@ pub struct ResourceTableState {
     pub sort_col_idx: Option<usize>,
     pub sort_ascending: bool,
     pub is_loading: bool,
+    pub warning_triage: bool,
 }
 
 impl ResourceTableState {
@@ -46,7 +47,14 @@ impl ResourceTableState {
             sort_col_idx: None,
             sort_ascending: true,
             is_loading: true,
+            warning_triage: false,
         }
+    }
+
+    pub fn toggle_warning_triage(&mut self, filter_query: &str) -> bool {
+        self.warning_triage = !self.warning_triage;
+        self.apply_filter(filter_query);
+        self.warning_triage
     }
 
     pub fn set_items(&mut self, items: Vec<Value>, filter_query: &str) {
@@ -57,42 +65,53 @@ impl ResourceTableState {
 
     pub fn apply_filter(&mut self, filter_query: &str) {
         let q = filter_query.trim();
-        self.filtered_indices = if q.is_empty() {
-            (0..self.raw_items.len()).collect()
-        } else {
-            let re = regex::RegexBuilder::new(q)
+        let re = if !q.is_empty() {
+            regex::RegexBuilder::new(q)
                 .case_insensitive(true)
                 .build()
-                .ok();
-
-            let q_lower = q.to_lowercase();
-            self.raw_items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| {
-                    let name = item.get("name")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()))
-                        .unwrap_or("");
-                    let ns = item.get("namespace")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| item.get("metadata").and_then(|m| m.get("namespace")).and_then(|v| v.as_str()))
-                        .unwrap_or("");
-                    let full_str = item.to_string();
-
-                    if let Some(ref regex) = re {
-                        if regex.is_match(name) || regex.is_match(ns) || regex.is_match(&full_str) {
-                            return true;
-                        }
-                    }
-
-                    name.to_lowercase().contains(&q_lower)
-                        || ns.to_lowercase().contains(&q_lower)
-                        || full_str.to_lowercase().contains(&q_lower)
-                })
-                .map(|(i, _)| i)
-                .collect()
+                .ok()
+        } else {
+            None
         };
+        let q_lower = q.to_lowercase();
+
+        self.filtered_indices = self.raw_items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                // Warning triage filter for Events
+                if self.kind == ResourceKind::Events && self.warning_triage {
+                    if !is_event_warning_or_failure(item) {
+                        return false;
+                    }
+                }
+
+                if q.is_empty() {
+                    return true;
+                }
+
+                let name = item.get("name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let ns = item.get("namespace")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("metadata").and_then(|m| m.get("namespace")).and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let full_str = item.to_string();
+
+                if let Some(ref regex) = re {
+                    if regex.is_match(name) || regex.is_match(ns) || regex.is_match(&full_str) {
+                        return true;
+                    }
+                }
+
+                name.to_lowercase().contains(&q_lower)
+                    || ns.to_lowercase().contains(&q_lower)
+                    || full_str.to_lowercase().contains(&q_lower)
+            })
+            .map(|(i, _)| i)
+            .collect();
 
         if self.selected_idx >= self.filtered_indices.len() {
             self.selected_idx = self.filtered_indices.len().saturating_sub(1);
@@ -351,8 +370,65 @@ fn raw_value_to_string(v: &Value) -> Option<String> {
     }
 }
 
+pub fn is_event_warning_or_failure(item: &Value) -> bool {
+    let type_str = item.get("type")
+        .or_else(|| item.get("type_"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if type_str.eq_ignore_ascii_case("Warning") {
+        return true;
+    }
+
+    let reason = item.get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let critical_reasons = [
+        "fail", "backoff", "crashloop", "oom", "evict", "unhealthy", 
+        "killing", "notready", "error", "warn", "invalidspec", "pressure"
+    ];
+    for cr in critical_reasons {
+        if reason.contains(cr) {
+            return true;
+        }
+    }
+
+    let msg = item.get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if msg.contains("oomkilled") || msg.contains("crashloopbackoff") || msg.contains("failed") || msg.contains("evicted") {
+        return true;
+    }
+
+    false
+}
+
 pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
     let key_lower = key.to_lowercase();
+
+    // 0. Event specific field aliases
+    if key_lower == "involvedobject" || key_lower == "object" {
+        if let Some(obj) = val.get("object").and_then(|v| v.as_str()) {
+            if !obj.is_empty() {
+                return obj.to_string();
+            }
+        }
+        if let Some(inv) = val.get("involvedObject") {
+            let kind = inv.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let name = inv.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if !kind.is_empty() || !name.is_empty() {
+                return format!("{}/{}", kind, name);
+            }
+        }
+    }
+    if key_lower == "type" || key_lower == "type_" {
+        if let Some(t) = val.get("type").or_else(|| val.get("type_")).and_then(|v| v.as_str()) {
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
 
     // 1. Direct key lookup
     if let Some(v) = val.get(key) {
@@ -475,16 +551,30 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
 }
 
 pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableState) {
-    let title = if state.is_loading {
-        format!(" {} [Loading...] ", state.kind.display_name())
+    let triage_badge = if state.kind == ResourceKind::Events && state.warning_triage {
+        " [WARNING TRIAGE: ON]"
     } else {
-        format!(" {} [{}] ", state.kind.display_name(), state.filtered_indices.len())
+        ""
+    };
+
+    let title = if state.is_loading {
+        format!(" {} [Loading...]{} ", state.kind.display_name(), triage_badge)
+    } else {
+        format!(" {} [{}]{} ", state.kind.display_name(), state.filtered_indices.len(), triage_badge)
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(title, Theme::title()));
+        .border_style(if state.kind == ResourceKind::Events && state.warning_triage {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Theme::BORDER)
+        })
+        .title(Span::styled(title, if state.kind == ResourceKind::Events && state.warning_triage {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Theme::title()
+        }));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -530,7 +620,7 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
 
             let cells = state.columns.iter().map(|col| {
                 let text = extract_field_str(item, col.key);
-                let cell_style = if col.key == "status" || col.key == "type" && state.kind == ResourceKind::Events {
+                let cell_style = if col.key == "status" || (state.kind == ResourceKind::Events && (col.key == "type" || col.key == "reason")) {
                     status_style(&text)
                 } else if is_selected {
                     Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
@@ -685,5 +775,67 @@ mod tests {
         assert_eq!(extract_field_str(&raw_pod, "podIP"), "10.244.0.5");
         assert_eq!(extract_field_str(&raw_pod, "podIp"), "10.244.0.5");
         assert_eq!(extract_field_str(&raw_pod, "node"), "worker-pool-1");
+    }
+
+    #[test]
+    fn test_events_field_extraction_and_warning_triage() {
+        let ev1 = json!({
+            "name": "default/pod-normal.17b",
+            "namespace": "default",
+            "type": "Normal",
+            "reason": "Scheduled",
+            "object": "Pod/frontend-web",
+            "message": "Successfully assigned default/frontend-web to node-1",
+            "age": "3m"
+        });
+
+        let ev2 = json!({
+            "name": "prod/pod-crash.17c",
+            "namespace": "prod",
+            "type": "Warning",
+            "reason": "CrashLoopBackOff",
+            "object": "Pod/api-backend-xyz",
+            "message": "Back-off restarting failed container",
+            "age": "30s"
+        });
+
+        let ev3 = json!({
+            "name": "prod/pod-oom.17d",
+            "namespace": "prod",
+            "type": "Warning",
+            "reason": "OOMKilled",
+            "involvedObject": {
+                "kind": "Pod",
+                "name": "ml-worker-gpu-0"
+            },
+            "message": "Container exceeded 32Gi memory limit and was killed",
+            "age": "10s"
+        });
+
+        // Field extraction
+        assert_eq!(extract_field_str(&ev1, "object"), "Pod/frontend-web");
+        assert_eq!(extract_field_str(&ev1, "involvedObject"), "Pod/frontend-web");
+        assert_eq!(extract_field_str(&ev3, "object"), "Pod/ml-worker-gpu-0");
+        assert_eq!(extract_field_str(&ev3, "involvedObject"), "Pod/ml-worker-gpu-0");
+
+        // Warning triage check
+        assert!(!is_event_warning_or_failure(&ev1));
+        assert!(is_event_warning_or_failure(&ev2));
+        assert!(is_event_warning_or_failure(&ev3));
+
+        // Table triage mode
+        let mut table = ResourceTableState::new(ResourceKind::Events);
+        table.set_items(vec![ev1, ev2, ev3], "");
+        assert_eq!(table.filtered_indices.len(), 3);
+
+        // Toggle triage ON
+        let active = table.toggle_warning_triage("");
+        assert!(active);
+        assert_eq!(table.filtered_indices.len(), 2);
+
+        // Toggle triage OFF
+        let active = table.toggle_warning_triage("");
+        assert!(!active);
+        assert_eq!(table.filtered_indices.len(), 3);
     }
 }
