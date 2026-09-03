@@ -2296,6 +2296,7 @@ impl App {
                                     let api_key = self.ai_settings.get_api_key(provider);
                                     let cache = self.client_cache.clone();
                                     let kubeconfig_paths = self.kubeconfig_paths.clone();
+                                    let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
 
                                     tokio::spawn(async move {
                                         crate::agent::run_boxed_cursor_turn(
@@ -2308,6 +2309,7 @@ impl App {
                                             cache,
                                             kubeconfig_paths,
                                             event_tx,
+                                            timeout_seconds,
                                         ).await;
                                     });
                                 } else {
@@ -2320,6 +2322,7 @@ impl App {
                                 let active_ctx = self.active_context.clone();
                                 let active_ns = self.active_namespace.clone();
                                 let history = ai.native_history.clone();
+                                let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
 
                                 tokio::spawn(async move {
                                     let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
@@ -2332,6 +2335,7 @@ impl App {
                                         active_ctx,
                                         active_ns,
                                         event_tx,
+                                        timeout_seconds,
                                     ).await;
                                 });
                             } else {

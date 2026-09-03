@@ -19,6 +19,7 @@ pub enum SettingField {
     ApiKey,
     Model,
     BaseUrl,
+    Timeout,
 }
 
 pub struct SettingsViewState {
@@ -80,10 +81,11 @@ impl SettingsViewState {
                 if is_custom {
                     SettingField::BaseUrl
                 } else {
-                    SettingField::ProviderToggle
+                    SettingField::Timeout
                 }
             }
-            SettingField::BaseUrl => SettingField::ProviderToggle,
+            SettingField::BaseUrl => SettingField::Timeout,
+            SettingField::Timeout => SettingField::ProviderToggle,
         };
     }
 
@@ -93,16 +95,17 @@ impl SettingsViewState {
         }
         let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
-            SettingField::ProviderToggle => {
+            SettingField::ProviderToggle => SettingField::Timeout,
+            SettingField::Timeout => {
                 if is_custom {
                     SettingField::BaseUrl
                 } else {
                     SettingField::Model
                 }
             }
-            SettingField::ApiKey => SettingField::ProviderToggle,
-            SettingField::Model => SettingField::ApiKey,
             SettingField::BaseUrl => SettingField::Model,
+            SettingField::Model => SettingField::ApiKey,
+            SettingField::ApiKey => SettingField::ProviderToggle,
         };
     }
 
@@ -121,6 +124,7 @@ impl SettingsViewState {
             SettingField::ApiKey => self.settings.api_keys.get(slug).cloned().unwrap_or_default(),
             SettingField::Model => self.settings.get_model(provider),
             SettingField::BaseUrl => self.settings.get_base_url(provider),
+            SettingField::Timeout => self.settings.get_timeout_seconds(provider).to_string(),
         };
         self.is_editing = true;
     }
@@ -151,6 +155,11 @@ impl SettingsViewState {
                     self.settings.base_urls.remove(&slug);
                 } else {
                     self.settings.base_urls.insert(slug, val);
+                }
+            }
+            SettingField::Timeout => {
+                if let Ok(secs) = val.parse::<u32>() {
+                    self.settings.set_timeout_seconds(provider, secs.clamp(5, 3600));
                 }
             }
         }
@@ -331,6 +340,15 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         };
         let current_model = state.settings.get_model(provider);
 
+        // Field: Timeout Display
+        let timeout_focus = is_selected_provider && state.selected_field == SettingField::Timeout;
+        let timeout_label_style = if timeout_focus {
+            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Theme::DIM)
+        };
+        let timeout_display = format!("{}s", state.settings.get_timeout_seconds(provider));
+
         let mut lines = vec![
             Line::from(header_spans),
             Line::from(vec![
@@ -340,6 +358,8 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             Line::from(vec![
                 Span::styled("   Model:   ", model_label_style),
                 Span::styled(current_model, if model_focus { Style::default().fg(Theme::YELLOW) } else { Style::default().fg(Theme::FG) }),
+                Span::styled("   │   Timeout: ", timeout_label_style),
+                Span::styled(timeout_display, if timeout_focus { Style::default().fg(Theme::YELLOW) } else { Style::default().fg(Theme::FG) }),
             ]),
         ];
 
@@ -386,6 +406,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             SettingField::ApiKey => if state.current_provider() == AiProvider::Cursor { "API Key (or leave blank for cursor login)" } else { "API Key" },
             SettingField::Model => "Model ID",
             SettingField::BaseUrl => "Base URL (e.g. http://localhost:11434/v1)",
+            SettingField::Timeout => "Turn Timeout (seconds, e.g. 120)",
             SettingField::ProviderToggle => "Provider",
         };
 

@@ -118,22 +118,32 @@ pub struct AiSettings {
     pub models: HashMap<String, String>,
     #[serde(default)]
     pub base_urls: HashMap<String, String>,
+    #[serde(default)]
+    pub timeouts: HashMap<String, u32>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u32,
 }
 
 fn default_max_tokens() -> u32 {
     4096
 }
 
+fn default_timeout_seconds() -> u32 {
+    120
+}
+
 impl Default for AiSettings {
     fn default() -> Self {
         let mut models = HashMap::new();
         let mut base_urls = HashMap::new();
+        let mut timeouts = HashMap::new();
         for provider in ALL_PROVIDERS {
             let slug = provider_slug(provider).to_string();
             models.insert(slug.clone(), default_model_for_provider(provider).to_string());
-            base_urls.insert(slug, default_base_url_for_provider(provider).to_string());
+            base_urls.insert(slug.clone(), default_base_url_for_provider(provider).to_string());
+            timeouts.insert(slug, 120);
         }
 
         Self {
@@ -141,7 +151,9 @@ impl Default for AiSettings {
             api_keys: HashMap::new(),
             models,
             base_urls,
+            timeouts,
             max_tokens: 4096,
+            timeout_seconds: 120,
         }
     }
 }
@@ -236,6 +248,20 @@ impl AiSettings {
             .unwrap_or_else(|| default_base_url_for_provider(kind).to_string())
     }
 
+    pub fn get_timeout_seconds(&self, kind: AiProvider) -> u32 {
+        let slug = provider_slug(kind);
+        self.timeouts
+            .get(slug)
+            .copied()
+            .unwrap_or(if self.timeout_seconds == 0 { 120 } else { self.timeout_seconds })
+    }
+
+    pub fn set_timeout_seconds(&mut self, kind: AiProvider, seconds: u32) {
+        let slug = provider_slug(kind).to_string();
+        self.timeouts.insert(slug, seconds);
+        self.timeout_seconds = seconds;
+    }
+
     pub fn resolve_provider_config(&self, kind: AiProvider) -> Option<ProviderConfig> {
         let llm_kind = kind.to_llm_kind()?;
         let api_key = self.get_api_key(kind).unwrap_or_else(|| {
@@ -272,6 +298,8 @@ mod tests {
         assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-4o");
         assert_eq!(s.get_base_url(AiProvider::OpenAiCompatible), "http://localhost:11434/v1");
         assert_eq!(s.get_model(AiProvider::Cursor), "default");
+        assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 120);
+        assert_eq!(s.get_timeout_seconds(AiProvider::Cursor), 120);
     }
 
     #[test]
@@ -280,6 +308,8 @@ mod tests {
         s.default_provider = AiProvider::Cursor;
         s.api_keys.insert("cursor".to_string(), "cur-test-12345".to_string());
         s.models.insert("cursor".to_string(), "claude-3.5-sonnet".to_string());
+        s.set_timeout_seconds(AiProvider::Cursor, 180);
+        s.set_timeout_seconds(AiProvider::Anthropic, 60);
 
         let json = serde_json::to_string(&s).unwrap();
         let deserialized: AiSettings = serde_json::from_str(&json).unwrap();
@@ -287,5 +317,8 @@ mod tests {
         assert_eq!(deserialized.default_provider, AiProvider::Cursor);
         assert_eq!(deserialized.get_api_key(AiProvider::Cursor).as_deref(), Some("cur-test-12345"));
         assert_eq!(deserialized.get_model(AiProvider::Cursor), "claude-3.5-sonnet");
+        assert_eq!(deserialized.get_timeout_seconds(AiProvider::Cursor), 180);
+        assert_eq!(deserialized.get_timeout_seconds(AiProvider::Anthropic), 60);
+        assert_eq!(deserialized.get_timeout_seconds(AiProvider::OpenAi), 120);
     }
 }

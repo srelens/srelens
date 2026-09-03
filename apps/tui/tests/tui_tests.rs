@@ -442,6 +442,31 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).await;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
         assert_eq!(app.ai_settings.default_provider, AiProvider::Cursor);
+
+        // 8. Currently at ApiKey, Tab twice to get to Timeout field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // Model
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // Timeout
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.selected_field, SettingField::Timeout);
+        }
+
+        // Press 'e' to edit Timeout
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).await;
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert_eq!(s.is_editing, true);
+        }
+
+        // Backspace default 120 and type 240
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
+        for c in "240".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+
+        assert_eq!(app.ai_settings.get_timeout_seconds(AiProvider::Cursor), 240);
     }
 
     #[tokio::test]

@@ -141,6 +141,7 @@ pub async fn run_native_agent_turn(
     active_context: String,
     active_namespace: String,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    timeout_seconds: u32,
 ) {
     let provider = srelens_llm::HttpProvider::new(config);
     let start_time = std::time::Instant::now();
@@ -212,14 +213,28 @@ pub async fn run_native_agent_turn(
         }
     };
 
-    let result = srelens_llm::agent_loop::run(
+    let run_fut = srelens_llm::agent_loop::run(
         &provider,
         invoker.as_ref(),
         prior_turns,
         enriched_prompt,
         &mut on_event,
-    )
-    .await;
+    );
+    let timeout_duration = std::time::Duration::from_secs(timeout_seconds.max(5) as u64);
+    let result = match tokio::time::timeout(timeout_duration, run_fut).await {
+        Ok(res) => res,
+        Err(_) => {
+            let msg = format!(
+                "AI assistant turn timed out after {} seconds. You can increase the timeout in settings (<Ctrl+s>).",
+                timeout_seconds
+            );
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_chunk:{}", active_context),
+                result: Ok(format!("\n[Error: {}]", msg)),
+            });
+            Err(srelens_llm::error::LlmError::Api(msg))
+        }
+    };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
     let prompt_est = (prompt.len() + 200) / 4;
@@ -269,6 +284,7 @@ pub async fn run_boxed_cursor_turn(
     cache: Arc<ClientCache>,
     kubeconfig_paths: Vec<PathBuf>,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    timeout_seconds: u32,
 ) {
     let start_time = std::time::Instant::now();
 
@@ -549,8 +565,8 @@ pub async fn run_boxed_cursor_turn(
                 (chars_count, emitted_usage, first_error)
             });
 
-            // Wait with a 120-second timeout so the UI never hangs indefinitely
-            let timeout_duration = std::time::Duration::from_secs(120);
+            // Wait with configurable timeout so the UI never hangs indefinitely
+            let timeout_duration = std::time::Duration::from_secs(timeout_seconds.max(5) as u64);
             let wait_res = tokio::time::timeout(timeout_duration, child.wait()).await;
 
             let (total_output_chars, has_emitted_usage, fatal_error_msg) = match stdout_task.await {
@@ -595,7 +611,7 @@ pub async fn run_boxed_cursor_turn(
                     let _ = child.kill().await;
                     let _ = event_tx.send(AppEvent::ActionResult {
                         title: format!("ai_chunk:{}", active_ctx),
-                        result: Ok("\n[Error: Cursor Agent timed out after 120 seconds. The upstream provider did not respond. Try switching to another model (e.g. gemini-3-flash) in <Ctrl+s> settings.]".to_string()),
+                        result: Ok(format!("\n[Error: Cursor Agent timed out after {} seconds. The upstream provider did not respond. You can increase the timeout in settings (<Ctrl+s>) or try another model.]", timeout_seconds)),
                     });
                 }
             }
