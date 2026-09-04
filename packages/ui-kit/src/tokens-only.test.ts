@@ -177,4 +177,134 @@ describe("the high-contrast theme", () => {
     // Guards the guard: a typo in a token name would silently compare nothing.
     expect(pairs.length).toBeGreaterThan(40);
   });
+
+  /**
+   * The accent a reader can CHOOSE, not just the one this theme declares.
+   *
+   * The test above reads `[data-theme="contrast"]`'s own block, and an accent
+   * picked in the Appearance pane is not in it — it arrives from a later
+   * `[data-accent="…"]` rule of equal specificity, which wins. So High
+   * contrast promised AAA and delivered between 5.37:1 and 6.64:1 the moment
+   * anyone chose Blue, Teal, Amber or Rose, and nothing here could see it.
+   */
+  function accentOverride(theme: string, accent: string): Record<string, string> {
+    const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+    // Every rule whose selector list carries this exact theme+accent pair, in
+    // file order — the last one wins, as the cascade has it at equal weight.
+    const out: Record<string, string> = {};
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const matches = selectors
+        .split(",")
+        .some((s) => s.trim() === `[data-theme="${theme}"][data-accent="${accent}"]`);
+      if (!matches) continue;
+      for (const [, name, value] of body.matchAll(/(--[a-z-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) out[name] = value;
+    }
+    return out;
+  }
+
+  /** The bare `[data-accent="x"]` set, which every theme inherits by default. */
+  function bareAccent(accent: string): Record<string, string> {
+    const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+    const out: Record<string, string> = {};
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!selectors.split(",").some((s) => s.trim() === `[data-accent="${accent}"]`)) continue;
+      for (const [, name, value] of body.matchAll(/(--[a-z-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) out[name] = value;
+    }
+    return out;
+  }
+
+  it("clears AAA for every accent a reader can choose, not only its own", () => {
+    const base = tokens();
+    const failures: string[] = [];
+    for (const accent of ["blue", "teal", "amber", "rose"]) {
+      // What the cascade actually resolves to: the theme's block, then the
+      // bare accent rule, then any contrast-specific override.
+      const t = { ...base, ...bareAccent(accent), ...accentOverride("contrast", accent) };
+      const grounds = ["--canvas", "--canvas-deep", "--surface", "--surface-sunk", "--surface-raised"];
+      for (const ground of grounds) {
+        const ratio = contrast(t["--accent"], t[ground]);
+        if (ratio < 7) failures.push(`${accent}: --accent on ${ground} = ${ratio.toFixed(2)}:1`);
+      }
+      const onWash = contrast(t["--accent"], t["--accent-wash"]);
+      if (onWash < 7) failures.push(`${accent}: --accent on --accent-wash = ${onWash.toFixed(2)}:1`);
+      const inkOn = contrast(t["--accent-ink"], t["--accent"]);
+      if (inkOn < 7) failures.push(`${accent}: --accent-ink on --accent = ${inkOn.toFixed(2)}:1`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it("keeps High contrast's ground pure, whatever accent is chosen", () => {
+    // Every other theme tints its canvas with a few percent of the accent so
+    // choosing one is visible on a screen that is mostly ground. This theme
+    // must not: its ratios are all computed against pure white.
+    //
+    // Read as the RESOLVED value, not as the absence of a selector. The first
+    // version of this test asserted no `[data-theme="contrast"][data-accent]`
+    // rule existed and passed while the theme was visibly tinted, because the
+    // tint arrived from `:root[data-accent]` — an element plus an attribute,
+    // which outweighs `[data-theme="contrast"]` alone. Absence of a rule says
+    // nothing about what the cascade does.
+    const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+    const own = tokens();
+    const start = css.indexOf(':root[data-theme="contrast"][data-accent] {');
+    expect(start, "no rule holds High contrast's ground against the tint").toBeGreaterThan(-1);
+    const body = css.slice(start, css.indexOf("}", start));
+    for (const token of ["--canvas", "--canvas-deep"]) {
+      const held = body.match(new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})\\s*;`))?.[1];
+      expect(held?.toLowerCase(), `${token} is not held at this theme's own value`).toBe(
+        own[token]?.toLowerCase(),
+      );
+    }
+    // And it must outweigh the root tint, or it is decoration.
+    expect(css.indexOf(":root[data-accent] {")).toBeLessThan(start);
+  });
+});
+
+/**
+ * The accent-tinted grounds copy each theme's own `--canvas` as the base of a
+ * `color-mix`, because a custom property cannot be defined in terms of itself.
+ * A copy is a thing that drifts, so it is checked rather than trusted.
+ */
+describe("the accent-tinted grounds", () => {
+  const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+
+  /** A theme's own declaration of one ground token. */
+  function declared(selector: string, token: string): string | undefined {
+    const start = css.indexOf(`${selector} {`);
+    if (start === -1) return undefined;
+    const body = css.slice(start, css.indexOf("}", start));
+    return body.match(new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})\\s*;`))?.[1];
+  }
+
+  const THEMES = [
+    [":root", ":root[data-accent]"],
+    ['[data-theme="paper"]', '[data-theme="paper"][data-accent]'],
+    ['[data-theme="dark"]', '[data-theme="dark"][data-accent]'],
+    ['[data-theme="midnight"]', '[data-theme="midnight"][data-accent]'],
+  ] as const;
+
+  it.each(THEMES)("mixes %s's accent tint into that theme's own ground", (plain, tinted) => {
+    const start = css.indexOf(`${tinted} {`);
+    expect(start, `${tinted} declares no tinted ground`).toBeGreaterThan(-1);
+    const body = css.slice(start, css.indexOf("}", start));
+    for (const token of ["--canvas", "--canvas-deep"]) {
+      // `[^;]` rather than `[^)]`: the mix contains `var(--accent)`, so a
+      // class that stops at the first `)` never reaches the base colour.
+      const base = body.match(new RegExp(`${token}:\\s*color-mix\\([^;]*?(#[0-9a-fA-F]{6})\\s*\\)`))?.[1];
+      expect(base, `${tinted} does not mix into a literal ${token}`).toBeDefined();
+      expect(base?.toLowerCase(), `${tinted}'s ${token} base has drifted from ${plain}'s`).toBe(
+        declared(plain, token)?.toLowerCase(),
+      );
+    }
+  });
+
+  it("leaves the surfaces content sits on untinted", () => {
+    // The ground moves; the paper does not. Text keeps the contrast its theme
+    // was drawn for.
+    for (const [, tinted] of THEMES) {
+      const start = css.indexOf(`${tinted} {`);
+      const body = css.slice(start, css.indexOf("}", start));
+      expect(body).not.toMatch(/--surface/);
+    }
+  });
 });
