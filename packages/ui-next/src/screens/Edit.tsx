@@ -693,24 +693,28 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           )}
         </div>
         <div className="flex min-h-0 flex-1">
-          <div className="relative min-h-0 min-w-0 flex-1 p-4">
+          {/* Edge to edge. The design is flush regions divided by hairlines
+              with no gutters (`kit.css`, "panes"), and the editor is a
+              region — inset by a gutter with a rounded frame it read as a
+              card floating in a design that has none. Prose still gets a
+              gutter; a document does not. */}
+          <div className="min-h-0 min-w-0 flex-1">
             {manifest.status === "loading" ? (
-              <p className="text-sm text-muted">Loading the manifest…</p>
+              <p className="p-3 text-sm text-muted">Loading the manifest…</p>
             ) : manifest.status === "error" ? null : (
-              <div className="absolute inset-4">
-                <CodeEditor
-                  value={yaml}
-                  onChange={setDraft}
-                  language="yaml"
-                  fill
-                  readOnly={!revealed}
-                  ariaLabel={`${name} manifest`}
-                  schemaValidate={validator(pinned)}
-                  completions={analysis.completions}
-                  onCursorChange={analysis.setCursor}
-                  onDiagnostics={analysis.setProblems}
-                />
-              </div>
+              <CodeEditor
+                value={yaml}
+                onChange={setDraft}
+                language="yaml"
+                fill
+                flush
+                readOnly={!revealed}
+                ariaLabel={`${name} manifest`}
+                schemaValidate={validator(pinned)}
+                completions={analysis.completions}
+                onCursorChange={analysis.setCursor}
+                onDiagnostics={analysis.setProblems}
+              />
             )}
           </div>
           {/* The diff is its own column, not a section of the analysis rail:
@@ -994,20 +998,20 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
           )}
         </div>
         <div className="flex min-h-0 flex-1">
-          <div className="relative min-h-0 min-w-0 flex-1 p-4">
-            <div className="absolute inset-4">
-              <CodeEditor
-                value={yaml}
-                onChange={setYaml}
-                language="yaml"
-                fill
-                ariaLabel="New resource manifest"
-                schemaValidate={validator(pinned)}
-                completions={analysis.completions}
-                onCursorChange={analysis.setCursor}
-                onDiagnostics={analysis.setProblems}
-              />
-            </div>
+          {/* Edge to edge, as above. */}
+          <div className="min-h-0 min-w-0 flex-1">
+            <CodeEditor
+              value={yaml}
+              onChange={setYaml}
+              language="yaml"
+              fill
+              flush
+              ariaLabel="New resource manifest"
+              schemaValidate={validator(pinned)}
+              completions={analysis.completions}
+              onCursorChange={analysis.setCursor}
+              onDiagnostics={analysis.setProblems}
+            />
           </div>
           <EditAnalysis
             problems={analysis.problems}

@@ -160,19 +160,26 @@ const highlightStyle = HighlightStyle.define([
 ]);
 
 /** Editor chrome, themed from CSS tokens (so light/dark just works). */
-function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
+function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush: boolean) {
   return EditorView.theme({
     "&": {
       color: "var(--ink)",
       backgroundColor: "var(--surface)",
       fontSize: "12px",
-      border: "1px solid var(--rule)",
-      borderRadius: "var(--radius-tile)",
+      // A framed editor sits inside a form or a dialog and needs an edge of
+      // its own. One that IS a region does not: the desktop layout is flush
+      // regions divided by hairlines (see `kit.css`, "panes"), and a border
+      // and radius inside one draw a floating card in a design that has none.
+      ...(flush
+        ? { border: "none", borderRadius: "0" }
+        : { border: "1px solid var(--rule)", borderRadius: "var(--radius-tile)" }),
       // `fill` makes the editor take its container's full height (scrolling
       // internally); otherwise it grows with content up to `maxHeight`.
       ...(fill ? { height: "100%" } : { maxHeight: `${maxHeight}px` }),
     },
-    "&.cm-focused": { outline: "none", borderColor: "var(--accent)" },
+    // A focus ring is an edge too; a flush editor fills its region and has
+    // nothing to ring, and the caret already says where typing goes.
+    "&.cm-focused": flush ? { outline: "none" } : { outline: "none", borderColor: "var(--accent)" },
     ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
@@ -280,6 +287,15 @@ export interface CodeEditorProps {
    */
   completions?: CompletionSource;
   /**
+   * Fill the region edge to edge: no border, no corner radius, no focus ring.
+   *
+   * For an editor that IS a pane rather than a control inside one. The
+   * desktop layout draws region boundaries with hairlines and gives them no
+   * gutters, so an editor set in from the edge with a rounded frame reads as
+   * a card floating in a design that has no cards.
+   */
+  flush?: boolean;
+  /**
    * Where the cursor is, as an offset into the document — once on mount and
    * whenever it moves or the document changes under it. What is valid THERE
    * is the caller's to say (a schema sidebar, say); the editor only knows the
@@ -311,6 +327,7 @@ export function CodeEditor({
   fill = false,
   schemaValidate,
   completions,
+  flush = false,
   onCursorChange,
   onDiagnostics,
 }: CodeEditorProps) {
@@ -344,7 +361,7 @@ export function CodeEditor({
       bracketMatching(),
       highlightSelectionMatches(),
       keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
-      editorTheme(minHeight, maxHeight, fill),
+      editorTheme(minHeight, maxHeight, fill, flush),
       syntaxHighlighting(highlightStyle),
       EditorView.editable.of(!readOnly),
       EditorState.readOnly.of(readOnly),
@@ -424,7 +441,7 @@ export function CodeEditor({
     };
     // Re-create only when structural options change, not on every value/onChange.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill]);
+  }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill, flush]);
 
   // A new validator has to be asked about the document already on screen.
   // Swapping it changes what is true — a different cluster, a different set of

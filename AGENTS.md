@@ -95,6 +95,13 @@ over the values.
   `NamespaceChoice` in `screens/resourceShell.tsx` are the shared pair —
   reach for them rather than writing the loading state again, because that is
   the part that drifts (an empty dropdown reads as "this cluster has none").
+- **Edge to edge.** The desktop layout is flush regions divided by
+  hairlines, each scrolling on its own — no gutters, no floating cards, no
+  page scroll. The rule is in `kit.css` under "panes" and it is easy to
+  break by habit: the editor sat in `p-4` inside a rounded, bordered frame,
+  which is a card in a design that has none. A component that IS a region
+  fills it; a control inside one keeps its frame (that is what `CodeEditor`'s
+  `flush` distinguishes). Prose still gets a gutter — a document does not.
 - **Machine text does not wrap.** A `last-applied-configuration` annotation is
   one line of a thousand characters; `break-all` turns it into a
   paragraph-shaped block that hides the short lines around it. Let it run and
