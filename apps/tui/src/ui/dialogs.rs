@@ -60,6 +60,12 @@ pub enum Modal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickActionId {
     AskAi,
+    PlaybookCrashLoop,
+    PlaybookPending,
+    PlaybookOom,
+    PlaybookRollout,
+    PlaybookEndpoints,
+    PlaybookNodePressure,
     RelationshipTree,
     ViewLogs,
     OpenShell,

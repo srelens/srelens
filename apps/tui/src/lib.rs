@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod ai_config;
+pub mod ai_skills;
 pub mod app;
 pub mod commands;
 pub mod deep_link;
@@ -12,5 +13,6 @@ pub mod ui;
 pub mod views;
 
 pub use ai_config::{AiProvider, AiSettings};
+pub use ai_skills::SkillDef;
 pub use app::App;
 pub use deep_link::DeepLink;

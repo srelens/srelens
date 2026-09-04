@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -119,6 +119,8 @@ pub struct AssistantViewState {
     pub last_viewport_rect: Cell<Rect>,
     pub plain_lines: RefCell<Vec<String>>,
     pub tool_chip_lines: RefCell<Vec<usize>>,
+    pub slash_suggestions: Vec<&'static crate::ai_skills::SkillDef>,
+    pub slash_suggestion_idx: usize,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -135,10 +137,10 @@ impl AssistantViewState {
 
     pub fn for_context(context_name: &str) -> Self {
         let content = if context_name.is_empty() {
-            "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
+            "Hello! I am your SRElens AI Assistant. Type '/' for SRE playbooks (CrashLoop, Pending, OOM, Rollout, Endpoints, Node pressure, Cluster summary), or ask any question:".to_string()
         } else {
             format!(
-                "Hello! I am your SRElens AI Assistant for context '{}'. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:",
+                "Hello! I am your SRElens AI Assistant for context '{}'. Type '/' for SRE playbooks (CrashLoop, Pending, OOM, Rollout, Endpoints, Node pressure, Cluster summary), or ask any question:",
                 context_name
             )
         };
@@ -170,7 +172,50 @@ impl AssistantViewState {
             last_viewport_rect: Cell::new(Rect::default()),
             plain_lines: RefCell::new(Vec::new()),
             tool_chip_lines: RefCell::new(Vec::new()),
+            slash_suggestions: Vec::new(),
+            slash_suggestion_idx: 0,
         }
+    }
+
+    pub fn update_slash_suggestions(&mut self) {
+        if self.input.starts_with('/') && !self.input.contains(' ') {
+            self.slash_suggestions = crate::ai_skills::match_slash_commands(&self.input);
+            if self.slash_suggestion_idx >= self.slash_suggestions.len() {
+                self.slash_suggestion_idx = 0;
+            }
+        } else {
+            self.slash_suggestions.clear();
+            self.slash_suggestion_idx = 0;
+        }
+    }
+
+    pub fn slash_suggestion_up(&mut self) {
+        if self.slash_suggestions.is_empty() {
+            return;
+        }
+        if self.slash_suggestion_idx == 0 {
+            self.slash_suggestion_idx = self.slash_suggestions.len().saturating_sub(1);
+        } else {
+            self.slash_suggestion_idx -= 1;
+        }
+    }
+
+    pub fn slash_suggestion_down(&mut self) {
+        if self.slash_suggestions.is_empty() {
+            return;
+        }
+        self.slash_suggestion_idx = (self.slash_suggestion_idx + 1) % self.slash_suggestions.len();
+    }
+
+    pub fn apply_selected_slash_suggestion(&mut self) -> bool {
+        if self.slash_suggestions.is_empty() {
+            return false;
+        }
+        let chosen = self.slash_suggestions[self.slash_suggestion_idx];
+        self.input = format!("/{} ", chosen.command);
+        self.slash_suggestions.clear();
+        self.slash_suggestion_idx = 0;
+        true
     }
 
     pub fn start_selection(&mut self, line: usize, col: usize) {
@@ -1022,14 +1067,16 @@ pub fn render_assistant_view(
     f.render_widget(history_widget, chunks[0]);
 
     // 2. Input box
-    let input_title = if !state.auto_scroll && effective_scroll < max_scroll {
+    let input_title = if !state.slash_suggestions.is_empty() {
+        " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) ".to_string()
+    } else if !state.auto_scroll && effective_scroll < max_scroll {
         format!(" Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
     } else {
-        " Ask Assistant (↑/↓ Prompt History, <c> Copy, <Option+⌫>/<Ctrl+⌫> Rubout, <Ctrl+s> Settings) ".to_string()
+        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::CYAN))
+        .border_style(Style::default().fg(if !state.slash_suggestions.is_empty() { Theme::ACCENT } else { Theme::CYAN }))
         .title(input_title);
     let visible_input_rows = input_box_height.saturating_sub(2);
     let scroll_y = (input_lines as u16).saturating_sub(visible_input_rows);
@@ -1039,6 +1086,99 @@ pub fn render_assistant_view(
         .wrap(Wrap { trim: false })
         .scroll((scroll_y, 0));
     f.render_widget(input_widget, chunks[2]);
+
+    // 3. Floating Slash Command Suggestions Popup
+    if !state.slash_suggestions.is_empty() {
+        let max_visible = 7.min(state.slash_suggestions.len());
+        let popup_height = (max_visible as u16) + 2; // borders
+        let popup_y = chunks[2].y.saturating_sub(popup_height);
+        let popup_width = chunks[2].width.saturating_sub(2).max(40);
+        let popup_x = chunks[2].x + 1;
+        let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+        f.render_widget(Clear, popup_area);
+
+        // Window the suggestions if there are more than max_visible
+        let sel_idx = state.slash_suggestion_idx;
+        let start_idx = if sel_idx >= max_visible {
+            sel_idx + 1 - max_visible
+        } else {
+            0
+        };
+        let end_idx = (start_idx + max_visible).min(state.slash_suggestions.len());
+
+        let items: Vec<ListItem> = state.slash_suggestions[start_idx..end_idx]
+            .iter()
+            .enumerate()
+            .map(|(rel_idx, skill)| {
+                let actual_idx = start_idx + rel_idx;
+                let is_selected = actual_idx == sel_idx;
+
+                let prefix = if is_selected { " ▶ " } else { "   " };
+                let cmd_display = format!("/{}", skill.command);
+                let target_hint = if !skill.target_placeholder().is_empty() {
+                    format!(" [{}]", skill.target_placeholder())
+                } else {
+                    String::new()
+                };
+
+                let row_style = if is_selected {
+                    Style::default().fg(Color::Black).bg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::FG)
+                };
+
+                let mut spans = vec![
+                    Span::styled(prefix, row_style),
+                    Span::styled(
+                        cmd_display,
+                        if is_selected {
+                            row_style
+                        } else {
+                            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                        },
+                    ),
+                ];
+                if !target_hint.is_empty() {
+                    spans.push(Span::styled(
+                        target_hint,
+                        if is_selected {
+                            row_style
+                        } else {
+                            Style::default().fg(Theme::YELLOW)
+                        },
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!(" - {}", skill.description),
+                    if is_selected {
+                        row_style
+                    } else {
+                        Style::default().fg(Theme::DIM)
+                    },
+                ));
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        let popup_title = format!(
+            " ⚡ SRE Playbooks & Slash Commands ({}/{}) [<Tab>/<Enter>: Apply, ↑/↓: Select] ",
+            sel_idx + 1,
+            state.slash_suggestions.len()
+        );
+
+        let popup_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::ACCENT))
+            .title(Span::styled(
+                popup_title,
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            ));
+
+        let list_widget = List::new(items).block(popup_block);
+        f.render_widget(list_widget, popup_area);
+    }
 }
 
 /// Formats message text lines, detecting and rendering Markdown structures:

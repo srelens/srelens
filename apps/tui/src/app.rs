@@ -1506,9 +1506,15 @@ impl App {
             }
             // Pop View Stack / Back
             KeyCode::Esc => {
-                if matches!(self.active_view, ActiveView::Assistant) && self.assistant_state.selection.is_some() {
-                    self.assistant_state.clear_selection();
-                    return;
+                if matches!(self.active_view, ActiveView::Assistant) {
+                    if !self.assistant_state.slash_suggestions.is_empty() {
+                        self.assistant_state.slash_suggestions.clear();
+                        return;
+                    }
+                    if self.assistant_state.selection.is_some() {
+                        self.assistant_state.clear_selection();
+                        return;
+                    }
                 }
                 if let ActiveView::Yaml(ref mut yaml) = self.active_view {
                     if yaml.selection.is_some() {
@@ -1553,6 +1559,10 @@ impl App {
             // Toggle AI Assistant Drawer
             KeyCode::Tab => {
                 if matches!(self.active_view, ActiveView::Assistant) {
+                    if !self.assistant_state.slash_suggestions.is_empty() {
+                        self.assistant_state.apply_selected_slash_suggestion();
+                        return;
+                    }
                     if let Some(prev) = self.nav_stack.pop() {
                         self.active_view = prev;
                         self.restart_active_watch().await;
@@ -2279,6 +2289,14 @@ impl App {
                     return;
                 }
                 match key.code {
+                    // Slash Suggestion Autocomplete: Tab
+                    KeyCode::Tab => {
+                        if !ai.slash_suggestions.is_empty() {
+                            ai.apply_selected_slash_suggestion();
+                            return;
+                        }
+                    }
+
                     // Copy selection with 'c' (or copy last assistant message if input is empty)
                     KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                         if let Some(selected) = ai.get_selected_text() {
@@ -2290,15 +2308,29 @@ impl App {
                                 self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
                             } else {
                                 ai.input.push('c');
+                                ai.update_slash_suggestions();
                             }
                         } else {
                             ai.input.push('c');
+                            ai.update_slash_suggestions();
                         }
                     }
 
-                    // Prompt History Navigation (Up/Down recalls sent prompts)
-                    KeyCode::Up => ai.history_up(),
-                    KeyCode::Down => ai.history_down(),
+                    // Prompt History / Slash Suggestions Navigation
+                    KeyCode::Up => {
+                        if !ai.slash_suggestions.is_empty() {
+                            ai.slash_suggestion_up();
+                            return;
+                        }
+                        ai.history_up();
+                    }
+                    KeyCode::Down => {
+                        if !ai.slash_suggestions.is_empty() {
+                            ai.slash_suggestion_down();
+                            return;
+                        }
+                        ai.history_down();
+                    }
 
                     // Viewport Scrolling (PageUp/PageDown, Home/End, or Mouse Scroll)
                     KeyCode::PageUp => ai.scroll_up(10),
@@ -2313,31 +2345,101 @@ impl App {
                     // Editing & Input
                     _ if is_word_delete_key(&key) => {
                         delete_prev_word(&mut ai.input);
+                        ai.update_slash_suggestions();
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
                         ai.input.clear();
+                        ai.update_slash_suggestions();
                     }
                     KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(clip) = get_clipboard_text() {
                             let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                             ai.input.push_str(&cleaned);
+                            ai.update_slash_suggestions();
                         }
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                         ai.input.push(c);
+                        ai.update_slash_suggestions();
                     }
-                    KeyCode::Backspace => { ai.input.pop(); },
+                    KeyCode::Backspace => {
+                        ai.input.pop();
+                        ai.update_slash_suggestions();
+                    }
                     KeyCode::Enter => {
                         if ai.is_busy {
                             self.set_toast("⚠️ Assistant is busy processing a query. Please wait or press <Ctrl+l> to clear.".to_string(), Theme::status_warn());
                             return;
                         }
-                        if !ai.input.trim().is_empty() {
-                            let query = ai.input.clone();
-                            ai.start_turn(query.clone());
-                            let provider = self.ai_settings.default_provider;
-                            let active_ctx = self.active_context.clone();
-                            let active_ns = self.active_namespace.clone();
+                        let raw_input = ai.input.trim().to_string();
+                        if raw_input.is_empty() {
+                            return;
+                        }
+
+                        let clean_query = raw_input.clone();
+                        let mut agent_query = raw_input.clone();
+
+                        if raw_input.starts_with('/') {
+                            let parts: Vec<&str> = raw_input.split_whitespace().collect();
+                            let cmd = parts.first().map(|s| s.trim_start_matches('/')).unwrap_or("");
+                            let arg = if parts.len() > 1 {
+                                Some(parts[1..].join(" "))
+                            } else {
+                                None
+                            };
+
+                            // Check utility commands first
+                            match cmd {
+                                "clear" | "cls" | "reset" => {
+                                    ai.clear_conversation();
+                                    ai.input.clear();
+                                    ai.slash_suggestions.clear();
+                                    self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
+                                    return;
+                                }
+                                "save" | "export" => {
+                                    let prov = self.ai_settings.default_provider;
+                                    let prov_name = crate::ai_config::provider_display_name(prov);
+                                    let model = self.ai_settings.get_model(prov);
+                                    let save_res = ai.save_conversation_to_file(prov_name, &model, None);
+                                    ai.input.clear();
+                                    ai.slash_suggestions.clear();
+                                    match save_res {
+                                        Ok(path) => self.set_toast(format!("✓ Saved conversation to {}", path.display()), Theme::status_ok()),
+                                        Err(err) => self.set_toast(format!("Failed to save conversation: {}", err), Theme::status_error()),
+                                    }
+                                    return;
+                                }
+                                "settings" | "config" | "model" => {
+                                    ai.input.clear();
+                                    ai.slash_suggestions.clear();
+                                    self.switch_view_to_kind(ResourceKind::Settings).await;
+                                    return;
+                                }
+                                _ => {}
+                            }
+
+                            // Check playbooks expansion
+                            if let Some(expanded) = crate::ai_skills::expand_slash_command(
+                                cmd,
+                                arg.as_deref(),
+                                &self.active_context,
+                                &self.active_namespace,
+                            ) {
+                                agent_query = expanded;
+                                ai.slash_suggestions.clear();
+                            } else if !ai.slash_suggestions.is_empty() && (!raw_input.contains(' ') || raw_input == "/") {
+                                ai.apply_selected_slash_suggestion();
+                                return;
+                            }
+                        }
+
+                        ai.slash_suggestions.clear();
+                        ai.start_turn(clean_query);
+                        let query = agent_query;
+                        let provider = self.ai_settings.default_provider;
+                        let active_ctx = self.active_context.clone();
+                        let active_ns = self.active_namespace.clone();
 
                             if provider == crate::ai_config::AiProvider::Cursor {
                                 if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
@@ -2398,7 +2500,6 @@ impl App {
                                 ai.add_assistant_message(reply);
                             }
                         }
-                    }
                     _ => {}
                 }
             }
@@ -3659,6 +3760,24 @@ impl App {
                     description: "Inspect pod status, errors, exit codes & recent events".to_string(),
                 },
                 QuickActionItem {
+                    id: QuickActionId::PlaybookCrashLoop,
+                    key_hint: "/crashloop".to_string(),
+                    title: "⚡ AI Triage CrashLoopBackOff".to_string(),
+                    description: "Fetch previous container logs, termination exit codes & recent events".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PlaybookPending,
+                    key_hint: "/pending".to_string(),
+                    title: "⚡ AI Diagnose Pending / Unschedulable".to_string(),
+                    description: "Analyze scheduling taints, node affinities, and PVC constraints".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PlaybookOom,
+                    key_hint: "/oom".to_string(),
+                    title: "⚡ AI Diagnose OOMKilled".to_string(),
+                    description: "Inspect memory limits, usage peaks, and OOM terminations".to_string(),
+                },
+                QuickActionItem {
                     id: QuickActionId::RelationshipTree,
                     key_hint: "t".to_string(),
                     title: "🌳 Resource Relationship Tree".to_string(),
@@ -3713,6 +3832,12 @@ impl App {
                     key_hint: "ai".to_string(),
                     title: format!("🤖 Ask AI Assistant about this {}", kind),
                     description: "Analyze workload health, failing replicas & recent events".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PlaybookRollout,
+                    key_hint: "/rollout".to_string(),
+                    title: "⚡ AI Diagnose Stalled Rollout".to_string(),
+                    description: "Examine rollout progression, updated vs available replicas & blockers".to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
@@ -3777,6 +3902,12 @@ impl App {
                     description: "View Service -> Ingress -> Endpoints -> Pods".to_string(),
                 },
                 QuickActionItem {
+                    id: QuickActionId::PlaybookEndpoints,
+                    key_hint: "/endpoints".to_string(),
+                    title: "⚡ AI Triage Missing Endpoints".to_string(),
+                    description: "Check selector matching, readiness probes, and backend pods".to_string(),
+                },
+                QuickActionItem {
                     id: QuickActionId::JumpToPods,
                     key_hint: "pods".to_string(),
                     title: "🎯 Jump to Backend Pods".to_string(),
@@ -3839,6 +3970,12 @@ impl App {
                     key_hint: "i".to_string(),
                     title: "🔍 Deep Node & GPU Inspector".to_string(),
                     description: "Hardware capacity, GPU cards, VRAM & scheduled pods".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PlaybookNodePressure,
+                    key_hint: "/nodepressure".to_string(),
+                    title: "⚡ AI Triage Node Pressure & Health".to_string(),
+                    description: "Analyze Memory/Disk pressure conditions, kubelet health & pod evictions".to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
@@ -3950,6 +4087,42 @@ impl App {
                             namespace.as_deref().unwrap_or("default")
                         );
                         self.assistant_state.input = prompt;
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookCrashLoop => {
+                        self.assistant_state.input = format!("/crashloop {}", resource_name);
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookPending => {
+                        self.assistant_state.input = format!("/pending {}", resource_name);
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookOom => {
+                        self.assistant_state.input = format!("/oom {}", resource_name);
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookRollout => {
+                        self.assistant_state.input = format!("/rollout {}", resource_name);
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookEndpoints => {
+                        self.assistant_state.input = format!("/endpoints {}", resource_name);
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookNodePressure => {
+                        self.assistant_state.input = format!("/nodepressure {}", resource_name);
+                        self.assistant_state.update_slash_suggestions();
                         let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
                         self.nav_stack.push(old);
                     }

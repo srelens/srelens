@@ -17,6 +17,7 @@ use ratatui::Terminal;
 
 mod agent;
 mod ai_config;
+mod ai_skills;
 mod app;
 mod commands;
 mod deep_link;

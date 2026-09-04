@@ -3343,4 +3343,138 @@ mod tests {
             assert_eq!(l.scroll_offset, 2); // 3rd line has ERROR
         }
     }
+
+    #[tokio::test]
+    async fn test_slash_commands_and_ai_playbooks() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ai_skills::{expand_slash_command, match_slash_commands};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-cluster".to_string()),
+            Some("production".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        app.active_view = ActiveView::Assistant;
+        app.active_context = "test-cluster".to_string();
+        app.active_namespace = "production".to_string();
+
+        // 1. Typing '/' triggers slash suggestions popup
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.input, "/");
+        assert!(!app.assistant_state.slash_suggestions.is_empty());
+        assert!(app.assistant_state.slash_suggestions.len() >= 9);
+
+        // 2. Typing 'c' then 'r' narrows suggestions to crashloop
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.input, "/cr");
+        assert_eq!(app.assistant_state.slash_suggestions.len(), 1);
+        assert_eq!(app.assistant_state.slash_suggestions[0].command, "crashloop");
+
+        // 3. Pressing Tab applies the suggestion with trailing space
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.input, "/crashloop ");
+        assert!(app.assistant_state.slash_suggestions.is_empty());
+
+        // 4. Test Up / Down navigation when suggestions are active
+        app.assistant_state.input = "/".to_string();
+        app.assistant_state.update_slash_suggestions();
+        assert_eq!(app.assistant_state.slash_suggestion_idx, 0);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.slash_suggestion_idx, 1);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.slash_suggestion_idx, 0);
+
+        // 5. Pressing Esc closes suggestions popup without leaving Assistant view
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(app.assistant_state.slash_suggestions.is_empty());
+        assert!(matches!(app.active_view, ActiveView::Assistant));
+
+        // 6. Test Playbook expansion (targeted vs discovery fallback)
+        let targeted = expand_slash_command("crashloop", Some("api-gateway-7f"), "test-cluster", "production").unwrap();
+        assert!(targeted.contains("Focus on Pod 'api-gateway-7f' in namespace 'production'"));
+        assert!(targeted.contains("PREVIOUS container's logs"));
+
+        let discovery = expand_slash_command("crashloop", None, "test-cluster", "production").unwrap();
+        assert!(discovery.contains("Scan namespace 'production' for any pods experiencing this issue"));
+
+        let node_playbook = expand_slash_command("nodepressure", None, "test-cluster", "").unwrap();
+        assert!(node_playbook.contains("MemoryPressure, DiskPressure, PIDPressure"));
+
+        let cluster_briefing = expand_slash_command("summarise", None, "prod-cluster", "").unwrap();
+        assert!(cluster_briefing.contains("executive briefing"));
+
+        // 7. Test utility command execution via Enter
+        app.assistant_state.add_assistant_message("Previous message".to_string());
+        assert!(!app.assistant_state.messages.is_empty());
+
+        app.assistant_state.input = "/clear".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.messages.len(), 1);
+        assert!(app.assistant_state.messages[0].content.contains("Hello! I am your SRElens AI Assistant"));
+        assert_eq!(app.assistant_state.input, "");
+    }
+
+    #[tokio::test]
+    async fn test_action_palette_playbooks() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::dialogs::{Modal, QuickActionId};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-cluster".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // 1. Pod palette has PlaybookCrashLoop, PlaybookPending, PlaybookOom
+        app.open_action_palette("Pod".to_string(), "my-failing-pod".to_string(), Some("default".to_string()));
+        if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
+            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookCrashLoop));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookPending));
+            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookOom));
+        } else {
+            panic!("Expected ActionPalette modal");
+        }
+
+        // 2. Select PlaybookCrashLoop and execute
+        if let Some(Modal::ActionPalette { ref mut selected_idx, ref actions, .. }) = app.modal {
+            let idx = actions.iter().position(|a| a.id == QuickActionId::PlaybookCrashLoop).unwrap();
+            *selected_idx = idx;
+        }
+        app.execute_action_palette().await;
+
+        assert!(matches!(app.active_view, ActiveView::Assistant));
+        assert_eq!(app.assistant_state.input, "/crashloop my-failing-pod");
+
+        // 3. Workload palette has PlaybookRollout
+        app.open_action_palette("Deployment".to_string(), "web-app".to_string(), Some("prod".to_string()));
+        if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
+            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookRollout));
+        }
+
+        // 4. Service palette has PlaybookEndpoints
+        app.open_action_palette("Service".to_string(), "api-svc".to_string(), Some("prod".to_string()));
+        if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
+            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookEndpoints));
+        }
+
+        // 5. Node palette has PlaybookNodePressure
+        app.open_action_palette("Node".to_string(), "worker-01".to_string(), None);
+        if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
+            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookNodePressure));
+        }
+    }
 }
