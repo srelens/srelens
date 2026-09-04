@@ -33,15 +33,20 @@ export function isBuiltInKind(kind: string): boolean {
 export async function resolveCrdGvk(
   context: string,
   kind: string,
+  /** The API group, when the caller knows it — the only thing that tells a
+   *  CRD reusing a built-in kind's name apart from the built-in. */
+  group?: string,
 ): Promise<{ crd?: DynamicGvk; error?: string }> {
   const result = await listCrds(context);
   if (result.error) {
     return { error: `Could not look up ${kind}'s CustomResourceDefinition: ${result.error}` };
   }
-  const matches = result.crds?.filter((c) => c.kind === kind) ?? [];
+  const named = group === undefined ? kind : `${kind} in ${group}`;
+  const matches =
+    result.crds?.filter((c) => c.kind === kind && (group === undefined || c.group === group)) ?? [];
   if (matches.length === 0) {
     return {
-      error: `${kind} has no matching CustomResourceDefinition on this cluster, so its manifest cannot be resolved.`,
+      error: `${named} has no matching CustomResourceDefinition on this cluster, so its manifest cannot be resolved.`,
     };
   }
   if (matches.length > 1) {

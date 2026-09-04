@@ -75,7 +75,7 @@ data:
   key: value
 `;
 const EDITED = LIVE.replace("key: value", "key: changed");
-const ROUTE = "/edit/ConfigMap/checkout/web";
+const ROUTE = "/edit/prod-eu/ConfigMap/checkout/web";
 
 /** The editor's last mount, and a way to type into it. */
 function latestEditor() {
@@ -215,7 +215,7 @@ describe("EditResource", () => {
     // `k8s.getManifest` returns a Secret in the clear; the detail pane
     // redacts it and the editor has to, or one tab over undoes the gate.
     core.getManifest.mockResolvedValue({ yaml: SECRET });
-    render(<EditResource route="/edit/Secret/checkout/db" />);
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
     await waitFor(() => expect(latestEditor()?.value).toBeDefined());
     const shown = latestEditor().value as string;
     expect(shown).not.toContain("czNjcmV0");
@@ -238,7 +238,7 @@ describe("EditResource", () => {
       crds: [{ name: "widgets.acme.io", group: "acme.io", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
     });
     core.getManifest.mockResolvedValue({ yaml: "apiVersion: acme.io/v1\nkind: Widget\nmetadata:\n  name: w1\n" });
-    render(<EditResource route="/edit/Widget/checkout/w1" />);
+    render(<EditResource route="/edit/prod-eu/Widget/checkout/w1" />);
     await waitFor(() => expect(latestEditor()?.value).toContain("kind: Widget"));
     expect(core.getManifest).toHaveBeenCalledWith("prod-eu", "Widget", "checkout", "w1", undefined, {
       group: "acme.io",
@@ -275,6 +275,68 @@ describe("EditResource", () => {
     await userEvent.click(within(dialog).getByRole("checkbox"));
     await userEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(core.applyManifest).toHaveBeenCalledWith("prod-eu", EDITED, false));
+  });
+
+  it("edits the cluster named in the route, not the one the rail is on", async () => {
+    // Edit picked on staging while the rail — and perhaps another editor tab
+    // for the same-named resource — is on prod-eu. The route carries the
+    // cluster, so this is its own tab, pinned to staging from the first read.
+    render(<EditResource route="/edit/staging/ConfigMap/checkout/web" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    expect(core.getManifest).toHaveBeenCalledWith("staging", "ConfigMap", "checkout", "web", undefined, undefined);
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("still runs against staging, not prod-eu");
+  });
+
+  it("takes a conflict down once the draft that caused it changes", async () => {
+    core.applyManifest.mockResolvedValueOnce({
+      documents: [
+        {
+          kind: "ConfigMap",
+          name: "web",
+          applied: false,
+          conflict: { managers: ["helm"], fields: [".data.key"], message: "conflict" },
+        },
+      ],
+      applied: false,
+    });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Apply" }));
+    await screen.findByRole("alert");
+
+    // Force applies what is in the editor, so a banner left over an edited
+    // draft would force text no plain apply had described. Typing takes it
+    // down, Force with it.
+    act(() => latestEditor().onChange(EDITED.replace("changed", "changed-again")));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Force apply" })).toBeNull();
+    // Back to the conflicted text, and the banner is back: it is that text's.
+    act(() => latestEditor().onChange(EDITED));
+    expect(screen.getByRole("alert").textContent).toContain("helm");
+  });
+
+  it("opens a custom kind that shares a built-in's name under its own group, not as the built-in", async () => {
+    core.listCrds.mockResolvedValue({
+      crds: [
+        { name: "deployments.acme.io", group: "acme.io", version: "v1", kind: "Deployment", plural: "deployments", namespaced: true },
+      ],
+    });
+    core.getManifest.mockResolvedValue({ yaml: "apiVersion: acme.io/v1\nkind: Deployment\nmetadata:\n  name: api\n" });
+    render(<EditResource route="/edit/prod-eu/acme.io%2FDeployment/checkout/api" />);
+    await waitFor(() => expect(latestEditor()?.value).toContain("acme.io/v1"));
+    expect(core.getManifest).toHaveBeenCalledWith("prod-eu", "Deployment", "checkout", "api", undefined, {
+      group: "acme.io",
+      version: "v1",
+      plural: "deployments",
+    });
+    // And no Delete: `k8s.deleteResource` resolves by kind alone, which here
+    // would be the built-in Deployment of the same name.
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   });
 
   it("says when the manifest could not be read, instead of an empty editor", async () => {

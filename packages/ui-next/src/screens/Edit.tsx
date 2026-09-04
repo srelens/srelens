@@ -28,7 +28,7 @@ import {
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
 import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
-import { parseEditRoute, type DetailRouteParts } from "../lib/detailRoute";
+import { parseEditRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
@@ -77,20 +77,20 @@ export function EditResource({ route }: { route: string }) {
         <div className="p-4">
           <FailureAlert
             title={`${route} does not name a resource`}
-            error="An editor tab's route is /edit/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."
+            error="An editor tab's route is /edit/<cluster>/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."
           />
         </div>
       </Screen>
     );
   }
 
-  // Keyed by route alone, NOT by cluster. A tab that is re-pointed at another
-  // resource starts its draft over; a rail that moves to another cluster must
-  // not. Each editor pins the cluster it was opened on, and that pin has to
-  // outlive the rail: keyed by `stableId` too, a rail switch remounted the
-  // editor, re-pinned it to the new cluster, threw the draft away, and made
-  // the gate see pinned === live — so Apply and Delete went to the new
-  // cluster without the moved-cluster warning this screen promises.
+  // Keyed by route alone, NOT by the rail's cluster. The route names the
+  // cluster the editor is FOR (see `EditRouteParts`), so a tab re-pointed at
+  // another resource, or at another cluster's resource, starts over — while a
+  // rail that merely moves must not: keyed by `stableId` too, a rail switch
+  // remounted the editor, re-pinned it to the new cluster, threw the draft
+  // away, and made the gate see pinned === live — so Apply and Delete went to
+  // the new cluster without the moved-cluster warning this screen promises.
   return parts ? (
     <EditExisting key={route} context={context} parts={parts} />
   ) : (
@@ -127,17 +127,27 @@ function useApply({
   pinned,
   live,
   verb,
+  yaml,
   onApplied,
 }: {
   pinned: string;
   live: string;
   verb: string;
+  /** What the editor holds NOW — what a remembered conflict is checked against. */
+  yaml: string;
   onApplied: (docs: ApplyDoc[]) => void;
 }) {
   const gate = useClusterGate({ pinned, live, verb });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [conflicts, setConflicts] = useState<ApplyDoc[]>([]);
+  // A conflict is remembered WITH the text that produced it, and shown only
+  // while the editor still holds that text. The banner's Force applies what
+  // is in the editor, so a banner left standing over an edited draft would
+  // have forced text no non-forcing attempt had described — new documents,
+  // retargeted ones — and taken ownership the banner never named. Typing
+  // takes the banner down; the next Apply is a plain one.
+  const [conflict, setConflict] = useState<{ docs: ApplyDoc[]; yaml: string } | null>(null);
+  const conflicts = conflict !== null && conflict.yaml === yaml ? conflict.docs : [];
   const [applied, setApplied] = useState<{ kind: string; name: string } | null>(null);
 
   async function apply(yaml: string, force: boolean) {
@@ -154,7 +164,7 @@ function useApply({
     setBusy(false);
     if (out.error) {
       setError(describeError(out.error).detail);
-      setConflicts([]);
+      setConflict(null);
       return false;
     }
     const docs = out.documents ?? [];
@@ -163,11 +173,11 @@ function useApply({
     // success, toast one, and reload the unchanged object.
     if (docs.length === 0) {
       setError("Nothing to apply: the manifest has no documents in it.");
-      setConflicts([]);
+      setConflict(null);
       return false;
     }
     const { conflicts: conflicted, failures } = outcome(docs);
-    setConflicts(conflicted);
+    setConflict(conflicted.length > 0 ? { docs: conflicted, yaml } : null);
     // A conflict and a hard failure can arrive together; the failure is shown
     // now rather than after the reader has forced the conflict.
     if (failures.length > 0) setError(failureLine(failures));
@@ -254,19 +264,28 @@ function Changes({ docs, computing }: { docs: DiffDoc[] | null; computing: boole
   );
 }
 
-function EditExisting({ context, parts }: { context: ClusterContext; parts: DetailRouteParts }) {
-  // The cluster this tab was opened on. Reads and writes go here, whatever the
-  // rail does later.
-  const [pinned] = useState(context.name);
+function EditExisting({ context, parts }: { context: ClusterContext; parts: EditRouteParts }) {
+  // The cluster this tab is FOR: the one in the route, which is the one the
+  // resource was picked on. Reads and writes go here, whatever the rail does
+  // later. Only a route an earlier build persisted has no cluster in it, and
+  // that one pins whatever the rail was on when the tab came back.
+  const [pinned] = useState(parts.cluster ?? context.name);
   const { kind, namespace, name } = parts;
+
+  // Custom when the route says so — a group is carried only for a custom
+  // kind, and it is what tells `Deployment` in `acme.io` from the built-in
+  // — or, on a route with no group, when the kind is outside the built-in
+  // table.
+  const custom = parts.group !== undefined || !isBuiltInKind(kind);
 
   // Whether Delete is offered at all: the same verdict the list menu and the
   // detail footer reach from the kind's descriptor. `k8s.deleteResource`
   // resolves kinds from a closed table with no CRD path — the manifest read
   // below is told a custom kind's group, delete cannot be — so for a custom
-  // resource it fails every time, after a confirm that read as real. See
-  // `KindActions.delete`.
-  const actions = isBuiltInKind(kind) ? descriptorFor(SLUG_BY_K8S_KIND[kind])?.actions : CUSTOM_RESOURCE_ACTIONS;
+  // resource it fails every time, after a confirm that read as real; and for
+  // a custom kind that shares a built-in's name it would delete the built-in.
+  // See `KindActions.delete`.
+  const actions = custom ? CUSTOM_RESOURCE_ACTIONS : descriptorFor(SLUG_BY_K8S_KIND[kind])?.actions;
   const canDelete = actions?.delete !== false;
 
   /**
@@ -292,8 +311,8 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
       // A kind outside the built-in table has to be resolved to its group
       // first, or the read fails for every custom resource.
       let crd: DynamicGvk | undefined;
-      if (!isBuiltInKind(kind)) {
-        const resolved = await resolveCrdGvk(pinned, kind);
+      if (custom) {
+        const resolved = await resolveCrdGvk(pinned, kind, parts.group);
         if (resolved.error) throw new Error(resolved.error);
         crd = resolved.crd;
       }
@@ -340,6 +359,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
   const editor = useApply({
     pinned,
     live: context.name,
+    yaml,
     verb: "apply",
     onApplied: () => {
       // The live object is now what was typed; the draft has nothing left to
@@ -707,7 +727,7 @@ function NewResource({ context }: { context: ClusterContext }) {
     setYaml((current) => (current === TEMPLATES[template](namespace) ? TEMPLATES[template](first) : current));
   }, [options, namespace, template]);
 
-  const editor = useApply({ pinned, live: context.name, verb: "create", onApplied: () => {} });
+  const editor = useApply({ pinned, live: context.name, verb: "create", yaml, onApplied: () => {} });
   const untouched = yaml === TEMPLATES[template](namespace);
 
   const pickTemplate = (next: string) => {

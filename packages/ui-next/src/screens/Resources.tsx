@@ -216,6 +216,7 @@ function KindList({
     context: name,
     kind: descriptor?.k8sKind ?? "",
     actions: descriptor?.actions ?? {},
+    group: descriptor?.group,
   });
 
   // The checkbox column's selection. Table owns the interaction (toggle,

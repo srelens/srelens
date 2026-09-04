@@ -170,10 +170,37 @@ describe("useRowMenu", () => {
    * click focused the FIRST resource's editor. A Pod `api` and a Deployment
    * `api` collapsed the same way.
    */
-  it("opens Edit at a route carrying the kind, the namespace and the name", async () => {
+  it("opens Edit at a route carrying the cluster, the kind, the namespace and the name", async () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/edit/Pod/kube-system/web-0")).toBe(true);
+    expect(
+      store.currentWorkspace().tabs.some((t) => t.route === `/edit/${POD_ARGS.context}/Pod/kube-system/web-0`),
+    ).toBe(true);
+  });
+
+  it("gives Edit on two clusters' same-named resources two tabs, not one", async () => {
+    // The editor pins the cluster it was opened on, so a second cluster's
+    // same-named resource must not land on the first cluster's pinned draft.
+    const row = { name: "web", namespace: "default" };
+    const { unmount } = render(<Harness args={{ context: "prod", kind: "ConfigMap", actions: {} }} row={row} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    unmount();
+    render(<Harness args={{ context: "staging", kind: "ConfigMap", actions: {} }} row={row} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const edits = store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/edit/"));
+    expect(edits.map((t) => t.route)).toEqual([
+      "/edit/prod/ConfigMap/default/web",
+      "/edit/staging/ConfigMap/default/web",
+    ]);
+  });
+
+  it("carries a custom kind's group into Edit's route, so a CRD reusing a built-in's name opens its own object", async () => {
+    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { delete: false }, group: "acme.io" };
+    render(<Harness args={args} row={{ name: "api", namespace: "default" }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(
+      store.currentWorkspace().tabs.some((t) => t.route === "/edit/prod/acme.io%2FDeployment/default/api"),
+    ).toBe(true);
   });
 
   it("gives Edit on two namespaces' same-named resources two tabs, not one", async () => {
@@ -185,15 +212,17 @@ describe("useRowMenu", () => {
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
     const edits = store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/edit/"));
     expect(edits.map((t) => t.route)).toEqual([
-      "/edit/Deployment/default/api",
-      "/edit/Deployment/staging/api",
+      "/edit/prod/Deployment/default/api",
+      "/edit/prod/Deployment/staging/api",
     ]);
   });
 
   it("gives Edit on a cluster-scoped kind the same arity, with the placeholder segment", async () => {
     render(<Harness args={NODE_ARGS} row={NODE_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/edit/Node/-/worker-1")).toBe(true);
+    expect(
+      store.currentWorkspace().tabs.some((t) => t.route === `/edit/${NODE_ARGS.context}/Node/-/worker-1`),
+    ).toBe(true);
   });
 
   it("opens Follow logs at the Logs screen's route, not the placeholder one", async () => {

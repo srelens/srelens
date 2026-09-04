@@ -48,9 +48,47 @@ export interface DetailRouteParts {
  * does for a DETAIL route today. Reported rather than changed: that file is
  * outside this task's reach.
  */
-export function editRoute(kind: string, namespace: string | null, name: string): string {
+export function editRoute(
+  kind: string,
+  namespace: string | null,
+  name: string,
+  on: {
+    /** The cluster the resource is on — part of the editor's identity, see {@link EditRouteParts}. */
+    cluster: string;
+    /** The API group, for a custom kind only — see {@link EditRouteParts.group}. */
+    group?: string;
+  },
+): string {
   const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
-  return `/edit/${encodeURIComponent(kind)}/${ns}/${encodeURIComponent(name)}`;
+  const qualified = on.group ? `${on.group}/${kind}` : kind;
+  return `/edit/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${ns}/${encodeURIComponent(name)}`;
+}
+
+/**
+ * What an edit route names, over and above a detail route.
+ *
+ * **The cluster is in the route** because the editor PINS the cluster it was
+ * opened on — every read and write goes there, whatever the rail does later —
+ * and `openTab` dedupes by route string. With the cluster left out, Edit on
+ * staging's `default/web` while prod's editor for `default/web` was open
+ * focused prod's draft, and staging's resource could not be opened at all
+ * without closing that tab first. The detail route has no cluster in it
+ * because the detail pane follows the rail; the editor deliberately does not.
+ *
+ * **The group is in the route for a custom kind** because a kind NAME alone
+ * does not identify one: a CRD may legally reuse a built-in kind's name in its
+ * own group — `Deployment` in `acme.io` — and an editor that inferred
+ * "built-in" from the name would read, and offer to delete, the built-in
+ * object of the same name instead. It rides in the kind segment as
+ * `<group>/<kind>`, kubectl's own qualified spelling; the segment is
+ * percent-encoded, so the `/` never changes the route's arity.
+ */
+export interface EditRouteParts extends DetailRouteParts {
+  /** Absent only on the five-segment shape an earlier build persisted, which
+   *  had no cluster in it; the editor then pins whatever the rail is on. */
+  cluster?: string;
+  /** Set only for a custom kind. A built-in kind's group is known to the backend. */
+  group?: string;
 }
 
 /**
@@ -87,10 +125,43 @@ function parseResourceRoute(route: string, prefix: string): DetailRouteParts | n
   }
 }
 
-/** The inverse of {@link editRoute}, or `null` for anything it cannot make a
- *  subject of — including the legacy one-segment `/edit/<name>`. */
-export function parseEditRoute(route: string): DetailRouteParts | null {
-  return parseResourceRoute(route, "edit");
+/**
+ * The inverse of {@link editRoute}, or `null` for anything it cannot make a
+ * subject of — including the legacy one-segment `/edit/<name>`.
+ *
+ * Six segments is the shape `editRoute` mints; five is the shape before the
+ * cluster joined it, still parsed so a tab an earlier build persisted opens
+ * an editor rather than the Placeholder.
+ */
+export function parseEditRoute(route: string): EditRouteParts | null {
+  const segments = route.split("/");
+  if (segments.length === 5) {
+    const parts = parseResourceRoute(route, "edit");
+    return parts ? splitGroup(parts) : null;
+  }
+  if (segments.length !== 6) return null;
+  const [empty, head, rawCluster, ...rest] = segments;
+  if (empty !== "" || head !== "edit" || !rawCluster) return null;
+  const parts = parseResourceRoute(`/edit/${rest.join("/")}`, "edit");
+  if (!parts) return null;
+  let cluster: string;
+  try {
+    cluster = decodeURIComponent(rawCluster);
+  } catch {
+    return null;
+  }
+  const qualified = splitGroup(parts);
+  return qualified ? { ...qualified, cluster } : null;
+}
+
+/** `<group>/<kind>` in the kind segment becomes `group` and `kind`; a bare kind is left alone. */
+function splitGroup(parts: DetailRouteParts): EditRouteParts | null {
+  const at = parts.kind.lastIndexOf("/");
+  if (at < 0) return parts;
+  const group = parts.kind.slice(0, at);
+  const kind = parts.kind.slice(at + 1);
+  if (!group || !kind) return null;
+  return { ...parts, group, kind };
 }
 
 /**
