@@ -28,9 +28,12 @@ vi.mock("@srelens/core/react", async (orig) => ({
   ...(await orig<typeof import("@srelens/core/react")>()),
   useNamespaceOptions: () => ({ namespaces: ["default", "payments"], scope: "", error: "" }),
 }));
+// The rail's cluster, mutable so a test can move it out from under an open
+// editor the way a reader would.
+const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu" } }));
 vi.mock("../lib/clusters", async (orig) => ({
   ...(await orig<typeof import("../lib/clusters")>()),
-  useActiveContext: () => ({ name: "prod-eu", stableId: "prod-eu" }),
+  useActiveContext: () => ({ ...active }),
   getKubeconfigFiles: () => [],
 }));
 
@@ -87,6 +90,8 @@ function latestEditor() {
 
 beforeEach(() => {
   editors.length = 0;
+  active.name = "prod-eu";
+  active.stableId = "prod-eu";
   core.getManifest.mockReset().mockResolvedValue({ yaml: LIVE });
   core.applyManifest.mockReset().mockResolvedValue({
     documents: [{ kind: "ConfigMap", name: "web", applied: true }],
@@ -240,6 +245,36 @@ describe("EditResource", () => {
       version: "v1",
       plural: "widgets",
     });
+    // `k8s.deleteResource` has no CRD path, so Delete on a custom resource
+    // would fail every time; it is withheld, as the list menu withholds it.
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("keeps the cluster it opened on when the rail moves, and asks before writing there", async () => {
+    const { rerender } = render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+
+    // The rail moves on to another cluster. The tab is not re-pointed: the
+    // draft stays, nothing is re-read, and the write is still aimed at the
+    // cluster the tab opened on.
+    active.name = "staging";
+    active.stableId = "staging";
+    rerender(<EditResource route={ROUTE} />);
+    expect(latestEditor().value).toBe(EDITED);
+    expect(core.getManifest).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("still runs against prod-eu, not staging");
+    // Unacknowledged, the apply is refused and the dialog stays on the question.
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(core.applyManifest).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog").textContent).toContain("This runs on prod-eu, not staging");
+
+    await userEvent.click(within(dialog).getByRole("checkbox"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(core.applyManifest).toHaveBeenCalledWith("prod-eu", EDITED, false));
   });
 
   it("says when the manifest could not be read, instead of an empty editor", async () => {

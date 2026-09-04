@@ -27,9 +27,11 @@ import {
 } from "@srelens/ui-kit";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
-import { isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
+import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, type DetailRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
+import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
+import { descriptorFor } from "../lib/kinds/descriptors";
 import { useResource } from "../lib/useResource";
 import { NoClusterScreen } from "./resourceShell";
 
@@ -82,12 +84,17 @@ export function EditResource({ route }: { route: string }) {
     );
   }
 
-  // Keyed by cluster and route, so a tab that is re-pointed starts its draft
-  // over rather than carrying one resource's edits onto another.
+  // Keyed by route alone, NOT by cluster. A tab that is re-pointed at another
+  // resource starts its draft over; a rail that moves to another cluster must
+  // not. Each editor pins the cluster it was opened on, and that pin has to
+  // outlive the rail: keyed by `stableId` too, a rail switch remounted the
+  // editor, re-pinned it to the new cluster, threw the draft away, and made
+  // the gate see pinned === live — so Apply and Delete went to the new
+  // cluster without the moved-cluster warning this screen promises.
   return parts ? (
-    <EditExisting key={`${context.stableId}:${route}`} context={context} parts={parts} />
+    <EditExisting key={route} context={context} parts={parts} />
   ) : (
-    <NewResource key={context.stableId} context={context} />
+    <NewResource context={context} />
   );
 }
 
@@ -252,6 +259,15 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
   // rail does later.
   const [pinned] = useState(context.name);
   const { kind, namespace, name } = parts;
+
+  // Whether Delete is offered at all: the same verdict the list menu and the
+  // detail footer reach from the kind's descriptor. `k8s.deleteResource`
+  // resolves kinds from a closed table with no CRD path — the manifest read
+  // below is told a custom kind's group, delete cannot be — so for a custom
+  // resource it fails every time, after a confirm that read as real. See
+  // `KindActions.delete`.
+  const actions = isBuiltInKind(kind) ? descriptorFor(SLUG_BY_K8S_KIND[kind])?.actions : CUSTOM_RESOURCE_ACTIONS;
+  const canDelete = actions?.delete !== false;
 
   /**
    * A Secret's values stay out of the DOM until the reader reveals them.
@@ -442,16 +458,18 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
           >
             Reload
           </Button>
-          <Button
-            variant="danger"
-            onClick={() => {
-              setDeleteError("");
-              editor.gate.reset();
-              setDeleting(true);
-            }}
-          >
-            Delete
-          </Button>
+          {canDelete && (
+            <Button
+              variant="danger"
+              onClick={() => {
+                setDeleteError("");
+                editor.gate.reset();
+                setDeleting(true);
+              }}
+            >
+              Delete
+            </Button>
+          )}
           <Button
             variant="primary"
             disabled={
@@ -524,10 +542,17 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
           title="Apply changes?"
           confirmLabel="Apply"
           busy={editor.busy}
-          // Closed on any answer, not only success: a conflict and a failure
-          // are shown on the page behind the dialog, and a modal left open
-          // would hide the one thing the reader now has to act on.
-          onConfirm={() => void editor.apply(yaml, false).finally(() => setConfirming(false))}
+          // Closed on any answer the server gave, not only success: a conflict
+          // and a failure are shown on the page behind the dialog, and a modal
+          // left open would hide the one thing the reader now has to act on.
+          // A refusal from the cluster gate is different — it is the dialog's
+          // own question, still unanswered, and closing would hide the box
+          // the refusal points at.
+          onConfirm={() =>
+            void editor.apply(yaml, false).then((ok) => {
+              if (ok || !editor.gate.refusal) setConfirming(false);
+            })
+          }
           onCancel={() => setConfirming(false)}
           message={
             <>
