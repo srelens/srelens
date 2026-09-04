@@ -30,6 +30,10 @@ pub struct IngressSummary {
     pub address: String,
     /// Served ports: "80" normally, "80, 443" when TLS is configured.
     pub ports: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -83,6 +87,7 @@ pub(crate) fn summarise(ing: Ingress) -> IngressSummary {
         hosts,
         address,
         ports,
+        created: crate::creation_rfc3339(ing.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(ing.metadata.creation_timestamp.as_ref()),
     }
 }

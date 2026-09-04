@@ -24,6 +24,10 @@ pub struct ResourceQuotaSummary {
     pub namespace: String,
     /// Number of resources the quota constrains (`spec.hard` entries).
     pub resources: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -42,6 +46,7 @@ pub(crate) fn summarise(rq: ResourceQuota) -> ResourceQuotaSummary {
         name: rq.metadata.name.clone().unwrap_or_default(),
         namespace: rq.metadata.namespace.clone().unwrap_or_default(),
         resources: resources as i32,
+        created: crate::creation_rfc3339(rq.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(rq.metadata.creation_timestamp.as_ref()),
     }
 }

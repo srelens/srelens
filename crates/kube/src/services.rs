@@ -33,6 +33,10 @@ pub struct ServiceSummary {
     #[serde(rename = "externalIP")]
     pub external_ip: String,
     pub ports: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -111,6 +115,7 @@ pub(crate) fn summarise(svc: Service) -> ServiceSummary {
         cluster_ip,
         external_ip,
         ports,
+        created: crate::creation_rfc3339(svc.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(svc.metadata.creation_timestamp.as_ref()),
     }
 }

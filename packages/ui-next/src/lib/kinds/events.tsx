@@ -1,6 +1,7 @@
 import { ageSortValue, eventVerdict } from "@srelens/core";
 import { AskChip, StatusPill, type Column } from "@srelens/ui-kit";
 import type { KindDescriptor, ListRow } from "./types";
+import { AgeCell } from "../ageCell";
 
 /**
  * One row of the events table.
@@ -20,6 +21,8 @@ export interface EventRow extends ListRow {
   object: string;
   message: string;
   count: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -187,7 +190,11 @@ export const eventColumns: Column<EventRow>[] = [
     // Takes the row, not the age string: `ageSortValue` reads `row.age` so a
     // column can hand it straight over by name.
     getSortValue: ageSortValue,
-    render: (e) => <span className="path text-faint">{e.age}</span>,
+    render: (e) => (
+      <span className="path text-faint">
+        <AgeCell created={e.created} age={e.age} />
+      </span>
+    ),
   },
 ];
 

@@ -24,6 +24,10 @@ pub struct LimitRangeSummary {
     pub namespace: String,
     /// Number of limit entries (`spec.limits`).
     pub limits: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -38,6 +42,7 @@ pub(crate) fn summarise(lr: LimitRange) -> LimitRangeSummary {
         name: lr.metadata.name.clone().unwrap_or_default(),
         namespace: lr.metadata.namespace.clone().unwrap_or_default(),
         limits: limits as i32,
+        created: crate::creation_rfc3339(lr.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(lr.metadata.creation_timestamp.as_ref()),
     }
 }

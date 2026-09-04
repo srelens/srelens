@@ -33,6 +33,10 @@ pub struct NetworkPolicySummary {
     /// Comma-joined `policyTypes` (e.g. "Ingress, Egress").
     #[serde(rename = "policyTypes")]
     pub policy_types: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -79,6 +83,7 @@ pub(crate) fn summarise(np: NetworkPolicy) -> NetworkPolicySummary {
         ingress,
         egress,
         policy_types,
+        created: crate::creation_rfc3339(np.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(np.metadata.creation_timestamp.as_ref()),
     }
 }

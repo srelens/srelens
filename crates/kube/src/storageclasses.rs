@@ -30,6 +30,10 @@ pub struct StorageClassSummary {
     pub volume_binding_mode: String,
     /// Whether this is the cluster's default StorageClass.
     pub default: bool,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -53,6 +57,7 @@ pub(crate) fn summarise(sc: StorageClass) -> StorageClassSummary {
         reclaim_policy: sc.reclaim_policy.unwrap_or_default(),
         volume_binding_mode: sc.volume_binding_mode.unwrap_or_default(),
         default,
+        created: crate::creation_rfc3339(sc.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(sc.metadata.creation_timestamp.as_ref()),
     }
 }

@@ -157,7 +157,8 @@ export const deploymentColumns: Column<DeploymentSummary>[] = [
   { key: "ready", header: "Ready", align: "end" },
   { key: "upToDate", header: "Up-to-date", sortable: true, align: "end" },
   { key: "available", header: "Available", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 /** A StatefulSet's verdict — the same rule, off the same "N/M" string. */
@@ -173,7 +174,8 @@ export const statefulSetColumns: Column<StatefulSetSummary>[] = [
   { key: "ready", header: "Ready", align: "end" },
   { key: "updated", header: "Updated", sortable: true, align: "end" },
   { key: "service", header: "Service", sortable: true, render: (s) => s.service || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 /** A DaemonSet's verdict — numeric fields here, unlike Deployment/StatefulSet's
@@ -192,7 +194,8 @@ export const daemonSetColumns: Column<DaemonSetSummary>[] = [
   { key: "ready", header: "Ready", sortable: true, align: "end" },
   { key: "upToDate", header: "Up-to-date", sortable: true, align: "end" },
   { key: "available", header: "Available", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 /** A Job's verdict, through core's own rule: a failure outranks an in-flight
@@ -217,7 +220,8 @@ export const jobColumns: Column<JobSummary>[] = [
   },
   { key: "duration", header: "Duration", align: "end", render: (j) => j.duration || "—" },
   { key: "owner", header: "Owner", render: (j) => j.owner || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 /** A CronJob's verdict: suspended or not, which is the whole of its health —
@@ -238,7 +242,8 @@ export const cronJobColumns: Column<CronJobSummary>[] = [
   },
   { key: "active", header: "Active", align: "end" },
   { key: "lastSchedule", header: "Last run", render: (c) => c.lastSchedule || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 /** "warning" / "neutral" classic badge variants, remapped onto the kit's `Tone`. */
@@ -326,7 +331,8 @@ export const nodeColumns: Column<NodeRow>[] = [
     render: (n) => <TaintTally row={n} />,
     getSortValue: (n) => taintSortValue(n.taintDetails),
   },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const configMapColumns: Column<ConfigMapSummary>[] = [
@@ -354,14 +360,16 @@ export const resourceQuotaColumns: Column<ResourceQuotaSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "resources", header: "Resources", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const limitRangeColumns: Column<LimitRangeSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "limits", header: "Limits", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const serviceColumns: Column<ServiceSummary>[] = [
@@ -371,7 +379,8 @@ export const serviceColumns: Column<ServiceSummary>[] = [
   { key: "clusterIP", header: "Cluster IP" },
   { key: "externalIP", header: "External IP", render: (s) => s.externalIP || "—" },
   { key: "ports", header: "Ports" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const ingressColumns: Column<IngressSummary>[] = [
@@ -381,7 +390,8 @@ export const ingressColumns: Column<IngressSummary>[] = [
   { key: "hosts", header: "Hosts", render: (i) => i.hosts || "*" },
   { key: "address", header: "Address", render: (i) => i.address || "—" },
   { key: "ports", header: "Ports" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const endpointSliceColumns: Column<EndpointSliceSummary>[] = [
@@ -391,7 +401,8 @@ export const endpointSliceColumns: Column<EndpointSliceSummary>[] = [
   { key: "endpoints", header: "Endpoints", align: "end" },
   { key: "ports", header: "Ports", render: (e) => e.ports || "—" },
   { key: "service", header: "Service", render: (e) => e.service || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const networkPolicyColumns: Column<NetworkPolicySummary>[] = [
@@ -401,7 +412,8 @@ export const networkPolicyColumns: Column<NetworkPolicySummary>[] = [
   { key: "ingress", header: "Ingress", sortable: true, align: "end" },
   { key: "egress", header: "Egress", sortable: true, align: "end" },
   { key: "policyTypes", header: "Policy Types", render: (n) => n.policyTypes || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const pvcColumns: Column<PvcSummary>[] = [
@@ -415,7 +427,8 @@ export const pvcColumns: Column<PvcSummary>[] = [
   { key: "accessModes", header: "Access Modes", render: (p) => p.accessModes || "—" },
   { key: "storageClass", header: "Storage Class", render: (p) => p.storageClass || "—" },
   { key: "volume", header: "Volume", render: (p) => p.volume || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const pvColumns: Column<PvSummary>[] = [
@@ -431,7 +444,8 @@ export const pvColumns: Column<PvSummary>[] = [
   },
   { key: "claim", header: "Claim", render: (p) => p.claim || "—" },
   { key: "storageClass", header: "Storage Class", render: (p) => p.storageClass || "—" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const storageClassColumns: Column<StorageClassSummary>[] = [
@@ -440,27 +454,31 @@ export const storageClassColumns: Column<StorageClassSummary>[] = [
   { key: "reclaimPolicy", header: "Reclaim", render: (s) => s.reclaimPolicy || "—" },
   { key: "volumeBindingMode", header: "Binding Mode", render: (s) => s.volumeBindingMode || "—" },
   { key: "default", header: "Default", render: (s) => (s.default ? <StatusPill status="Default" kind="success" /> : "—") },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const serviceAccountColumns: Column<ServiceAccountSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "secrets", header: "Secrets", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const roleColumns: Column<RoleSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "rules", header: "Rules", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const clusterRoleColumns: Column<ClusterRoleSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "rules", header: "Rules", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const roleBindingColumns: Column<RoleBindingSummary>[] = [
@@ -468,12 +486,14 @@ export const roleBindingColumns: Column<RoleBindingSummary>[] = [
   { key: "namespace", header: "Namespace", sortable: true },
   { key: "role", header: "Role" },
   { key: "subjects", header: "Subjects", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];
 
 export const clusterRoleBindingColumns: Column<ClusterRoleBindingSummary>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "role", header: "Role" },
   { key: "subjects", header: "Subjects", sortable: true, align: "end" },
-  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+  // #405: live age, derived against a ticking clock from `created`.
+  { key: "age", header: "Age", sortable: true, align: "end", render: (r) => <AgeCell created={r.created} age={r.age} />, getSortValue: ageSortValue },
 ];

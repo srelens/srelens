@@ -74,6 +74,10 @@ pub struct CronJobSummary {
     /// Humanized age of the last scheduled run, or "" if never scheduled.
     #[serde(rename = "lastSchedule")]
     pub last_schedule: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
 }
 
@@ -96,6 +100,7 @@ pub(crate) fn summarise(cj: CronJob) -> CronJobSummary {
         suspended: spec.and_then(|s| s.suspend).unwrap_or(false),
         active: status.map(|s| s.active.as_ref().map_or(0, |a| a.len() as i32)).unwrap_or(0),
         last_schedule,
+        created: crate::creation_rfc3339(cj.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(cj.metadata.creation_timestamp.as_ref()),
     }
 }
