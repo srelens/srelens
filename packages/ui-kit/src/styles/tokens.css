@@ -15,23 +15,37 @@
 
 /* ---------------------------------------------------------------
    srelens design tokens — "instrument paper"
-   Light: lavender paper, white instruments, one violet accent.
+   Light: neutral paper, white instruments, one violet accent.
    Dark:  ink-violet control room, same rules, same rhythm.
    --------------------------------------------------------------- */
+/* The light ground is NEUTRAL, matching the design it was drawn from. It was
+   lavender — every grey here carried a violet cast, which read as a tint over
+   the whole window and is not what the original shows.
+
+   Each value is the neutral grey of the SAME relative luminance as the one it
+   replaces, so only the hue moved: --ink stays at 18.58:1 on white,
+   --ink-soft at 10.05 against 10.10, --ink-muted at 5.57 against 5.53,
+   --ink-faint at 2.85. Neutralising by eye instead would have cost contrast —
+   the first attempt at this dropped --ink-muted from 5.53 to 4.83 — so the
+   greys were computed against the old ones rather than picked.
+
+   The accent is untouched: violet on a neutral ground is the design's own
+   pairing, and the ground is not where an accent belongs (see the accent axis
+   below). */
 :root {
-  --canvas: #f5f4f8;
-  --canvas-deep: #eceaf2;
+  --canvas: #f5f5f5;
+  --canvas-deep: #ebebeb;
   --surface: #ffffff;
-  --surface-sunk: #fafaFc;
+  --surface-sunk: #fafafa;
   --surface-raised: #ffffff;
 
-  --ink: #141219;
-  --ink-soft: #443f52;
-  --ink-muted: #6b6678;
-  --ink-faint: #9b97a6;
+  --ink: #131313;
+  --ink-soft: #424242;
+  --ink-muted: #686868;
+  --ink-faint: #999999;
 
-  --rule: #e7e5ed;
-  --rule-strong: #d7d4e0;
+  --rule: #e6e6e6;
+  --rule-strong: #d6d6d6;
 
   --accent: #4b3bd6;
   --accent-ink: #ffffff;
@@ -47,8 +61,8 @@
   --info: #2a5fa8;
   --info-wash: #ecf2fb;
 
-  --field: rgba(20, 18, 25, 0.05);
-  --shadow-lift: 0 1px 0 rgba(20, 18, 25, 0.02);
+  --field: rgba(19, 19, 19, 0.05);
+  --shadow-lift: 0 1px 0 rgba(19, 19, 19, 0.02);
 
   /* --- mark palette: identity, not meaning ---------------------------
      The colours a cluster mark may be given. An axis of their own rather
@@ -216,7 +230,11 @@
 [data-accent="blue"]   { --accent: #1f5fd0; --accent-wash: #e9f0fd; --accent-line: #b7cdf5; }
 [data-accent="teal"]   { --accent: #0d7068; --accent-wash: #e4f4f2; --accent-line: #a8ded8; }
 [data-accent="amber"]  { --accent: #9a5c05; --accent-wash: #fdf1de; --accent-line: #efd0a0; }
-[data-accent="rose"]   { --accent: #ad2456; --accent-wash: #fdeaf1; --accent-line: #f0bbcf; }
+/* Rose is brighter than it was (#ad2456), to match the reference — but not
+   as bright as the #e11d48 it appears to use, which is 4.70:1 on white. This
+   is 5.06:1, so it still clears AA as text with room to spare. Vividness and
+   contrast pull opposite ways here and the floor wins. */
+[data-accent="rose"]   { --accent: #d61f4a; --accent-wash: #fff0f4; --accent-line: #f7c3d2; }
 
 [data-theme="dark"][data-accent="blue"],
 [data-theme="midnight"][data-accent="blue"]  { --accent: #7fa8f5; --accent-wash: #141c2e; --accent-line: #2c3f66; }

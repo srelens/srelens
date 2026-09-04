@@ -482,7 +482,7 @@ describe("the toggle's dark side", () => {
     // prose does not — including the one hex that lives inside a comment and
     // would otherwise be read as a token of the block it sits in.
     expect(TOKENS).toContain('[data-theme="paper"] {');
-    expect(TOKENS).toContain("--canvas: #f5f4f8;");
+    expect(TOKENS).toContain("--canvas: #f5f5f5;");
     expect(TOKENS).not.toContain("warm light, easier under office lighting");
     expect(TOKENS).not.toContain("#565656");
   });
