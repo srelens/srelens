@@ -164,11 +164,30 @@ impl YamlViewState {
         }
     }
 
+    /// Update the YAML content and re-sanitize lines to prevent terminal desync.
+    pub fn update_content(&mut self, new_yaml: String) {
+        self.yaml_content = new_yaml;
+        self.lines = self.yaml_content.lines().map(super::sanitize_span_text).collect();
+        self.scroll_offset = 0;
+        self.search_matches.clear();
+        self.current_match_idx = None;
+        self.selection = None;
+        self.is_selecting = false;
+    }
+
     /// Spawns the user's $EDITOR on a temp file with the YAML content
     pub fn spawn_editor(&self) -> Result<Option<String>, String> {
         let editor = std::env::var("EDITOR")
             .or_else(|_| std::env::var("VISUAL"))
             .unwrap_or_else(|_| "vi".to_string());
+
+        let parts: Vec<String> = shlex::split(&editor).unwrap_or_else(|| {
+            editor.split_whitespace().map(String::from).collect()
+        });
+        let (prog, args) = match parts.split_first() {
+            Some((p, rest)) => (p.as_str(), rest),
+            None => ("vi", &[][..]),
+        };
 
         let mut temp_file = tempfile::Builder::new()
             .prefix(&format!("srelens-{}-", self.resource_name))
@@ -184,11 +203,14 @@ impl YamlViewState {
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
 
-        let status = Command::new(&editor)
-            .arg(temp_file.path())
-            .stdin(std::process::Stdio::inherit())
+        let mut cmd = Command::new(prog);
+        cmd.args(args);
+        cmd.arg(temp_file.path());
+        cmd.stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+
+        let status = cmd
             .status()
             .map_err(|e| format!("Failed to spawn editor '{}': {}", editor, e))?;
 

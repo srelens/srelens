@@ -80,7 +80,7 @@ pub fn env_var_for_provider(kind: AiProvider) -> &'static str {
         AiProvider::Anthropic => "ANTHROPIC_API_KEY",
         AiProvider::OpenAi => "OPENAI_API_KEY",
         AiProvider::Gemini => "GEMINI_API_KEY",
-        AiProvider::OpenAiCompatible => "OLLAMA_HOST",
+        AiProvider::OpenAiCompatible => "OPENAI_COMPATIBLE_API_KEY",
         AiProvider::Cursor => "CURSOR_API_KEY",
     }
 }

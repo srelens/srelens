@@ -96,10 +96,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             CliCommand::Toolbox => {
+                let state = views::ToolboxViewState::new();
                 println!("SRElens Toolbox Status:");
-                println!("  kubectl: available");
-                println!("  helm:    available");
-                println!("  krew:    available");
+                for tool in &state.tools {
+                    let status = if tool.installed {
+                        format!("available ({})", tool.version.as_deref().unwrap_or("unknown version"))
+                    } else if tool.required {
+                        "missing (required)".to_string()
+                    } else {
+                        "not installed (optional)".to_string()
+                    };
+                    let path_info = tool.path.as_deref().map(|p| format!(" [{}]", p)).unwrap_or_default();
+                    println!("  {:<8} : {}{}", tool.name, status, path_info);
+                }
                 return Ok(());
             }
         }
@@ -358,9 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
                         match yaml.spawn_editor() {
                             Ok(Some(new_yaml)) => {
-                                yaml.yaml_content = new_yaml.clone();
-                                yaml.lines = new_yaml.lines().map(String::from).collect();
-                                yaml.scroll_offset = 0;
+                                yaml.update_content(new_yaml.clone());
 
                                 let ctx = app.active_context.clone();
                                 let active_ns = app.active_namespace.clone();

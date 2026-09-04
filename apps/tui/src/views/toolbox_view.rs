@@ -23,32 +23,67 @@ pub struct ToolboxViewState {
     pub selected_idx: usize,
 }
 
+fn detect_tool(name: &str, alt_names: &[&str], required: bool, version_args: &[&str]) -> ToolStatusItem {
+    let mut resolved_path = None;
+
+    // Check primary name and alternatives with `which`
+    for bin in std::iter::once(&name).chain(alt_names.iter()) {
+        if let Ok(output) = std::process::Command::new("which").arg(bin).output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path_str.is_empty() {
+                    resolved_path = Some(path_str);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fallback: check standard ~/.krew/bin if checking krew
+    if resolved_path.is_none() && name == "krew" {
+        if let Some(home) = dirs::home_dir() {
+            let candidate = home.join(".krew").join("bin").join("kubectl-krew");
+            if candidate.is_file() {
+                resolved_path = Some(candidate.display().to_string());
+            }
+        }
+    }
+
+    let installed = resolved_path.is_some();
+    let version = if let Some(ref path) = resolved_path {
+        std::process::Command::new(path)
+            .args(version_args)
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    text.lines().next().map(|l| l.trim().to_string())
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    };
+
+    ToolStatusItem {
+        name: name.to_string(),
+        installed,
+        version,
+        path: resolved_path,
+        required,
+    }
+}
+
 impl ToolboxViewState {
     pub fn new() -> Self {
+        let kubectl = detect_tool("kubectl", &[], true, &["version", "--client"]);
+        let helm = detect_tool("helm", &[], false, &["version", "--short"]);
+        let krew = detect_tool("krew", &["kubectl-krew"], false, &["version"]);
+
         Self {
-            tools: vec![
-                ToolStatusItem {
-                    name: "kubectl".to_string(),
-                    installed: true,
-                    version: Some("v1.31.0".to_string()),
-                    path: Some("/usr/local/bin/kubectl".to_string()),
-                    required: true,
-                },
-                ToolStatusItem {
-                    name: "helm".to_string(),
-                    installed: true,
-                    version: Some("v3.15.0".to_string()),
-                    path: Some("/usr/local/bin/helm".to_string()),
-                    required: false,
-                },
-                ToolStatusItem {
-                    name: "krew".to_string(),
-                    installed: true,
-                    version: Some("v0.4.4".to_string()),
-                    path: Some("/Users/skatara/.krew/bin/kubectl-krew".to_string()),
-                    required: false,
-                },
-            ],
+            tools: vec![kubectl, helm, krew],
             selected_idx: 0,
         }
     }

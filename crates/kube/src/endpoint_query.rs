@@ -116,12 +116,10 @@ pub fn parse_raw_http_response(bytes: &[u8]) -> Result<(u16, String), String> {
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|pos| (pos, 4))
-        .or_else(|| bytes.windows(2).position(|w| w == b"\n\n").map(|pos| (pos, 2)));
+        .or_else(|| bytes.windows(2).position(|w| w == b"\n\n").map(|pos| (pos, 2)))
+        .ok_or_else(|| "Invalid HTTP response: header delimiter not found".to_string())?;
 
-    let (header_bytes, body_bytes) = match header_sep {
-        Some((pos, len)) => (&bytes[..pos], &bytes[pos + len..]),
-        None => (bytes, &[][..]),
-    };
+    let (header_bytes, body_bytes) = (&bytes[..header_sep.0], &bytes[header_sep.0 + header_sep.1..]);
 
     let header_str = String::from_utf8_lossy(header_bytes);
     let first_line = header_str.lines().next().unwrap_or("");
@@ -129,7 +127,7 @@ pub fn parse_raw_http_response(bytes: &[u8]) -> Result<(u16, String), String> {
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(200);
+        .ok_or_else(|| format!("Invalid HTTP status line: '{}'", first_line))?;
 
     // Decode body: if chunked, unchunk
     let is_chunked = header_str.to_lowercase().contains("transfer-encoding: chunked");
@@ -392,5 +390,16 @@ mod tests {
         assert_eq!(returned, 2);
         assert_eq!(lines[0], "DCGM_FI_DEV_FB_USED{gpu=\"0\"} 1024");
         assert_eq!(lines[1], "DCGM_FI_DEV_FB_FREE{gpu=\"0\"} 7168");
+    }
+
+    #[test]
+    fn test_parse_raw_http_response_errors_on_malformed_input() {
+        // Missing delimiter
+        let malformed = b"Some raw output without headers";
+        assert!(parse_raw_http_response(malformed).is_err());
+
+        // Missing valid HTTP status code
+        let bad_status = b"NOT_HTTP\r\nHeader: value\r\n\r\nBody";
+        assert!(parse_raw_http_response(bad_status).is_err());
     }
 }
