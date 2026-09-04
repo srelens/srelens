@@ -119,6 +119,12 @@ const SCHEMA = {
   },
 };
 
+/** Open one of the toolbar's pickers and choose a row. */
+async function pick(label: string, option: string) {
+  await userEvent.click(screen.getByRole("combobox", { name: label }));
+  await userEvent.click(await screen.findByRole("option", { name: option }));
+}
+
 beforeEach(() => {
   editors.length = 0;
   active.name = "prod-eu";
@@ -584,12 +590,12 @@ describe("EditResource on /new", () => {
   it("swaps the draft when a different template is picked", async () => {
     render(<EditResource route="/new" />);
     await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.Deployment("default")));
-    // A native select, so picked with `selectOptions` rather than two clicks.
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Template" }), "ConfigMap");
+    // The design's picker, not a native select: open the trigger, choose a row.
+    await pick("Template", "ConfigMap");
     await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.ConfigMap("default")));
     // And the namespace follows the picker while the draft is still the
     // template's.
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Namespace" }), "payments");
+    await pick("Namespace", "payments");
     await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.ConfigMap("payments")));
   });
 });

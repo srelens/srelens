@@ -19,11 +19,11 @@ import { useNamespaceOptions } from "@srelens/core/react";
 import {
   Button,
   CodeEditor,
+  Combobox,
   ConfirmDialog,
   DiffLines,
   EmptyState,
   Screen,
-  Select,
   type EditorDiagnostic,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -38,7 +38,7 @@ import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { useResource } from "../lib/useResource";
 import { EditAnalysis, ProblemsDot, type DryRunState } from "./EditAnalysis";
-import { NoClusterScreen } from "./resourceShell";
+import { NamespaceChoice, NoClusterScreen } from "./resourceShell";
 
 /**
  * The resource editor: one YAML manifest, applied server-side.
@@ -927,24 +927,25 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
       eyebrow={pinned}
       actions={
         <>
-          <label className="flex items-center gap-2 text-xs text-muted">
+          {/* The design's own picker, not a native `<select>`: the browser
+              draws its own dropdown for those, which reads as another app's
+              control beside this toolbar — and a cluster with sixty
+              namespaces needs the search this one has. */}
+          <span className="flex items-center gap-2 text-xs text-muted">
             Template
-            <Select
+            <Combobox
               value={template}
               onValueChange={pickTemplate}
               options={TEMPLATE_ORDER.map((t) => ({ value: t }))}
-              className="min-w-36"
+              ariaLabel="Template"
+              searchPlaceholder="Find a template…"
+              className="min-w-40"
             />
-          </label>
-          <label className="flex items-center gap-2 text-xs text-muted">
+          </span>
+          <span className="flex items-center gap-2 text-xs text-muted">
             Namespace
-            <Select
-              value={namespace}
-              onValueChange={pickNamespace}
-              options={(options.length > 0 ? options : [namespace]).map((n) => ({ value: n }))}
-              className="min-w-36"
-            />
-          </label>
+            <NamespaceChoice namespaces={namespaces} value={namespace} onChange={pickNamespace} />
+          </span>
           <ProblemsDot problems={analysis.problems} checked={analysis.checked} />
           <Button
             variant="ghost"
