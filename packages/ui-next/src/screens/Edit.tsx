@@ -727,6 +727,8 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               keys={analysis.keys}
               schema={analysis.schema.status}
               kind={analysis.schema.kind}
+              schemaError={analysis.schema.error}
+              onRetrySchema={analysis.schema.retry}
               dryRun={analysis.dryRun}
             />
           )}
@@ -1012,6 +1014,8 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
             keys={analysis.keys}
             schema={analysis.schema.status}
             kind={analysis.schema.kind}
+            schemaError={analysis.schema.error}
+            onRetrySchema={analysis.schema.retry}
             dryRun={analysis.dryRun}
           />
         </div>

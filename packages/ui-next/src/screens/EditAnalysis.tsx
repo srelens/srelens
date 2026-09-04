@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { EditorDiagnostic } from "@srelens/ui-kit";
+import { Button, type EditorDiagnostic } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import type { KeysHere, SchemaStatus } from "../lib/manifestSchema";
 
@@ -91,6 +91,8 @@ export function EditAnalysis({
   keys,
   schema,
   kind,
+  schemaError,
+  onRetrySchema,
   dryRun,
 }: {
   problems: EditorDiagnostic[];
@@ -99,6 +101,9 @@ export function EditAnalysis({
   keys: KeysHere | null;
   schema: SchemaStatus;
   kind: string | null;
+  /** Why the schema lookup failed, when `schema` is `failed`. */
+  schemaError?: string;
+  onRetrySchema?: () => void;
   dryRun: DryRunState;
 }) {
   return (
@@ -152,9 +157,25 @@ export function EditAnalysis({
           <p className="text-xs text-muted">Name an apiVersion and a kind to see what goes here.</p>
         ) : schema === "loading" ? (
           <p className="text-xs text-muted">Loading the schema…</p>
-        ) : schema === "unavailable" ? (
+        ) : schema === "failed" ? (
+          // Not "the cluster has no schema for Secret": the cluster was not
+          // heard from. Which it is changes what the reader does next.
+          <div className="flex flex-col items-start gap-2">
+            <p className="text-xs text-muted">
+              Could not read {kind ?? "this kind"}&apos;s schema from the cluster, so nothing here can
+              say what goes where the cursor is.
+            </p>
+            {schemaError && <p className="text-xs text-sev">{schemaError}</p>}
+            {onRetrySchema && (
+              <Button variant="ghost" onClick={onRetrySchema}>
+                Try again
+              </Button>
+            )}
+          </div>
+        ) : schema === "absent" ? (
           <p className="text-xs text-muted">
-            The cluster has no schema for {kind ?? "this kind"}, so nothing can say what goes here.
+            This cluster publishes no schema for {kind ?? "this kind"} — a CustomResourceDefinition
+            with none of its own, or a kind spelled differently from any it serves.
           </p>
         ) : !keys || keys.entries.length === 0 ? (
           <p className="text-xs text-muted">Nothing more goes here.</p>

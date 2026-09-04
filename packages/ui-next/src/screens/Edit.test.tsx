@@ -416,6 +416,37 @@ describe("EditResource", () => {
     expect(typeof latestEditor().completions).toBe("function");
   });
 
+  it("tells a schema the cluster would not hand over apart from one it does not have", async () => {
+    // Secret is a built-in kind; the cluster certainly has a schema for it.
+    // Saying "this cluster publishes no schema for Secret" when the lookup
+    // itself failed is a confident wrong answer, and it hid a backend bug
+    // that made every lookup fail.
+    core.openApiSchema.mockResolvedValue({ error: "the openapi document could not be read" });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    const sidebar = screen.getByRole("complementary", { name: "Analysis" });
+    expect(await within(sidebar).findByText(/Could not read ConfigMap's schema/)).toBeDefined();
+    // The reason travels with it, through the same friendly-error copy every
+    // other failure on this screen uses.
+    expect(within(sidebar).getByText(/openapi document could not be read/)).toBeDefined();
+    expect(within(sidebar).queryByText(/publishes no schema/)).toBeNull();
+
+    // And it can be asked again: the failure may have been the cluster.
+    core.openApiSchema.mockResolvedValue({ key: "cm", schemas: { cm: { type: "object", properties: { data: { type: "object", description: "Data." } } } } });
+    await userEvent.click(within(sidebar).getByRole("button", { name: "Try again" }));
+    expect(await within(sidebar).findByText("data")).toBeDefined();
+  });
+
+  it("says a kind the cluster serves no schema for is exactly that", async () => {
+    // The other fact: the document came back and declares nothing of this
+    // kind — a CRD that ships no schema of its own.
+    core.openApiSchema.mockResolvedValue({ key: null, schemas: {} });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    const sidebar = screen.getByRole("complementary", { name: "Analysis" });
+    expect(await within(sidebar).findByText(/publishes no schema for ConfigMap/)).toBeDefined();
+    expect(within(sidebar).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
   it("runs a dry run on demand, shows the verdict, and retires it when the draft changes", async () => {
     core.validateManifest.mockResolvedValue({
       valid: false,

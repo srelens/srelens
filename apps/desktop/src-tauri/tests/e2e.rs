@@ -1271,7 +1271,10 @@ async fn run_suite() {
     let out = h
         .ok(
             "k8s.openApiSchema",
-            json!({ "context": ctx, "api_version": "apps/v1", "kind": "Deployment" }),
+            // `apiVersion`, the spelling `core`'s wrapper sends. This case
+            // used to send `api_version` — the struct's own field name — and
+            // so passed while every real call failed to deserialize.
+            json!({ "context": ctx, "apiVersion": "apps/v1", "kind": "Deployment" }),
         )
         .await;
     assert!(out["key"]

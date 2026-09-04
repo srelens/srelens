@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  describeError,
   extractApiVersionKind,
   fieldCompletions,
   openApiSchema,
@@ -27,41 +28,62 @@ export type SchemaStatus =
   | "none"
   | "loading"
   | "ready"
-  /** The cluster has no schema for this kind — a CRD without one, or a typo. */
-  | "unavailable";
+  /** The cluster answered, and publishes no schema for this kind. */
+  | "absent"
+  /** The lookup itself failed. Kept apart from `absent`: they are different
+   *  facts, and saying "the cluster has no schema for Secret" when the request
+   *  was refused or timed out is a confident wrong answer about a built-in
+   *  kind that certainly has one. */
+  | "failed";
 
 /** The schema for the kind the draft names, loaded once per cluster, apiVersion and kind. */
 export function useManifestSchema(
   context: string,
   yaml: string,
-): { bundle: SchemaBundle | null; status: SchemaStatus; kind: string | null } {
+): {
+  bundle: SchemaBundle | null;
+  status: SchemaStatus;
+  kind: string | null;
+  /** Why the lookup failed, when it did. */
+  error: string;
+  /** Ask again — the failure may have been the cluster, not the kind. */
+  retry: () => void;
+} {
   const ident = extractApiVersionKind(yaml);
   const apiVersion = ident?.apiVersion ?? null;
   const kind = ident?.kind ?? null;
-  const [state, setState] = useState<{ bundle: SchemaBundle | null; status: SchemaStatus }>({
+  const [state, setState] = useState<{ bundle: SchemaBundle | null; status: SchemaStatus; error: string }>({
     bundle: null,
     status: "none",
+    error: "",
   });
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
     if (!apiVersion || !kind) {
-      setState({ bundle: null, status: "none" });
+      setState({ bundle: null, status: "none", error: "" });
       return;
     }
     let active = true;
-    setState({ bundle: null, status: "loading" });
+    setState({ bundle: null, status: "loading", error: "" });
     void openApiSchema(context, apiVersion, kind).then((out) => {
       if (!active) return;
-      // `key: null` is the backend saying the kind is not in the document.
-      if ("error" in out || !out.key) setState({ bundle: null, status: "unavailable" });
-      else setState({ bundle: out, status: "ready" });
+      if ("error" in out) {
+        setState({ bundle: null, status: "failed", error: describeError(out.error).detail });
+      } else if (!out.key) {
+        // The document came back and nothing in it declares this kind.
+        setState({ bundle: null, status: "absent", error: "" });
+      } else {
+        setState({ bundle: out, status: "ready", error: "" });
+      }
     });
     return () => {
       active = false;
     };
-  }, [context, apiVersion, kind]);
+  }, [context, apiVersion, kind, attempt]);
 
-  return { bundle: state.bundle, status: state.status, kind };
+  return { bundle: state.bundle, status: state.status, error: state.error, kind, retry };
 }
 
 /** What the schema allows at one position: the keys of the mapping the cursor
