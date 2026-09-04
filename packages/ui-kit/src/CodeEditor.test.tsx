@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { CodeEditor } from "./CodeEditor";
 
 describe("CodeEditor", () => {
@@ -72,5 +72,36 @@ describe("CodeEditor", () => {
 
     rerender(<CodeEditor value="a: 1" schemaValidate={second} />);
     await vi.waitFor(() => expect(second).toHaveBeenCalled(), { timeout: 3000 });
+  });
+});
+
+describe("CodeEditor — what it tells the caller", () => {
+  it("reports the cursor on mount, and again when the document is replaced under it", () => {
+    // A sidebar that says what is valid at the cursor needs the position; the
+    // editor is mounted imperatively, so this is the one way it gets out.
+    const onCursorChange = vi.fn();
+    const { rerender } = render(<CodeEditor value="a: 1" onCursorChange={onCursorChange} />);
+    expect(onCursorChange).toHaveBeenCalledWith(0);
+    rerender(<CodeEditor value="b: 22" onCursorChange={onCursorChange} />);
+    expect(onCursorChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports each lint pass's findings, with the line each is on", async () => {
+    // The gutter shows a marker; a list beside the editor has to say "line 2"
+    // and what is wrong there. A duplicate key is a syntax-level error the
+    // yaml package places at the second key.
+    const onDiagnostics = vi.fn();
+    render(<CodeEditor value={"a: 1\na: 2\n"} onDiagnostics={onDiagnostics} />);
+    await waitFor(() => expect(onDiagnostics).toHaveBeenCalled(), { timeout: 3000 });
+    const last = onDiagnostics.mock.calls.at(-1)![0] as Array<{ line: number; severity: string; message: string }>;
+    expect(last.length).toBeGreaterThan(0);
+    expect(last[0].line).toBe(2);
+    expect(last[0].severity).toBe("error");
+  });
+
+  it("reports an empty pass too, so the caller can say the document is clean", async () => {
+    const onDiagnostics = vi.fn();
+    render(<CodeEditor value={"a: 1\n"} onDiagnostics={onDiagnostics} />);
+    await waitFor(() => expect(onDiagnostics).toHaveBeenCalledWith([]), { timeout: 3000 });
   });
 });

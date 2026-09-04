@@ -8,6 +8,7 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
+  Button,
   ColumnPicker,
   ErrorState,
   FilterBar,
@@ -23,7 +24,7 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
-import { detailRoute, parseDetailRoute } from "../lib/detailRoute";
+import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
@@ -216,6 +217,7 @@ function KindList({
     context: name,
     kind: descriptor?.k8sKind ?? "",
     actions: descriptor?.actions ?? {},
+    group: descriptor?.group,
   });
 
   // The checkbox column's selection. Table owns the interaction (toggle,
@@ -482,6 +484,13 @@ function KindList({
             onToggle={onToggleColumn}
             pinnedKey={NAME_KEY}
           />
+          <Button
+            variant="secondary"
+            title={`Create a resource on ${name} from a template`}
+            onClick={() => openTab(newRoute(name), { clusterName: name })}
+          >
+            New
+          </Button>
         </>
       }
     >

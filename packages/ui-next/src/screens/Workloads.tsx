@@ -13,6 +13,7 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
+  Button,
   ColumnPicker,
   FilterBar,
   LiveSignal,
@@ -30,7 +31,7 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
-import { detailRoute } from "../lib/detailRoute";
+import { detailRoute, newRoute } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import {
   cronJobVerdict,
@@ -436,6 +437,13 @@ function WorkloadList({
             onToggle={onToggleColumn}
             pinnedKey={NAME_KEY}
           />
+          <Button
+            variant="secondary"
+            title={`Create a resource on ${name} from a template`}
+            onClick={() => openTab(newRoute(name), { clusterName: name })}
+          >
+            New
+          </Button>
         </>
       }
     >

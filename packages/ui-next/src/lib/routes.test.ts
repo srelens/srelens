@@ -147,6 +147,16 @@ suite("describe", () => {
       sub: "c",
     });
     expect(describe("/edit/Deployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The shape `editRoute` mints now, with the cluster in front; the title
+    // does not repeat the cluster, which is the tab's own label.
+    expect(describe("/edit/prod/Deployment/staging/api", "c")).toMatchObject({
+      title: "Edit staging/api",
+      kind: "edit",
+      sub: "c",
+    });
+    expect(describe("/edit/prod/acme.io%2FDeployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The create half on a named cluster, beside the bare `/new` in the table.
+    expect(describe("/new/prod", "c")).toMatchObject({ title: "New resource", kind: "edit", sub: "c" });
     // Cluster-scoped: there is no namespace to name.
     expect(describe("/edit/Node/-/worker-1", "c")).toMatchObject({ title: "Edit worker-1", kind: "edit" });
     // Percent-encoded on the way in, so the title is the decoded name.
