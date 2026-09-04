@@ -32,7 +32,7 @@ describe("NewResourceEditor", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
-    await waitFor(() => expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", editor.value, false));
+    await waitFor(() => expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", editor.value, false, "prod"));
     expect(await screen.findByText(/Applied Service/)).toBeDefined();
     expect(onCreated).toHaveBeenCalled();
     // Editor is still present (tab stays open to create more).
