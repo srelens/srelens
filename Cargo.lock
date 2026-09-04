@@ -6410,6 +6410,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "libc",
  "log",
  "ratatui",
  "regex",

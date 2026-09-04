@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Initialize event loop and application state
-    let events = EventHandler::new(Duration::from_millis(250));
+    let mut events = EventHandler::new(Duration::from_millis(250));
 
     // Parse target deep link if provided
     let parsed_target = cli.target.as_deref().and_then(|t| DeepLink::parse(t).ok());
@@ -181,13 +181,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = app.navigate_deep_link(&link).await;
     }
 
-    let mut event_rx = events.rx;
-
     // Main TUI Event Loop
     while app.is_running {
         terminal.draw(|f| app.render(f))?;
 
-        if let Some(event) = event_rx.recv().await {
+        if let Some(event) = events.recv().await {
             match event {
                 AppEvent::Key(key) => {
                     app.handle_key_event(key).await;
@@ -321,6 +319,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 target_state.append_stream_chunk(&format!("\n[Error: {}]", err));
                                 target_state.finish_turn();
                                 app.set_toast(err, theme::Theme::status_error());
+                            } else {
+                                app.set_toast(err, theme::Theme::status_error());
                             }
                         }
                     }
@@ -336,10 +336,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
         if let Some(action) = app.requires_terminal_suspend.take() {
-            // 1. Temporarily restore terminal
+            // 1. Pause background event listener and wait for it to release stdin
+            events.pause();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            while events.try_recv().is_ok() {}
+
+            // Temporarily restore terminal
             disable_raw_mode()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                DisableBracketedPaste
+            )?;
             terminal.show_cursor()?;
+            let _ = terminal.flush();
 
             // 2. Run external action
             match action {
@@ -352,36 +363,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 yaml.scroll_offset = 0;
 
                                 let ctx = app.active_context.clone();
+                                let active_ns = app.active_namespace.clone();
                                 let cache = app.client_cache.clone();
                                 let ny = new_yaml.clone();
                                 let event_tx = app.event_tx.clone();
                                 tokio::spawn(async move {
-                                    if let Ok(client) = cache.get(&ctx).await {
-                                        if let Ok(docs) = srelens_kube::manifest::split_documents(&ny) {
-                                            for doc in docs {
-                                                if let Some(r) = srelens_kube::manifest::resource_ref(&doc) {
-                                                    let (group, version) = srelens_kube::manifest::parse_api_version(&r.api_version);
-                                                    let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(&group, &version, &r.kind));
-                                                    let api: kube::Api<kube::core::DynamicObject> = match &r.namespace {
-                                                        Some(ns) => kube::Api::namespaced_with(client.clone(), ns, &ar),
-                                                        None => kube::Api::all_with(client.clone(), &ar),
-                                                    };
-                                                    let params = kube::api::PatchParams::apply("srelens");
-                                                    match api.patch(&r.name, &params, &kube::api::Patch::Apply(&doc)).await {
-                                                        Ok(_) => {
-                                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                                title: "yaml_applied".to_string(),
-                                                                result: Ok(format!("Updated {}/{} in cluster", r.kind, r.name)),
-                                                            });
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                                title: "yaml_error".to_string(),
-                                                                result: Err(format!("Apply error: {}", e)),
-                                                            });
-                                                        }
-                                                    }
-                                                }
+                                    let client = match cache.get(&ctx).await {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "yaml_error".to_string(),
+                                                result: Err(format!("Cluster connect error: {}", e)),
+                                            });
+                                            return;
+                                        }
+                                    };
+
+                                    let docs = match srelens_kube::manifest::split_documents(&ny) {
+                                        Ok(d) if !d.is_empty() => d,
+                                        Ok(_) => {
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "yaml_error".to_string(),
+                                                result: Err("No YAML documents found in file".to_string()),
+                                            });
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            let _ = event_tx.send(AppEvent::ActionResult {
+                                                title: "yaml_error".to_string(),
+                                                result: Err(format!("YAML parse error: {}", e)),
+                                            });
+                                            return;
+                                        }
+                                    };
+
+                                    for mut doc in docs {
+                                        let r = match srelens_kube::manifest::resource_ref(&doc) {
+                                            Some(r) => r,
+                                            None => {
+                                                let _ = event_tx.send(AppEvent::ActionResult {
+                                                    title: "yaml_error".to_string(),
+                                                    result: Err("Document missing apiVersion, kind, or metadata.name".to_string()),
+                                                });
+                                                continue;
+                                            }
+                                        };
+
+                                        // Strip server-managed status and metadata noise before applying
+                                        if let Some(obj) = doc.as_object_mut() {
+                                            obj.remove("status");
+                                            if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                                                meta.remove("managedFields");
+                                                meta.remove("resourceVersion");
+                                                meta.remove("generation");
+                                                meta.remove("uid");
+                                                meta.remove("creationTimestamp");
+                                            }
+                                        }
+
+                                        let (group, version) = srelens_kube::manifest::parse_api_version(&r.api_version);
+                                        let gvk_info = srelens_kube::manifest::gvk_for(&r.kind);
+                                        let is_namespaced = gvk_info.map(|(_, ns)| ns).unwrap_or_else(|| {
+                                            r.namespace.as_ref().map(|s| !s.is_empty()).unwrap_or(true)
+                                        });
+
+                                        let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(&group, &version, &r.kind));
+                                        let api: kube::Api<kube::core::DynamicObject> = if is_namespaced {
+                                            let target_ns = r.namespace.as_deref()
+                                                .filter(|s| !s.is_empty())
+                                                .unwrap_or(if active_ns.is_empty() || active_ns == "all" { "default" } else { &active_ns });
+                                            kube::Api::namespaced_with(client.clone(), target_ns, &ar)
+                                        } else {
+                                            kube::Api::all_with(client.clone(), &ar)
+                                        };
+
+                                        let params = kube::api::PatchParams::apply("srelens").force();
+                                        match api.patch(&r.name, &params, &kube::api::Patch::Apply(&doc)).await {
+                                            Ok(_) => {
+                                                let _ = event_tx.send(AppEvent::ActionResult {
+                                                    title: "yaml_applied".to_string(),
+                                                    result: Ok(format!("Updated {}/{} in cluster", r.kind, r.name)),
+                                                });
+                                            }
+                                            Err(e) => {
+                                                let clean_err = srelens_kube::manifest::clean_kube_error(e);
+                                                let _ = event_tx.send(AppEvent::ActionResult {
+                                                    title: "yaml_error".to_string(),
+                                                    result: Err(format!("Apply error: {}", clean_err)),
+                                                });
                                             }
                                         }
                                     }
@@ -419,11 +488,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // 3. Re-enter TUI mode
+            // 3. Flush any leftover leaked sequences from child process (e.g. vim OSC queries)
+            #[cfg(unix)]
+            unsafe {
+                libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+            }
+
+            // 4. Re-enter TUI mode
             enable_raw_mode()?;
-            execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+            execute!(
+                terminal.backend_mut(),
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                EnableBracketedPaste
+            )?;
             terminal.hide_cursor()?;
             terminal.clear()?;
+            let _ = terminal.flush();
+
+            // Drain any pending crossterm events before resuming the event handler
+            while crossterm::event::poll(Duration::from_millis(15)).unwrap_or(false) {
+                let _ = crossterm::event::read();
+            }
+            while events.try_recv().is_ok() {}
+
+            // 5. Resume background event listener
+            events.resume();
         }
     }
 

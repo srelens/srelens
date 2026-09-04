@@ -181,10 +181,19 @@ impl YamlViewState {
             .map_err(|e| e.to_string())?;
         temp_file.flush().map_err(|e| e.to_string())?;
 
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+
         let status = Command::new(&editor)
             .arg(temp_file.path())
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
             .status()
             .map_err(|e| format!("Failed to spawn editor '{}': {}", editor, e))?;
+
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
 
         if !status.success() {
             return Err(format!("Editor exited with status: {}", status));

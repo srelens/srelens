@@ -573,7 +573,7 @@ pub struct ValidateError {
 /// Extract a clean, human message from a kube error — the API server's
 /// `message` for API errors (dropping the `ErrorResponse {…}` debug noise),
 /// and a plain string otherwise.
-fn clean_kube_error(e: kube::Error) -> String {
+pub fn clean_kube_error(e: kube::Error) -> String {
     match e {
         kube::Error::Api(resp) if !resp.message.is_empty() => resp.message,
         other => other.to_string(),
