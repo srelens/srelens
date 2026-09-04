@@ -323,6 +323,45 @@ describe("EditResource", () => {
     expect(dialog.textContent).toContain("still runs against staging, not prod-eu");
   });
 
+  it("shows the diff in its own column, with long unchanged runs behind a counted gap", async () => {
+    // A manifest diff is almost all unchanged lines — one
+    // last-applied-configuration annotation is a thousand characters on one
+    // line — so the panel used to bury the one changed line in the document
+    // around it, wrapped, in a 360px rail.
+    const same = (text: string) => ({ tag: "same", left: text, right: text });
+    const rows = [
+      ...Array.from({ length: 30 }, (_, i) => same(`  line ${i}`)),
+      { tag: "replace", left: "  key: value", right: "  key: changed" },
+      ...Array.from({ length: 30 }, (_, i) => same(`  tail ${i}`)),
+    ];
+    core.diffManifest.mockResolvedValue({
+      documents: [{ kind: "ConfigMap", name: "web", exists: true, changed: true, currentResourceVersion: "100", rows }],
+    });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+
+    // Its own column, not a section of the analysis rail.
+    const panel = await screen.findByRole("complementary", { name: "Diff" });
+    expect(within(screen.getByRole("complementary", { name: "Analysis" })).queryByText(/unchanged/)).toBeNull();
+    // The change and its context are shown; the rest is a counted gap.
+    const gaps = await within(panel).findAllByRole(
+      "button",
+      { name: /unchanged lines/ },
+      { timeout: 3000 },
+    );
+    expect(gaps).toHaveLength(2);
+    expect(gaps[0].textContent).toContain("27");
+    expect(panel.textContent).toContain("key: changed");
+    expect(panel.textContent).not.toContain("line 0");
+    // And what the whole document costs, counted.
+    expect(panel.textContent).toContain("+1");
+
+    // A gap opens where it stands.
+    await userEvent.click(gaps[0]);
+    expect(panel.textContent).toContain("line 0");
+  });
   it("says when the comparison failed, rather than showing no changes", async () => {
     // A dry run that is forbidden, or times out, used to come back as an
     // empty diff — "No changes." one click before Apply, and no "changed

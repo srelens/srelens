@@ -10,8 +10,10 @@ import type { KeysHere, SchemaStatus } from "../lib/manifestSchema";
  * Every line here is derived from something the editor or the cluster
  * already told the screen — the lint pass's findings, the on-demand dry run,
  * the kind's OpenAPI schema — laid out where a reader can see all of it at
- * once instead of hovering gutter markers one at a time. The diff, when it is
- * open, sits at the top: it is the one section that is a choice.
+ * once instead of hovering gutter markers one at a time.
+ *
+ * The diff is NOT here. It was, and 360px of manifest diff was unreadable:
+ * it has its own wider column beside this one, opened from the toolbar.
  */
 
 /** What an on-demand dry run came back with. */
@@ -90,7 +92,6 @@ export function EditAnalysis({
   schema,
   kind,
   dryRun,
-  diff,
 }: {
   problems: EditorDiagnostic[];
   /** Whether any lint pass has run at all — before one has, "no problems" would be a guess. */
@@ -99,13 +100,9 @@ export function EditAnalysis({
   schema: SchemaStatus;
   kind: string | null;
   dryRun: DryRunState;
-  /** The diff panel, when the reader has it open. */
-  diff?: ReactNode;
 }) {
   return (
-    <aside className="rule-l scroll flex w-[360px] shrink-0 flex-col text-sm" aria-label="Analysis">
-      {diff && <Section title="Diff">{diff}</Section>}
-
+    <aside className="rule-l scroll flex w-[22rem] shrink-0 flex-col text-sm" aria-label="Analysis">
       <Section title="Problems" count={problems.length}>
         {problems.length === 0 ? (
           <p className="text-xs text-muted">

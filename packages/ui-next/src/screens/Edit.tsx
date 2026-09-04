@@ -32,6 +32,7 @@ import { useClusterGate } from "../lib/clusterMoved";
 import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, parseNewRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
+import { collapseDiff, diffCounts } from "../lib/diffCollapse";
 import { keysAt, schemaCompletions, useManifestSchema } from "../lib/manifestSchema";
 import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
@@ -304,6 +305,62 @@ function Conflicts({
 }
 
 /**
+ * One document's diff: the changed lines, a few either side, and a counted
+ * gap standing in for every long unchanged run.
+ *
+ * A manifest diff is almost all unchanged lines — a Deployment's
+ * `last-applied-configuration` annotation alone runs to a thousand
+ * characters on one line — so printing the whole document to show that one
+ * label moved buried the answer. Each gap opens where it stands, and lines
+ * run rather than wrap, because a wrapped annotation is a block of text with
+ * the short changed lines lost inside it.
+ */
+function DocDiff({ doc }: { doc: DiffDoc }) {
+  const rows = doc.rows ?? [];
+  const { added, removed } = diffCounts(rows);
+  const segments = useMemo(() => collapseDiff(rows), [rows]);
+  const [opened, setOpened] = useState<Set<number>>(new Set());
+
+  return (
+    <section>
+      <h3 className="mb-1 flex items-baseline gap-2 text-[10px] uppercase tracking-wide text-faint">
+        <span className="truncate">
+          {doc.kind} {doc.name}
+        </span>
+        {!doc.exists ? (
+          <span className="normal-case tracking-normal text-ok">will be created</span>
+        ) : added === 0 && removed === 0 ? (
+          <span className="normal-case tracking-normal text-muted">unchanged</span>
+        ) : (
+          <span className="tabular-nums normal-case tracking-normal">
+            <span className="text-ok">+{added}</span> <span className="text-sev">−{removed}</span>
+          </span>
+        )}
+      </h3>
+      {rows.length > 0 && (
+        <div className="overflow-x-auto rounded-md border border-rule">
+          {segments.map((segment) =>
+            segment.kind === "rows" || opened.has(segment.from) ? (
+              <DiffLines key={segment.from} rows={segment.rows} wrap={false} />
+            ) : (
+              <button
+                key={segment.from}
+                type="button"
+                onClick={() => setOpened((prev) => new Set(prev).add(segment.from))}
+                className="sticky left-0 flex w-full items-center gap-2 bg-sunk px-2 py-1 text-left text-[10px] text-muted hover:text-ink"
+              >
+                <span aria-hidden>⋯</span>
+                Show {segment.rows.length} unchanged {segment.rows.length === 1 ? "line" : "lines"}
+              </button>
+            ),
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
  * The Changes panel: what applying the draft would do, per document, from a
  * dry run — and the one line that matters most, whether the live object has
  * moved since the manifest was loaded.
@@ -328,14 +385,7 @@ function Changes({ docs, computing, error }: { docs: DiffDoc[] | null; computing
   return (
     <div className="flex flex-col gap-4 p-3">
       {docs.map((d, i) => (
-        <section key={`${d.kind}/${d.name}/${i}`}>
-          <h3 className="mb-1 text-[10px] uppercase text-faint">
-            {d.kind} {d.name}
-            {!d.exists && " · will be created"}
-            {d.exists && !d.changed && " · unchanged"}
-          </h3>
-          {d.changed && <DiffLines rows={d.rows} />}
-        </section>
+        <DocDiff key={`${d.kind}/${d.name}/${i}`} doc={d} />
       ))}
     </div>
   );
@@ -663,6 +713,13 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               </div>
             )}
           </div>
+          {/* The diff is its own column, not a section of the analysis rail:
+              a manifest diff is wide, and 360px of it was unreadable. */}
+          {showChanges && dirty && (
+            <aside className="rule-l scroll w-[30rem] shrink-0" aria-label="Diff">
+              <Changes docs={diff} computing={diffing} error={diffError} />
+            </aside>
+          )}
           {manifest.status === "ready" && (
             <EditAnalysis
               problems={analysis.problems}
@@ -671,7 +728,6 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               schema={analysis.schema.status}
               kind={analysis.schema.kind}
               dryRun={analysis.dryRun}
-              diff={showChanges && dirty ? <Changes docs={diff} computing={diffing} error={diffError} /> : null}
             />
           )}
         </div>
