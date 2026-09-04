@@ -177,4 +177,60 @@ describe("the high-contrast theme", () => {
     // Guards the guard: a typo in a token name would silently compare nothing.
     expect(pairs.length).toBeGreaterThan(40);
   });
+
+  /**
+   * The accent a reader can CHOOSE, not just the one this theme declares.
+   *
+   * The test above reads `[data-theme="contrast"]`'s own block, and an accent
+   * picked in the Appearance pane is not in it — it arrives from a later
+   * `[data-accent="…"]` rule of equal specificity, which wins. So High
+   * contrast promised AAA and delivered between 5.37:1 and 6.64:1 the moment
+   * anyone chose Blue, Teal, Amber or Rose, and nothing here could see it.
+   */
+  function accentOverride(theme: string, accent: string): Record<string, string> {
+    const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+    // Every rule whose selector list carries this exact theme+accent pair, in
+    // file order — the last one wins, as the cascade has it at equal weight.
+    const out: Record<string, string> = {};
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const matches = selectors
+        .split(",")
+        .some((s) => s.trim() === `[data-theme="${theme}"][data-accent="${accent}"]`);
+      if (!matches) continue;
+      for (const [, name, value] of body.matchAll(/(--[a-z-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) out[name] = value;
+    }
+    return out;
+  }
+
+  /** The bare `[data-accent="x"]` set, which every theme inherits by default. */
+  function bareAccent(accent: string): Record<string, string> {
+    const css = readFileSync(join(__dirname, "styles", "tokens.css"), "utf8");
+    const out: Record<string, string> = {};
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!selectors.split(",").some((s) => s.trim() === `[data-accent="${accent}"]`)) continue;
+      for (const [, name, value] of body.matchAll(/(--[a-z-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) out[name] = value;
+    }
+    return out;
+  }
+
+  it("clears AAA for every accent a reader can choose, not only its own", () => {
+    const base = tokens();
+    const failures: string[] = [];
+    for (const accent of ["blue", "teal", "amber", "rose"]) {
+      // What the cascade actually resolves to: the theme's block, then the
+      // bare accent rule, then any contrast-specific override.
+      const t = { ...base, ...bareAccent(accent), ...accentOverride("contrast", accent) };
+      const grounds = ["--canvas", "--canvas-deep", "--surface", "--surface-sunk", "--surface-raised"];
+      for (const ground of grounds) {
+        const ratio = contrast(t["--accent"], t[ground]);
+        if (ratio < 7) failures.push(`${accent}: --accent on ${ground} = ${ratio.toFixed(2)}:1`);
+      }
+      const onWash = contrast(t["--accent"], t["--accent-wash"]);
+      if (onWash < 7) failures.push(`${accent}: --accent on --accent-wash = ${onWash.toFixed(2)}:1`);
+      const inkOn = contrast(t["--accent-ink"], t["--accent"]);
+      if (inkOn < 7) failures.push(`${accent}: --accent-ink on --accent = ${inkOn.toFixed(2)}:1`);
+    }
+    expect(failures).toEqual([]);
+  });
+
 });
