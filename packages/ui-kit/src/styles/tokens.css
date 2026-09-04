@@ -244,55 +244,6 @@
 [data-theme="contrast"][data-accent="amber"] { --accent: #744604; --accent-wash: #fdf1de; --accent-line: #744604; }
 [data-theme="contrast"][data-accent="rose"]  { --accent: #931f49; --accent-wash: #fdeaf1; --accent-line: #931f49; }
 
-/* --- the ground follows the accent, faintly ---------------------------
-   An accent recoloured buttons, links and selection and left the window
-   itself untouched, so choosing one on a screen showing mostly ground looked
-   like nothing had happened. A few percent of the accent mixed into the
-   canvas answers that without turning the app into a colour: the surfaces
-   content sits on — `--surface` and its pair — are deliberately NOT tinted,
-   so text keeps the contrast its theme was drawn for.
-
-   Only where an accent was CHOSEN. `writeAxis` spells the default Violet as
-   the ABSENCE of the attribute, so `[data-accent]` is exactly "not the
-   default" — a reader who has never touched the control sees the ground their
-   theme has always had, to the byte.
-
-   High contrast is excluded on purpose: its ground is pure white and every
-   ratio in that theme is computed against it.
-
-   The dark grounds take a little more than the light ones. The same 4% that
-   reads as a tint on paper is invisible against near-black.
-
-   Each theme's base is written out rather than derived, because `--canvas`
-   cannot be defined in terms of itself. `tokens-only.test.ts` asserts each
-   base here equals that theme's own `--canvas`, so the copies cannot drift. */
-:root[data-accent] {
-  --canvas: color-mix(in oklab, var(--accent) 4%, #f5f4f8);
-  --canvas-deep: color-mix(in oklab, var(--accent) 5%, #eceaf2);
-}
-[data-theme="paper"][data-accent] {
-  --canvas: color-mix(in oklab, var(--accent) 4%, #f4f1ea);
-  --canvas-deep: color-mix(in oklab, var(--accent) 5%, #eae5da);
-}
-[data-theme="dark"][data-accent] {
-  --canvas: color-mix(in oklab, var(--accent) 7%, #0d0c12);
-  --canvas-deep: color-mix(in oklab, var(--accent) 8%, #08080c);
-}
-[data-theme="midnight"][data-accent] {
-  --canvas: color-mix(in oklab, var(--accent) 7%, #000105);
-  --canvas-deep: color-mix(in oklab, var(--accent) 8%, #000000);
-}
-/* And High contrast opts back out, explicitly.
-   Leaving it out of the list above is not enough: `:root[data-accent]` is an
-   element and an attribute, which outweighs `[data-theme="contrast"]` on its
-   own, so this theme inherited the light ground TINTED — the one theme whose
-   every ratio is computed against pure white. Written at the same weight as
-   the rule it has to beat, and pinned by a test that reads the resolved value
-   rather than the absence of a selector, which is what missed it. */
-:root[data-theme="contrast"][data-accent] {
-  --canvas: #ffffff;
-  --canvas-deep: #ffffff;
-}
 
 /* --- density: row height and padding, independent of zoom ----------- */
 :root { --row-h: 27px; --pad-y: 0.2rem; --pane-head-h: 27px; }
