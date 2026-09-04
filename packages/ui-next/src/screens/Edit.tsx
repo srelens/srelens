@@ -5,12 +5,15 @@ import {
   describeError,
   diffManifest,
   getManifest,
+  getSecret,
   notify,
   parseResourceVersion,
+  redactSecretManifest,
   validateManifest,
   type ApplyDoc,
   type ClusterContext,
   type DiffDoc,
+  type DynamicGvk,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
@@ -24,6 +27,7 @@ import {
 } from "@srelens/ui-kit";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
+import { isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, type DetailRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
@@ -147,6 +151,14 @@ function useApply({
       return false;
     }
     const docs = out.documents ?? [];
+    // An emptied editor applies nothing, and the API answers with no
+    // documents — neither a conflict nor a failure, so it used to read as a
+    // success, toast one, and reload the unchanged object.
+    if (docs.length === 0) {
+      setError("Nothing to apply: the manifest has no documents in it.");
+      setConflicts([]);
+      return false;
+    }
     const { conflicts: conflicted, failures } = outcome(docs);
     setConflicts(conflicted);
     // A conflict and a hard failure can arrive together; the failure is shown
@@ -241,23 +253,66 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
   const [pinned] = useState(context.name);
   const { kind, namespace, name } = parts;
 
+  /**
+   * A Secret's values stay out of the DOM until the reader reveals them.
+   *
+   * `k8s.getManifest` returns them in the clear, so the manifest is redacted
+   * on arrival — the same redactor the detail pane's YAML view uses, failing
+   * closed on any shape it does not understand — and the editor shows that,
+   * read-only, until Reveal. Reveal goes through `k8s.getSecret`, the
+   * consent-gated read, and only after it answers is the real manifest put
+   * in the editor. The real text is held here in the meantime, in state, and
+   * never rendered; and Apply is off while the editor shows placeholders,
+   * because applying a redacted manifest would write the placeholders over
+   * the values.
+   */
+  const isSecret = kind === "Secret";
+  const [revealed, setRevealed] = useState(!isSecret);
+  const [revealBusy, setRevealBusy] = useState(false);
+  const [revealError, setRevealError] = useState("");
+
   const manifest = useResource(
     async () => {
-      const out = await getManifest(pinned, kind, namespace, name);
+      // A kind outside the built-in table has to be resolved to its group
+      // first, or the read fails for every custom resource.
+      let crd: DynamicGvk | undefined;
+      if (!isBuiltInKind(kind)) {
+        const resolved = await resolveCrdGvk(pinned, kind);
+        if (resolved.error) throw new Error(resolved.error);
+        crd = resolved.crd;
+      }
+      const out = await getManifest(pinned, kind, namespace, name, undefined, crd);
       if (out.error) throw new Error(out.error);
-      return out.yaml ?? "";
+      const raw = out.yaml ?? "";
+      if (!isSecret) return { raw, shown: raw };
+      const redacted = redactSecretManifest(raw);
+      if (redacted.error !== undefined) throw new Error(redacted.error);
+      return { raw, shown: redacted.yaml ?? "" };
     },
     [pinned, kind, namespace, name],
     // An empty manifest is still a manifest that loaded.
     () => false,
   );
+  const live = revealed ? manifest.data?.raw : manifest.data?.shown;
+
+  async function reveal() {
+    setRevealBusy(true);
+    setRevealError("");
+    const out = await getSecret(pinned, namespace ?? "", name);
+    setRevealBusy(false);
+    if (out.error) {
+      setRevealError(describeError(out.error).detail);
+      return;
+    }
+    setRevealed(true);
+  }
 
   // `null` is "the reader has not typed": the editor shows the live manifest,
   // Apply is off, and a reload from the cluster is not a lost draft.
   const [draft, setDraft] = useState<string | null>(null);
-  const yaml = draft ?? manifest.data ?? "";
-  const dirty = draft !== null && draft !== manifest.data;
-  const loadedRv = useMemo(() => parseResourceVersion(manifest.data ?? ""), [manifest.data]);
+  const yaml = draft ?? live ?? "";
+  const dirty = draft !== null && draft !== live;
+  const loadedRv = useMemo(() => parseResourceVersion(manifest.data?.raw ?? ""), [manifest.data]);
 
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -364,6 +419,16 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
               Changed elsewhere
             </span>
           )}
+          {isSecret && !revealed && (
+            <Button
+              variant="secondary"
+              onClick={() => void reveal()}
+              disabled={revealBusy || manifest.status !== "ready"}
+              title="Reads the Secret's values through the consent-gated read, then shows the real manifest"
+            >
+              {revealBusy ? "Revealing…" : "Reveal values"}
+            </Button>
+          )}
           <Button variant="ghost" onClick={() => setShowChanges((v) => !v)} disabled={!dirty}>
             {showChanges ? "Hide changes" : "Changes"}
           </Button>
@@ -389,7 +454,9 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
           </Button>
           <Button
             variant="primary"
-            disabled={!dirty || editor.busy || manifest.status !== "ready"}
+            disabled={
+              !revealed || !dirty || !yaml.trim() || editor.busy || manifest.status !== "ready"
+            }
             onClick={() => {
               editor.setError("");
               editor.gate.reset();
@@ -407,6 +474,12 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
           {manifest.status === "error" && (
             <FailureAlert title={`Could not load ${kind} ${name}`} error={manifest.error} />
           )}
+          {isSecret && !revealed && manifest.status === "ready" && (
+            <p className="text-sm text-muted" data-testid="secret-redacted">
+              Values are redacted. Reveal them to edit this Secret; applying is off until then.
+            </p>
+          )}
+          {revealError && <FailureAlert title={`Could not reveal ${name}`} error={revealError} />}
           <Conflicts
             conflicts={editor.conflicts}
             busy={editor.busy}
@@ -432,6 +505,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Deta
                   onChange={setDraft}
                   language="yaml"
                   fill
+                  readOnly={!revealed}
                   ariaLabel={`${name} manifest`}
                   schemaValidate={validator(pinned)}
                 />

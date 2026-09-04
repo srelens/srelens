@@ -17,6 +17,8 @@ const core = vi.hoisted(() => ({
   diffManifest: vi.fn(),
   validateManifest: vi.fn(),
   deleteResource: vi.fn(),
+  getSecret: vi.fn(),
+  listCrds: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -74,7 +76,12 @@ const ROUTE = "/edit/ConfigMap/checkout/web";
 
 /** The editor's last mount, and a way to type into it. */
 function latestEditor() {
-  const props = editors.at(-1) as { value: string; onChange: (v: string) => void; ariaLabel: string };
+  const props = editors.at(-1) as {
+    value: string;
+    onChange: (v: string) => void;
+    ariaLabel: string;
+    readOnly?: boolean;
+  };
   return props;
 }
 
@@ -88,13 +95,27 @@ beforeEach(() => {
   core.diffManifest.mockReset().mockResolvedValue({ documents: [] });
   core.validateManifest.mockReset().mockResolvedValue({ valid: true, errors: [] });
   core.deleteResource.mockReset().mockResolvedValue({ ok: true });
+  core.getSecret.mockReset().mockResolvedValue({ data: { password: "s3cret" } });
+  core.listCrds.mockReset().mockResolvedValue({ crds: [] });
 });
+
+const SECRET = `apiVersion: v1
+kind: Secret
+metadata:
+  name: db
+  namespace: checkout
+type: Opaque
+data:
+  password: czNjcmV0
+`;
 
 describe("EditResource", () => {
   it("opens on the live manifest, read from the cluster the tab is on", async () => {
     render(<EditResource route={ROUTE} />);
     await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
-    expect(core.getManifest).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web");
+    // A built-in kind needs no CRD lookup, so none is passed.
+    expect(core.getManifest).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web", undefined, undefined);
+    expect(core.listCrds).not.toHaveBeenCalled();
     expect(latestEditor().ariaLabel).toBe("web manifest");
     // Nothing typed yet, so there is nothing to apply.
     expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
@@ -164,6 +185,61 @@ describe("EditResource", () => {
     );
     // The tab says what happened rather than showing an editor over nothing.
     expect(await screen.findByText(/ConfigMap web was deleted/)).toBeDefined();
+  });
+
+  it("does not call an emptied manifest applied", async () => {
+    // Blank YAML applies nothing; the API answers with no documents, which is
+    // neither a conflict nor a failure and used to be toasted as a success.
+    core.applyManifest.mockResolvedValueOnce({ documents: [], applied: false });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange("   \n"));
+    // Whitespace alone is not a draft worth applying.
+    expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
+    // A comment-only document reaches the server and comes back empty.
+    act(() => latestEditor().onChange("# nothing here\n"));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Apply" }));
+    expect(await screen.findByText(/Nothing to apply/)).toBeDefined();
+    expect(screen.queryByText(/^Applied /)).toBeNull();
+    // The draft is kept, not cleared as an applied one would be.
+    expect(core.getManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a Secret's values out of the editor until they are revealed through the gated read", async () => {
+    // `k8s.getManifest` returns a Secret in the clear; the detail pane
+    // redacts it and the editor has to, or one tab over undoes the gate.
+    core.getManifest.mockResolvedValue({ yaml: SECRET });
+    render(<EditResource route="/edit/Secret/checkout/db" />);
+    await waitFor(() => expect(latestEditor()?.value).toBeDefined());
+    const shown = latestEditor().value as string;
+    expect(shown).not.toContain("czNjcmV0");
+    expect(shown).toContain("REDACTED");
+    expect(latestEditor().readOnly).toBe(true);
+    expect(screen.getByTestId("secret-redacted")).toBeDefined();
+    expect(core.getSecret).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Reveal values" }));
+    await waitFor(() => expect(core.getSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db"));
+    await waitFor(() => expect(latestEditor().value).toBe(SECRET));
+    expect(latestEditor().readOnly).toBe(false);
+    expect(screen.queryByTestId("secret-redacted")).toBeNull();
+  });
+
+  it("resolves a custom kind's group before reading its manifest", async () => {
+    // `k8s.getManifest` knows the built-in kinds and has to be told about any
+    // other; every custom resource opened to an error until the editor asked.
+    core.listCrds.mockResolvedValue({
+      crds: [{ name: "widgets.acme.io", group: "acme.io", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
+    });
+    core.getManifest.mockResolvedValue({ yaml: "apiVersion: acme.io/v1\nkind: Widget\nmetadata:\n  name: w1\n" });
+    render(<EditResource route="/edit/Widget/checkout/w1" />);
+    await waitFor(() => expect(latestEditor()?.value).toContain("kind: Widget"));
+    expect(core.getManifest).toHaveBeenCalledWith("prod-eu", "Widget", "checkout", "w1", undefined, {
+      group: "acme.io",
+      version: "v1",
+      plural: "widgets",
+    });
   });
 
   it("says when the manifest could not be read, instead of an empty editor", async () => {
