@@ -19,6 +19,7 @@ const core = vi.hoisted(() => ({
   deleteResource: vi.fn(),
   getSecret: vi.fn(),
   listCrds: vi.fn(),
+  openApiSchema: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -31,6 +32,9 @@ vi.mock("@srelens/core/react", async (orig) => ({
 // The rail's cluster, mutable so a test can move it out from under an open
 // editor the way a reader would.
 const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu" } }));
+// The console the Review button hands the draft to.
+const { ask } = vi.hoisted(() => ({ ask: vi.fn() }));
+vi.mock("../console", () => ({ useConsole: () => ({ ask }) }));
 vi.mock("../lib/clusters", async (orig) => ({
   ...(await orig<typeof import("../lib/clusters")>()),
   useActiveContext: () => ({ ...active }),
@@ -84,9 +88,36 @@ function latestEditor() {
     onChange: (v: string) => void;
     ariaLabel: string;
     readOnly?: boolean;
+    completions?: unknown;
+    onCursorChange?: (pos: number) => void;
+    onDiagnostics?: (diagnostics: unknown[]) => void;
   };
   return props;
 }
+
+/** A schema bundle for the fixture's ConfigMap: enough to say what goes where. */
+const SCHEMA = {
+  key: "io.k8s.api.core.v1.ConfigMap",
+  schemas: {
+    "io.k8s.api.core.v1.ConfigMap": {
+      type: "object",
+      properties: {
+        apiVersion: { type: "string", description: "APIVersion defines the versioned schema." },
+        kind: { type: "string" },
+        metadata: { allOf: [{ $ref: "#/components/schemas/ObjectMeta" }], description: "Standard object's metadata." },
+        data: { type: "object", description: "Data contains the configuration data." },
+        immutable: { type: "boolean", description: "Immutable, if set to true, ensures that data cannot be updated." },
+      },
+    },
+    ObjectMeta: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Name must be unique within a namespace." },
+        namespace: { type: "string", description: "Namespace defines the space within which each name must be unique." },
+      },
+    },
+  },
+};
 
 beforeEach(() => {
   editors.length = 0;
@@ -102,6 +133,8 @@ beforeEach(() => {
   core.deleteResource.mockReset().mockResolvedValue({ ok: true });
   core.getSecret.mockReset().mockResolvedValue({ data: { password: "s3cret" } });
   core.listCrds.mockReset().mockResolvedValue({ crds: [] });
+  core.openApiSchema.mockReset().mockResolvedValue(SCHEMA);
+  ask.mockReset();
 });
 
 const SECRET = `apiVersion: v1
@@ -290,6 +323,104 @@ describe("EditResource", () => {
     expect(dialog.textContent).toContain("still runs against staging, not prod-eu");
   });
 
+  it("says when the comparison failed, rather than showing no changes", async () => {
+    // A dry run that is forbidden, or times out, used to come back as an
+    // empty diff — "No changes." one click before Apply, and no "changed
+    // elsewhere" check either.
+    core.diffManifest.mockResolvedValue({ error: 'configmaps "web" is forbidden: cannot dry-run' });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    expect(await screen.findByText("Could not compare with the cluster", {}, { timeout: 3000 })).toBeDefined();
+    expect(screen.queryByText("No changes.")).toBeNull();
+    // And the header says so, whether or not the panel is open.
+    expect(screen.getByText("Not compared")).toBeDefined();
+  });
+
+  it("lists the lint pass's findings beside the editor, and calls the draft valid when there are none", async () => {
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    const sidebar = screen.getByRole("complementary", { name: "Analysis" });
+    // What the editor's linter found — syntax, then the server-side dry run
+    // — arrives through one callback and is listed with its line.
+    act(() =>
+      latestEditor().onDiagnostics!([
+        { from: 60, to: 70, line: 7, severity: "error", message: 'unknown field "immutble"' },
+      ]),
+    );
+    expect(within(sidebar).getByText('unknown field "immutble"')).toBeDefined();
+    expect(within(sidebar).getByText("L7")).toBeDefined();
+    expect(screen.getByTestId("manifest-status").textContent).toContain("1 problem");
+
+    act(() => latestEditor().onDiagnostics!([]));
+    expect(screen.getByTestId("manifest-status").textContent).toContain("valid");
+    expect(within(sidebar).getByText(/No problems/).textContent).toContain("dry run");
+  });
+
+  it("says what the schema allows where the cursor is, and completes from the same schema", async () => {
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    expect(core.openApiSchema).toHaveBeenCalledWith("prod-eu", "v1", "ConfigMap");
+    const sidebar = screen.getByRole("complementary", { name: "Analysis" });
+    // Cursor at the top: the top-level keys, with type and description.
+    expect(await within(sidebar).findByText("immutable")).toBeDefined();
+    expect(within(sidebar).getByText("Data contains the configuration data")).toBeDefined();
+
+    // Cursor inside metadata: its keys, and the path in the heading.
+    act(() => latestEditor().onCursorChange!(LIVE.indexOf("  name: web") + 4));
+    expect(await within(sidebar).findByText("namespace")).toBeDefined();
+    expect(within(sidebar).getByText("metadata")).toBeDefined();
+    expect(within(sidebar).queryByText("immutable")).toBeNull();
+
+    // The editor's completion popup is fed from the same schema.
+    expect(typeof latestEditor().completions).toBe("function");
+  });
+
+  it("runs a dry run on demand, shows the verdict, and retires it when the draft changes", async () => {
+    core.validateManifest.mockResolvedValue({
+      valid: false,
+      errors: [{ docIndex: 0, message: "metadata.name: Invalid value: too long" }],
+    });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    await userEvent.click(screen.getByRole("button", { name: "Dry run" }));
+    const verdict = await screen.findByTestId("dry-run-verdict");
+    expect(verdict.textContent).toContain("Dry run failed");
+    expect(verdict.textContent).toContain("Invalid value: too long");
+    expect(core.validateManifest).toHaveBeenCalledWith("prod-eu", LIVE);
+
+    // The verdict was about that text; typing makes it stale, so it goes.
+    act(() => latestEditor().onChange(EDITED));
+    expect(screen.queryByTestId("dry-run-verdict")).toBeNull();
+
+    core.validateManifest.mockResolvedValue({ valid: true, errors: [] });
+    await userEvent.click(screen.getByRole("button", { name: "Dry run" }));
+    expect((await screen.findByTestId("dry-run-verdict")).textContent).toContain("Dry run passed");
+  });
+
+  it("hands the draft to the assistant for review, naming the cluster it is bound for", async () => {
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(ask).toHaveBeenCalledTimes(1);
+    const question = ask.mock.calls[0][0] as string;
+    expect(question).toContain("ConfigMap web");
+    expect(question).toContain("prod-eu");
+    expect(question).toContain("key: changed");
+  });
+
+  it("reverts the draft to the live manifest", async () => {
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    expect(latestEditor().value).toBe(EDITED);
+    await userEvent.click(screen.getByRole("button", { name: "Revert" }));
+    await waitFor(() => expect(latestEditor().value).toBe(LIVE));
+    expect(core.getManifest).toHaveBeenCalledTimes(2);
+  });
+
   it("takes a conflict down once the draft that caused it changes", async () => {
     core.applyManifest.mockResolvedValueOnce({
       documents: [
@@ -353,6 +484,21 @@ describe("EditResource", () => {
 });
 
 describe("EditResource on /new", () => {
+  it("creates on the cluster named in the route, and asks first when the rail is elsewhere", async () => {
+    // New pressed on staging's list opens /new/staging; the rail is on
+    // prod-eu. The draft is staging's, and the gate says so before Create.
+    render(<EditResource route="/new/staging" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.Deployment("default")));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(core.applyManifest).not.toHaveBeenCalled();
+    expect(screen.getByText(/still runs against staging, not prod-eu/)).toBeDefined();
+    await userEvent.click(screen.getByRole("checkbox"));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(core.applyManifest).toHaveBeenCalledWith("staging", TEMPLATES.Deployment("default"), false),
+    );
+  });
+
   it("starts from a template in the picked namespace, and creates with one click", async () => {
     render(<EditResource route="/new" />);
     await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.Deployment("default")));

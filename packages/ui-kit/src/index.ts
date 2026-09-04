@@ -10,7 +10,13 @@ export { Breadcrumb, type BreadcrumbProps } from "./Breadcrumb";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
 export { ClusterRail, type ClusterRailItem, type ClusterRailMarker, type ClusterRailProps } from "./ClusterRail";
-export { CodeEditor, documentDiagnostics, yamlDiagnostics, type CodeEditorProps } from "./CodeEditor";
+export {
+  CodeEditor,
+  documentDiagnostics,
+  yamlDiagnostics,
+  type CodeEditorProps,
+  type EditorDiagnostic,
+} from "./CodeEditor";
 export { ColumnPicker, type ColumnOption, type ColumnPickerProps } from "./ColumnPicker";
 export { Combobox, type ComboboxOption, type ComboboxProps } from "./Combobox";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";

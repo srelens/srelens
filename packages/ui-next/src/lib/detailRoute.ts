@@ -154,6 +154,31 @@ export function parseEditRoute(route: string): EditRouteParts | null {
   return qualified ? { ...qualified, cluster } : null;
 }
 
+/**
+ * `/new/<cluster>` — the editor's CREATE half, on a named cluster.
+ *
+ * The cluster is in it for the reason it is in the edit route: the editor
+ * pins the cluster it was opened on and `openTab` dedupes by route, so a bare
+ * `/new` opened from staging while prod's new-resource tab was open would
+ * have focused prod's draft. The bare `/new` is still parsed — an earlier
+ * build's table named it — and pins whatever the rail is on.
+ */
+export function newRoute(cluster: string): string {
+  return `/new/${encodeURIComponent(cluster)}`;
+}
+
+/** The inverse of {@link newRoute}; `{}` for the bare `/new`; `null` for anything else. */
+export function parseNewRoute(route: string): { cluster?: string } | null {
+  if (route === "/new") return {};
+  const segments = route.split("/");
+  if (segments.length !== 3 || segments[0] !== "" || segments[1] !== "new" || !segments[2]) return null;
+  try {
+    return { cluster: decodeURIComponent(segments[2]) };
+  } catch {
+    return null;
+  }
+}
+
 /** `<group>/<kind>` in the kind segment becomes `group` and `kind`; a bare kind is left alone. */
 function splitGroup(parts: DetailRouteParts): EditRouteParts | null {
   const at = parts.kind.lastIndexOf("/");

@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
-import { parseDetailRoute, parseEditRoute } from "./detailRoute";
+import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 import { Agent } from "../screens/Agent";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
@@ -150,6 +150,9 @@ export function describe(route: string, clusterName?: string): RouteInfo {
     const where = edit.namespace === null ? edit.name : `${edit.namespace}/${edit.name}`;
     return { route, title: `Edit ${where}`, sub, kind: "edit" };
   }
+  // `/new/<cluster>` — the create half, on a named cluster. The cluster is
+  // not in the title: it is the tab's own label, as on every other tab.
+  if (parseNewRoute(route)) return { route, title: "New resource", sub, kind: "edit" };
   // The legacy one-segment `/edit/<name>`. Nothing mints it any more; the shape
   // survives here only so a tab a previous session persisted can still name
   // itself in the strip, exactly as `/resources/<name>/logs|shell|forward` does
@@ -344,6 +347,9 @@ export function screenFor(route: string): ScreenComponent | null {
   // one-segment `/edit/<name>` stay a Placeholder rather than an editor with
   // no resource in it.
   if (parseEditRoute(route)) return EditResource;
+  // And its create half on a named cluster, `/new/<cluster>`; the bare
+  // `/new` is in `SCREENS`.
+  if (parseNewRoute(route)) return EditResource;
   // A logs subject route, for the same reason and by the same means: matched
   // by parse rather than by a `/logs/` prefix entry, so `/logs/` on its own —
   // and anything else under the prefix that is not a whole subject — stays a

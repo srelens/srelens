@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect } from "vitest";
-import { detailRoute, editRoute, parseDetailRoute, parseEditRoute } from "./detailRoute";
+import { detailRoute, editRoute, newRoute, parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 
 describe("detailRoute", () => {
   it("carries the kind, the namespace and the name", () => {
@@ -139,5 +139,29 @@ describe("editRoute", () => {
     // And it does not answer for another prefix's route of the right arity.
     expect(parseEditRoute("/k/Pod/default/web-0")).toBeNull();
     expect(parseDetailRoute("/edit/Pod/default/web-0")).toBeNull();
+  });
+});
+
+describe("newRoute", () => {
+  it("names the cluster, so New on two clusters is two tabs", () => {
+    expect(newRoute("prod")).toBe("/new/prod");
+    expect(newRoute("prod")).not.toBe(newRoute("staging"));
+    expect(parseNewRoute(newRoute("staging"))).toEqual({ cluster: "staging" });
+  });
+
+  it("encodes the cluster, and refuses one that will not decode", () => {
+    expect(parseNewRoute(newRoute("kind/local"))!.cluster).toBe("kind/local");
+    expect(parseNewRoute("/new/%zz")).toBeNull();
+  });
+
+  it("still answers for the bare /new an earlier build named, with no cluster", () => {
+    expect(parseNewRoute("/new")).toEqual({});
+  });
+
+  it("refuses anything else", () => {
+    expect(parseNewRoute("/new/")).toBeNull();
+    expect(parseNewRoute("/new/prod/extra")).toBeNull();
+    expect(parseNewRoute("/news")).toBeNull();
+    expect(parseNewRoute("/edit/prod/Pod/default/web")).toBeNull();
   });
 });

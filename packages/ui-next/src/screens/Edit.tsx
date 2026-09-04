@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   applyManifest,
   deleteResource,
@@ -24,15 +24,19 @@ import {
   EmptyState,
   Screen,
   Select,
+  type EditorDiagnostic,
 } from "@srelens/ui-kit";
+import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
 import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
-import { parseEditRoute, type EditRouteParts } from "../lib/detailRoute";
+import { parseEditRoute, parseNewRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
+import { keysAt, schemaCompletions, useManifestSchema } from "../lib/manifestSchema";
 import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { useResource } from "../lib/useResource";
+import { EditAnalysis, ProblemsDot, type DryRunState } from "./EditAnalysis";
 import { NoClusterScreen } from "./resourceShell";
 
 /**
@@ -53,21 +57,22 @@ import { NoClusterScreen } from "./resourceShell";
  * a field another manager owns comes back as a conflict rather than an
  * overwrite — the reader chooses to force it, and is told whose field it was.
  *
- * What is NOT here yet: schema-driven completion in the editor. The kit takes
- * a completion source and core has the schema helpers, but wiring the two
- * needs CodeMirror's autocomplete types in this package, which it does not
- * yet depend on. Validation — a strict dry run against the API server — is
- * wired, and is the half that catches a wrong manifest before it is applied.
+ * **Beside the editor, an analysis of the draft**: the lint pass's findings
+ * listed with their lines, an on-demand dry run's verdict, and what the
+ * kind's OpenAPI schema allows where the cursor is — the same schema that
+ * feeds the editor's completion popup, through `lib/manifestSchema`. The
+ * toolbar carries the one-word verdict ("valid", "2 problems"), Revert, Diff,
+ * Review — which hands the draft to the assistant — Dry run, and Apply.
  */
 export function EditResource({ route }: { route: string }) {
   const context = useActiveContext();
-  const creating = route === "/new";
-  const parts = creating ? null : parseEditRoute(route);
+  const created = parseNewRoute(route);
+  const parts = created ? null : parseEditRoute(route);
   const title = parts ? `Edit ${parts.name}` : "New resource";
 
   if (!context) return <NoClusterScreen title={title} noun="resources" />;
 
-  if (!creating && !parts) {
+  if (!created && !parts) {
     // Unreachable through `screenFor`, which sends a route here only once
     // `parseEditRoute` has accepted it — but a route string can arrive from a
     // persisted session, and a tab that says what is wrong with it is worth
@@ -94,7 +99,7 @@ export function EditResource({ route }: { route: string }) {
   return parts ? (
     <EditExisting key={route} context={context} parts={parts} />
   ) : (
-    <NewResource context={context} />
+    <NewResource key={route} context={context} cluster={created?.cluster} />
   );
 }
 
@@ -203,6 +208,64 @@ function validator(context: string) {
     validateManifest(context, yaml).then((r) => (r.valid === false ? (r.errors ?? []) : []));
 }
 
+/**
+ * Everything the analysis sidebar knows about the draft, shared by edit and
+ * create: the last lint pass's findings, the schema for the kind the draft
+ * names and what it allows at the cursor, an on-demand dry run, the
+ * completion source built on that same schema, and the hand-off to the
+ * assistant for a review.
+ */
+function useAnalysis(pinned: string, yaml: string) {
+  // `null` until the first pass: "no problems" before anything has looked
+  // would be a guess, and the toolbar says "unchecked" instead.
+  const [problems, setProblems] = useState<EditorDiagnostic[] | null>(null);
+  const [cursor, setCursor] = useState(0);
+  const schema = useManifestSchema(pinned, yaml);
+  const bundleRef = useRef(schema.bundle);
+  bundleRef.current = schema.bundle;
+  // One source for the editor's life. It reads the bundle through the ref, so
+  // a schema that arrives after mount — or changes with the kind — is offered
+  // without rebuilding the editor.
+  const completions = useMemo(() => schemaCompletions(() => bundleRef.current), []);
+  const keys = useMemo(
+    () => (schema.bundle ? keysAt(schema.bundle, yaml, cursor) : null),
+    [schema.bundle, yaml, cursor],
+  );
+
+  const [dryRun, setDryRun] = useState<DryRunState>({ status: "idle", errors: [] });
+  // A dry run's verdict is about the text it ran on; typing retires it.
+  useEffect(() => {
+    setDryRun({ status: "idle", errors: [] });
+  }, [yaml]);
+  async function runDryRun() {
+    setDryRun({ status: "running", errors: [] });
+    const r = await validateManifest(pinned, yaml);
+    if (r.error) setDryRun({ status: "error", errors: [], error: describeError(r.error).detail });
+    else if (r.valid === false) setDryRun({ status: "failed", errors: r.errors ?? [] });
+    else setDryRun({ status: "passed", errors: [] });
+  }
+
+  const { ask } = useConsole();
+  function review(what: string) {
+    ask(
+      `Review this ${what} before I apply it to ${pinned}. Say what is risky, wrong, or missing, and why.\n\n\`\`\`yaml\n${yaml}\n\`\`\``,
+    );
+  }
+
+  return {
+    problems: problems ?? [],
+    checked: problems !== null,
+    setProblems,
+    setCursor,
+    schema,
+    keys,
+    completions,
+    dryRun,
+    runDryRun,
+    review,
+  };
+}
+
 /** The conflict banner: who owns the field, and the one way past it. */
 function Conflicts({
   conflicts,
@@ -245,7 +308,21 @@ function Conflicts({
  * dry run — and the one line that matters most, whether the live object has
  * moved since the manifest was loaded.
  */
-function Changes({ docs, computing }: { docs: DiffDoc[] | null; computing: boolean }) {
+function Changes({ docs, computing, error }: { docs: DiffDoc[] | null; computing: boolean; error: string }) {
+  // A comparison that failed is not "no changes": the reader is one click
+  // from Apply, and the dry run that would have told them what it does — and
+  // whether the object moved under them — never answered.
+  if (error) {
+    return (
+      <div className="flex flex-col gap-2 p-3">
+        <FailureAlert title="Could not compare with the cluster" error={error} />
+        <p className="text-xs text-muted">
+          Nothing here can say what applying would change, or whether the live object has changed
+          since you opened it. Applying takes your version.
+        </p>
+      </div>
+    );
+  }
   if (computing && !docs) return <p className="p-3 text-sm text-muted">Comparing with the cluster…</p>;
   if (!docs || docs.length === 0) return <p className="p-3 text-sm text-muted">No changes.</p>;
   return (
@@ -347,6 +424,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   const [draft, setDraft] = useState<string | null>(null);
   const yaml = draft ?? live ?? "";
   const dirty = draft !== null && draft !== live;
+  const analysis = useAnalysis(pinned, yaml);
   const loadedRv = useMemo(() => parseResourceVersion(manifest.data?.raw ?? ""), [manifest.data]);
 
   const [confirming, setConfirming] = useState(false);
@@ -381,9 +459,15 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
    */
   const [diff, setDiff] = useState<DiffDoc[] | null>(null);
   const [diffing, setDiffing] = useState(false);
+  // Kept apart from `diff` rather than folded into an empty list: an empty
+  // list is a real answer ("nothing would change"), and a failed comparison
+  // shown as that answer was false reassurance right before Apply — and
+  // silently switched off the "changed elsewhere" check with it.
+  const [diffError, setDiffError] = useState("");
   useEffect(() => {
     if (!dirty) {
       setDiff(null);
+      setDiffError("");
       return;
     }
     let active = true;
@@ -391,7 +475,8 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     const t = setTimeout(() => {
       void diffManifest(pinned, yaml).then((out) => {
         if (!active) return;
-        setDiff(out.error ? [] : (out.documents ?? []));
+        setDiff(out.error ? null : (out.documents ?? []));
+        setDiffError(out.error ? describeError(out.error).detail : "");
         setDiffing(false);
       });
     }, 600);
@@ -447,10 +532,19 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
       eyebrow={`${where} · ${pinned}`}
       actions={
         <>
+          <ProblemsDot problems={analysis.problems} checked={analysis.checked} />
+          {diffError && (
+            <span
+              className="text-xs text-sev"
+              title={`The dry run that compares the draft with the cluster failed, so whether the live object has changed is unknown. ${diffError}`}
+            >
+              Not compared
+            </span>
+          )}
           {stale && (
             <span
               className="text-xs text-warn"
-              title="The live object has a newer resourceVersion than the one loaded here. Reload to see it; applying over it takes your version."
+              title="The live object has a newer resourceVersion than the one loaded here. Revert to see it; applying over it takes your version."
             >
               Changed elsewhere
             </span>
@@ -465,9 +559,6 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               {revealBusy ? "Revealing…" : "Reveal values"}
             </Button>
           )}
-          <Button variant="ghost" onClick={() => setShowChanges((v) => !v)} disabled={!dirty}>
-            {showChanges ? "Hide changes" : "Changes"}
-          </Button>
           <Button
             variant="ghost"
             onClick={() => {
@@ -476,7 +567,26 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
             }}
             title="Throw the draft away and load the manifest again from the cluster"
           >
-            Reload
+            Revert
+          </Button>
+          <Button variant="ghost" onClick={() => setShowChanges((v) => !v)} disabled={!dirty}>
+            {showChanges ? "Hide diff" : "Diff"}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => analysis.review(`${kind} ${name}`)}
+            disabled={!revealed || !yaml.trim() || manifest.status !== "ready"}
+            title="Hand the manifest to the assistant to look over before you apply it"
+          >
+            Review
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void analysis.runDryRun()}
+            disabled={!revealed || !yaml.trim() || analysis.dryRun.status === "running" || manifest.status !== "ready"}
+            title="Send the manifest to the API server as a dry run — admission included, nothing written"
+          >
+            {analysis.dryRun.status === "running" ? "Dry run…" : "Dry run"}
           </Button>
           {canDelete && (
             <Button
@@ -546,14 +656,23 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
                   readOnly={!revealed}
                   ariaLabel={`${name} manifest`}
                   schemaValidate={validator(pinned)}
+                  completions={analysis.completions}
+                  onCursorChange={analysis.setCursor}
+                  onDiagnostics={analysis.setProblems}
                 />
               </div>
             )}
           </div>
-          {showChanges && dirty && (
-            <aside className="rule-l scroll w-[440px] shrink-0" aria-label="Changes">
-              <Changes docs={diff} computing={diffing} />
-            </aside>
+          {manifest.status === "ready" && (
+            <EditAnalysis
+              problems={analysis.problems}
+              checked={analysis.checked}
+              keys={analysis.keys}
+              schema={analysis.schema.status}
+              kind={analysis.schema.kind}
+              dryRun={analysis.dryRun}
+              diff={showChanges && dirty ? <Changes docs={diff} computing={diffing} error={diffError} /> : null}
+            />
           )}
         </div>
       </div>
@@ -709,8 +828,10 @@ metadata:
 
 export const TEMPLATE_ORDER = ["Deployment", "Service", "ConfigMap", "Secret", "Ingress", "Namespace", "Blank"];
 
-function NewResource({ context }: { context: ClusterContext }) {
-  const [pinned] = useState(context.name);
+function NewResource({ context, cluster }: { context: ClusterContext; cluster?: string }) {
+  // The cluster in the route — the one the reader pressed New on — or, on the
+  // bare `/new`, whatever the rail is on now. See `newRoute`.
+  const [pinned] = useState(cluster ?? context.name);
   const { namespaces } = useNamespaceOptions(pinned, getKubeconfigFiles());
   const options = namespaces ?? [];
 
@@ -728,6 +849,7 @@ function NewResource({ context }: { context: ClusterContext }) {
   }, [options, namespace, template]);
 
   const editor = useApply({ pinned, live: context.name, verb: "create", yaml, onApplied: () => {} });
+  const analysis = useAnalysis(pinned, yaml);
   const untouched = yaml === TEMPLATES[template](namespace);
 
   const pickTemplate = (next: string) => {
@@ -765,6 +887,23 @@ function NewResource({ context }: { context: ClusterContext }) {
               className="min-w-36"
             />
           </label>
+          <ProblemsDot problems={analysis.problems} checked={analysis.checked} />
+          <Button
+            variant="ghost"
+            onClick={() => analysis.review("new manifest")}
+            disabled={!yaml.trim()}
+            title="Hand the manifest to the assistant to look over before you create it"
+          >
+            Review
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void analysis.runDryRun()}
+            disabled={!yaml.trim() || analysis.dryRun.status === "running"}
+            title="Send the manifest to the API server as a dry run — admission included, nothing written"
+          >
+            {analysis.dryRun.status === "running" ? "Dry run…" : "Dry run"}
+          </Button>
           <Button
             variant="primary"
             disabled={!yaml.trim() || editor.busy}
@@ -795,17 +934,30 @@ function NewResource({ context }: { context: ClusterContext }) {
             </p>
           )}
         </div>
-        <div className="relative min-h-0 flex-1 p-4">
-          <div className="absolute inset-4">
-            <CodeEditor
-              value={yaml}
-              onChange={setYaml}
-              language="yaml"
-              fill
-              ariaLabel="New resource manifest"
-              schemaValidate={validator(pinned)}
-            />
+        <div className="flex min-h-0 flex-1">
+          <div className="relative min-h-0 min-w-0 flex-1 p-4">
+            <div className="absolute inset-4">
+              <CodeEditor
+                value={yaml}
+                onChange={setYaml}
+                language="yaml"
+                fill
+                ariaLabel="New resource manifest"
+                schemaValidate={validator(pinned)}
+                completions={analysis.completions}
+                onCursorChange={analysis.setCursor}
+                onDiagnostics={analysis.setProblems}
+              />
+            </div>
           </div>
+          <EditAnalysis
+            problems={analysis.problems}
+            checked={analysis.checked}
+            keys={analysis.keys}
+            schema={analysis.schema.status}
+            kind={analysis.schema.kind}
+            dryRun={analysis.dryRun}
+          />
         </div>
       </div>
     </Screen>

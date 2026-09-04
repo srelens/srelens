@@ -154,6 +154,8 @@ suite("describe", () => {
       sub: "c",
     });
     expect(describe("/edit/prod/acme.io%2FDeployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The create half on a named cluster, beside the bare `/new` in the table.
+    expect(describe("/new/prod", "c")).toMatchObject({ title: "New resource", kind: "edit", sub: "c" });
     // Cluster-scoped: there is no namespace to name.
     expect(describe("/edit/Node/-/worker-1", "c")).toMatchObject({ title: "Edit worker-1", kind: "edit" });
     // Percent-encoded on the way in, so the title is the decoded name.
