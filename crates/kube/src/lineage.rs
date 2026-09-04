@@ -214,41 +214,71 @@ fn extract_status_and_details(kind: &str, obj: &DynamicObject) -> (Option<String
     }
 }
 
-/// Recursively resolve owner hierarchy upwards.
-async fn resolve_ancestors(
+/// Recursively resolve owner hierarchy upwards, nesting the child node inside its parent,
+/// and returning the highest ancestor (root) of the hierarchy.
+async fn nest_in_ancestors(
     client: &Client,
+    child: LineageNode,
     owners: &[OwnerReference],
     namespace: Option<&str>,
-) -> Vec<LineageNode> {
-    let mut ancestor_nodes = Vec::new();
-
-    for owner in owners {
-        let mut node = LineageNode::new(
-            &owner.kind,
-            &owner.name,
-            namespace.map(|s| s.to_string()),
-            LineageRelation::Owner,
-        );
-
-        if let Some((api, _)) = dynamic_api(client, &owner.kind, namespace) {
-            if let Ok(Ok(parent_obj)) = tokio::time::timeout(Duration::from_millis(1500), api.get(&owner.name)).await {
-                let (status, details) = extract_status_and_details(&owner.kind, &parent_obj);
-                node.status = status;
-                node.details = details;
-
-                // Continue upwards if this parent also has ownerReferences
-                if let Some(grandparents) = parent_obj.metadata.owner_references {
-                    if !grandparents.is_empty() {
-                        let grand_nodes = Box::pin(resolve_ancestors(client, &grandparents, namespace)).await;
-                        node.children.extend(grand_nodes);
-                    }
-                }
-            }
-        }
-        ancestor_nodes.push(node);
+) -> LineageNode {
+    if owners.is_empty() {
+        return child;
     }
 
-    ancestor_nodes
+    // Prefer controller owner if present, otherwise first owner
+    let primary_owner = owners
+        .iter()
+        .find(|o| o.controller == Some(true))
+        .unwrap_or(&owners[0]);
+
+    let mut parent_node = LineageNode::new(
+        &primary_owner.kind,
+        &primary_owner.name,
+        namespace.map(|s| s.to_string()),
+        LineageRelation::Owner,
+    );
+
+    let mut grandparents = None;
+    if let Some((api, _)) = dynamic_api(client, &primary_owner.kind, namespace) {
+        if let Ok(Ok(parent_obj)) = tokio::time::timeout(Duration::from_millis(1500), api.get(&primary_owner.name)).await {
+            let (status, details) = extract_status_and_details(&primary_owner.kind, &parent_obj);
+            parent_node.status = status;
+            parent_node.details = details;
+            grandparents = parent_obj.metadata.owner_references;
+        }
+    }
+
+    parent_node.children.push(child);
+
+    // If there were other non-primary owners on the child, attach them as sibling nodes to parent_node
+    for owner in owners {
+        if owner.uid != primary_owner.uid && owner.name != primary_owner.name {
+            let mut other_node = LineageNode::new(
+                &owner.kind,
+                &owner.name,
+                namespace.map(|s| s.to_string()),
+                LineageRelation::Owner,
+            );
+            if let Some((api, _)) = dynamic_api(client, &owner.kind, namespace) {
+                if let Ok(Ok(obj)) = tokio::time::timeout(Duration::from_millis(1500), api.get(&owner.name)).await {
+                    let (status, details) = extract_status_and_details(&owner.kind, &obj);
+                    other_node.status = status;
+                    other_node.details = details;
+                }
+            }
+            parent_node.children.push(other_node);
+        }
+    }
+
+    // Continue upwards if this parent also has ownerReferences (e.g. ReplicaSet -> Deployment)
+    if let Some(gps) = grandparents {
+        if !gps.is_empty() {
+            return Box::pin(nest_in_ancestors(client, parent_node, &gps, namespace)).await;
+        }
+    }
+
+    parent_node
 }
 
 /// Extract config and storage references from a pod spec.
@@ -336,14 +366,7 @@ pub async fn resolve_resource_lineage(
     let target_uid = obj.metadata.uid.clone().unwrap_or_default();
     let target_labels = obj.metadata.labels.clone().unwrap_or_default();
 
-    // 1. Resolve Ancestors (Upwards)
-    let ancestors = if let Some(owners) = &obj.metadata.owner_references {
-        resolve_ancestors(&client, owners, effective_ns).await
-    } else {
-        Vec::new()
-    };
-
-    // 2. Resolve Children / Dependents (Downwards)
+    // 1. Resolve Children / Dependents (Downwards)
     let mut dependents = Vec::new();
 
     let kind_lower = kind.to_lowercase();
@@ -588,22 +611,15 @@ pub async fn resolve_resource_lineage(
 
     target_node.children = dependents;
 
-    // If there are ancestors, nest the target under the uppermost ancestor
-    if !ancestors.is_empty() {
-        let mut root = ancestors[0].clone();
-        attach_target_to_ancestor(&mut root, target_node);
-        Ok(root)
-    } else {
-        Ok(target_node)
+    // If there are ancestors (ownerReferences), nest target_node inside its ancestors upwards
+    if let Some(owners) = &obj.metadata.owner_references {
+        if !owners.is_empty() {
+            let root = nest_in_ancestors(&client, target_node, owners, effective_ns).await;
+            return Ok(root);
+        }
     }
-}
 
-fn attach_target_to_ancestor(root: &mut LineageNode, target: LineageNode) {
-    if root.children.is_empty() {
-        root.children.push(target);
-    } else {
-        attach_target_to_ancestor(&mut root.children[0], target);
-    }
+    Ok(target_node)
 }
 
 #[cfg(test)]
@@ -649,5 +665,20 @@ mod tests {
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.children[0].children.len(), 1);
         assert_eq!(root.children[0].children[0].kind, "Pod");
+    }
+
+    #[test]
+    fn test_owner_hierarchy_ordering() {
+        // Verify that Deployment is the root ancestor that owns ReplicaSet, which owns Pod
+        let pod = LineageNode::new("Pod", "connection-sink-5z2xs", Some("prod".into()), LineageRelation::Target);
+        let mut rs = LineageNode::new("ReplicaSet", "connection-sink-7595b", Some("prod".into()), LineageRelation::Owner);
+        let mut deploy = LineageNode::new("Deployment", "connection-sink", Some("prod".into()), LineageRelation::Owner);
+
+        rs.children.push(pod);
+        deploy.children.push(rs);
+
+        assert_eq!(deploy.kind, "Deployment");
+        assert_eq!(deploy.children[0].kind, "ReplicaSet");
+        assert_eq!(deploy.children[0].children[0].kind, "Pod");
     }
 }

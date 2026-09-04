@@ -3348,7 +3348,7 @@ mod tests {
     async fn test_slash_commands_and_ai_playbooks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ai_skills::{expand_slash_command, match_slash_commands};
+        use srelens_tui::ai_skills::expand_slash_command;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -3425,7 +3425,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_action_palette_playbooks() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::dialogs::{Modal, QuickActionId};
 
