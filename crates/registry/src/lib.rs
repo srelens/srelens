@@ -341,6 +341,21 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::pod_overview::pod_overview_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::topology::topology_graph_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::topology::topology_probe_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::prometheus::prometheus_discover_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::prometheus::prometheus_query_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::connections::pod_connections_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::nodes::list_nodes_capability(cache.clone()));
     reg.register(srelens_kube::manifest::get_manifest_capability(
         cache.clone(),

@@ -15,6 +15,7 @@ import { ResourceDetailScreen, Resources } from "../screens/Resources";
 import { Settings } from "../screens/Settings";
 import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
+import { Topology } from "../screens/Topology";
 import { Workloads } from "../screens/Workloads";
 
 /**
@@ -289,6 +290,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   "/helm": Helm,
   // App-scoped: the managed kubectl, helm and krew are the machine's, and the
   // exec-auth rail is the only part of it that looks at a context at all.
+  // Cluster-scoped: how traffic reaches a workload in ONE namespace, which is
+  // why the screen carries a namespace picker rather than reading the tab.
+  // Four lanes, all of them joins the cluster can prove — see
+  // crates/kube/src/topology.rs for the three the design has that it cannot.
+  "/topology": Topology,
   "/toolbox": Toolbox,
   // App-scoped, and about every cluster at once rather than one: which contexts
   // srelens can see, the file each was read from, and what the last probe said.
