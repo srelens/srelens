@@ -13,6 +13,8 @@ use crate::theme::Theme;
 pub struct NodeInspectorState {
     pub node_name: String,
     pub details: Option<NodeInspectorDetails>,
+    pub cpu_history: Vec<u64>,
+    pub mem_history: Vec<u64>,
     pub selected_pod_idx: usize,
     pub scroll_offset: usize,
     pub is_loading: bool,
@@ -26,6 +28,8 @@ impl NodeInspectorState {
         Self {
             node_name,
             details: None,
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
             selected_pod_idx: 0,
             scroll_offset: 0,
             is_loading: true,
@@ -33,6 +37,11 @@ impl NodeInspectorState {
             last_pods_table_rect: std::cell::Cell::new(Rect::default()),
             last_scroll_offset: std::cell::Cell::new(0),
         }
+    }
+
+    pub fn update_metrics_history(&mut self, cpu: &[u64], mem: &[u64]) {
+        self.cpu_history = cpu.to_vec();
+        self.mem_history = mem.to_vec();
     }
 
     pub fn set_details(&mut self, details: NodeInspectorDetails) {
@@ -136,17 +145,22 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // Layout hierarchy:
     // 1. Header Card (height: 4)
     // 2. Resource & GPU Allocation Gauges (height: 4)
-    // 3. Conditions & Taints Strip (height: 3)
-    // 4. Scheduled Pods Table (min: 8)
-    // 5. Footer Key Hints (height: 1)
+    // 3. Live Metrics Timeline (Sparklines for CPU & Memory) (height: 4 if height >= 26)
+    // 4. Conditions & Taints Strip (height: 3)
+    // 5. Scheduled Pods Table (min: 6)
+    // 6. Footer Key Hints (height: 1)
+    let show_sparklines = area.height >= 26;
+    let sparkline_height = if show_sparklines { 4 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Header
-            Constraint::Length(4), // Gauges
-            Constraint::Length(3), // Conditions & Taints
-            Constraint::Min(8),    // Pods table
-            Constraint::Length(1), // Footer
+            Constraint::Length(4),                 // Header
+            Constraint::Length(4),                 // Gauges
+            Constraint::Length(sparkline_height),  // Live Sparklines
+            Constraint::Length(3),                 // Conditions & Taints
+            Constraint::Min(6),                    // Pods table
+            Constraint::Length(1),                 // Footer
         ])
         .split(area);
 
@@ -156,14 +170,73 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // --- 2. Gauges Area ---
     render_gauges_card(f, chunks[1], d);
 
-    // --- 3. Conditions & Taints Bar ---
-    render_conditions_and_taints(f, chunks[2], d);
+    // --- 3. Live Sparklines Timeline ---
+    if show_sparklines {
+        render_metrics_timeline_card(f, chunks[2], state, d);
+    }
 
-    // --- 4. Scheduled Pods Table ---
-    render_pods_table(f, chunks[3], state, d);
+    // --- 4. Conditions & Taints Bar ---
+    render_conditions_and_taints(f, chunks[3], d);
 
-    // --- 5. Footer Shortcuts ---
-    render_footer_hints(f, chunks[4], d);
+    // --- 5. Scheduled Pods Table ---
+    render_pods_table(f, chunks[4], state, d);
+
+    // --- 6. Footer Shortcuts ---
+    render_footer_hints(f, chunks[5], d);
+}
+
+fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &NodeInspectorDetails) {
+    if area.height < 3 || area.width < 20 {
+        return;
+    }
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // 1. CPU Sparkline
+    let cur_cpu = state.cpu_history.last().copied().unwrap_or(d.cpu_requests_millicores.max(0) as u64);
+    let peak_cpu = state.cpu_history.iter().copied().max().unwrap_or(cur_cpu);
+    let cpu_title = format!(" 📈 CPU Usage Trend [cur: {}m | peak: {}m | alloc: {}m] ", cur_cpu, peak_cpu, d.cpu_allocatable_millicores);
+    let cpu_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(Span::styled(cpu_title, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
+    let cpu_inner = cpu_block.inner(h_chunks[0]);
+    f.render_widget(cpu_block, h_chunks[0]);
+
+    if state.cpu_history.is_empty() {
+        let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
+        f.render_widget(p, cpu_inner);
+    } else {
+        let sparkline = ratatui::widgets::Sparkline::default()
+            .data(&state.cpu_history)
+            .style(Style::default().fg(Theme::CYAN))
+            .max(peak_cpu.max(10));
+        f.render_widget(sparkline, cpu_inner);
+    }
+
+    // 2. Memory Sparkline
+    let cur_mem = state.mem_history.last().copied().unwrap_or(d.mem_requests_mib.max(0) as u64);
+    let peak_mem = state.mem_history.iter().copied().max().unwrap_or(cur_mem);
+    let mem_title = format!(" 📈 Memory Usage Trend [cur: {}MiB | peak: {}MiB | alloc: {}MiB] ", cur_mem, peak_mem, d.mem_allocatable_mib);
+    let mem_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(Span::styled(mem_title, Style::default().fg(Color::Rgb(168, 85, 247)).add_modifier(Modifier::BOLD)));
+    let mem_inner = mem_block.inner(h_chunks[1]);
+    f.render_widget(mem_block, h_chunks[1]);
+
+    if state.mem_history.is_empty() {
+        let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
+        f.render_widget(p, mem_inner);
+    } else {
+        let sparkline = ratatui::widgets::Sparkline::default()
+            .data(&state.mem_history)
+            .style(Style::default().fg(Color::Rgb(168, 85, 247)))
+            .max(peak_mem.max(10));
+        f.render_widget(sparkline, mem_inner);
+    }
 }
 
 fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {

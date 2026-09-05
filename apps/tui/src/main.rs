@@ -312,12 +312,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             } else if title == "pod_metrics_updated" {
                                 app.handle_pod_metrics_update(&msg);
+                            } else if title == "node_metrics_updated" {
+                                app.handle_node_metrics_update(&msg);
                             } else {
                                 app.set_toast(msg, theme::Theme::status_ok());
                             }
                         }
                         Err(err) => {
-                            if title == "pod_metrics_updated" {
+                            if title == "cluster_info_updated" || title == "cluster_info_failed" {
+                                app.handle_cluster_info_failure(&err);
+                            } else if title == "cluster_overview_updated" {
+                                // Best-effort: ignore if cluster overview cannot connect
+                            } else if title == "pod_metrics_updated" || title == "node_metrics_updated" {
                                 // Best-effort: ignore if metrics-server is unavailable
                             } else if action.starts_with("ai_") {
                                 let target_state = match event_ctx {

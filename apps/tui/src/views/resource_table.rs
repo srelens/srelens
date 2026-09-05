@@ -18,6 +18,52 @@ pub struct ColumnDef {
     pub width: Constraint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkloadSegment {
+    #[default]
+    All,
+    Deployment,
+    StatefulSet,
+    DaemonSet,
+    Pod,
+    CronJob,
+}
+
+impl WorkloadSegment {
+    pub fn all() -> &'static [WorkloadSegment] {
+        &[
+            WorkloadSegment::All,
+            WorkloadSegment::Deployment,
+            WorkloadSegment::StatefulSet,
+            WorkloadSegment::DaemonSet,
+            WorkloadSegment::Pod,
+            WorkloadSegment::CronJob,
+        ]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Deployment => "Deployment",
+            Self::StatefulSet => "StatefulSet",
+            Self::DaemonSet => "DaemonSet",
+            Self::Pod => "Pod",
+            Self::CronJob => "CronJob",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::All => Self::Deployment,
+            Self::Deployment => Self::StatefulSet,
+            Self::StatefulSet => Self::DaemonSet,
+            Self::DaemonSet => Self::Pod,
+            Self::Pod => Self::CronJob,
+            Self::CronJob => Self::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResourceTableState {
     pub kind: ResourceKind,
@@ -31,8 +77,13 @@ pub struct ResourceTableState {
     pub sort_ascending: bool,
     pub is_loading: bool,
     pub warning_triage: bool,
+    pub reason_rail_focused: bool,
+    pub selected_reason_idx: usize,
+    pub active_reason_filter: Option<String>,
+    pub workload_segment: WorkloadSegment,
     pub last_viewport_rect: std::cell::Cell<Rect>,
     pub last_start_idx: std::cell::Cell<usize>,
+    pub last_area_width: std::cell::Cell<u16>,
 }
 
 impl ResourceTableState {
@@ -50,8 +101,35 @@ impl ResourceTableState {
             sort_ascending: true,
             is_loading: true,
             warning_triage: false,
+            reason_rail_focused: false,
+            selected_reason_idx: 0,
+            active_reason_filter: None,
+            workload_segment: WorkloadSegment::All,
             last_viewport_rect: std::cell::Cell::new(Rect::default()),
             last_start_idx: std::cell::Cell::new(0),
+            last_area_width: std::cell::Cell::new(0),
+        }
+    }
+
+    pub fn toggle_reason_rail_focus(&mut self) {
+        self.reason_rail_focused = !self.reason_rail_focused;
+    }
+
+    pub fn set_reason_filter(&mut self, reason: Option<String>, filter_query: &str) {
+        self.active_reason_filter = reason;
+        self.selected_idx = 0;
+        self.apply_filter(filter_query);
+    }
+
+    pub fn select_next_reason(&mut self, max_len: usize) {
+        if max_len > 0 && self.selected_reason_idx + 1 < max_len {
+            self.selected_reason_idx += 1;
+        }
+    }
+
+    pub fn select_prev_reason(&mut self) {
+        if self.selected_reason_idx > 0 {
+            self.selected_reason_idx -= 1;
         }
     }
 
@@ -86,6 +164,24 @@ impl ResourceTableState {
                 // Warning triage filter for Events
                 if self.kind == ResourceKind::Events && self.warning_triage {
                     if !is_event_warning_or_failure(item) {
+                        return false;
+                    }
+                }
+
+                // Reason Rail filter for Events
+                if self.kind == ResourceKind::Events {
+                    if let Some(ref rf) = self.active_reason_filter {
+                        let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        if !reason.eq_ignore_ascii_case(rf) {
+                            return false;
+                        }
+                    }
+                }
+
+                // Segment filter for Workloads
+                if self.kind == ResourceKind::Workloads && self.workload_segment != WorkloadSegment::All {
+                    let k = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    if k != self.workload_segment.display_name() {
                         return false;
                     }
                 }
@@ -185,10 +281,30 @@ impl ResourceTableState {
             .or_else(|| item.get("metadata").and_then(|m| m.get("namespace")).and_then(|v| v.as_str()))
             .map(String::from)
     }
+
+    pub fn selected_resource_kind(&self) -> Option<String> {
+        let item = self.selected_item()?;
+        item.get("kind")
+            .and_then(|v| v.as_str())
+            .or_else(|| item.pointer("/metadata/kind").and_then(|v| v.as_str()))
+            .map(String::from)
+    }
 }
 
 pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
     match kind {
+        ResourceKind::Workloads => vec![
+            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(16) },
+            ColumnDef { name: "KIND", key: "kind", width: Constraint::Length(12) },
+            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(24) },
+            ColumnDef { name: "READY", key: "ready", width: Constraint::Length(8) },
+            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(14) },
+            ColumnDef { name: "RESTARTS", key: "restarts", width: Constraint::Length(9) },
+            ColumnDef { name: "CPU", key: "cpu", width: Constraint::Length(8) },
+            ColumnDef { name: "MEM", key: "memory", width: Constraint::Length(8) },
+            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef { name: "IMAGE", key: "image", width: Constraint::Min(25) },
+        ],
         ResourceKind::Pods => vec![
             ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
             ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
@@ -755,24 +871,67 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
             return ip.to_string();
         }
     }
+    if key_lower == "restarts" {
+        if let Some(r) = val.get("restarts") {
+            if let Some(s) = raw_value_to_string(r) {
+                if !s.is_empty() && s != "-" && s != "null" {
+                    return s;
+                }
+            }
+        }
+        if val.get("kind").is_some() {
+            return "—".to_string();
+        }
+    }
     if key_lower == "cpu" {
         if let Some(cpu) = val.get("cpu").or_else(|| val.get("cpuUsage")).and_then(|v| v.as_str()) {
-            if !cpu.is_empty() {
+            if !cpu.is_empty() && cpu != "-" {
                 return cpu.to_string();
             }
         }
         if let Some(req_cpu) = val.pointer("/spec/containers/0/resources/requests/cpu").and_then(|v| v.as_str()) {
             return req_cpu.to_string();
         }
+        if val.get("kind").is_some() {
+            return "—".to_string();
+        }
     }
     if key_lower == "memory" || key_lower == "mem" {
         if let Some(mem) = val.get("memory").or_else(|| val.get("memUsage")).and_then(|v| v.as_str()) {
-            if !mem.is_empty() {
+            if !mem.is_empty() && mem != "-" {
                 return mem.to_string();
             }
         }
         if let Some(req_mem) = val.pointer("/spec/containers/0/resources/requests/memory").and_then(|v| v.as_str()) {
             return req_mem.to_string();
+        }
+        if val.get("kind").is_some() {
+            return "—".to_string();
+        }
+    }
+    if key_lower == "image" {
+        if let Some(img) = val.get("image").and_then(|v| v.as_str()) {
+            if !img.is_empty() && img != "-" {
+                return img.to_string();
+            }
+        }
+        if let Some(img) = val.pointer("/spec/template/spec/containers/0/image").and_then(|v| v.as_str()) {
+            if !img.is_empty() {
+                return img.to_string();
+            }
+        }
+        if val.get("kind").is_some() {
+            return "—".to_string();
+        }
+    }
+    if key_lower == "ready" {
+        if let Some(r) = val.get("ready").and_then(|v| v.as_str()) {
+            if !r.is_empty() && r != "-" {
+                return r.to_string();
+            }
+        }
+        if val.get("kind").is_some() {
+            return "—".to_string();
         }
     }
 
@@ -780,10 +939,49 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
 }
 
 pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableState) {
+    state.last_area_width.set(area.width);
+    if state.kind == ResourceKind::Events && area.width >= 110 {
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                Constraint::Min(65),
+                Constraint::Length(32),
+            ])
+            .split(area);
+
+        render_single_resource_table(f, chunks[0], state);
+
+        let tallies = crate::views::reason_rail::tally_event_reasons(&state.raw_items);
+        crate::views::reason_rail::render_reason_rail_widget(
+            f,
+            chunks[1],
+            &tallies,
+            state.selected_reason_idx,
+            state.reason_rail_focused,
+            state.active_reason_filter.as_deref(),
+        );
+    } else {
+        render_single_resource_table(f, area, state);
+    }
+}
+
+fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableState) {
+    let segment_badge = if state.kind == ResourceKind::Workloads {
+        format!(" [Segment: {} (Tab to cycle)]", state.workload_segment.display_name())
+    } else {
+        String::new()
+    };
+
     let triage_badge = if state.kind == ResourceKind::Events && state.warning_triage {
-        " [WARNING TRIAGE: ON]"
+        " [TRIAGE: ON]"
     } else {
         ""
+    };
+
+    let reason_badge = if let Some(ref r) = state.active_reason_filter {
+        format!(" [Reason: {}]", r)
+    } else {
+        String::new()
     };
 
     let count_badge = if !state.is_loading && state.filtered_indices.len() != state.raw_items.len() {
@@ -794,16 +992,20 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
         format!(" [{}]", state.filtered_indices.len())
     };
 
-    let title = format!(" {}{}{} ", state.kind.display_name(), count_badge, triage_badge);
+    let title = format!(" {}{}{}{}{} ", state.kind.display_name(), segment_badge, count_badge, triage_badge, reason_badge);
+
+    let border_color = if state.kind == ResourceKind::Events && state.reason_rail_focused {
+        Theme::BORDER
+    } else if state.kind == ResourceKind::Events && state.warning_triage {
+        Color::Yellow
+    } else {
+        Theme::BORDER
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if state.kind == ResourceKind::Events && state.warning_triage {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Theme::BORDER)
-        })
-        .title(Span::styled(title, if state.kind == ResourceKind::Events && state.warning_triage {
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(title, if state.kind == ResourceKind::Events && state.warning_triage && !state.reason_rail_focused {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Theme::title()
@@ -1220,5 +1422,33 @@ mod tests {
         assert_eq!(extract_field_str(&healthy_es, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSynced");
         assert_eq!(extract_field_str(&healthy_es, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "True");
         assert_ne!(extract_field_str(&healthy_es, "printer:.status.refreshTime"), "-");
+    }
+
+    #[test]
+    fn test_event_reason_filtering() {
+        let mut state = ResourceTableState::new(ResourceKind::Events);
+        let events = vec![
+            json!({ "name": "ev1", "reason": "FailedScheduling", "type": "Warning" }),
+            json!({ "name": "ev2", "reason": "BackOff", "type": "Warning" }),
+            json!({ "name": "ev3", "reason": "FailedScheduling", "type": "Warning" }),
+            json!({ "name": "ev4", "reason": "Scheduled", "type": "Normal" }),
+        ];
+
+        state.set_items(events, "");
+        assert_eq!(state.filtered_indices.len(), 4);
+
+        // Filter by FailedScheduling
+        state.set_reason_filter(Some("FailedScheduling".to_string()), "");
+        assert_eq!(state.filtered_indices.len(), 2);
+        assert_eq!(state.filtered_indices, vec![0, 2]);
+
+        // Filter by BackOff
+        state.set_reason_filter(Some("BackOff".to_string()), "");
+        assert_eq!(state.filtered_indices.len(), 1);
+        assert_eq!(state.filtered_indices, vec![1]);
+
+        // Clear reason filter
+        state.set_reason_filter(None, "");
+        assert_eq!(state.filtered_indices.len(), 4);
     }
 }

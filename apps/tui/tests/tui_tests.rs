@@ -185,10 +185,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -272,10 +277,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -328,6 +338,10 @@ mod tests {
         use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_cfg = temp_dir.path().join("ai_settings.json");
+        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
@@ -367,10 +381,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -484,6 +503,7 @@ mod tests {
             assert_eq!(s.is_editing, false);
             assert_eq!(s.settings.get_api_key(AiProvider::Cursor).as_deref(), Some("pasted-cursor-api-key-12345"));
         }
+        std::env::remove_var("SRELENS_AI_SETTINGS_PATH");
     }
 
     #[tokio::test]
@@ -539,10 +559,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -744,10 +769,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -931,10 +961,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1062,10 +1097,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1149,10 +1189,15 @@ mod tests {
             node_count: 32,
             pod_count: 1,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1269,10 +1314,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1356,10 +1406,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1435,10 +1490,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1555,10 +1615,15 @@ mod tests {
             node_count: 5,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1679,10 +1744,15 @@ mod tests {
             node_count: 32,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("data-processing-prod-eu-dus1"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1828,10 +1898,15 @@ mod tests {
             node_count: 5,
             pod_count: 12,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod-eu"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -1923,10 +1998,15 @@ mod tests {
             node_count: 32,
             pod_count: 184,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -2324,10 +2404,15 @@ mod tests {
             node_count: 1,
             pod_count: 2,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -2437,10 +2522,15 @@ mod tests {
             node_count: 1,
             pod_count: 2,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -2652,6 +2742,8 @@ mod tests {
             node_count: 10,
             pod_count: 100,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             toast: None,
             requires_terminal_suspend: None,
             crds: vec![],
@@ -2661,6 +2753,9 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -2759,6 +2854,8 @@ mod tests {
             node_count: 10,
             pod_count: 100,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             toast: None,
             requires_terminal_suspend: None,
             crds: vec![],
@@ -2768,6 +2865,9 @@ mod tests {
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("shop"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -2867,11 +2967,16 @@ mod tests {
             node_count: 10,
             pod_count: 80,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -3066,11 +3171,16 @@ mod tests {
             node_count: 20,
             pod_count: 50,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -3258,11 +3368,16 @@ mod tests {
             node_count: 5,
             pod_count: 10,
             is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
             screen_selection: None,
             screen_selecting: false,
@@ -3476,4 +3591,1231 @@ mod tests {
             assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookNodePressure));
         }
     }
+
+    #[tokio::test]
+    async fn test_unreachable_cluster_timeout_triggers_cracked_lens() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_tui::app::App;
+        use std::time::{Duration, Instant};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("unreachable-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Initially connecting
+        assert_eq!(app.cluster_version, "Connecting...");
+        assert!(!app.cluster_unreachable);
+
+        // Advance connection attempt by >8 seconds
+        app.connection_attempt_start = Instant::now() - Duration::from_secs(9);
+
+        // Run tick to trigger timeout detection
+        app.handle_tick();
+        assert!(app.cluster_unreachable);
+        assert!(!app.is_connected);
+
+        // Verify rendering draws the cracked lens ASCII widget
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(content.contains("CLUSTER UNREACHABLE"));
+        assert!(content.contains("unreachable-ctx"));
+        assert!(content.contains("Retry connection"));
+
+        // Press 'r' in unreachable table view to retry connection
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        assert!(!app.cluster_unreachable);
+
+        // Simulate successful cluster response
+        app.handle_cluster_info_update("v1.30.2|3|24");
+        assert!(app.is_connected);
+        assert!(!app.cluster_unreachable);
+        assert_eq!(app.cluster_version, "v1.30.2");
+    }
+
+    #[tokio::test]
+    async fn test_overview_summarise_cluster_health_hotkey() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::overview_view::{ClusterOverviewData, OverviewViewState};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let overview_data = ClusterOverviewData {
+            context_name: "prod-ctx".to_string(),
+            cluster_name: "production".to_string(),
+            server_url: "https://k8s.example.com".to_string(),
+            k8s_version: "v1.30.0".to_string(),
+            is_reachable: true,
+            node_count: 10,
+            ready_nodes: 10,
+            total_pods: 80,
+            running_pods: 78,
+            pending_pods: 1,
+            failed_pods: 1,
+            ..Default::default()
+        };
+
+        app.active_view = ActiveView::Overview(OverviewViewState::with_data(overview_data));
+
+        // 1. Press 's' to trigger summarise cluster health
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+
+        assert!(matches!(app.active_view, ActiveView::Assistant));
+        assert!(app.assistant_state.messages.iter().any(|m| m.role == "user" && m.content == "Summarise the health of this cluster"));
+
+        // 2. Press Esc to go back to Overview (clear busy state for second prompt in unit test)
+        app.assistant_state.is_busy = false;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Overview(_)));
+
+        // 3. Press Ctrl+a to trigger summarise cluster health
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)).await;
+        assert!(matches!(app.active_view, ActiveView::Assistant));
+    }
+
+    #[tokio::test]
+    async fn test_event_reason_rail_inline_and_modal_filtering() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let mut table = ResourceTableState::new(ResourceKind::Events);
+        let events = vec![
+            json!({ "name": "ev1", "reason": "FailedScheduling", "type": "Warning" }),
+            json!({ "name": "ev2", "reason": "BackOff", "type": "Warning" }),
+            json!({ "name": "ev3", "reason": "FailedScheduling", "type": "Warning" }),
+            json!({ "name": "ev4", "reason": "OOMKilled", "type": "Warning" }),
+        ];
+        table.set_items(events, "");
+        app.active_view = ActiveView::Table(table);
+
+        // Render on wide terminal (width 130) -> inline Reason Rail is rendered
+        let backend = TestBackend::new(130, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(content.contains("Event Reasons"));
+        assert!(content.contains("FailedScheduling"));
+        assert!(content.contains("BackOff"));
+
+        // 1. Focus the Reason Rail with 'R'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert!(t.reason_rail_focused);
+        }
+
+        // 2. Press Enter to select the top reason (FailedScheduling: 2 occurrences)
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert!(!t.reason_rail_focused);
+            assert_eq!(t.active_reason_filter.as_deref(), Some("FailedScheduling"));
+            assert_eq!(t.filtered_indices.len(), 2);
+        }
+
+        // 3. Press Esc to clear reason filter
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.active_reason_filter, None);
+            assert_eq!(t.filtered_indices.len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metrics_panel_modal_and_timeline() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_kube::metrics::MetricSample;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::views::metrics_panel_view::MetricsTimeRange;
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![
+            json!({ "name": "web-pod-1", "namespace": "default", "status": "Running" }),
+        ], "");
+        app.active_view = ActiveView::Table(table);
+
+        // Prepopulate metrics history for web-pod-1
+        let mut history = std::collections::VecDeque::new();
+        history.push_back(MetricSample {
+            timestamp_epoch_ms: 1000,
+            cpu_millicores: 250,
+            memory_mib: 512,
+        });
+        history.push_back(MetricSample {
+            timestamp_epoch_ms: 5000,
+            cpu_millicores: 500,
+            memory_mib: 768,
+        });
+        app.pod_metrics_history.insert("web-pod-1".to_string(), history);
+
+        // 1. Press 'm' to open Metrics Timeline modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
+
+        assert!(matches!(app.modal, Some(Modal::MetricsTimeline(_))));
+
+        // 2. Render modal
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(content.contains("Live Metrics Timeline"));
+        assert!(content.contains("web-pod-1"));
+        assert!(content.contains("CPU Usage"));
+        assert!(content.contains("Memory Usage"));
+
+        // 3. Switch range to 10m via key '2'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+        if let Some(Modal::MetricsTimeline(ref panel)) = app.modal {
+            assert_eq!(panel.range, MetricsTimeRange::TenMin);
+        }
+
+        // 4. Press Tab to cycle range
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let Some(Modal::MetricsTimeline(ref panel)) = app.modal {
+            assert_eq!(panel.range, MetricsTimeRange::ThirtyMin);
+        }
+
+        // 5. Press Esc to close modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_caveman_mode_activation_and_levels() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ai_skills::CavemanLevel;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_cfg = temp_dir.path().join("ai_settings.json");
+        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        app.active_view = ActiveView::Assistant;
+
+        // Initially caveman mode is off
+        assert_eq!(app.assistant_state.caveman_level, None);
+
+        // 1. Enter `/caveman ultra`
+        app.assistant_state.input = "/caveman ultra".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Ultra));
+        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Ultra));
+        assert!(app.assistant_state.messages.last().unwrap().content.contains("Caveman mode active"));
+        assert!(app.assistant_state.messages.last().unwrap().content.contains("ultra"));
+
+        // 2. Switch to `lite`
+        app.assistant_state.input = "/caveman lite".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Lite));
+        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Lite));
+        assert!(app.assistant_state.messages.last().unwrap().content.contains("lite"));
+
+        // 3. Disable via `/caveman off`
+        app.assistant_state.input = "/caveman off".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, None);
+        assert_eq!(app.ai_settings.get_caveman_level(), None);
+        assert!(app.assistant_state.messages.last().unwrap().content.contains("Caveman mode disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_caveman_natural_language_triggers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ai_skills::CavemanLevel;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_cfg = temp_dir.path().join("ai_settings.json");
+        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        app.active_view = ActiveView::Assistant;
+
+        // 1. Natural trigger: "caveman mode"
+        app.assistant_state.input = "caveman mode".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Full));
+        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Full));
+
+        // 2. Natural trigger: "stop caveman"
+        app.assistant_state.input = "stop caveman".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, None);
+        assert_eq!(app.ai_settings.get_caveman_level(), None);
+
+        // 3. Natural trigger: "talk like caveman"
+        app.assistant_state.input = "talk like caveman".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Full));
+
+        // 4. Natural trigger: "normal mode"
+        app.assistant_state.input = "normal mode".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        assert_eq!(app.assistant_state.caveman_level, None);
+    }
+
+    #[tokio::test]
+    async fn test_caveman_header_title_rendering() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ai_skills::CavemanLevel;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_cfg = temp_dir.path().join("ai_settings.json");
+        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        app.active_view = ActiveView::Assistant;
+        app.assistant_state.caveman_level = Some(CavemanLevel::Ultra);
+
+        let backend = TestBackend::new(140, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(content.contains("CAVEMAN: ULTRA"));
+        assert!(content.contains("🦖"));
+    }
+
+    #[tokio::test]
+    async fn test_caveman_inline_query_and_prompt_injection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ai_skills::CavemanLevel;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_cfg = temp_dir.path().join("ai_settings.json");
+        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        app.active_view = ActiveView::Assistant;
+
+        // Type inline command + question
+        app.assistant_state.input = "/caveman ultra why is auth-pod stuck in CrashLoopBackOff?".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+
+        // Level should be set to Ultra
+        assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Ultra));
+        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Ultra));
+
+        // Assistant state should have registered the clean user query in turn
+        let last_user_msg = app.assistant_state.messages.iter().rev().find(|m| m.role == "user");
+        assert!(last_user_msg.is_some());
+        assert_eq!(last_user_msg.unwrap().content, "why is auth-pod stuck in CrashLoopBackOff?");
+
+        // Verify that the prompt instructions for Ultra level are present
+        let ultra_prompt = CavemanLevel::Ultra.prompt_instructions();
+        assert!(ultra_prompt.contains("INSTRUCTION: CAVEMAN MODE (ULTRA)"));
+        assert!(ultra_prompt.contains("One word when one word enough"));
+        assert!(ultra_prompt.contains("arrows for causality"));
+    }
+
+    #[tokio::test]
+    async fn test_assistant_typing_character_n_and_other_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("prod-cluster".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        app.active_view = ActiveView::Assistant;
+
+        let query = "Tell me about the pending pod in monitoring namespace?";
+        for c in query.chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+
+        assert_eq!(app.assistant_state.input, query);
+
+        // Also test uppercase 'N'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE)).await;
+        assert_eq!(app.assistant_state.input, format!("{}N", query));
+    }
+
+    #[tokio::test]
+    async fn test_node_inspector_multi_container_pod_logs_picker() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::{ContainerAction, InputMode, Modal};
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_tui::views::node_inspector_view::NodeInspectorState;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut ni_state = NodeInspectorState::new("worker-node-1".to_string());
+        let details = NodeInspectorDetails {
+            name: "worker-node-1".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "m5.large".to_string(),
+            zone: None,
+            region: None,
+            nodepool: None,
+            internal_ip: Some("10.0.0.1".to_string()),
+            external_ip: None,
+            os_image: "Ubuntu 22.04".to_string(),
+            kernel_version: "5.15.0".to_string(),
+            container_runtime: "containerd".to_string(),
+            kubelet_version: "v1.30.2".to_string(),
+            architecture: "amd64".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cpu_capacity_millicores: 4000,
+            cpu_allocatable_millicores: 3800,
+            cpu_requests_millicores: 1000,
+            mem_capacity_mib: 16384,
+            mem_allocatable_mib: 15000,
+            mem_requests_mib: 4000,
+            pods_capacity: 110,
+            pods_allocatable: 110,
+            pods_count: 1,
+            has_gpu: false,
+            gpu_model: None,
+            gpu_driver_version: None,
+            gpu_cuda_version: None,
+            gpu_capacity_count: 0,
+            gpu_allocatable_count: 0,
+            gpu_requests_count: 0,
+            gpu_memory_total_mib: None,
+            gpu_memory_requests_mib: 0,
+            conditions: vec![],
+            taints: vec![],
+            pods: vec![
+                NodePodItem {
+                    name: "prom-agent-istio-forwarder-shard-1-0".to_string(),
+                    namespace: "monitoring".to_string(),
+                    phase: "Running".to_string(),
+                    ready_containers: "2/2".to_string(),
+                    restarts: 0,
+                    age: "5d".to_string(),
+                    cpu_requests_millicores: 200,
+                    mem_requests_mib: 512,
+                    gpu_requests: 0,
+                    gpu_mem_requests_mib: 0,
+                    pod_ip: "10.244.2.10".to_string(),
+                },
+            ],
+        };
+        ni_state.set_details(details);
+
+        let mut resource_cache = HashMap::new();
+        // Seed resource_cache with pod containing init and app containers
+        let pod_json = serde_json::json!({
+            "metadata": {
+                "name": "prom-agent-istio-forwarder-shard-1-0",
+                "namespace": "monitoring",
+            },
+            "spec": {
+                "initContainers": [
+                    { "name": "init-config-reloader" }
+                ],
+                "containers": [
+                    { "name": "prometheus" },
+                    { "name": "config-reloader" }
+                ]
+            }
+        });
+        resource_cache.insert(
+            ("prod".to_string(), "monitoring".to_string(), "Pods".to_string()),
+            vec![pod_json],
+        );
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string(), "monitoring".to_string()],
+            active_view: ActiveView::NodeInspector(ni_state),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            resource_cache,
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 1,
+            pod_count: 1,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 1. Press 'l' on the highlighted pod in NodeInspector
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)).await;
+
+        // Verify that Modal::ContainerPicker opened with all containers
+        match &app.modal {
+            Some(Modal::ContainerPicker { pod_name, namespace, containers, selected_idx, action }) => {
+                assert_eq!(pod_name, "prom-agent-istio-forwarder-shard-1-0");
+                assert_eq!(namespace.as_deref(), Some("monitoring"));
+                assert_eq!(containers, &vec!["prometheus", "config-reloader", "init-config-reloader"]);
+                assert_eq!(*selected_idx, 0);
+                assert!(matches!(action, ContainerAction::Logs));
+            }
+            other => panic!("Expected ContainerPicker modal, got {:?}", other),
+        }
+
+        // 2. Navigate down in the container picker (j selects "config-reloader")
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        if let Some(Modal::ContainerPicker { selected_idx, .. }) = &app.modal {
+            assert_eq!(*selected_idx, 1);
+        } else {
+            panic!("Expected ContainerPicker modal");
+        }
+
+        // 3. Press Enter to select "config-reloader"
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+
+        // Verify that ActiveView is now Logs with chosen container
+        match &app.active_view {
+            ActiveView::Logs(logs_state) => {
+                assert_eq!(logs_state.pod_name, "prom-agent-istio-forwarder-shard-1-0");
+                assert_eq!(logs_state.namespace, "monitoring");
+                assert_eq!(logs_state.container.as_deref(), Some("config-reloader"));
+            }
+            _ => panic!("Expected ActiveView::Logs"),
+        }
+
+        // 4. Verify that nav_stack preserved the NodeInspector view
+        assert_eq!(app.nav_stack.len(), 1);
+        assert!(matches!(app.nav_stack[0], ActiveView::NodeInspector(_)));
+
+        // 5. Press Esc to return back to NodeInspector
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
+    }
+
+    #[tokio::test]
+    async fn test_node_inspector_single_container_pod_logs_direct() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_tui::views::node_inspector_view::NodeInspectorState;
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut ni_state = NodeInspectorState::new("worker-node-1".to_string());
+        let details = NodeInspectorDetails {
+            name: "worker-node-1".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "m5.large".to_string(),
+            zone: None,
+            region: None,
+            nodepool: None,
+            internal_ip: Some("10.0.0.1".to_string()),
+            external_ip: None,
+            os_image: "Ubuntu 22.04".to_string(),
+            kernel_version: "5.15.0".to_string(),
+            container_runtime: "containerd".to_string(),
+            kubelet_version: "v1.30.2".to_string(),
+            architecture: "amd64".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cpu_capacity_millicores: 4000,
+            cpu_allocatable_millicores: 3800,
+            cpu_requests_millicores: 1000,
+            mem_capacity_mib: 16384,
+            mem_allocatable_mib: 15000,
+            mem_requests_mib: 4000,
+            pods_capacity: 110,
+            pods_allocatable: 110,
+            pods_count: 1,
+            has_gpu: false,
+            gpu_model: None,
+            gpu_driver_version: None,
+            gpu_cuda_version: None,
+            gpu_capacity_count: 0,
+            gpu_allocatable_count: 0,
+            gpu_requests_count: 0,
+            gpu_memory_total_mib: None,
+            gpu_memory_requests_mib: 0,
+            conditions: vec![],
+            taints: vec![],
+            pods: vec![
+                NodePodItem {
+                    name: "nginx-standalone".to_string(),
+                    namespace: "default".to_string(),
+                    phase: "Running".to_string(),
+                    ready_containers: "1/1".to_string(),
+                    restarts: 0,
+                    age: "1d".to_string(),
+                    cpu_requests_millicores: 100,
+                    mem_requests_mib: 128,
+                    gpu_requests: 0,
+                    gpu_mem_requests_mib: 0,
+                    pod_ip: "10.244.2.11".to_string(),
+                },
+            ],
+        };
+        ni_state.set_details(details);
+
+        let mut resource_cache = HashMap::new();
+        let pod_json = serde_json::json!({
+            "metadata": {
+                "name": "nginx-standalone",
+                "namespace": "default",
+            },
+            "spec": {
+                "containers": [
+                    { "name": "nginx" }
+                ]
+            }
+        });
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "Pods".to_string()),
+            vec![pod_json],
+        );
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::NodeInspector(ni_state),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            resource_cache,
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 1,
+            pod_count: 1,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // Press 'l' on single-container pod
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)).await;
+
+        // No modal should be displayed, should directly enter Logs view for "nginx"
+        assert!(app.modal.is_none());
+        match &app.active_view {
+            ActiveView::Logs(logs_state) => {
+                assert_eq!(logs_state.pod_name, "nginx-standalone");
+                assert_eq!(logs_state.namespace, "default");
+                assert_eq!(logs_state.container.as_deref(), Some("nginx"));
+            }
+            _ => panic!("Expected ActiveView::Logs"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_workloads_command_resolution_and_aliases() {
+        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
+
+        assert_eq!(resolve_command(":workloads"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
+        assert_eq!(resolve_command(":wl"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
+        assert_eq!(resolve_command(":workload"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
+        assert_eq!(resolve_command("workloads"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
+        assert_eq!(resolve_command("wl"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
+    }
+
+    #[tokio::test]
+    async fn test_workloads_columns_and_segment_filtering() {
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::{
+            default_columns_for_kind, extract_field_str, ResourceTableState, WorkloadSegment,
+        };
+        use serde_json::json;
+
+        // Verify columns
+        let cols = default_columns_for_kind(&ResourceKind::Workloads);
+        let col_names: Vec<&str> = cols.iter().map(|c| c.name).collect();
+        assert_eq!(col_names, vec!["NAMESPACE", "KIND", "NAME", "READY", "STATUS", "RESTARTS", "CPU", "MEM", "AGE", "IMAGE"]);
+
+        // Verify segment cycling
+        let mut seg = WorkloadSegment::All;
+        assert_eq!(seg.display_name(), "All");
+        seg = seg.next();
+        assert_eq!(seg.display_name(), "Deployment");
+        seg = seg.next();
+        assert_eq!(seg.display_name(), "StatefulSet");
+        seg = seg.next();
+        assert_eq!(seg.display_name(), "DaemonSet");
+        seg = seg.next();
+        assert_eq!(seg.display_name(), "Pod");
+        seg = seg.next();
+        assert_eq!(seg.display_name(), "CronJob");
+        seg = seg.next();
+        assert_eq!(seg.display_name(), "All");
+
+        // Verify extract_field_str em-dash fallback for Workloads rows
+        let dep_row = json!({
+            "name": "web",
+            "namespace": "default",
+            "kind": "Deployment",
+            "ready": "3/3",
+            "status": "Running",
+            "restarts": null,
+            "cpu": null,
+            "memory": null,
+            "image": null,
+        });
+        assert_eq!(extract_field_str(&dep_row, "name"), "web");
+        assert_eq!(extract_field_str(&dep_row, "kind"), "Deployment");
+        assert_eq!(extract_field_str(&dep_row, "ready"), "3/3");
+        assert_eq!(extract_field_str(&dep_row, "restarts"), "—");
+        assert_eq!(extract_field_str(&dep_row, "cpu"), "—");
+        assert_eq!(extract_field_str(&dep_row, "memory"), "—");
+        assert_eq!(extract_field_str(&dep_row, "image"), "—");
+
+        // Verify segment filtering on ResourceTableState
+        let mut state = ResourceTableState::new(ResourceKind::Workloads);
+        let items = vec![
+            json!({ "name": "dep-1", "kind": "Deployment" }),
+            json!({ "name": "sts-1", "kind": "StatefulSet" }),
+            json!({ "name": "ds-1", "kind": "DaemonSet" }),
+            json!({ "name": "pod-1", "kind": "Pod" }),
+            json!({ "name": "cj-1", "kind": "CronJob" }),
+        ];
+        state.set_items(items, "");
+        assert_eq!(state.filtered_indices.len(), 5);
+
+        // Switch to Pod segment
+        state.workload_segment = WorkloadSegment::Pod;
+        state.apply_filter("");
+        assert_eq!(state.filtered_indices.len(), 1);
+        assert_eq!(state.raw_items[state.filtered_indices[0]]["name"], "pod-1");
+
+        // Switch to Deployment segment
+        state.workload_segment = WorkloadSegment::Deployment;
+        state.apply_filter("");
+        assert_eq!(state.filtered_indices.len(), 1);
+        assert_eq!(state.raw_items[state.filtered_indices[0]]["name"], "dep-1");
+
+        // Filter text within segment
+        state.workload_segment = WorkloadSegment::All;
+        state.apply_filter("pod");
+        assert_eq!(state.filtered_indices.len(), 1);
+        assert_eq!(state.raw_items[state.filtered_indices[0]]["name"], "pod-1");
+    }
+
+    #[tokio::test]
+    async fn test_workloads_rebuild_aggregation_and_status_verdicts() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::theme::{status_style, Theme};
+        use std::collections::{HashMap, HashSet};
+        use serde_json::json;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut resource_cache = HashMap::new();
+
+        // 1. Deployments
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "deployments".to_string()),
+            vec![
+                json!({ "name": "dep-running", "namespace": "default", "ready": "3/3", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "dep-degraded", "namespace": "default", "ready": "1/3", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "dep-scaled-down", "namespace": "default", "ready": "0/0", "createdAt": "2024-01-01T00:00:00Z" }),
+            ],
+        );
+
+        // 2. StatefulSets
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "statefulsets".to_string()),
+            vec![
+                json!({ "name": "sts-running", "namespace": "default", "ready": "2/2", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "sts-degraded", "namespace": "default", "ready": "1/2", "createdAt": "2024-01-01T00:00:00Z" }),
+            ],
+        );
+
+        // 3. DaemonSets
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "daemonsets".to_string()),
+            vec![
+                json!({ "name": "ds-running", "namespace": "default", "ready": 3, "desired": 3, "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "ds-degraded", "namespace": "default", "ready": 1, "desired": 3, "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "ds-not-scheduled", "namespace": "default", "ready": 0, "desired": 0, "createdAt": "2024-01-01T00:00:00Z" }),
+            ],
+        );
+
+        // 4. Pods
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "pods".to_string()),
+            vec![
+                json!({ "name": "pod-running", "namespace": "default", "phase": "Running", "ready": "1/1", "restarts": 0, "waitingReason": "", "image": "nginx:latest", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "pod-crashloop", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 5, "waitingReason": "CrashLoopBackOff", "image": "api:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "pod-notready", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 1, "waitingReason": "", "image": "worker:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "pod-completed", "namespace": "default", "phase": "Succeeded", "ready": "0/1", "restarts": 0, "waitingReason": "", "image": "job:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+            ],
+        );
+
+        // 5. CronJobs
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "cronjobs".to_string()),
+            vec![
+                json!({ "name": "cj-active", "namespace": "default", "suspended": false, "active": 1, "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "cj-suspended", "namespace": "default", "suspended": true, "active": 0, "createdAt": "2024-01-01T00:00:00Z" }),
+            ],
+        );
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Workloads)),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache,
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: vec![],
+            is_running: true,
+            requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 1,
+            pod_count: 4,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // Rebuild table
+        app.rebuild_workloads_table();
+
+        let table = match &app.active_view {
+            ActiveView::Table(t) => t,
+            _ => panic!("Expected ActiveView::Table"),
+        };
+
+        assert_eq!(table.raw_items.len(), 14);
+
+        let find_item = |name: &str| -> &serde_json::Value {
+            table.raw_items.iter().find(|i| i["name"] == name).expect(name)
+        };
+
+        // Check Deployments
+        assert_eq!(find_item("dep-running")["status"], "Running");
+        assert_eq!(find_item("dep-running")["ready"], "3/3");
+        assert_eq!(find_item("dep-degraded")["status"], "Degraded");
+        assert_eq!(find_item("dep-scaled-down")["status"], "Scaled down");
+
+        // Check StatefulSets
+        assert_eq!(find_item("sts-running")["status"], "Running");
+        assert_eq!(find_item("sts-degraded")["status"], "Degraded");
+
+        // Check DaemonSets
+        assert_eq!(find_item("ds-running")["status"], "Running");
+        assert_eq!(find_item("ds-running")["ready"], "3/3");
+        assert_eq!(find_item("ds-degraded")["status"], "Degraded");
+        assert_eq!(find_item("ds-degraded")["ready"], "1/3");
+        assert_eq!(find_item("ds-not-scheduled")["status"], "Not scheduled");
+        assert_eq!(find_item("ds-not-scheduled")["ready"], "0/0");
+
+        // Check Pods
+        assert_eq!(find_item("pod-running")["status"], "Running");
+        assert_eq!(find_item("pod-crashloop")["status"], "CrashLoopBackOff");
+        assert_eq!(find_item("pod-notready")["status"], "NotReady");
+        assert_eq!(find_item("pod-completed")["status"], "Succeeded");
+
+        // Check CronJobs
+        assert_eq!(find_item("cj-active")["status"], "Active");
+        assert_eq!(find_item("cj-active")["ready"], "—");
+        assert_eq!(find_item("cj-suspended")["status"], "Suspended");
+        assert_eq!(find_item("cj-suspended")["ready"], "—");
+
+        // Verify status styling
+        assert_eq!(status_style("Degraded"), Theme::status_error());
+        assert_eq!(status_style("Scaled down").fg, Some(Theme::DIM));
+        assert_eq!(status_style("Not scheduled").fg, Some(Theme::DIM));
+        assert_eq!(status_style("Suspended").fg, Some(Theme::DIM));
+        assert_eq!(status_style("Running"), Theme::status_ok());
+        assert_eq!(status_style("Active"), Theme::status_ok());
+    }
+
+    #[tokio::test]
+    async fn test_workloads_tab_segment_cycle_and_enter_drilldown() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::{ResourceTableState, WorkloadSegment};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use serde_json::json;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+
+        let mut resource_cache = HashMap::new();
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "deployments".to_string()),
+            vec![json!({ "name": "nginx-dep", "namespace": "default", "ready": "1/1" })],
+        );
+        resource_cache.insert(
+            ("prod".to_string(), "default".to_string(), "pods".to_string()),
+            vec![json!({ "name": "nginx-dep-abcd", "namespace": "default", "phase": "Running", "ready": "1/1", "restarts": 0, "image": "nginx" })],
+        );
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Workloads)),
+            nav_stack: Vec::new(),
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            toast: None,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            event_tx: tx,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            resource_cache,
+            active_log_channel: None,
+            last_active_namespace: "default".to_string(),
+            crds: vec![],
+            is_running: true,
+            requires_terminal_suspend: None,
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 1,
+            pod_count: 1,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        app.rebuild_workloads_table();
+
+        // Verify initial state: 2 rows (1 dep, 1 pod), segment = All
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.workload_segment, WorkloadSegment::All);
+            assert_eq!(t.filtered_indices.len(), 2);
+        }
+
+        // 1. Press Tab -> Cycles to Deployment
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.workload_segment, WorkloadSegment::Deployment);
+            assert_eq!(t.filtered_indices.len(), 1);
+            assert_eq!(t.raw_items[t.filtered_indices[0]]["name"], "nginx-dep");
+        }
+
+        // 2. Press Enter on Deployment -> Drills down to Pods table filtered by "nginx-dep"
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.kind, ResourceKind::Pods);
+            assert_eq!(app.filter_buffer, "nginx-dep");
+        } else {
+            panic!("Expected drill-down into Pods table");
+        }
+
+        // 3. Pop back to Workloads
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await; // clears filter
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await; // pops nav stack
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.kind, ResourceKind::Workloads);
+        }
+
+        // 4. Press Tab 3 times -> StatefulSet -> DaemonSet -> Pod
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // StatefulSet
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // DaemonSet
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // Pod
+        if let ActiveView::Table(t) = &app.active_view {
+            assert_eq!(t.workload_segment, WorkloadSegment::Pod);
+            assert_eq!(t.filtered_indices.len(), 1);
+            assert_eq!(t.raw_items[t.filtered_indices[0]]["name"], "nginx-dep-abcd");
+        }
+    }
 }
+
+
+

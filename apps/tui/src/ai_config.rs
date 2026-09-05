@@ -124,6 +124,8 @@ pub struct AiSettings {
     pub max_tokens: u32,
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u32,
+    #[serde(default)]
+    pub caveman_level: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -154,12 +156,23 @@ impl Default for AiSettings {
             timeouts,
             max_tokens: 4096,
             timeout_seconds: 120,
+            caveman_level: None,
         }
     }
 }
 
 impl AiSettings {
     pub fn config_path() -> PathBuf {
+        if let Ok(custom) = std::env::var("SRELENS_AI_SETTINGS_PATH") {
+            if !custom.trim().is_empty() {
+                return PathBuf::from(custom);
+            }
+        }
+        if let Ok(custom_dir) = std::env::var("SRELENS_CONFIG_DIR") {
+            if !custom_dir.trim().is_empty() {
+                return PathBuf::from(custom_dir).join("ai_settings.json");
+            }
+        }
         dirs::config_dir()
             .map(|p| p.join("srelens").join("ai_settings.json"))
             .unwrap_or_else(|| PathBuf::from(".srelens-ai.json"))
@@ -262,6 +275,14 @@ impl AiSettings {
         self.timeout_seconds = seconds;
     }
 
+    pub fn get_caveman_level(&self) -> Option<crate::ai_skills::CavemanLevel> {
+        self.caveman_level.as_deref().and_then(crate::ai_skills::CavemanLevel::parse)
+    }
+
+    pub fn set_caveman_level(&mut self, level: Option<crate::ai_skills::CavemanLevel>) {
+        self.caveman_level = level.map(|l| l.display_name().to_string());
+    }
+
     pub fn resolve_provider_config(&self, kind: AiProvider) -> Option<ProviderConfig> {
         let llm_kind = kind.to_llm_kind()?;
         let api_key = self.get_api_key(kind).unwrap_or_else(|| {
@@ -300,6 +321,7 @@ mod tests {
         assert_eq!(s.get_model(AiProvider::Cursor), "default");
         assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 120);
         assert_eq!(s.get_timeout_seconds(AiProvider::Cursor), 120);
+        assert_eq!(s.get_caveman_level(), None);
     }
 
     #[test]
@@ -310,6 +332,7 @@ mod tests {
         s.models.insert("cursor".to_string(), "claude-3.5-sonnet".to_string());
         s.set_timeout_seconds(AiProvider::Cursor, 180);
         s.set_timeout_seconds(AiProvider::Anthropic, 60);
+        s.set_caveman_level(Some(crate::ai_skills::CavemanLevel::Ultra));
 
         let json = serde_json::to_string(&s).unwrap();
         let deserialized: AiSettings = serde_json::from_str(&json).unwrap();
@@ -320,5 +343,6 @@ mod tests {
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::Cursor), 180);
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::Anthropic), 60);
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::OpenAi), 120);
+        assert_eq!(deserialized.get_caveman_level(), Some(crate::ai_skills::CavemanLevel::Ultra));
     }
 }

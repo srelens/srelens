@@ -121,6 +121,7 @@ pub struct AssistantViewState {
     pub tool_chip_lines: RefCell<Vec<usize>>,
     pub slash_suggestions: Vec<&'static crate::ai_skills::SkillDef>,
     pub slash_suggestion_idx: usize,
+    pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -137,10 +138,10 @@ impl AssistantViewState {
 
     pub fn for_context(context_name: &str) -> Self {
         let content = if context_name.is_empty() {
-            "Hello! I am your SRElens AI Assistant. Type '/' for SRE playbooks (CrashLoop, Pending, OOM, Rollout, Endpoints, Node pressure, Cluster summary), or ask any question:".to_string()
+            "Hello! I am your SRElens AI Assistant. Type '/' for SRE playbooks or '/caveman' for token compression, or ask any question:".to_string()
         } else {
             format!(
-                "Hello! I am your SRElens AI Assistant for context '{}'. Type '/' for SRE playbooks (CrashLoop, Pending, OOM, Rollout, Endpoints, Node pressure, Cluster summary), or ask any question:",
+                "Hello! I am your SRElens AI Assistant for context '{}'. Type '/' for SRE playbooks or '/caveman' for token compression, or ask any question:",
                 context_name
             )
         };
@@ -174,6 +175,7 @@ impl AssistantViewState {
             tool_chip_lines: RefCell::new(Vec::new()),
             slash_suggestions: Vec::new(),
             slash_suggestion_idx: 0,
+            caveman_level: None,
         }
     }
 
@@ -794,9 +796,13 @@ pub fn render_assistant_view(
     } else {
         String::new()
     };
+    let caveman_tag = match state.caveman_level {
+        Some(lvl) => format!(" [🦖 CAVEMAN: {}]", lvl.display_name().to_uppercase()),
+        None => String::new(),
+    };
     let title = format!(
-        " SRElens AI Assistant{}[{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        cluster_tag, prov_name, model, token_hint, copy_hint, tools_hint
+        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
+        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint
     );
 
     let block = Block::default()

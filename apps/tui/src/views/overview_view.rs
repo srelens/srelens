@@ -106,7 +106,7 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(" Cluster Health & Resource Overview [<c> Copy, <r> Refresh, <Esc> Back] ", Theme::title()));
+        .title(Span::styled(" Cluster Health & Resource Overview [<s> Summarise, <c> Copy, <r> Refresh, <Esc> Back] ", Theme::title()));
 
     let inner = block.inner(area);
     f.render_widget(block, area);

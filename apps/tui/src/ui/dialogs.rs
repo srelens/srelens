@@ -55,6 +55,12 @@ pub enum Modal {
         selected_idx: usize,
         filter: String,
     },
+    MetricsTimeline(crate::views::metrics_panel_view::MetricsPanelState),
+    ReasonRail {
+        tallies: Vec<crate::views::reason_rail::ReasonTally>,
+        selected_idx: usize,
+        active_filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -537,6 +543,12 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled(": Cancel", Style::default().fg(Theme::DIM)),
             ])).alignment(Alignment::Center);
             f.render_widget(footer, chunks[2]);
+        }
+        Modal::MetricsTimeline(state) => {
+            crate::views::metrics_panel_view::render_metrics_panel_modal(f, area, state);
+        }
+        Modal::ReasonRail { tallies, selected_idx, active_filter } => {
+            crate::views::reason_rail::render_reason_rail_modal(f, area, tallies, *selected_idx, active_filter.as_deref());
         }
     }
 }

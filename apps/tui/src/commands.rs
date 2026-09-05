@@ -39,6 +39,7 @@ pub enum ResourceKind {
     Toolbox,
     Assistant,
     Settings,
+    Workloads,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -101,6 +102,7 @@ impl ResourceKind {
             Self::Toolbox => "Toolbox Diagnostics",
             Self::Assistant => "SRElens Assistant",
             Self::Settings => "AI & Assistant Settings",
+            Self::Workloads => "Workloads",
         }
     }
 
@@ -211,6 +213,12 @@ pub enum CommandTarget {
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
+    CommandDef {
+        name: "workloads",
+        aliases: &["wl", "workload"],
+        description: "Unified Workloads view (Deployments, StatefulSets, DaemonSets, Pods, CronJobs)",
+        target: CommandTarget::Resource(ResourceKind::Workloads),
+    },
     CommandDef {
         name: "pods",
         aliases: &["po", "pod"],

@@ -5,6 +5,7 @@
 //! and contextual resource prompts.
 
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDef {
@@ -150,6 +151,15 @@ Synthesize the findings into an executive briefing with high-priority risks and 
         instructions: "",
         is_utility: true,
     },
+    SkillDef {
+        name: "caveman",
+        command: "caveman",
+        aliases: &["cave", "terse"],
+        description: "Set ultra-compressed caveman mode to cut token usage ~75% (lite|full|ultra|wenyan-*|off)",
+        target_kind: Some("lite|full|ultra|wenyan|off"),
+        instructions: "",
+        is_utility: true,
+    },
 ];
 
 /// Finds all slash commands matching the user's current input.
@@ -220,6 +230,176 @@ pub fn expand_slash_command(
     Some(prompt)
 }
 
+/// Supported caveman compression levels matching SKILL.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CavemanLevel {
+    Lite,
+    Full,
+    Ultra,
+    WenyanLite,
+    WenyanFull,
+    WenyanUltra,
+}
+
+impl CavemanLevel {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            CavemanLevel::Lite => "lite",
+            CavemanLevel::Full => "full",
+            CavemanLevel::Ultra => "ultra",
+            CavemanLevel::WenyanLite => "wenyan-lite",
+            CavemanLevel::WenyanFull => "wenyan-full",
+            CavemanLevel::WenyanUltra => "wenyan-ultra",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim().to_lowercase();
+        match trimmed.as_str() {
+            "lite" => Some(CavemanLevel::Lite),
+            "full" | "" => Some(CavemanLevel::Full),
+            "ultra" => Some(CavemanLevel::Ultra),
+            "wenyan-lite" | "wenyan_lite" | "wenyanlite" => Some(CavemanLevel::WenyanLite),
+            "wenyan-full" | "wenyan_full" | "wenyanfull" | "wenyan" => Some(CavemanLevel::WenyanFull),
+            "wenyan-ultra" | "wenyan_ultra" | "wenyanultra" => Some(CavemanLevel::WenyanUltra),
+            _ => None,
+        }
+    }
+
+    pub fn prompt_instructions(&self) -> &'static str {
+        match self {
+            CavemanLevel::Lite => "\
+[INSTRUCTION: CAVEMAN MODE (LITE)]
+Respond terse and direct. Cut token usage drastically.
+Rules:
+- No filler (just/really/basically/actually/simply) or pleasantries (sure/certainly/happy to/hello) or hedging.
+- Keep articles and complete grammatical sentences, but keep them concise and strictly professional.
+- Technical terms, code blocks, yaml, and errors must remain exact.
+- Drop caveman for security warnings or destructive confirmations; resume after.
+- Stop immediately once the answer is delivered.",
+
+            CavemanLevel::Full => "\
+[INSTRUCTION: CAVEMAN MODE (FULL)]
+Respond terse like smart caveman. Cut token usage ~75%. All technical substance stays, only fluff dies.
+Rules:
+- Drop articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries, and hedging.
+- Fragments OK. Short synonyms (e.g. fix, not 'implement a solution for').
+- Technical terms, error messages, yaml, and code blocks MUST remain exact and uncompressed.
+- Pattern: [thing] [action] [reason]. [next step].
+- Example: 'Bug in auth middleware. Token expiry check use < not <=. Fix: ...'
+- Drop caveman for security warnings or destructive confirmations; resume after.
+- Stop immediately once the answer is delivered.",
+
+            CavemanLevel::Ultra => "\
+[INSTRUCTION: CAVEMAN MODE (ULTRA)]
+Ultra-compressed caveman. Extreme token reduction.
+Rules:
+- Drop all articles, conjunctions, pleasantries, filler, and hedging.
+- Abbreviate common terms (DB/auth/config/req/res/fn/impl/svc/ns/dep).
+- Use arrows for causality (X → Y).
+- One word when one word enough.
+- Code blocks, commands, and error snippets stay exact.
+- Example: 'Inline obj prop → new ref → re-render. Wrap in useMemo.'
+- Drop caveman for security warnings or destructive confirmations; resume after.
+- Stop immediately once the answer is delivered.",
+
+            CavemanLevel::WenyanLite => "\
+[INSTRUCTION: CAVEMAN MODE (WENYAN-LITE)]
+Semi-classical Chinese conciseness (文言文簡略). Cut token usage drastically.
+Rules:
+- Drop filler and hedging, retain grammar structure in concise classical register.
+- Technical terms, error messages, and code blocks remain exact.
+- Drop caveman for security warnings or destructive confirmations; resume after.
+- Stop immediately once the answer is delivered.",
+
+            CavemanLevel::WenyanFull => "\
+[INSTRUCTION: CAVEMAN MODE (WENYAN-FULL)]
+Maximum classical terseness (文言文極簡). 80-90% character reduction.
+Rules:
+- Fully 文言文 phrasing. Verbs precede objects, subjects often omitted, use classical particles (之/乃/為/其).
+- Technical terms, error messages, and code blocks remain exact.
+- Example: '池reuse open connection。不每req新開。skip handshake overhead。'
+- Drop caveman for security warnings or destructive confirmations; resume after.
+- Stop immediately once the answer is delivered.",
+
+            CavemanLevel::WenyanUltra => "\
+[INSTRUCTION: CAVEMAN MODE (WENYAN-ULTRA)]
+Extreme abbreviation while keeping classical Chinese feel. Maximum compression, ultra terse.
+Rules:
+- Maximum compression, ultra terse classical phrasing.
+- Technical terms, error messages, and code blocks remain exact.
+- Example: '池reuse conn。skip handshake → fast。'
+- Drop caveman for security warnings or destructive confirmations; resume after.
+- Stop immediately once the answer is delivered.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CavemanCommandAction {
+    /// Show current status / prompt help
+    Status,
+    /// Disable caveman mode
+    Disable,
+    /// Set caveman level with an optional query following the command
+    SetLevel {
+        level: CavemanLevel,
+        remainder_query: Option<String>,
+    },
+}
+
+pub fn parse_caveman_command(args: &str) -> CavemanCommandAction {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return CavemanCommandAction::Status;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let first = parts.next().unwrap_or("");
+    let remainder: String = parts.collect::<Vec<_>>().join(" ");
+    let remainder_opt = if remainder.trim().is_empty() {
+        None
+    } else {
+        Some(remainder.trim().to_string())
+    };
+
+    match first.to_lowercase().as_str() {
+        "off" | "stop" | "disable" | "none" | "normal" => CavemanCommandAction::Disable,
+        "lite" => CavemanCommandAction::SetLevel {
+            level: CavemanLevel::Lite,
+            remainder_query: remainder_opt,
+        },
+        "full" => CavemanCommandAction::SetLevel {
+            level: CavemanLevel::Full,
+            remainder_query: remainder_opt,
+        },
+        "ultra" => CavemanCommandAction::SetLevel {
+            level: CavemanLevel::Ultra,
+            remainder_query: remainder_opt,
+        },
+        "wenyan-lite" | "wenyan_lite" | "wenyanlite" => CavemanCommandAction::SetLevel {
+            level: CavemanLevel::WenyanLite,
+            remainder_query: remainder_opt,
+        },
+        "wenyan-full" | "wenyan_full" | "wenyanfull" | "wenyan" => CavemanCommandAction::SetLevel {
+            level: CavemanLevel::WenyanFull,
+            remainder_query: remainder_opt,
+        },
+        "wenyan-ultra" | "wenyan_ultra" | "wenyanultra" => CavemanCommandAction::SetLevel {
+            level: CavemanLevel::WenyanUltra,
+            remainder_query: remainder_opt,
+        },
+        _ => {
+            // First word is not a keyword, so treated as full level with entire input as question
+            CavemanCommandAction::SetLevel {
+                level: CavemanLevel::Full,
+                remainder_query: Some(trimmed.to_string()),
+            }
+        }
+    }
+}
+
 /// Scans `~/.config/srelens/assistant/skills/*.md` for user-defined skills.
 pub fn load_user_skills_dir() -> PathBuf {
     dirs::config_dir()
@@ -250,6 +430,10 @@ mod tests {
         let sum = match_slash_commands("/sum");
         assert_eq!(sum.len(), 1);
         assert_eq!(sum[0].command, "summarise");
+
+        let cave = match_slash_commands("/cave");
+        assert_eq!(cave.len(), 1);
+        assert_eq!(cave[0].command, "caveman");
     }
 
     #[test]
@@ -273,5 +457,68 @@ mod tests {
         assert!(expand_slash_command("clear", None, "prod", "default").is_none());
         assert!(expand_slash_command("save", None, "prod", "default").is_none());
         assert!(expand_slash_command("settings", None, "prod", "default").is_none());
+        assert!(expand_slash_command("caveman", None, "prod", "default").is_none());
+    }
+
+    #[test]
+    fn test_caveman_levels_and_parsing() {
+        assert_eq!(CavemanLevel::parse("lite"), Some(CavemanLevel::Lite));
+        assert_eq!(CavemanLevel::parse("full"), Some(CavemanLevel::Full));
+        assert_eq!(CavemanLevel::parse("ultra"), Some(CavemanLevel::Ultra));
+        assert_eq!(CavemanLevel::parse("wenyan-lite"), Some(CavemanLevel::WenyanLite));
+        assert_eq!(CavemanLevel::parse("wenyan-full"), Some(CavemanLevel::WenyanFull));
+        assert_eq!(CavemanLevel::parse("wenyan"), Some(CavemanLevel::WenyanFull));
+        assert_eq!(CavemanLevel::parse("wenyan-ultra"), Some(CavemanLevel::WenyanUltra));
+        assert_eq!(CavemanLevel::parse(""), Some(CavemanLevel::Full));
+        assert_eq!(CavemanLevel::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_parse_caveman_command() {
+        assert_eq!(parse_caveman_command(""), CavemanCommandAction::Status);
+        assert_eq!(parse_caveman_command("   "), CavemanCommandAction::Status);
+        assert_eq!(parse_caveman_command("off"), CavemanCommandAction::Disable);
+        assert_eq!(parse_caveman_command("stop"), CavemanCommandAction::Disable);
+        assert_eq!(parse_caveman_command("normal"), CavemanCommandAction::Disable);
+
+        assert_eq!(
+            parse_caveman_command("ultra"),
+            CavemanCommandAction::SetLevel {
+                level: CavemanLevel::Ultra,
+                remainder_query: None,
+            }
+        );
+
+        assert_eq!(
+            parse_caveman_command("lite why is pod pending?"),
+            CavemanCommandAction::SetLevel {
+                level: CavemanLevel::Lite,
+                remainder_query: Some("why is pod pending?".to_string()),
+            }
+        );
+
+        assert_eq!(
+            parse_caveman_command("why is auth-service in crashloop?"),
+            CavemanCommandAction::SetLevel {
+                level: CavemanLevel::Full,
+                remainder_query: Some("why is auth-service in crashloop?".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_caveman_prompt_instructions() {
+        for level in [
+            CavemanLevel::Lite,
+            CavemanLevel::Full,
+            CavemanLevel::Ultra,
+            CavemanLevel::WenyanLite,
+            CavemanLevel::WenyanFull,
+            CavemanLevel::WenyanUltra,
+        ] {
+            let prompt = level.prompt_instructions();
+            assert!(!prompt.is_empty());
+            assert!(prompt.contains("INSTRUCTION: CAVEMAN MODE"));
+        }
     }
 }
