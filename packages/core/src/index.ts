@@ -95,6 +95,7 @@ export * from "./lib/updater";
 export * from "./lib/watch";
 export * from "./lib/webClusters";
 export * from "./lib/webKubeconfigs";
+export * from "./lib/topology";
 export * from "./lib/workloads";
 
 // Disambiguates the star exports above; see the note in the header.

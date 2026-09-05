@@ -1100,11 +1100,41 @@
     font-size: 8.5px;
     text-anchor: middle;
   }
+  /* Level of detail. What a card says shrinks with it: below 70% the small
+     print — kind, metric, replica squares, edge rates — is unreadable, and
+     below 40% so are the names. Hidden rather than merely tiny, because a
+     glyph nobody can read costs exactly as much to rasterise as one they
+     can, and a zoomed-out graph of a few hundred nodes is thousands of them
+     on every step of the wheel. */
+  [data-lod="mid"] .node-kind,
+  [data-lod="mid"] .node-metric,
+  [data-lod="mid"] .edge-label,
+  [data-lod="mid"] .pips,
+  [data-lod="far"] .node-kind,
+  [data-lod="far"] .node-metric,
+  [data-lod="far"] .edge-label,
+  [data-lod="far"] .pips,
+  [data-lod="far"] .node-label {
+    display: none;
+  }
   .flow {
     stroke-dasharray: 5 4;
     animation: flow 900ms linear infinite;
   }
   @keyframes flow { to { stroke-dashoffset: -18; } }
+  /* A reader who asked for less motion still has to tell a MEASURED edge from
+     a DECLARED one, and on the topology graph those are told apart by movement.
+     The global reduce-motion rule freezes the animation, which would leave
+     observed traffic as static dashes — close enough to the dotted line that
+     means "a host named in a config file" to be read as the same thing. So the
+     dashes go too: observed becomes solid, declared stays dotted, and the
+     distinction survives being held still. */
+  @media (prefers-reduced-motion: reduce) {
+    .flow {
+      animation: none;
+      stroke-dasharray: none;
+    }
+  }
 
   /* --- window chrome --------------------------------------------- */
   .titlebar {

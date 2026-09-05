@@ -1,9 +1,7 @@
 import { createElement, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  K8S_KIND,
   eventVerdict,
   getManifest,
-  listCrds,
   listEvents,
   redactSecretManifest,
   resourceStatusLine,
@@ -24,6 +22,7 @@ import {
 } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { descriptorFor } from "../../lib/kinds/descriptors";
+import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../../lib/crdGvk";
 import { useObject } from "../../lib/useObject";
 import { ConfigDetailsBody } from "./ConfigBody";
 import { CronJobDetailsBody } from "./CronJobBody";
@@ -65,77 +64,12 @@ import type { DetailFact, FactsFor } from "./facts";
  *  `KindDescriptor` the list already resolves what extra panes a kind offers.
  *  Built from core's own table rather than hand-duplicated, so a kind added
  *  there is never silently unresolvable here. */
-const SLUG_BY_K8S_KIND: Record<string, string> = Object.fromEntries(
-  Object.entries(K8S_KIND)
-    .filter(([, k8sKind]) => k8sKind !== "")
-    .map(([slug, k8sKind]) => [k8sKind, slug]),
-);
 
 /** How a subject is named in a loading or error line, in either screen. */
 export function describeTarget(kind: string, namespace: string | null, name: string): string {
   return `${kind} ${namespace ? `${namespace}/` : ""}${name}`;
 }
 
-/**
- * Resolves a custom resource's `{group, version, plural}` from the cluster's
- * own CRD list, for `getManifest`'s optional fifth argument.
- *
- * `getManifest(context, kind, namespace, name, invoke, crd?)` needs that GVK
- * to resolve a CRD-backed kind — kind alone is ambiguous to the backend's
- * kind→GVR match, which has no CRD path at all (the same reason
- * `KindActions.delete` is withheld for custom resources in `lib/kinds/
- * custom.ts`). This layer only ever receives a bare `kind` string (not a
- * slug, not a `CrdRef`), and there is nowhere upstream to source one from
- * yet — no descriptor represents a CRD kind today, and threading a `CrdRef`
- * through `KindDescriptor`/props would only work once every future caller
- * remembers to supply it, which is exactly the kind of coordination gap that
- * has already bitten this screen once (see Task 9's own "must remember to
- * set panes.containers" concern). Resolving it here instead means the YAML
- * pane works correctly for a custom resource the moment ANY caller passes
- * its kind — self-contained, not dependent on another task's discipline —
- * at the cost of one extra `listCrds` round trip per custom-resource YAML
- * open (skipped entirely for a built-in kind, and only paid once the reader
- * actually opens the YAML tab, matching this module's existing laziness).
- *
- * A `kind` with no CRD on the cluster (the CRD was deleted, or the caller
- * mis-typed it) is reported as an error, not silently passed through
- * unresolved: an unresolved `crd` would make `getManifest` guess via the
- * same ambiguous kind→GVR match this function exists to avoid, which can
- * fail confusingly or, worse, resolve to the wrong resource entirely.
- *
- * A `kind` claimed by MORE than one CRD is reported the same way, for the
- * same reason. Two groups can legitimately define the same `.kind`
- * (`widgets.example.com` and `widgets.other.io`), and this layer is handed a
- * bare kind string with no group to disambiguate it. Taking the first match
- * would fetch a manifest from possibly the wrong group and render it as
- * though it were the right one — a possibly-wrong success, which is worse
- * than a failure, because nothing on screen would say anything was ambiguous.
- */
-async function resolveCrdGvk(
-  context: string,
-  kind: string,
-): Promise<{ crd?: DynamicGvk; error?: string }> {
-  const result = await listCrds(context);
-  if (result.error) {
-    return { error: `Could not look up ${kind}'s CustomResourceDefinition: ${result.error}` };
-  }
-  const matches = result.crds?.filter((c) => c.kind === kind) ?? [];
-  if (matches.length === 0) {
-    return {
-      error: `${kind} has no matching CustomResourceDefinition on this cluster, so its manifest cannot be resolved.`,
-    };
-  }
-  if (matches.length > 1) {
-    // Sorted and de-duplicated so the message reads the same whichever order
-    // `listCrds` happened to return them in.
-    const groups = [...new Set(matches.map((c) => c.group))].sort().join(", ");
-    return {
-      error: `${kind} is claimed by more than one CustomResourceDefinition on this cluster (${groups}), so its manifest cannot be resolved unambiguously.`,
-    };
-  }
-  const match = matches[0];
-  return { crd: { group: match.group, version: match.version, plural: match.plural } };
-}
 
 /**
  * `kind` is the route's, not `object.kind`. A body dispatched on one kind and
@@ -528,7 +462,7 @@ export function useDetailPaneState({
   // `getManifest` needs a CRD's group/version/plural to resolve a
   // custom-resource manifest — see `resolveCrdGvk`'s own doc comment for why
   // this is looked up here rather than threaded in from a descriptor.
-  const isBuiltInKind = SLUG_BY_K8S_KIND[kind] !== undefined;
+  const builtIn = isBuiltInKind(kind);
   // The Details pane keeps a Secret's values out of the DOM until the reader
   // reveals them; `k8s.getManifest` returns them in the clear (only
   // `k8s.getObject` redacts — see `crates/kube/src/manifest.rs`), so without
@@ -540,7 +474,7 @@ export function useDetailPaneState({
   const isSecret = kind === "Secret";
   const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
     let crd: DynamicGvk | undefined;
-    if (!isBuiltInKind) {
+    if (!builtIn) {
       const resolved = await resolveCrdGvk(context, kind);
       if (resolved.error) return { error: resolved.error };
       crd = resolved.crd;

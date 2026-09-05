@@ -20,6 +20,17 @@ use crate::manifest::parse_api_version;
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenApiSchemaIn {
     pub context: String,
+    /// `apiVersion` on the wire, as every caller has always sent it.
+    ///
+    /// Without this rename the field was `api_version`, which nothing sends:
+    /// `core`'s `openApiSchema` wrapper passes `apiVersion`, so every call
+    /// failed to deserialize and the editor's field autocomplete was dead —
+    /// silently, because the caller turns any failure into "no schema". Its
+    /// neighbours (`ListEventsIn`, `ListReplicaSetsIn`, `PodsForSelectorIn`)
+    /// each rename their own multi-word fields the same way; this one did not.
+    /// The e2e case did not catch it because it spoke the STRUCT's spelling
+    /// rather than the app's — it sends `apiVersion` now.
+    #[serde(rename = "apiVersion")]
     pub api_version: String,
     pub kind: String,
 }
@@ -168,6 +179,32 @@ mod tests {
             Some("io.k8s.api.apps.v1.Deployment")
         );
         assert!(find_schema_key(&sample(), "apps", "v1", "Missing").is_none());
+    }
+
+    /// The wire shape, which is not the struct's field spelling.
+    ///
+    /// `core`'s `openApiSchema` wrapper sends `apiVersion`; the field is
+    /// `api_version`. Without the rename every call failed to deserialize and
+    /// the editor's field autocomplete was dead — silently, because the caller
+    /// reads any failure as "this kind has no schema". The e2e case sent the
+    /// struct's own spelling and so agreed with the bug.
+    #[test]
+    fn deserializes_the_payload_callers_actually_send() {
+        let input: OpenApiSchemaIn = serde_json::from_value(serde_json::json!({
+            "context": "prod-eu",
+            "apiVersion": "v1",
+            "kind": "Secret",
+        }))
+        .expect("the wrapper's own payload must deserialize");
+        assert_eq!(input.api_version, "v1");
+        assert_eq!(input.kind, "Secret");
+        // And the struct spelling is NOT also accepted, so nothing drifts back.
+        assert!(serde_json::from_value::<OpenApiSchemaIn>(serde_json::json!({
+            "context": "prod-eu",
+            "api_version": "v1",
+            "kind": "Secret",
+        }))
+        .is_err());
     }
 
     #[test]

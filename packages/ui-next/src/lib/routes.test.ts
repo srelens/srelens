@@ -21,6 +21,7 @@ import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
 import { Settings } from "../screens/Settings";
+import { Topology } from "../screens/Topology";
 import { Terminals } from "../screens/Terminals";
 import { Helm } from "../screens/Helm";
 import { Toolbox } from "../screens/Toolbox";
@@ -146,6 +147,16 @@ suite("describe", () => {
       sub: "c",
     });
     expect(describe("/edit/Deployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The shape `editRoute` mints now, with the cluster in front; the title
+    // does not repeat the cluster, which is the tab's own label.
+    expect(describe("/edit/prod/Deployment/staging/api", "c")).toMatchObject({
+      title: "Edit staging/api",
+      kind: "edit",
+      sub: "c",
+    });
+    expect(describe("/edit/prod/acme.io%2FDeployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The create half on a named cluster, beside the bare `/new` in the table.
+    expect(describe("/new/prod", "c")).toMatchObject({ title: "New resource", kind: "edit", sub: "c" });
     // Cluster-scoped: there is no namespace to name.
     expect(describe("/edit/Node/-/worker-1", "c")).toMatchObject({ title: "Edit worker-1", kind: "edit" });
     // Percent-encoded on the way in, so the title is the decoded name.
@@ -336,8 +347,14 @@ suite("screenFor", () => {
     expect(screenFor("/settings")).toBe(Settings);
   });
 
+  it("resolves the topology screen", () => {
+    // Registered in the PR that built it. Until then the sidebar entry and
+    // the tab title both existed and opened the Placeholder.
+    expect(screenFor("/topology")).toBe(Topology);
+  });
+
   it("gives a route with no screen a placeholder", () => {
-    for (const route of ["/", "/incidents", "/topology"]) {
+    for (const route of ["/", "/incidents"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
@@ -380,7 +397,7 @@ suite("screenFor", () => {
   it("still refuses a route with no screen", () => {
     // `/k/` on its own names no kind, so it is not a route: a prefix that
     // matched itself would render the list screen with an empty slug.
-    for (const route of ["/topology", "/k/", "/logs/", "constructor"]) {
+    for (const route of ["/k/", "/logs/", "constructor"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });

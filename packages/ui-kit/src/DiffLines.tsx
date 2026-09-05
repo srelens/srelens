@@ -18,6 +18,16 @@ export interface DiffRow {
 export interface DiffLinesProps {
   rows: DiffRow[];
   className?: string;
+  /**
+   * Wrap a line too long for the column (the default), or let it run and
+   * scroll the block sideways.
+   *
+   * Wrapping is right for prose-width text and wrong for a manifest: a
+   * `last-applied-configuration` annotation is one line of a thousand
+   * characters, and `break-all` turns it into a paragraph-shaped block that
+   * hides the short lines around it — the ones that actually changed.
+   */
+  wrap?: boolean;
 }
 
 interface Line {
@@ -74,18 +84,27 @@ const MARK: Record<Line["tag"], string> = { same: " ", delete: "-", insert: "+" 
  * `RawError` and `PairList` follow: a diff pane with nothing to say should
  * not leave a blank box behind for its caller to notice and hide.
  */
-export function DiffLines({ rows, className }: DiffLinesProps) {
+export function DiffLines({ rows, className, wrap = true }: DiffLinesProps) {
   const lines = toLines(rows);
   if (lines.length === 0) return null;
 
   return (
-    <div className={cx("flex flex-col font-mono text-[0.6875rem] leading-relaxed", className)}>
+    <div
+      className={cx(
+        "flex flex-col font-mono text-[0.6875rem] leading-relaxed",
+        // The block scrolls, not the page: `w-max` lets the widest line set
+        // the width so every row's wash runs the full length of the longest
+        // one, rather than stopping at the column edge.
+        !wrap && "w-max min-w-full",
+        className,
+      )}
+    >
       {lines.map((l) => (
         <div
           key={l.key}
           data-slot="line"
           data-tag={l.tag}
-          className="flex gap-2 whitespace-pre-wrap break-all px-2 py-px"
+          className={cx("flex gap-2 px-2 py-px", wrap ? "whitespace-pre-wrap break-all" : "whitespace-pre")}
           style={
             l.tag === "same"
               ? { color: "var(--ink-soft)" }

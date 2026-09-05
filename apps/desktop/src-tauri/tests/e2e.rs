@@ -1271,7 +1271,10 @@ async fn run_suite() {
     let out = h
         .ok(
             "k8s.openApiSchema",
-            json!({ "context": ctx, "api_version": "apps/v1", "kind": "Deployment" }),
+            // `apiVersion`, the spelling `core`'s wrapper sends. This case
+            // used to send `api_version` — the struct's own field name — and
+            // so passed while every real call failed to deserialize.
+            json!({ "context": ctx, "apiVersion": "apps/v1", "kind": "Deployment" }),
         )
         .await;
     assert!(out["key"]
@@ -1332,6 +1335,130 @@ async fn run_suite() {
         .unwrap()
         .iter()
         .any(|p| p["name"] == PVC_POD));
+
+    // --- topologyGraph: the three joins, against objects the fixtures made ---
+    // The unit tests in `crates/kube/src/topology.rs` prove the join rules on
+    // hand-built objects. What only a cluster can prove is that the fields
+    // those rules read are the fields a real API server fills in — the
+    // Service selector, the Deployment template labels the controller copies
+    // onto its pods, and the ownerReference the Deployment controller writes
+    // on the ReplicaSet it makes.
+    // The full input, spelled out: several namespaces at once is the
+    // capability's shape, and the two optional sources are named as absent
+    // rather than left to a default that may not exist.
+    let out = h
+        .ok(
+            "k8s.topologyGraph",
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }),
+        )
+        .await;
+    let nodes = out["nodes"].as_array().unwrap();
+    let edges = out["edges"].as_array().unwrap();
+    let node_id = |kind: &str, name: &str| format!("{kind}/{NS}/{name}");
+    let deploy_id = node_id("Deployment", DEPLOY);
+    let svc_id = node_id("Service", SVC);
+
+    assert!(
+        nodes.iter().any(|n| n["id"] == json!(deploy_id)),
+        "the fixture Deployment must be a node: {out}"
+    );
+    assert!(
+        nodes.iter().any(|n| n["id"] == json!(svc_id)),
+        "the fixture Service must be a node: {out}"
+    );
+    // Service -> workload, which is the selector subset test against labels a
+    // real controller wrote.
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["from"] == json!(svc_id) && e["to"] == json!(deploy_id) && e["kind"] == json!("routes")),
+        "the Service must route to the Deployment it selects: {out}"
+    );
+    // Deployment -> ReplicaSet, from the ownerReference. The ReplicaSet's name
+    // is generated, so this asserts the SHAPE of the edge rather than an id
+    // the test cannot know.
+    assert!(
+        edges.iter().any(|e| {
+            e["from"] == json!(deploy_id)
+                && e["kind"] == json!("owns")
+                && e["to"].as_str().is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
+        }),
+        "the Deployment must own a ReplicaSet: {out}"
+    );
+    // Both fixture replicas are up by now, so the node reads healthy — the one
+    // assertion here that would catch ready/desired being read off the wrong
+    // field, which no hand-built object can.
+    let deploy = nodes.iter().find(|n| n["id"] == json!(deploy_id)).unwrap();
+    assert_eq!(deploy["desired"], json!(2), "{out}");
+    assert_eq!(deploy["health"], json!("ok"), "{out}");
+
+    // The probe is the same graph read with one exec per pod, and a
+    // capability of its own so the consent layer can gate it. On the fixture
+    // pods (busybox) it reads, and it always answers with its report.
+    let out = h
+        .ok("k8s.topologyProbe", json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }))
+        .await;
+    assert!(out["probe"].is_object(), "the probe must report on itself: {out}");
+    assert!(
+        out["nodes"].as_array().unwrap().iter().any(|n| n["id"] == json!(deploy_id)),
+        "{out}"
+    );
+
+    // --- the topology's optional sources ---------------------------------------
+    // The e2e cluster runs no metrics backend, and that is the ordinary case
+    // the capability is written for: discovery answers an empty list, not an
+    // error. Nothing the fixtures made looks like a query API, so it must not
+    // be listed either.
+    let out = h.ok("k8s.prometheusDiscover", json!({ "context": ctx })).await;
+    let candidates = out["candidates"].as_array().unwrap();
+    assert!(
+        candidates.iter().all(|c| c["namespace"] != json!(NS)),
+        "nothing in the fixture namespace serves PromQL: {out}"
+    );
+    // A query at a Service that does not exist is refused by the API server's
+    // proxy, and the capability reports that as an error rather than as a
+    // graph with no traffic in it.
+    let msg = h
+        .err(
+            "k8s.prometheusQuery",
+            json!({
+                "context": ctx,
+                "namespace": NS,
+                "service": "no-such-prometheus",
+                "port": 9090,
+                "query": "up"
+            }),
+        )
+        .await;
+    assert!(!msg.is_empty());
+    // The socket table of a fixture pod, over exec. busybox has `cat`, so the
+    // pod reads; what it reports is whatever the pod has open, which the test
+    // cannot know — the assertion is that the pod is accounted for, in one
+    // list or the other, and never silently missing from both.
+    let out = h
+        .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
+        .await;
+    let pod = out["pods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY)))
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .expect("a running fixture pod");
+    let out = h
+        .ok(
+            "k8s.podConnections",
+            json!({ "context": ctx, "namespace": NS, "pods": [pod] }),
+        )
+        .await;
+    let read = out["connections"].as_array().unwrap();
+    let unread = out["unreadable"].as_array().unwrap();
+    assert_eq!(
+        read.iter().filter(|c| c["pod"] == json!(pod)).count()
+            + unread.iter().filter(|u| u["pod"] == json!(pod)).count(),
+        1,
+        "the pod must be reported exactly once: {out}"
+    );
 
     // === 4. Access =============================================================
     println!("=== access ===");

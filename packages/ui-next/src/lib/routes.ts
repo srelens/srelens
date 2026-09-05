@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
-import { parseDetailRoute, parseEditRoute } from "./detailRoute";
+import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 import { Agent } from "../screens/Agent";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
@@ -12,9 +12,11 @@ import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { EditResource } from "../screens/Edit";
 import { Settings } from "../screens/Settings";
 import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
+import { Topology } from "../screens/Topology";
 import { Workloads } from "../screens/Workloads";
 
 /**
@@ -149,6 +151,9 @@ export function describe(route: string, clusterName?: string): RouteInfo {
     const where = edit.namespace === null ? edit.name : `${edit.namespace}/${edit.name}`;
     return { route, title: `Edit ${where}`, sub, kind: "edit" };
   }
+  // `/new/<cluster>` — the create half, on a named cluster. The cluster is
+  // not in the title: it is the tab's own label, as on every other tab.
+  if (parseNewRoute(route)) return { route, title: "New resource", sub, kind: "edit" };
   // The legacy one-segment `/edit/<name>`. Nothing mints it any more; the shape
   // survives here only so a tab a previous session persisted can still name
   // itself in the strip, exactly as `/resources/<name>/logs|shell|forward` does
@@ -264,6 +269,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // never a second conversation.
   "/agent": Agent,
   "/resources": Workloads,
+  // The editor's create half. The row menu's `Edit` reaches the same screen
+  // through `parseEditRoute` in `screenFor` — one screen, two shapes, as
+  // `/logs` is. Without these two the menu opened a correctly titled tab
+  // onto the Placeholder, which is what "Edit does nothing" was.
+  "/new": EditResource,
   "/events": Events,
   "/overview": Overview,
   // The bare route. Its deeper `/logs/<kind>/<namespace>/<name>` shape reaches
@@ -289,6 +299,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   "/helm": Helm,
   // App-scoped: the managed kubectl, helm and krew are the machine's, and the
   // exec-auth rail is the only part of it that looks at a context at all.
+  // Cluster-scoped: how traffic reaches a workload in ONE namespace, which is
+  // why the screen carries a namespace picker rather than reading the tab.
+  // Four lanes, all of them joins the cluster can prove — see
+  // crates/kube/src/topology.rs for the three the design has that it cannot.
+  "/topology": Topology,
   "/toolbox": Toolbox,
   // App-scoped, and about every cluster at once rather than one: which contexts
   // srelens can see, the file each was read from, and what the last probe said.
@@ -333,6 +348,14 @@ export function screenFor(route: string): ScreenComponent | null {
   // were just another kind slug. Matched by parse rather than by adding a
   // second `/k/` entry to `PREFIXED`, which cannot tell the two apart at all.
   if (parseDetailRoute(route)) return ResourceDetailScreen;
+  // The editor's edit half, by the same means and for the same reason: a
+  // whole subject or nothing, so `/edit/` on its own and the legacy
+  // one-segment `/edit/<name>` stay a Placeholder rather than an editor with
+  // no resource in it.
+  if (parseEditRoute(route)) return EditResource;
+  // And its create half on a named cluster, `/new/<cluster>`; the bare
+  // `/new` is in `SCREENS`.
+  if (parseNewRoute(route)) return EditResource;
   // A logs subject route, for the same reason and by the same means: matched
   // by parse rather than by a `/logs/` prefix entry, so `/logs/` on its own —
   // and anything else under the prefix that is not a whole subject — stays a

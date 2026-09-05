@@ -372,6 +372,12 @@
     "requiresConfirm": false
   },
   {
+    "id": "k8s.podConnections",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": true
+  },
+  {
     "id": "k8s.podCount",
     "readOnly": true,
     "destructive": false,
@@ -414,6 +420,18 @@
     "requiresConfirm": false
   },
   {
+    "id": "k8s.prometheusDiscover",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "k8s.prometheusQuery",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.queryPodEndpoint",
     "readOnly": true,
     "destructive": false,
@@ -442,6 +460,18 @@
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false
+  },
+  {
+    "id": "k8s.topologyGraph",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "k8s.topologyProbe",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": true
   },
   {
     "id": "k8s.updateConfigData",
