@@ -27,6 +27,10 @@ pub struct DeploymentSummary {
     pub up_to_date: i32,
     pub available: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -49,6 +53,7 @@ pub(crate) fn summarise(dep: Deployment) -> DeploymentSummary {
         up_to_date,
         available,
         age: crate::humanize_age(dep.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(dep.metadata.creation_timestamp.as_ref()),
     }
 }
 
@@ -96,6 +101,10 @@ pub struct ReplicaSetSummary {
     pub ready: i32,
     pub current: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -129,6 +138,7 @@ pub(crate) fn summarise_rs(rs: ReplicaSet) -> ReplicaSetSummary {
         ready,
         current,
         age: crate::humanize_age(rs.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(rs.metadata.creation_timestamp.as_ref()),
     }
 }
 

@@ -29,6 +29,10 @@ pub struct DaemonSetSummary {
     pub up_to_date: i32,
     pub available: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -47,6 +51,7 @@ pub(crate) fn summarise(ds: DaemonSet) -> DaemonSetSummary {
         up_to_date: status.and_then(|s| s.updated_number_scheduled).unwrap_or(0),
         available: status.and_then(|s| s.number_available).unwrap_or(0),
         age: crate::humanize_age(ds.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(ds.metadata.creation_timestamp.as_ref()),
     }
 }
 

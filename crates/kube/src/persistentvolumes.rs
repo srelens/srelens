@@ -33,6 +33,10 @@ pub struct PvSummary {
     #[serde(rename = "storageClass")]
     pub storage_class: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -81,6 +85,7 @@ pub(crate) fn summarise(pv: PersistentVolume) -> PvSummary {
         claim,
         storage_class,
         age: crate::humanize_age(pv.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(pv.metadata.creation_timestamp.as_ref()),
     }
 }
 

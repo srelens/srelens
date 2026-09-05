@@ -60,13 +60,21 @@ pub struct NodeMetricsIn {
     pub context: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeMetric {
     pub name: String,
     #[serde(rename = "cpuMillicores")]
     pub cpu_millicores: i64,
     #[serde(rename = "memoryMiB")]
     pub memory_mib: i64,
+}
+
+/// A single timestamped CPU and memory sample for a Pod or Node timeline series.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricSample {
+    pub timestamp_epoch_ms: u64,
+    pub cpu_millicores: u64,
+    pub memory_mib: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -114,7 +122,7 @@ pub struct PodMetricsIn {
     pub namespace: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PodMetric {
     pub name: String,
     pub namespace: String,
@@ -174,6 +182,60 @@ pub fn pod_metrics_capability(cache: Arc<ClientCache>) -> Capability {
             }
         },
     )
+}
+
+/// Fetch per-pod CPU and memory metrics from metrics.k8s.io
+pub async fn fetch_pod_metrics(
+    cache: Arc<ClientCache>,
+    context: &str,
+    namespace: &str,
+) -> Result<Vec<PodMetric>, String> {
+    let client = cache.get(context).await.map_err(|e| e.to_string())?;
+    let api = metrics_api(client, "PodMetrics", true, namespace);
+    let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+        .await
+        .map_err(|_| "pod metrics timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let metrics = list
+        .items
+        .into_iter()
+        .map(|o| {
+            let (cpu, mem) = sum_pod_usage(&o.data["containers"]);
+            PodMetric {
+                name: o.metadata.name.unwrap_or_default(),
+                namespace: o.metadata.namespace.unwrap_or_default(),
+                cpu_millicores: cpu,
+                memory_mib: mem,
+            }
+        })
+        .collect();
+    Ok(metrics)
+}
+
+/// Fetch per-node CPU and memory metrics from metrics.k8s.io
+pub async fn fetch_node_metrics(
+    cache: Arc<ClientCache>,
+    context: &str,
+) -> Result<Vec<NodeMetric>, String> {
+    let client = cache.get(context).await.map_err(|e| e.to_string())?;
+    let api = metrics_api(client, "NodeMetrics", false, "");
+    let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+        .await
+        .map_err(|_| "node metrics timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let metrics = list
+        .items
+        .into_iter()
+        .map(|o| {
+            let usage = &o.data["usage"];
+            NodeMetric {
+                name: o.metadata.name.unwrap_or_default(),
+                cpu_millicores: cpu_millicores(usage["cpu"].as_str().unwrap_or("0")),
+                memory_mib: mem_mib(usage["memory"].as_str().unwrap_or("0")),
+            }
+        })
+        .collect();
+    Ok(metrics)
 }
 
 #[cfg(test)]

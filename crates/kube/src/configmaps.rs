@@ -30,6 +30,10 @@ pub struct ConfigMapSummary {
     /// stale (#405). Prefer this; `age` stays for callers that have no clock.
     pub created: Option<String>,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -46,6 +50,7 @@ pub(crate) fn summarise(cm: ConfigMap) -> ConfigMapSummary {
         keys: (data_keys + binary_keys) as i32,
         created: crate::creation_rfc3339(cm.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(cm.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(cm.metadata.creation_timestamp.as_ref()),
     }
 }
 

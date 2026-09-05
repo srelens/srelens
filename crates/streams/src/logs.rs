@@ -219,24 +219,28 @@ mod tests {
             .await
             .unwrap();
 
-        let mut payloads = Vec::new();
+        let mut status_payloads = Vec::new();
         for _ in 0..200 {
-            payloads = sink.payloads_for("logs:1");
-            if payloads.len() >= 2 {
+            let payloads = sink.payloads_for("logs:1");
+            status_payloads = payloads
+                .into_iter()
+                .filter(|p| p.get("status").is_some())
+                .collect();
+            if status_payloads.len() >= 2 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         manager.stop("logs:1");
 
-        assert_eq!(payloads.len(), 2, "expected one status per target");
-        let mut sources: Vec<String> = payloads
+        assert_eq!(status_payloads.len(), 2, "expected one status per target");
+        let mut sources: Vec<String> = status_payloads
             .iter()
             .map(|p| p["source"].as_str().unwrap_or("<missing>").to_string())
             .collect();
         sources.sort();
         assert_eq!(sources, vec!["web-1".to_string(), "web-2".to_string()]);
-        for p in &payloads {
+        for p in &status_payloads {
             assert_eq!(p["status"], "reconnecting");
         }
     }

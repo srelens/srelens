@@ -31,6 +31,10 @@ pub struct IngressSummary {
     /// Served ports: "80" normally, "80, 443" when TLS is configured.
     pub ports: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -84,6 +88,7 @@ pub(crate) fn summarise(ing: Ingress) -> IngressSummary {
         address,
         ports,
         age: crate::humanize_age(ing.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(ing.metadata.creation_timestamp.as_ref()),
     }
 }
 

@@ -31,6 +31,10 @@ pub struct StorageClassSummary {
     /// Whether this is the cluster's default StorageClass.
     pub default: bool,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -54,6 +58,7 @@ pub(crate) fn summarise(sc: StorageClass) -> StorageClassSummary {
         volume_binding_mode: sc.volume_binding_mode.unwrap_or_default(),
         default,
         age: crate::humanize_age(sc.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(sc.metadata.creation_timestamp.as_ref()),
     }
 }
 

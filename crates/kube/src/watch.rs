@@ -11,7 +11,7 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Event as CoreEvent, LimitRange, PersistentVolume, PersistentVolumeClaim, Pod,
+    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
     ResourceQuota, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -28,6 +28,7 @@ use crate::cronjobs::{summarise as summarise_cronjob, CronJobSummary};
 use crate::daemonsets::{summarise as summarise_daemonset, DaemonSetSummary};
 use crate::endpointslices::{summarise as summarise_endpointslice, EndpointSliceSummary};
 use crate::ingresses::{summarise as summarise_ingress, IngressSummary};
+use crate::nodes::{summarise as summarise_node, NodeSummary};
 use crate::limitranges::{summarise as summarise_limitrange, LimitRangeSummary};
 use crate::networkpolicies::{summarise as summarise_networkpolicy, NetworkPolicySummary};
 use crate::persistentvolumes::{summarise as summarise_pv, PvSummary};
@@ -722,6 +723,82 @@ where
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
+pub struct NamespaceSummary {
+    pub name: String,
+    pub status: String,
+    pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+pub fn summarise_namespace(ns: Namespace) -> NamespaceSummary {
+    let name = ns.metadata.name.clone().unwrap_or_default();
+    let status = ns
+        .status
+        .as_ref()
+        .and_then(|s| s.phase.clone())
+        .unwrap_or_else(|| "Active".to_string());
+    let age = crate::humanize_age(ns.metadata.creation_timestamp.as_ref());
+    let created_at = crate::creation_timestamp_iso(ns.metadata.creation_timestamp.as_ref());
+    NamespaceSummary {
+        name,
+        status,
+        age,
+        created_at,
+    }
+}
+
+/// Watch cluster Nodes (cluster-scoped; namespace ignored).
+pub async fn watch_nodes<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    _namespace: String,
+    on_update: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<NodeSummary>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let api: Api<Node> = Api::all(client);
+    watch_typed(
+        api,
+        summarise_node,
+        |n: &NodeSummary| n.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
+}
+
+/// Watch cluster Namespaces (cluster-scoped; namespace ignored).
+pub async fn watch_namespaces<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    _namespace: String,
+    on_update: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<NamespaceSummary>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let api: Api<Namespace> = Api::all(client);
+    watch_typed(
+        api,
+        summarise_namespace,
+        |n: &NamespaceSummary| n.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
+}
+
 /// Classify a watcher event as an object change. `Apply`/`Delete` always are.
 /// `Init`/`InitApply` never are — they are just the replay of the current list
 /// building up in memory, with nothing yet to report. `InitDone` — which
@@ -879,8 +956,10 @@ mod tests {
             node: "n".into(),
             created: None,
             age: "1m".into(),
+            created_at: String::new(),
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
+            pod_ip: "10.244.0.1".into(),
         }
     }
 

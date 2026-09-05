@@ -257,6 +257,7 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::logs::pod_logs_capability(cache.clone()));
+    reg.register(srelens_kube::endpoint_query::query_pod_endpoint_capability(cache.clone()));
     reg.register(srelens_kube::deployments::list_deployments_capability(
         cache.clone(),
     ));
