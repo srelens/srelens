@@ -1008,6 +1008,7 @@ mod tests {
             }
         });
         let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+        crate::connect::ensure_crypto_provider();
         (kube::Client::try_from(config).unwrap(), seen)
     }
 

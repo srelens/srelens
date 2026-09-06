@@ -24,6 +24,13 @@ tokio = { version = "1", features = ["fs", "time", "net", "io-util", "process"] 
 # cluster over loopback the payload is small enough that gzip is a wash
 # either way. Without this feature, kube-rs never sends `Accept-Encoding`.
 kube = { version = "4", default-features = false, features = ["client", "config", "rustls-tls", "ring", "runtime", "ws", "gzip"] }
+# Direct, for `connect::ensure_crypto_provider`: rustls picks a process-wide
+# provider on its own only while exactly ONE is compiled in. A binary that
+# also links something built against `aws-lc-rs` — the GPUI shell does,
+# through its HTTP client — has two, and rustls then panics on the first TLS
+# handshake instead of choosing. This crate names `ring` before it builds a
+# client, so it is correct whatever else the process links.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 k8s-openapi = { version = "0.28", features = ["v1_34"] }
 futures = "0.3"
 base64 = "0.22"

@@ -21,11 +21,14 @@ use kube_bridge::KubeBridge;
 use workspace::Workspace;
 
 fn main() {
-    // Before any TLS: see the note on `rustls` in Cargo.toml. Two providers
-    // are linked and rustls will not choose between them; this chooses the
-    // one kube-rs was built against. A second install (a test harness that
-    // already did it) is not an error worth stopping for.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Two rustls crypto providers end up in this process — kube-rs brings
+    // `ring`, GPUI's HTTP client brings `aws-lc-rs` — and rustls will not
+    // choose between them: it panics on the first TLS handshake, which was on
+    // the kube thread, and took the pod list down without a word in the
+    // window. `crates/kube` owns the choice and makes it before every client
+    // it builds; this call just makes it before anything else in this binary
+    // could touch TLS first.
+    srelens_kube::connect::ensure_crypto_provider();
 
     let bridge = match KubeBridge::new() {
         Ok(bridge) => bridge,

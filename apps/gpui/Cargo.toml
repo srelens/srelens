@@ -19,13 +19,6 @@ srelens-registry = { path = "../../crates/registry" }
 # kube-rs needs a tokio reactor; GPUI has its own executor. One runtime is
 # built at startup and every kube future runs on it — see `kube_bridge`.
 tokio = { version = "1", features = ["rt-multi-thread"] }
-# Two rustls crypto providers end up in this one process: kube-rs brings
-# `ring`, GPUI's HTTP client brings `aws-lc-rs`. rustls then refuses to pick
-# one at runtime and panics on the first TLS handshake — on the kube thread,
-# where it took the pod list down without a word in the window. `main`
-# installs `ring` explicitly before anything touches the network. Default
-# features off so this line does not become a third vote.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 gpui-kit = { version = "0.6", features = ["test-support"] }

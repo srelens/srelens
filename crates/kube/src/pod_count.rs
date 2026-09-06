@@ -214,6 +214,7 @@ mod pod_count_tests {
             }
         });
         let config = Config::new(format!("http://{addr}").parse().unwrap());
+        crate::connect::ensure_crypto_provider();
         (Client::try_from(config).unwrap(), handle, seen)
     }
 
@@ -346,6 +347,7 @@ mod pod_count_tests {
             }
         });
         let config = Config::new(format!("http://{addr}").parse().unwrap());
+        crate::connect::ensure_crypto_provider();
         let client = Client::try_from(config).unwrap();
 
         let err = count_pods(client, Duration::from_millis(50)).await.unwrap_err();

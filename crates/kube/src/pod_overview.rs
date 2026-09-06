@@ -567,7 +567,10 @@ mod pod_overview_tests {
         });
         let config = Config::new(format!("http://{addr}").parse().unwrap());
         Server {
-            client: Client::try_from(config).unwrap(),
+            client: {
+                crate::connect::ensure_crypto_provider();
+                Client::try_from(config).unwrap()
+            },
             handle,
             seen,
         }
@@ -877,6 +880,7 @@ mod pod_overview_tests {
             }
         });
         let config = Config::new(format!("http://{addr}").parse().unwrap());
+        crate::connect::ensure_crypto_provider();
         let client = Client::try_from(config).unwrap();
 
         let out = overview(client, Duration::from_secs(5)).await.unwrap();
@@ -920,6 +924,7 @@ mod pod_overview_tests {
             }
         });
         let config = Config::new(format!("http://{addr}").parse().unwrap());
+        crate::connect::ensure_crypto_provider();
         let client = Client::try_from(config).unwrap();
 
         let err = overview(client, Duration::from_millis(50)).await.unwrap_err();

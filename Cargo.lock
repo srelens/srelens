@@ -9609,7 +9609,6 @@ name = "srelens-gpui"
 version = "0.8.0"
 dependencies = [
  "gpui-kit",
- "rustls",
  "srelens-capability",
  "srelens-kube",
  "srelens-registry",
@@ -9629,6 +9628,7 @@ dependencies = [
  "http",
  "k8s-openapi",
  "kube",
+ "rustls",
  "schemars 0.8.22",
  "serde",
  "serde_json",

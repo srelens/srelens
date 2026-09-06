@@ -20,6 +20,24 @@ use srelens_capability::{Annotations, Capability, CapabilityError};
 use crate::client_cache::ClientCache;
 use crate::context_resolve::resolve_context;
 
+/// Name `ring` as the process-wide rustls provider, once.
+///
+/// rustls resolves a default provider on its own only while exactly one is
+/// compiled into the process. This crate brings `ring` through kube-rs; a
+/// host that also links a crate built against `aws-lc-rs` — the GPUI shell
+/// does, through GPUI's HTTP client — has two, and `Client::try_from` then
+/// panics on the first TLS config it builds, on whatever thread happened to
+/// build it. Choosing explicitly makes this crate correct regardless of the
+/// binary around it. Idempotent: a second call, or a host that installed one
+/// first, is not an error.
+pub fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // `Err` means a provider is already installed, which is the state we want.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Default per-request timeout budget (connect + list/get/apply), in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 8;
 /// Smallest timeout a user may configure, in seconds.
@@ -276,6 +294,7 @@ pub(crate) async fn config_for_context(paths: &[PathBuf], context: &str) -> Resu
 
 pub(crate) async fn build_client(paths: &[PathBuf], context: &str) -> Result<Client, String> {
     let config = config_for_context(paths, context).await?;
+    ensure_crypto_provider();
     Client::try_from(config).map_err(|e| e.to_string())
 }
 
@@ -346,6 +365,7 @@ pub async fn build_client_with_bearer(
     bearer: &str,
 ) -> Result<Client, String> {
     let config = config_for_context_with_bearer(paths, context, bearer).await?;
+    ensure_crypto_provider();
     Client::try_from(config).map_err(|e| e.to_string())
 }
 
@@ -466,6 +486,7 @@ async fn probe_cluster_from_yaml(yaml: &str, context: &str) -> ClusterInfoOut {
         Ok(c) => c,
         Err(e) => return fail(e.to_string()),
     };
+    ensure_crypto_provider();
     let client = match Client::try_from(config) {
         Ok(c) => c,
         Err(e) => return fail(e.to_string()),
@@ -698,15 +719,19 @@ mod tests {
     use super::*;
 
     /// kube's `rustls-tls` feature no longer selects a crypto provider on its
-    /// own -- kube 4 split `ring` and `aws-lc-rs` out into separate features.
-    /// Without one of them rustls cannot resolve a process-level provider and
-    /// `Client::try_from` panics the first time it builds a TLS config.
-    ///
-    /// This only bites when the crate is built on its own: a workspace build
-    /// unifies `ring` in from a sibling crate and hides it. CI runs the
-    /// kind-bound suites as `cargo test -p srelens-kube`, so guard that.
+    /// own -- kube 4 split `ring` and `aws-lc-rs` out into separate features,
+    /// and rustls resolves one automatically only while exactly ONE is
+    /// compiled in. That held until `apps/gpui` joined the workspace: its
+    /// HTTP client is built against `aws-lc-rs`, a workspace test build then
+    /// links both, and twenty-five of this crate's own tests panicked in
+    /// `Client::try_from` — in CI, not locally, because `-p srelens-kube`
+    /// alone still had one provider. `ensure_crypto_provider` names `ring`
+    /// before every client this crate builds, so the crate is correct in any
+    /// process. This test builds a client the way production does and is
+    /// what fails if that call ever goes missing.
     #[tokio::test]
     async fn building_a_client_selects_a_rustls_crypto_provider() {
+        ensure_crypto_provider();
         let config = kube::Config::new("https://127.0.0.1:6443".parse().expect("uri"));
         Client::try_from(config).expect("client builds without a rustls provider panic");
     }
