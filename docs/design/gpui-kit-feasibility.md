@@ -133,9 +133,10 @@ arguing about:
   says "one Rust codebase to macOS, Windows, and Linux" and never mentions the
   browser, and why the skills treat wasm as a set of differences to work
   around rather than a headline. It also means the browser path depends on
-  one company keeping a divergence from upstream alive. The one concrete rough edge I found — `std::time::Instant` is
-  unimplemented on `wasm32`, so scroll axis-locking had to be disabled in the
-  browser to stop a panic — is the kind of thing a quiet target has more of.
+  one company keeping a divergence from upstream alive. The one concrete
+  rough edge I found — `std::time::Instant` is unimplemented on `wasm32`, so
+  scroll axis-locking had to be disabled in the browser to stop a panic — is
+  the kind of thing a quiet target has more of.
 - *WebGPU narrows reach.* Today's web mode is a React app: it opens in
   anything. A WebGPU build needs a browser that has WebGPU on, which is not a
   given in locked-down enterprise fleets or older Safari. For a tool aimed at
