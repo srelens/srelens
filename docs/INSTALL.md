@@ -60,6 +60,65 @@ just Linux — is being enabled; see
 > "Windows protected your PC" prompt. Click **More info → Run anyway** to
 > proceed. Signed installers will remove this step in a future release.
 
+## Terminal UI (`srelens-tui`)
+
+The terminal UI ships as one self-contained binary, separate from the desktop
+app and with nothing to install. Every release carries an archive per platform:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86-64 | `srelens-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64, static | `srelens-tui-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `srelens-tui-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `srelens-tui-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `srelens-tui-<version>-x86_64-apple-darwin.tar.gz` |
+| Windows x86-64 | `srelens-tui-<version>-x86_64-pc-windows-msvc.zip` |
+
+Take the **musl** build if your distribution is Alpine, or if the glibc build
+reports a version error — it is statically linked and depends on nothing on the
+host. Otherwise prefer the glibc build.
+
+**Linux and macOS.** Extract and put it on your `PATH`:
+
+```bash
+tar -xzf srelens-tui-<version>-<target>.tar.gz
+chmod +x srelens-tui
+sudo mv srelens-tui /usr/local/bin/
+srelens-tui --version
+```
+
+**Windows.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
+`PATH`, then run `srelens-tui --version` in a terminal. Windows may warn that
+the file came from the internet, for the same reason the desktop installer
+does: code signing is on the roadmap ([#32]).
+
+> **macOS: "cannot be opened because the developer cannot be verified".** The
+> binary is not notarized. You will usually never see this, because extracting
+> a `.tar.gz` with `tar` in a terminal does not mark the contents as
+> quarantined. Safari does, if it auto-expands the download. Clear it with:
+>
+> ```bash
+> xattr -d com.apple.quarantine ./srelens-tui
+> ```
+
+**Checking the download.** Each release lists the SHA-256 of every TUI archive
+in `srelens-tui-<version>-SHA256SUMS.txt`:
+
+```bash
+sha256sum -c --ignore-missing srelens-tui-<version>-SHA256SUMS.txt
+```
+
+That proves the file arrived intact, not who built it. For that, the archives
+carry detached GPG signatures like every other release asset — see
+[Verifying a download](#verifying-a-download) below, which applies to them
+unchanged.
+
+Run `srelens-tui --help` for the full set of flags; `srelens-tui info` prints
+cluster reachability, and `srelens-tui toolbox` reports whether `kubectl`,
+`helm` and `krew` are on your `PATH`.
+
+[#32]: https://github.com/srelens/srelens/issues/32
+
 ## Verifying a download
 
 > **srelens 0.6.0 and earlier are unsigned.** Release signing begins with
