@@ -429,12 +429,17 @@ mod tests {
             summary: String::new(),
         })
         .unwrap();
-        let keys: Vec<&str> = out
+        // Sorted before comparing: serde_json's map keeps declaration order
+        // when any crate in the build turns on its `preserve_order` feature
+        // and sorts otherwise, and a workspace test build is not the same
+        // build as `-p srelens-kube`. The contract is the set of names.
+        let mut keys: Vec<&str> = out
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
             .collect();
+        keys.sort_unstable();
         assert_eq!(
             keys,
             [
