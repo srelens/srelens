@@ -3,7 +3,8 @@
 **Verdict: not as a migration, yes as a bounded experiment.** The technical
 fit is better than it looks from the outside, and the project cost is worse.
 The blocker is not GPUI Kit; it is that srelens would be carrying three user
-interfaces instead of two, and would lose the browser.
+interfaces instead of two, and that the browser build gives back the one
+boundary whose removal is the whole financial case.
 
 What follows is measured rather than estimated. Every number in it came from
 this repository or from the GPUI Kit skills, both read on 2026-09-06.
@@ -55,12 +56,22 @@ IPC boundary into `crates/kube` and back, plus the types to describe what
 crosses. In a GPUI application that boundary does not exist: a screen calls
 the capability directly.
 
-So `packages/core` is not ported. It is **deleted**. That is the one place in
-this exercise where the work goes down rather than up, and it is a real 11k
-lines. It also removes a whole class of bug this codebase has actually had —
-the `api_version` / `apiVersion` mismatch that killed schema autocomplete in
-both designs for every release was a defect that can only exist because there
-is a JSON boundary in the middle. Direct calls are typed end to end.
+So `packages/core` is not ported. It is **deleted** — on the desktop. That
+is the one place in this exercise where the work goes down rather than up, and
+it is a real 11k lines. It also removes a whole class of bug this codebase has
+actually had — the `api_version` / `apiVersion` mismatch that killed schema
+autocomplete in both designs for every release was a defect that can only
+exist because there is a JSON boundary in the middle. Direct calls are typed
+end to end.
+
+**The browser build does not get this.** See §4: a GPUI app compiled to
+WebAssembly runs in the browser, but `crates/kube` does not — the kube
+client, kubeconfigs, exec plugins and TLS all stay on the server. So the
+browser build needs an RPC client to `crates/server`, which is `core`
+again, in Rust. It would be smaller than 11k lines and it could share types
+with the server crate rather than hand-mirroring them, which is a genuine
+improvement over today. But the boundary is back, and with it the class of
+bug. The deletion is a desktop win only.
 
 The second argument is performance, and it is not theoretical here. The
 topology screen was reworked twice for lag, and the resource lists are
@@ -102,12 +113,40 @@ because they would have changed the verdict in the wrong direction:
 about punctuation. Zed has an alacritty-backed terminal, but it is not part of
 `gpui-kit`. This is build-it-or-vendor-it, and it is not small.
 
-**Web mode dies.** `crates/server` is 7,784 lines that exist to serve this
-frontend into a browser, with a Docker image and `docs/WEB.md` behind it. GPUI
-is native only — macOS, Windows, Linux. Moving ui-next to GPUI means either
-dropping browser access as a product capability, or keeping the React frontend
-alive forever to serve it. That is a product decision, not an engineering one,
-and it should be made before any code is written.
+**Web mode is possible, and it is the least proven path.** An earlier draft
+of this document called GPUI native-only. That was wrong, and the correction
+was sitting in the installed skills: the coding guides list "macOS / Windows /
+Linux / wasm" as the platform axis and say to "preserve platform/wasm
+differences when an API is not portable". GPUI compiles to `wasm32` and
+renders through WebGPU in the browser, and gpui-component's own gallery ships
+that way.
+
+Three things temper it, all worth carrying into the experiment rather than
+arguing about:
+
+- *It is the quiet target, and it is a fork's.* Upstream GPUI — the one Zed
+  ships — does not run in a browser. Zed's own discussion of it has "no work
+  on wasm support" in mid-2024, lists "Zed on the web" as a milestone beyond
+  1.0, and by February 2026 the maintainers were redirecting the question to
+  Discord. The browser target that gpui-kit exercises therefore lives in
+  Longbridge's line of GPUI, not Zed's. That is why the gpui-component README
+  says "one Rust codebase to macOS, Windows, and Linux" and never mentions the
+  browser, and why the skills treat wasm as a set of differences to work
+  around rather than a headline. It also means the browser path depends on
+  one company keeping a divergence from upstream alive. The one concrete rough edge I found — `std::time::Instant` is
+  unimplemented on `wasm32`, so scroll axis-locking had to be disabled in the
+  browser to stop a panic — is the kind of thing a quiet target has more of.
+- *WebGPU narrows reach.* Today's web mode is a React app: it opens in
+  anything. A WebGPU build needs a browser that has WebGPU on, which is not a
+  given in locked-down enterprise fleets or older Safari. For a tool aimed at
+  operators on whatever machine is in front of them, that is a real regression
+  to weigh against the rendering speed.
+- *The RPC boundary returns* (§2). `crates/server` at 7,784 lines stays,
+  and the browser build needs a typed client for it. The desktop's strongest
+  argument does not carry across.
+
+So browser access is not the blocker it looked like. It is the part of the
+experiment most likely to surprise, and it has to be in the experiment.
 
 **A third interface.** The classic-to-ui-next migration is *not finished*:
 `design.ts` lists 19 ported routes and `apps/desktop/src` is still 23,871
@@ -144,9 +183,12 @@ scrolling, the namespace picker, the row menu, and it calls `crates/kube`
 directly — so it also proves or disproves the "delete `packages/core`" claim,
 which is the whole financial case.
 
-Build it as its own binary against the existing crates. Do not wire it into
-the Tauri app, do not put it behind a feature flag in the shipping product,
-and do not port a second screen until the first has answered:
+Build it as its own binary against the existing crates, **and build the
+same screen for `wasm32` against `crates/server`**, because the browser
+build is where this toolkit is least proven and where the desktop's best
+argument stops applying. Do not wire either into the Tauri app, do not put
+them behind a feature flag in the shipping product, and do not port a second
+screen until the first has answered:
 
 1. How many lines is the list screen in GPUI versus its 43k-line neighbourhood
    in ui-next?
@@ -156,15 +198,19 @@ and do not port a second screen until the first has answered:
 4. What does the accessibility tree expose, checked with a real screen reader
    on Windows and macOS?
 5. How much of `ui-kit`'s token system survives GPUI Kit's own design guides?
+6. Does the `wasm32` build open, scroll and render the list in the browsers
+   the web mode is actually used from — measured on WebGPU availability,
+   bundle size and first paint against today's React build?
+7. How big is the Rust RPC client the browser build needs, and can it share
+   types with `crates/server` instead of mirroring them?
 
 If the answers are good, the migration is a real option and there is a number
-to put on it. If they are not, the cost of finding out was one screen.
+to put on it. If they are not, the cost of finding out was one screen, twice.
 
-**Two things to settle first, because they are not engineering questions:**
-whether browser access is expendable, and whether the classic design gets
-retired before another interface starts. If browser access stays, this is a
-second frontend forever, and the answer is no regardless of how good the
-prototype looks.
+**One thing to settle first, because it is not an engineering question:**
+whether the classic design gets retired before another interface starts.
+Three shipping UIs is the failure mode this repository has already met at a
+smaller scale.
 
 ---
 
