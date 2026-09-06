@@ -70,6 +70,7 @@ app and with nothing to install. Every release carries an archive per platform:
 | Linux x86-64 | `srelens-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux x86-64, static | `srelens-tui-<version>-x86_64-unknown-linux-musl.tar.gz` |
 | Linux arm64 | `srelens-tui-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux arm64, static | `srelens-tui-<version>-aarch64-unknown-linux-musl.tar.gz` |
 | macOS Apple Silicon | `srelens-tui-<version>-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `srelens-tui-<version>-x86_64-apple-darwin.tar.gz` |
 | Windows x86-64 | `srelens-tui-<version>-x86_64-pc-windows-msvc.zip` |
@@ -143,6 +144,13 @@ unchanged.
 Run `srelens-tui --help` for the full set of flags; `srelens-tui info` prints
 cluster reachability, and `srelens-tui toolbox` reports whether `kubectl`,
 `helm` and `krew` are on your `PATH`.
+
+> **`toolbox` on Windows reports every tool as missing.** It resolves
+> executables the Unix way, so on Windows it finds nothing even when the tools
+> are installed and working. Tracked in [#445]; everything else in the Windows
+> build is unaffected.
+
+[#445]: https://github.com/srelens/srelens/issues/445
 
 [#32]: https://github.com/srelens/srelens/issues/32
 

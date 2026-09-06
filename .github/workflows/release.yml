@@ -647,6 +647,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             smoke: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            smoke: true
           - target: aarch64-apple-darwin
             runner: macos-latest
             smoke: true
@@ -705,6 +708,7 @@ jobs:
         shell: bash
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
           # Debug symbols are most of an unstripped Linux/macOS binary and
           # nothing here symbolicates a user crash dump, so they are pure
           # download weight. No-op on Windows, where MSVC keeps debug info in a
@@ -898,8 +902,8 @@ jobs:
           # that six jobs each uploaded one: a silently missing target is the
           # failure this is here to catch.
           count=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
-          if [ "$count" -ne 6 ]; then
-            echo "::error::expected 6 TUI archives, found $count"
+          if [ "$count" -ne 7 ]; then
+            echo "::error::expected 7 TUI archives, found $count"
             ls -l
             exit 1
           fi
