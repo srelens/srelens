@@ -17,9 +17,8 @@ use srelens_kube::node_inspector::{
 };
 use srelens_tui::ai_skills::CavemanLevel;
 use srelens_tui::app::{
-    copy_to_clipboard, copy_via_osc52, extract_tool_call_completed_info,
-    extract_tool_call_start_info, format_event_summary, get_clipboard_text, parse_involved_object,
-    parse_ready_ratio, ActiveView, App, SuspendAction,
+    extract_tool_call_completed_info, extract_tool_call_start_info, format_event_summary,
+    get_clipboard_text, parse_involved_object, parse_ready_ratio, ActiveView, App, SuspendAction,
 };
 use srelens_tui::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
 use srelens_tui::event::AppEvent;
@@ -418,18 +417,16 @@ fn assert_only_greeting(app: &App) {
 // Free helper functions
 // ---------------------------------------------------------------------------
 
-#[test]
-fn copying_to_the_clipboard_reports_a_result_even_without_a_display() {
-    // OSC 52 + native command fallbacks: the call must not panic and must
-    // return the io::Result shape regardless of what the runner has installed.
-    copy_via_osc52("selected text");
-    let result = copy_to_clipboard("line one\nline two");
-    assert!(result.is_ok() || result.is_err());
-    // Base64 boundary cases (1, 2 and 3 byte tails) all go through the encoder.
-    copy_via_osc52("a");
-    copy_via_osc52("ab");
-    copy_via_osc52("");
-}
+// Nothing here calls `copy_via_osc52` or `copy_to_clipboard` directly. They
+// write to the host: OSC 52 hands the text to the terminal emulator and the
+// fallbacks shell out to wl-copy/xclip, so a direct call from a test
+// overwrites whatever the developer had on their clipboard. There is nothing
+// to assert about them either — they return `()` and `io::Result`, so the
+// only available assertion is that a result is a result. The copy paths that
+// carry real signal are the key handlers in `app_extra_tests.rs`, which press
+// the key and assert the toast that names what was copied.
+//
+// Reading is a different matter: it takes nothing away from the developer.
 
 #[test]
 fn reading_the_clipboard_never_yields_an_empty_string() {

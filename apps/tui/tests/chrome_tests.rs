@@ -8,6 +8,7 @@
 mod common;
 
 use std::cell::RefCell;
+use std::time::Duration;
 
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
@@ -81,6 +82,25 @@ fn fresh_state() -> AssistantViewState {
     let mut state = AssistantViewState::new();
     state.messages[0].timestamp = "10:00:00".to_string();
     state
+}
+
+/// The `(Ns elapsed)` count from the busy line that starts with `prefix`.
+/// Panics with the frame if the line or the count is not there, so a renderer
+/// that stops showing elapsed time fails loudly rather than silently.
+fn elapsed_seconds(text: &str, prefix: &str) -> u64 {
+    let line = text
+        .lines()
+        .find(|l| l.contains(prefix))
+        .unwrap_or_else(|| panic!("no busy line starting {prefix:?}: {text}"));
+    let (_, after) = line
+        .split_once(&format!("{prefix} ("))
+        .unwrap_or_else(|| panic!("no elapsed badge on {line:?}"));
+    let (count, _) = after
+        .split_once("s elapsed)")
+        .unwrap_or_else(|| panic!("no elapsed badge on {line:?}"));
+    count
+        .parse()
+        .unwrap_or_else(|e| panic!("elapsed count {count:?} is not a number: {e}"))
 }
 
 fn status_props(mode: &InputMode) -> StatusBarProps<'_> {
@@ -1315,14 +1335,21 @@ fn a_busy_assistant_shows_a_spinner_status_and_elapsed_seconds() {
         "{text}"
     );
 
+    // Seed a known age instead of reading the clock and asserting an exact
+    // count: on a loaded runner a second can pass between `Instant::now()`
+    // and the render, and a CORRECT renderer would then print 8s and fail an
+    // equality check. Assert the floor instead — that the elapsed seconds are
+    // the seeded age or more, which a renderer stuck at 0 still fails.
     state.set_status("Running kubectl get pods".into());
-    state.busy_start = Some(std::time::Instant::now());
+    state.busy_start = std::time::Instant::now().checked_sub(Duration::from_secs(7));
+    assert!(
+        state.busy_start.is_some(),
+        "the clock must support a 7s offset"
+    );
     state.tick();
     let text = assistant_text(160, 30, &state);
-    assert!(
-        text.contains("⠼ Running kubectl get pods (0s elapsed)"),
-        "{text}"
-    );
+    let seconds = elapsed_seconds(&text, "⠼ Running kubectl get pods");
+    assert!(seconds >= 7, "expected at least the seeded 7s: {text}");
 
     state.finish_turn();
     assert!(!state.is_busy && state.busy_start.is_none());
