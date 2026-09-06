@@ -17,7 +17,12 @@ use crate::client_cache::ClientCache;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_MAX_LINES: usize = 200;
 
+/// Wire names are the caller's, not the struct's (see AGENTS.md): the app
+/// and the MCP schema speak camelCase, so `max_lines` arrives as `maxLines`.
+/// Without the rename the caller's cap was silently ignored and the default
+/// 200 applied.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct QueryPodEndpointIn {
     /// Kubernetes context name
     pub context: String,
@@ -44,6 +49,7 @@ pub struct QueryPodEndpointIn {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct QueryPodEndpointOut {
     pub pod: String,
     pub port: u16,
@@ -390,6 +396,58 @@ mod tests {
         assert_eq!(returned, 2);
         assert_eq!(lines[0], "DCGM_FI_DEV_FB_USED{gpu=\"0\"} 1024");
         assert_eq!(lines[1], "DCGM_FI_DEV_FB_FREE{gpu=\"0\"} 7168");
+    }
+
+    /// The caller writes `maxLines`. Before the rename that key was an
+    /// unknown field, silently dropped, and every call got the 200-line
+    /// default — so pin the wire spelling on both the input and the output.
+    #[test]
+    fn wire_fields_are_camel_case() {
+        let input: QueryPodEndpointIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "namespace": "n", "maxLines": 1
+        }))
+        .unwrap();
+        assert_eq!(input.max_lines, Some(1));
+
+        let struct_spelling: QueryPodEndpointIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "namespace": "n", "max_lines": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            struct_spelling.max_lines, None,
+            "the struct's own spelling is not the wire contract"
+        );
+
+        let out = serde_json::to_value(QueryPodEndpointOut {
+            pod: "p".into(),
+            port: 8080,
+            path: "/metrics".into(),
+            status_code: 200,
+            total_lines: 2,
+            returned_lines: 1,
+            metrics: vec!["e2e_up 1".into()],
+            summary: String::new(),
+        })
+        .unwrap();
+        let keys: Vec<&str> = out
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "metrics",
+                "path",
+                "pod",
+                "port",
+                "returnedLines",
+                "statusCode",
+                "summary",
+                "totalLines"
+            ]
+        );
     }
 
     #[test]

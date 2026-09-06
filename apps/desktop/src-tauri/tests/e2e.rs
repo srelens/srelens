@@ -1559,7 +1559,7 @@ async fn run_suite() {
             )
             .await
         {
-            Ok(v) if v["status_code"] == 200 => break v,
+            Ok(v) if v["statusCode"] == 200 => break v,
             Ok(v) if Instant::now() > dl => {
                 panic!("queryPodEndpoint never got HTTP 200 from {HTTP_DEPLOY}: {v}")
             }
@@ -1595,7 +1595,7 @@ async fn run_suite() {
         "the sample line must come back exactly as served: {out}"
     );
     assert_eq!(
-        out["total_lines"],
+        out["totalLines"],
         json!(lines.len()),
         "with no filter and no cap, total and returned agree: {out}"
     );
@@ -1612,22 +1612,22 @@ async fn run_suite() {
             "k8s.queryPodEndpoint",
             json!({
                 "context": ctx, "namespace": NS, "pod": http_pod,
-                "port": 8080, "path": "metrics", "filter": "e2e_up", "max_lines": 1
+                "port": 8080, "path": "metrics", "filter": "e2e_up", "maxLines": 1
             }),
         )
         .await;
-    assert_eq!(out["status_code"], json!(200), "{out}");
+    assert_eq!(out["statusCode"], json!(200), "{out}");
     assert_eq!(
         out["path"], "/metrics",
         "a bare path gets its leading slash: {out}"
     );
     assert_eq!(
-        out["total_lines"],
+        out["totalLines"],
         json!(2),
         "the filter is a substring match over every line: {out}"
     );
     assert_eq!(
-        out["returned_lines"],
+        out["returnedLines"],
         json!(1),
         "max_lines caps what comes back: {out}"
     );
@@ -1645,7 +1645,7 @@ async fn run_suite() {
             json!({ "context": ctx, "namespace": NS, "pod": http_pod, "path": "/nope" }),
         )
         .await;
-    assert_eq!(out["status_code"], json!(404), "{out}");
+    assert_eq!(out["statusCode"], json!(404), "{out}");
 
     // A selector nothing matches is a clean error, not an 8-second timeout.
     let msg = h
