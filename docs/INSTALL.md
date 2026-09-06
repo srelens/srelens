@@ -141,9 +141,11 @@ carry detached GPG signatures like every other release asset — see
 [Verifying a download](#verifying-a-download) below, which applies to them
 unchanged.
 
-Run `srelens-tui --help` for the full set of flags; `srelens-tui info` prints
-cluster reachability, and `srelens-tui toolbox` reports whether `kubectl`,
-`helm` and `krew` are on your `PATH`.
+Run `srelens-tui --help` for the full set of flags. `srelens-tui info` lists
+the contexts found in your kubeconfig with the cluster and server each names —
+it reads the file and does not contact any cluster, so it tells you what is
+configured, not what is reachable. `srelens-tui toolbox` reports whether
+`kubectl`, `helm` and `krew` are on your `PATH`.
 
 > **`toolbox` on Windows reports every tool as missing.** It resolves
 > executables the Unix way, so on Windows it finds nothing even when the tools
