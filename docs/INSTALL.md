@@ -147,10 +147,15 @@ it reads the file and does not contact any cluster, so it tells you what is
 configured, not what is reachable. `srelens-tui toolbox` reports whether
 `kubectl`, `helm` and `krew` are on your `PATH`.
 
-> **`toolbox` on Windows reports every tool as missing.** It resolves
-> executables the Unix way, so on Windows it finds nothing even when the tools
-> are installed and working. Tracked in [#445]; everything else in the Windows
-> build is unaffected.
+> **Windows: anything that looks for another program on your `PATH` may not
+> find it.** Executable lookup is Unix-shaped in several places — it shells out
+> to `which`, which Windows does not have, and the in-process fallback matches
+> a bare program name without consulting `PATHEXT`, so it never sees
+> `kubectl.exe` or `helm.exe`. What that affects: `srelens-tui toolbox` reports
+> every tool as missing, Helm operations may report Helm as absent, and the
+> Cursor AI provider may not find its binary. Browsing clusters, logs, YAML and
+> everything else that talks to the API server is unaffected. Tracked in
+> [#445].
 
 [#445]: https://github.com/srelens/srelens/issues/445
 

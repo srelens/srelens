@@ -77,6 +77,16 @@ pub enum CliCommand {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    // Resolved BEFORE the subcommand match, because those arms return early.
+    // `info` used to call `all_kubeconfig_paths()` itself and so ignored
+    // `--kubeconfig` entirely: a user pointing at a file outside the default
+    // locations was shown the contexts of the DEFAULT kubeconfig and told they
+    // were theirs.
+    let kubeconfig_paths = match &cli.kubeconfig {
+        Some(path) => vec![path.clone()],
+        None => srelens_registry::all_kubeconfig_paths(),
+    };
+
     // Handle non-interactive CLI subcommands if requested
     if let Some(cmd) = cli.command {
         match cmd {
@@ -86,8 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CliCommand::Info => {
                 println!("SRElens Kubernetes TUI (srelens-tui)");
-                let paths = srelens_registry::all_kubeconfig_paths();
-                let contexts = srelens_kube::context_resolve::resolve_contexts(&paths);
+                let contexts = srelens_kube::context_resolve::resolve_contexts(&kubeconfig_paths);
                 println!("Found {} contexts across kubeconfigs:", contexts.len());
                 for ctx in contexts {
                     let mark = if ctx.is_current { "* " } else { "  " };
@@ -113,13 +122,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    // Resolve kubeconfig paths
-    let kubeconfig_paths = if let Some(p) = cli.kubeconfig {
-        vec![p]
-    } else {
-        srelens_registry::all_kubeconfig_paths()
-    };
 
     // Install panic hook to restore terminal on panic
     let default_panic = std::panic::take_hook();
