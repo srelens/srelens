@@ -1,7 +1,7 @@
 //! The `k8s.listContexts` capability — reads the kubeconfig and returns its
 //! contexts. Surfaced to both the UI and MCP via the shared registry.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use srelens_capability::{Annotations, Capability, CapabilityError};
@@ -86,6 +86,75 @@ pub struct ListContextsOut {
 /// the developer's real config directory. The DIRECTORY is fixed but its
 /// CONTENTS are read on each call, which is what lets a config pasted or
 /// dropped in while the app runs resolve without a restart (#256).
+/// List the contexts across the active kubeconfig files.
+///
+/// The typed door; `list_contexts_capability` is this behind JSON. `additional`
+/// is the capability's optional `paths`: `Some` rebuilds the active set from
+/// `default_paths` plus these; `None` keeps whatever is already active.
+pub async fn list_contexts(
+    cache: &ClientCache,
+    default_paths: Vec<PathBuf>,
+    managed_dir: Option<&Path>,
+    additional: Option<Vec<String>>,
+) -> Result<ListContextsOut, CapabilityError> {
+    // A caller that names its own files rebuilds from the static
+    // defaults; one that doesn't keeps whatever is already active,
+    // so an MCP `{}` call never discards paths the desktop set.
+    let mut paths = match additional {
+        Some(additional) => {
+            let mut paths = default_paths;
+            for path in additional.into_iter().map(PathBuf::from) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            paths
+        }
+        None => cache.paths().await,
+    };
+    // Both branches then reconcile with the disk, so discovery
+    // behaves the same however the capability is invoked.
+    //
+    // Read HERE, not captured at registry-build time: the folder's
+    // contents change while the app runs, and a startup snapshot
+    // would miss anything pasted or dropped in afterwards (#256).
+    if let Some(dir) = managed_dir {
+        for managed in crate::connect::kubeconfig_files_in(dir) {
+            if !paths.contains(&managed) {
+                paths.push(managed);
+            }
+        }
+    }
+    // `default_paths` and the cache seed are both snapshots, so a
+    // kubeconfig deleted while the app runs would otherwise be
+    // reintroduced on every call and sit in the cache forever —
+    // where `load_kubeconfigs` is strict and fails the
+    // merged-resolution fallback on the missing file. Only ABSENT
+    // files are dropped: one that exists but is malformed still
+    // reaches the reader and surfaces its parse error, which the
+    // caller needs to see.
+    paths.retain(|path| path.exists());
+    cache.set_paths(paths).await;
+    // Enumerate every context across all files with duplicate-name
+    // disambiguation, so contexts that share a name (e.g. `default`
+    // across per-cluster kubeconfigs) are all visible and each
+    // resolves to its own file — kube-rs merge would drop them.
+    let paths = cache.paths().await;
+    let resolved = resolve_contexts(&paths);
+    // Resilient to a bad additional file. An empty result is only an
+    // error when *no* kubeconfig could be read at all; a readable file
+    // with zero contexts (e.g. after deleting the last one) is fine.
+    if resolved.is_empty()
+        && !paths.iter().any(|path| kube::config::Kubeconfig::read_from(path).is_ok())
+    {
+        return Err(CapabilityError::Handler(
+            "no kubeconfig contexts could be read".to_string(),
+        ));
+    }
+    let contexts = resolved.into_iter().map(build_context_dto).collect();
+    Ok(ListContextsOut { contexts })
+}
+
 pub fn list_contexts_capability(
     cache: Arc<ClientCache>,
     default_paths: Vec<PathBuf>,
@@ -100,62 +169,7 @@ pub fn list_contexts_capability(
             let default_paths = default_paths.clone();
             let managed_dir = managed_dir.clone();
             async move {
-                // A caller that names its own files rebuilds from the static
-                // defaults; one that doesn't keeps whatever is already active,
-                // so an MCP `{}` call never discards paths the desktop set.
-                let mut paths = match input.paths {
-                    Some(additional) => {
-                        let mut paths = default_paths;
-                        for path in additional.into_iter().map(PathBuf::from) {
-                            if !paths.contains(&path) {
-                                paths.push(path);
-                            }
-                        }
-                        paths
-                    }
-                    None => cache.paths().await,
-                };
-                // Both branches then reconcile with the disk, so discovery
-                // behaves the same however the capability is invoked.
-                //
-                // Read HERE, not captured at registry-build time: the folder's
-                // contents change while the app runs, and a startup snapshot
-                // would miss anything pasted or dropped in afterwards (#256).
-                if let Some(dir) = &managed_dir {
-                    for managed in crate::connect::kubeconfig_files_in(dir) {
-                        if !paths.contains(&managed) {
-                            paths.push(managed);
-                        }
-                    }
-                }
-                // `default_paths` and the cache seed are both snapshots, so a
-                // kubeconfig deleted while the app runs would otherwise be
-                // reintroduced on every call and sit in the cache forever —
-                // where `load_kubeconfigs` is strict and fails the
-                // merged-resolution fallback on the missing file. Only ABSENT
-                // files are dropped: one that exists but is malformed still
-                // reaches the reader and surfaces its parse error, which the
-                // caller needs to see.
-                paths.retain(|path| path.exists());
-                cache.set_paths(paths).await;
-                // Enumerate every context across all files with duplicate-name
-                // disambiguation, so contexts that share a name (e.g. `default`
-                // across per-cluster kubeconfigs) are all visible and each
-                // resolves to its own file — kube-rs merge would drop them.
-                let paths = cache.paths().await;
-                let resolved = resolve_contexts(&paths);
-                // Resilient to a bad additional file. An empty result is only an
-                // error when *no* kubeconfig could be read at all; a readable file
-                // with zero contexts (e.g. after deleting the last one) is fine.
-                if resolved.is_empty()
-                    && !paths.iter().any(|path| kube::config::Kubeconfig::read_from(path).is_ok())
-                {
-                    return Err(CapabilityError::Handler(
-                        "no kubeconfig contexts could be read".to_string(),
-                    ));
-                }
-                let contexts = resolved.into_iter().map(build_context_dto).collect();
-                Ok(ListContextsOut { contexts })
+                list_contexts(&cache, default_paths, managed_dir.as_deref(), input.paths).await
             }
         },
     )

@@ -135,8 +135,9 @@ jobs:
           cargo llvm-cov --no-report -p srelens-desktop --test e2e -- --ignored --nocapture --test-threads=1
           cargo llvm-cov --no-report -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test-threads=1
       - name: Enforce the coverage floor
-        # Only the process entries stay excluded (lib.rs/main.rs and the
-        # server's bin — they execute solely inside a running app/server).
+        # Only the process entries stay excluded (lib.rs/main.rs, the
+        # server's bin, and the GPUI shell's main.rs — they execute solely
+        # inside a running app, server or window).
         # The command shims that used to sit here are unit-tested through
         # tauri::test's MockRuntime and count like everything else. The floor
         # is a ratchet — 55 at first green, 84 when the kind suites started
@@ -144,7 +145,7 @@ jobs:
         # #28's acceptance number) — never lower it.
         run: >-
           cargo llvm-cov report --summary-only --fail-under-lines 85
-          --ignore-filename-regex 'apps/desktop/src-tauri/src/(lib|main)\.rs|crates/server/src/bin/'
+          --ignore-filename-regex 'apps/desktop/src-tauri/src/(lib|main)\.rs|crates/server/src/bin/|apps/gpui/src/main\.rs'
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the

@@ -123,6 +123,31 @@ Two examples from one branch: the Changes toggle stayed on "Hide changes"
 after an apply, and the diff panel was unreadable at its column width. Both
 had green tests. Neither was findable without looking.
 
+## The GPUI shell (`apps/gpui`)
+
+An experiment, not the product: one screen against the existing crates, to
+cost a migration (`docs/design/gpui-kit-feasibility.md`). Three things it
+already taught, each of which cost a build to learn:
+
+- **Two rustls providers end up in one process.** kube-rs brings `ring`,
+  GPUI's HTTP client brings `aws-lc-rs`, and rustls panics on the first
+  handshake — on the kube thread, silently, with an empty window. `main`
+  installs `ring` explicitly before anything touches the network. Any binary
+  that links both ecosystems needs that line.
+- **`use super::*` in a test module under `use gpui_kit::*` breaks `#[test]`.**
+  The glob carries a `test` attribute macro, and a bare `#[test]` then
+  expands into itself until the recursion limit. Name the imports.
+- **The accessibility tree is measurable, so measure it.** On Windows the
+  window is exposed through AccessKit to UI Automation; a PowerShell walker
+  over `RawViewWalker` lists what a screen reader gets. Pickers need
+  `accessibility_label` or they arrive nameless; the `DataTable` does not
+  arrive at all, and the pickers' `ExpandCollapse` pattern is declared but
+  does nothing. Check the tree before calling a GPUI screen done.
+
+Read the two installed skills (`.claude/skills/gpui-kit*`) before touching it;
+their coding and design guides are normative, and every API in that crate was
+taken from the toolkit's source, not guessed.
+
 ## Windows
 
 Three suites fail on Windows only and are unrelated to your change:

@@ -72,6 +72,31 @@ fn handler_err(e: impl ToString) -> CapabilityError {
     CapabilityError::Handler(e.to_string())
 }
 
+/// List namespace names in a connected context.
+///
+/// The typed door. `list_namespaces_capability` is this behind JSON for the
+/// registry; a Rust caller in the same process — the GPUI shell — calls this
+/// and never sees a `Value`. One body, so the two cannot drift, and no field
+/// name to misspell between them (which is how `k8s.openApiSchema` was dead
+/// for every release: its struct and its callers disagreed on one key).
+pub async fn list_namespaces(
+    cache: &ClientCache,
+    context: &str,
+) -> Result<ListNamespacesOut, CapabilityError> {
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let api: Api<Namespace> = Api::all(client);
+    let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+        .await
+        .map_err(|_| CapabilityError::Handler("list namespaces timed out".into()))?
+        .map_err(handler_err)?;
+    let namespaces = list
+        .items
+        .into_iter()
+        .filter_map(|ns| ns.metadata.name)
+        .collect();
+    Ok(ListNamespacesOut { namespaces })
+}
+
 /// `k8s.listNamespaces` — list namespace names in a connected context.
 pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListNamespacesIn, ListNamespacesOut, _, _>(
@@ -80,23 +105,7 @@ pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
         Annotations::READ_ONLY,
         move |input: ListNamespacesIn| {
             let cache = cache.clone();
-            async move {
-                let client = cache
-                    .get(&input.context)
-                    .await
-                    .map_err(CapabilityError::Handler)?;
-                let api: Api<Namespace> = Api::all(client);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list namespaces timed out".into()))?
-                    .map_err(handler_err)?;
-                let namespaces = list
-                    .items
-                    .into_iter()
-                    .filter_map(|ns| ns.metadata.name)
-                    .collect();
-                Ok(ListNamespacesOut { namespaces })
-            }
+            async move { list_namespaces(&cache, &input.context).await }
         },
     )
 }
@@ -167,6 +176,25 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
 }
 
 /// `k8s.listPods` — list pods in a namespace of a connected context.
+/// List the pods of one namespace (`""` for all) in a connected context.
+///
+/// The typed door; see `list_namespaces` for why it exists beside the
+/// capability rather than inside it.
+pub async fn list_pods(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+) -> Result<ListPodsOut, CapabilityError> {
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let api: Api<Pod> = crate::scoped_api(client, namespace);
+    let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+        .await
+        .map_err(|_| CapabilityError::Handler("list pods timed out".into()))?
+        .map_err(handler_err)?;
+    let pods = list.items.into_iter().map(summarise_pod).collect();
+    Ok(ListPodsOut { pods })
+}
+
 pub fn list_pods_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListPodsIn, ListPodsOut, _, _>(
         "k8s.listPods",
@@ -174,19 +202,7 @@ pub fn list_pods_capability(cache: Arc<ClientCache>) -> Capability {
         Annotations::READ_ONLY,
         move |input: ListPodsIn| {
             let cache = cache.clone();
-            async move {
-                let client = cache
-                    .get(&input.context)
-                    .await
-                    .map_err(CapabilityError::Handler)?;
-                let api: Api<Pod> = crate::scoped_api(client, &input.namespace);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list pods timed out".into()))?
-                    .map_err(handler_err)?;
-                let pods = list.items.into_iter().map(summarise_pod).collect();
-                Ok(ListPodsOut { pods })
-            }
+            async move { list_pods(&cache, &input.context, &input.namespace).await }
         },
     )
 }

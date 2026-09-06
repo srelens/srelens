@@ -102,9 +102,20 @@ because they would have changed the verdict in the wrong direction:
   single-threaded deterministic executor. Not Testing Library, but not a gap.
 - *Accessibility.* The coding guides direct you to test "through the
   accessibility tree by role, label, value, enabled state, focus, and
-  selection". There is a semantic tree. Given how much this codebase has
-  invested in aria roles, live regions and a 7:1 contrast promise, an absent
-  one would have been disqualifying on its own.
+  selection". There is a tree, and it reaches the OS: on Windows the window
+  reports itself to UI Automation as framework `AccessKit`, and the first
+  screen (§7) exposed its two pickers as ComboBoxes and its Refresh as a
+  Button. Two things measured against it, both worth knowing: the pickers
+  arrived with **empty names** until the app set `accessibility_label` —
+  names are the application's job, as they are in HTML — and the
+  `DataTable` **did not appear in the tree at all**. The pickers also
+  advertise UI Automation's `ExpandCollapse` pattern, and calling it left
+  them collapsed with no option ever entering the tree — declared, not
+  honoured. A list screen whose list is invisible to a screen reader, behind
+  a picker a screen reader cannot open, is not shippable to the readers this
+  codebase's 7:1 promise was made for. Whether those are gaps in this
+  toolkit version or in AccessKit's Windows adapter is the first thing the
+  experiment should run down, before any second screen.
 
 ## 4. What has no answer
 
