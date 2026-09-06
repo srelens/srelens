@@ -92,20 +92,47 @@ srelens-tui --version
 the file came from the internet, for the same reason the desktop installer
 does: code signing is on the roadmap ([#32]).
 
-> **macOS: "cannot be opened because the developer cannot be verified".** The
-> binary is not notarized. You will usually never see this, because extracting
-> a `.tar.gz` with `tar` in a terminal does not mark the contents as
-> quarantined. Safari does, if it auto-expands the download. Clear it with:
->
-> ```bash
-> xattr -d com.apple.quarantine ./srelens-tui
-> ```
+The macOS builds are signed with the same Apple Developer ID as the desktop
+app and notarized with the same account, so Gatekeeper admits them. The
+notarization ticket is **not stapled** — Apple only staples to `.app`, `.dmg`
+and `.pkg`, and this ships as a tarball — so the first run of a quarantined
+copy is checked against Apple online. If that first run happens offline and
+macOS refuses the binary, either reconnect and try again or clear the
+quarantine flag yourself:
+
+```bash
+xattr -d com.apple.quarantine ./srelens-tui
+```
+
+Most people never see this at all: extracting a `.tar.gz` with `tar` in a
+terminal does not mark the contents as quarantined in the first place.
 
 **Checking the download.** Each release lists the SHA-256 of every TUI archive
-in `srelens-tui-<version>-SHA256SUMS.txt`:
+in `srelens-tui-<version>-SHA256SUMS.txt`. Download it next to the archive and
+check the one file you took. The tool differs per platform — `sha256sum` is GNU
+coreutils, so it is absent on a stock macOS and on Windows.
+
+Linux:
 
 ```bash
 sha256sum -c --ignore-missing srelens-tui-<version>-SHA256SUMS.txt
+```
+
+macOS (`shasum` ships with the system; `-c -` reads the one line you pass it,
+and `--ignore-missing` does not exist here):
+
+```bash
+grep "srelens-tui-<version>-<target>.tar.gz$" \
+  srelens-tui-<version>-SHA256SUMS.txt | shasum -a 256 -c -
+```
+
+Windows (PowerShell):
+
+```powershell
+$archive = "srelens-tui-<version>-x86_64-pc-windows-msvc.zip"
+$expected = (Select-String -Path "srelens-tui-<version>-SHA256SUMS.txt" -Pattern ([regex]::Escape($archive))).Line.Split(" ")[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+if ($expected -eq $actual) { "OK" } else { "MISMATCH — do not run this file" }
 ```
 
 That proves the file arrived intact, not who built it. For that, the archives
