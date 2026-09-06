@@ -46,12 +46,50 @@ use tokio::sync::mpsc::UnboundedReceiver;
 const WIDE: (u16, u16) = (200, 50);
 const NARROW: (u16, u16) = (80, 24);
 
-/// Point AI settings persistence at a scratch file so no test touches the
-/// user's real configuration.
-fn isolate_ai_settings() {
-    let dir = std::env::temp_dir().join("srelens-app-state-tests");
-    let _ = std::fs::create_dir_all(&dir);
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", dir.join("ai_settings.json"));
+/// Point AI settings persistence at a scratch file that belongs to this test
+/// alone, and hold a lock for as long as it is pointed there. Bind the guard
+/// (`let _settings = isolate_ai_settings();`) — dropping it immediately
+/// releases the lock and deletes the directory.
+///
+/// `AiSettings::config_path()` reads a process-global environment variable,
+/// which is the only seam the type offers. So two settings tests running at
+/// once would fight over it, and — the reason this is not merely theoretical —
+/// a FIXED scratch path carries one run's saved state into the next run of the
+/// binary: a saved `"openai": "value"` seeds the next run's edit buffer and
+/// the assertion reads `valuesk-test` instead of `sk-test`. A fresh directory
+/// per test cannot do that.
+fn isolate_ai_settings() -> SettingsGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panics while holding the lock poisons it; the next test
+    // still wants the lock, not the panic.
+    let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
+    let previous = std::env::var("SRELENS_AI_SETTINGS_PATH").ok();
+    std::env::set_var(
+        "SRELENS_AI_SETTINGS_PATH",
+        dir.path().join("ai_settings.json"),
+    );
+    SettingsGuard {
+        _lock: lock,
+        _dir: dir,
+        previous,
+    }
+}
+
+struct SettingsGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    /// Held, not used: dropping it deletes the scratch directory.
+    _dir: tempfile::TempDir,
+    previous: Option<String>,
+}
+
+impl Drop for SettingsGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("SRELENS_AI_SETTINGS_PATH", value),
+            None => std::env::remove_var("SRELENS_AI_SETTINGS_PATH"),
+        }
+    }
 }
 
 /// An assistant configuration that can never reach a provider: Gemini with no
@@ -869,7 +907,7 @@ async fn the_overview_renders_cluster_health_with_gauges_and_hints() {
 
 #[tokio::test]
 async fn the_assistant_settings_and_tree_views_render_with_their_hints() {
-    isolate_ai_settings();
+    let _settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
 
     app.assistant_state
@@ -1938,7 +1976,7 @@ async fn a_configured_provider_starts_a_native_agent_turn() {
 
 #[tokio::test]
 async fn caveman_phrases_and_slash_commands_switch_the_terse_mode() {
-    isolate_ai_settings();
+    let _settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
     keyless_assistant(&mut app);
     app.active_view = ActiveView::Assistant;
@@ -1985,7 +2023,7 @@ async fn caveman_phrases_and_slash_commands_switch_the_terse_mode() {
 
 #[tokio::test]
 async fn utility_slash_commands_clear_open_settings_and_expand_playbooks() {
-    isolate_ai_settings();
+    let _settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
     keyless_assistant(&mut app);
     app.active_view = ActiveView::Assistant;
@@ -2015,7 +2053,7 @@ async fn utility_slash_commands_clear_open_settings_and_expand_playbooks() {
 
 #[tokio::test]
 async fn settings_keys_navigate_toggle_edit_and_save() {
-    isolate_ai_settings();
+    let _settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
     app.switch_view_to_kind(ResourceKind::Settings).await;
     // The view opens on whichever provider the stored settings name; start
