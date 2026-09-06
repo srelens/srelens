@@ -93,8 +93,13 @@ srelens-tui --version
 the file came from the internet, for the same reason the desktop installer
 does: code signing is on the roadmap ([#32]).
 
-The macOS builds are signed with the same Apple Developer ID as the desktop
-app and notarized with the same account, so Gatekeeper admits them. The
+The macOS builds on a **stable** release are signed with the same Apple
+Developer ID as the desktop app and notarized with the same account, so
+Gatekeeper admits them — a stable release cannot be cut without them, the same
+rule that governs the GPG signatures below. Dev-channel pre-releases are built
+even when those credentials are unavailable, so treat an unsigned macOS binary
+there as a pre-release that skipped signing rather than as evidence of
+tampering. The
 notarization ticket is **not stapled** — Apple only staples to `.app`, `.dmg`
 and `.pkg`, and this ships as a tarball — so the first run of a quarantined
 copy is checked against Apple online. If that first run happens offline and

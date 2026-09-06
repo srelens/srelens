@@ -720,6 +720,20 @@ jobs:
         # a release binary.
         run: cargo build --release --locked -p srelens-tui --target ${{ matrix.target }}
 
+      # A stable release REQUIRES signing; only dev may fall open. This
+      # mirrors sign-artifacts, which refuses to cut a stable release without a
+      # GPG key, and for the same reason: fail-open is the right default for a
+      # daily pre-release and the wrong one for the artifact the install docs
+      # make a promise about. A deleted or expired secret would otherwise
+      # publish an unsigned binary under documentation saying it is signed, and
+      # the first person to find out would be a user hitting Gatekeeper.
+      - name: Require Apple signing for stable releases
+        if: runner.os == 'macOS' && github.ref_name == 'main' && env.ENABLE_MAC_SIGNING != 'true'
+        run: |
+          echo "::error::Apple signing secrets are not configured, so this stable release cannot be signed."
+          echo "Set APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY, then re-run." >&2
+          exit 1
+
       # Sign and notarize with the same Developer ID certificate and the same
       # App Store Connect key the desktop app uses. tauri-action does this for
       # the .app; a bare binary has to be driven by hand.
@@ -790,9 +804,10 @@ jobs:
       # Say plainly when a macOS build is going out unsigned, so an expired or
       # removed secret shows up in the log instead of being discovered by a
       # user hitting a Gatekeeper wall.
+      # Only reachable on dev now that stable hard-fails above.
       - name: Note unsigned macOS build
         if: runner.os == 'macOS' && env.ENABLE_MAC_SIGNING != 'true'
-        run: echo "::warning::Apple signing secrets are not configured — this macOS binary ships unsigned and unnotarized."
+        run: echo "::warning::Apple signing secrets are not configured — this macOS pre-release binary ships unsigned and unnotarized."
 
       # A binary that cannot start is worse than no binary, and a
       # cross-compiled leg can produce one that links but does not run. Assert
