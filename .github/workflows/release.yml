@@ -778,7 +778,9 @@ jobs:
           # times out rather than failing.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          # `list-keychains`, plural: the singular spelling is widely copied around
+          # but is not a subcommand security(1) defines.
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
 
           codesign --force --options runtime --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" "$BIN"
