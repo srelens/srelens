@@ -123,6 +123,28 @@ Two examples from one branch: the Changes toggle stayed on "Hide changes"
 after an apply, and the diff panel was unreadable at its column width. Both
 had green tests. Neither was findable without looking.
 
+## `-p <crate>` and `--workspace` are two different builds
+
+CI runs `cargo test --workspace`. Cargo unifies features across everything
+in that build, so your crate's tests run inside whatever the rest of the
+workspace turned on — and `cargo test -p <crate>` on your machine did not.
+
+Two bugs from one branch, both invisible under `-p`, both red in CI:
+
+- `serde_json` sorts map keys until any crate enables `preserve_order`;
+  `thirtyfour` (the desktop smoke driver) does. A test that asserted key
+  order passed alone and failed in the workspace. Never assert map order.
+- kube-rs brings the `ring` rustls provider; GPUI's HTTP client brings
+  `aws-lc-rs`. With both linked, rustls will not pick, and twenty-five of
+  `crates/kube`'s own tests panicked in `Client::try_from` — only in the
+  workspace build. The fix names a provider in the crate that builds the
+  client, not in the binary that happened to notice.
+
+Before you push, run the failing crate the way CI does — at minimum
+`cargo test -p <crate> -p <the heaviest sibling>`, or the whole workspace —
+and check `cargo tree -e features -i <dep>` when a test depends on a
+dependency's behaviour.
+
 ## Windows
 
 Three suites fail on Windows only and are unrelated to your change:

@@ -141,8 +141,60 @@ fn write_lock(path: &Path) -> Result<fs::File, String> {
     let lock_path = parent.join(format!("{file_name}.lock"));
     let lock = fs::File::create(&lock_path)
         .map_err(|error| format!("create {}: {error}", lock_path.display()))?;
-    lock.lock()
-        .map_err(|error| format!("lock {}: {error}", lock_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let res = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+        if res != 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(format!("lock {}: {err}", lock_path.display()));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        #[repr(C)]
+        struct OVERLAPPED {
+            internal: usize,
+            internal_high: usize,
+            offset: u32,
+            offset_high: u32,
+            h_event: *mut std::ffi::c_void,
+        }
+        extern "system" {
+            fn LockFileEx(
+                hFile: *mut std::ffi::c_void,
+                dwFlags: u32,
+                dwReserved: u32,
+                nNumberOfBytesToLockLow: u32,
+                nNumberOfBytesToLockHigh: u32,
+                lpOverlapped: *mut OVERLAPPED,
+            ) -> i32;
+        }
+        const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
+        let handle = lock.as_raw_handle();
+        let mut overlapped = OVERLAPPED {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            h_event: std::ptr::null_mut(),
+        };
+        let res = unsafe {
+            LockFileEx(
+                handle as *mut _,
+                LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                !0u32,
+                !0u32,
+                &mut overlapped,
+            )
+        };
+        if res == 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(format!("lock {}: {err}", lock_path.display()));
+        }
+    }
     Ok(lock)
 }
 

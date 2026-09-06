@@ -27,6 +27,10 @@ pub struct ServiceAccountSummary {
     /// Number of referenced secrets.
     pub secrets: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -40,6 +44,7 @@ pub(crate) fn summarise(sa: ServiceAccount) -> ServiceAccountSummary {
         namespace: sa.metadata.namespace.clone().unwrap_or_default(),
         secrets: sa.secrets.as_ref().map_or(0, |s| s.len()) as i32,
         age: crate::humanize_age(sa.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(sa.metadata.creation_timestamp.as_ref()),
     }
 }
 
