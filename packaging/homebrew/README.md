@@ -49,7 +49,12 @@ Two things this repository cannot do for itself:
    cannot push to another one.
 
 Until both exist the publish **skips** rather than failing, so releases keep
-working. The run log says which one is missing.
+working, and the run log says which one is missing. Both are checked, not just
+the token: setting a tap up is two steps by two different means, so a token
+without a repository is the normal middle of doing it rather than a mistake —
+and cloning a repository that is not there would fail the release for it. Once
+the token is set the skip is a warning rather than silence, since by then
+somebody is expecting a publish.
 
 Set `HOMEBREW_TAP_REPO` as a repository variable to publish somewhere other
 than `srelens/homebrew-tap` — useful for trying the whole path against a
