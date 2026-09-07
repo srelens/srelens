@@ -1,0 +1,159 @@
+name: Publish winget
+
+# Opens a pull request against microsoft/winget-pkgs adding srelens-tui at a
+# published version. Called by the release workflow after a stable release goes
+# public, and runnable BY HAND for any already published version.
+#
+# Split out for the same reason `homebrew-publish.yml` and `aur-publish.yml`
+# are: welded to the release pipeline, a failed submission could only be
+# retried by cutting another release, which is how AUR sat four versions
+# behind before it was separated. That matters more here than anywhere else,
+# because this is the one channel whose outcome is decided by someone else —
+# a submission is a pull request into a repository we do not own, and it can
+# sit in moderation or be sent back for changes long after our release is
+# done.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to publish, without a leading v (e.g. 1.2.3)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version to submit, without a leading v. Defaults to the newest stable release.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Two runs would open two pull requests for the same package.
+concurrency:
+  group: winget-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish winget (srelens-tui)
+    # Windows because wingetcreate is a Windows binary, and because the
+    # validation it runs is the same code path the winget client uses.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # winget-pkgs is Microsoft's repository: GITHUB_TOKEN cannot fork it, and
+      # the submission is made as a person. Until someone sets the token this
+      # skips rather than failing — a release should not go red because a
+      # distribution channel is not set up yet. Same rule the Homebrew and AUR
+      # publishes already follow.
+      - name: Skip when the token isn't set up
+        id: gate
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "WINGET_TOKEN not set — skipping the winget submission."
+            echo "See packaging/winget/README.md for what it needs."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          node-version: 22
+
+      # A manual run may omit the version, meaning "whatever the newest stable
+      # release is". Resolved here rather than defaulted in the input, so the
+      # log records which version was chosen.
+      - name: Resolve version
+        id: resolve
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-}"
+          if [ -z "$VERSION" ]; then
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name // empty')
+            VERSION="${TAG#srelens-v}"
+            echo "No version given — using the newest stable release: ${TAG:-<none>}"
+          fi
+          VERSION="${VERSION#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'${VERSION}' is not a stable X.Y.Z version. winget is a catalogue of stable software; a dev pre-release is not what someone typing 'winget install' is asking for."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Submitting srelens-tui ${VERSION}"
+
+      # Rendering reads the release's own SHA256SUMS, so a release missing the
+      # Windows archive fails here with that said plainly, rather than
+      # producing a manifest that 404s on a stranger's machine after
+      # moderation has already approved it.
+      - name: Render the manifests
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          node packaging/winget/render.mjs "$VERSION" --out winget-out
+          echo "--- rendered manifests ---"
+          for f in winget-out/manifests/s/srelens/srelens-tui/"$VERSION"/*; do
+            echo "=== $f"
+            cat "$f"
+          done
+
+      - name: Get wingetcreate
+        if: steps.gate.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          # The documented CI download. Not `winget install wingetcreate`,
+          # which needs the winget client itself present on the runner.
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+
+      # Validation before submission, so a schema mistake is ours to see here
+      # rather than a reviewer's to find in a pull request.
+      - name: Validate
+        if: steps.gate.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          $dir = "winget-out/manifests/s/srelens/srelens-tui/$env:VERSION"
+          ./wingetcreate.exe show --format yaml $dir 2>&1 | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "wingetcreate could not read the rendered manifests" }
+          Write-Host "manifests parse"
+
+      - name: Submit to microsoft/winget-pkgs
+        if: steps.gate.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $dir = "winget-out/manifests/s/srelens/srelens-tui/$env:VERSION"
+          # --prtitle so the pull request says what it is in winget-pkgs's
+          # very long list. The token forks winget-pkgs into its owner's
+          # account and pushes a branch there; nothing is written to this
+          # repository.
+          ./wingetcreate.exe submit `
+            --token $env:WINGET_TOKEN `
+            --prtitle "New version: srelens.srelens-tui version $env:VERSION" `
+            $dir
+          if ($LASTEXITCODE -ne 0) { throw "wingetcreate submit failed" }
+
+      - name: Say what happens next
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          echo "::notice::Submitted srelens-tui ${VERSION} to microsoft/winget-pkgs. It is a pull request there: automated validation runs first, then a human moderates it, so publication lags this run by hours or more. Watch https://github.com/microsoft/winget-pkgs/pulls?q=srelens-tui"

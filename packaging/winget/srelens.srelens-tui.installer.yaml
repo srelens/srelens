@@ -1,0 +1,22 @@
+# TEMPLATE. See srelens.srelens-tui.yaml.
+#
+# `zip` + `portable`, not `exe` or `msi`: the TUI ships as a portable archive
+# with a bare binary inside. winget unpacks it, registers srelens-tui as a
+# command, and puts it on PATH through its links directory -- no installer to
+# run, nothing in Add/Remove Programs, and `winget uninstall` deletes it again.
+#
+# x64 only, matching the one Windows archive the release builds. When an
+# arm64 Windows target is added to the release workflow, add it here too.
+PackageIdentifier: srelens.srelens-tui
+PackageVersion: 0.0.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: srelens-tui.exe
+    PortableCommandAlias: srelens-tui
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0
