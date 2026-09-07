@@ -76,6 +76,10 @@ pub enum CliCommand {
         /// Report what an update would do, without changing anything
         #[arg(long)]
         check: bool,
+        /// Which releases to consider: stable, or the rolling dev
+        /// pre-releases. Defaults to the channel this binary came from.
+        #[arg(long, value_parser = ["stable", "dev"])]
+        channel: Option<String>,
     },
 }
 
@@ -110,8 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
-            CliCommand::Update { check } => {
-                return run_update(check);
+            CliCommand::Update { check, channel } => {
+                return run_update(check, channel);
             }
             CliCommand::Toolbox => {
                 let state = views::ToolboxViewState::new();
@@ -553,7 +557,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Written as a plain synchronous function: it runs before the terminal is
 /// touched and exits, so there is nothing to interleave with.
-fn run_update(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_update(
+    check_only: bool,
+    channel: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // `#[tokio::main]` means this function is called ON a runtime worker
     // thread. `reqwest::blocking` drives its own runtime on a private thread
     // and parks the caller on a channel until it answers; doing that from a
@@ -565,14 +572,14 @@ fn run_update(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     // not arise.
     // `String` rather than `Box<dyn Error>`: the boxed trait object is not
     // `Send`, so it cannot come back across a thread boundary.
-    std::thread::spawn(move || update_off_the_runtime(check_only))
+    std::thread::spawn(move || update_off_the_runtime(check_only, channel))
         .join()
         .map_err(|_| "the update thread panicked")??;
     Ok(())
 }
 
-fn update_off_the_runtime(check_only: bool) -> Result<(), String> {
-    use srelens_tui::self_update::{self, Check, UpdateError};
+fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(), String> {
+    use srelens_tui::self_update::{self, Channel, Check, UpdateError};
 
     // reqwest is built with `rustls-no-provider`, which does NOT pick a
     // provider on its own: building a client without one panics inside
@@ -588,6 +595,13 @@ fn update_off_the_runtime(check_only: bool) -> Result<(), String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let current = env!("CARGO_PKG_VERSION");
+    // Default to the channel this binary came from, so `update` keeps someone
+    // where they are instead of quietly moving a dev user onto stable.
+    let channel = match channel {
+        Some(name) => Channel::parse(&name)
+            .ok_or_else(|| format!("unknown channel {name:?} — use \"stable\" or \"dev\""))?,
+        None => Channel::of_version(current),
+    };
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not find this binary on disk: {e}"))?;
     // A Windows update leaves the displaced binary behind because the running
@@ -621,33 +635,54 @@ fn update_off_the_runtime(check_only: bool) -> Result<(), String> {
     // written-out sentence into `Download("404 Not Found for https://…")` —
     // the quotes and the variant name are noise, and the message is the part
     // that tells the user what to do.
-    let plan = match self_update::plan(current, exe.clone(), &fetch) {
+    let plan = match self_update::plan(current, channel, exe.clone(), &fetch) {
         Ok(Check::Available(plan)) => *plan,
-        Ok(Check::UpToDate { .. }) => {
-            println!("srelens-tui {current} is the latest release.");
+        Ok(Check::UpToDate { channel, .. }) => {
+            println!(
+                "srelens-tui {current} is the latest {} release.",
+                channel.as_str()
+            );
             return Ok(());
         }
-        Ok(Check::AheadOfStable { latest }) => {
-            // Only the stable channel was consulted, so all that is known is
-            // that nothing stable is newer. Saying "you are on the latest"
-            // would be a claim about pre-releases that were never checked.
-            println!(
-                "srelens-tui {current} is ahead of the latest stable release ({latest}); there is no stable update to install."
+        Ok(Check::AheadOfChannel { channel, latest }) => {
+            // Only this channel was consulted, so that is all that can be
+            // claimed. Naming the other one turns a dead end into a next step.
+            print!(
+                "srelens-tui {current} is ahead of the latest {} release ({latest}); there is no {} update to install.",
+                channel.as_str(),
+                channel.as_str()
             );
+            match channel {
+                Channel::Stable => println!(" Try `srelens-tui update --channel dev`."),
+                Channel::Dev => println!(),
+            }
             return Ok(());
         }
         Err(error) => fail(error),
     };
 
     if check_only {
+        // The hint has to carry the channel when it is not the default one, or
+        // copying the line installs from a channel the user did not ask about —
+        // which for a stable binary checking dev is the whole point of asking.
+        let flag = if channel == Channel::of_version(current) {
+            String::new()
+        } else {
+            format!(" --channel {}", channel.as_str())
+        };
         println!(
-            "srelens-tui {} is available (you have {}).\n  {}\nRun `srelens-tui update` to install it.",
-            plan.latest, plan.current, plan.archive_url
+            "srelens-tui {} is available (you have {}).\n  {}\nRun `srelens-tui update{}` to install it.",
+            plan.latest, plan.current, plan.archive_url, flag
         );
         return Ok(());
     }
 
-    println!("Updating srelens-tui {} -> {}…", plan.current, plan.latest);
+    println!(
+        "Updating srelens-tui {} -> {} ({} channel)…",
+        plan.current,
+        plan.latest,
+        channel.as_str()
+    );
     if let Err(error) = self_update::apply(&plan, &fetch) {
         fail(error);
     }

@@ -19,11 +19,60 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Where the release metadata and assets live. `releases/latest` is the
-/// GitHub endpoint that skips pre-releases, which is what makes this the
-/// stable channel without any filtering of our own.
+/// The stable channel. `releases/latest` is the GitHub endpoint that skips
+/// pre-releases, so this needs no filtering of our own.
 pub const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/srelens/srelens/releases/latest";
+/// The dev channel. The full list, newest first, because dev builds ARE
+/// pre-releases and the endpoint above hides them by definition.
+pub const RELEASES_URL: &str = "https://api.github.com/repos/srelens/srelens/releases?per_page=20";
 const DOWNLOAD_BASE: &str = "https://github.com/srelens/srelens/releases/download";
+
+/// Which releases to consider, matching the two the desktop app offers under
+/// Settings → Updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// Released versions.
+    Stable,
+    /// Rolling pre-releases, cut from `dev` once a day.
+    Dev,
+}
+
+impl Channel {
+    /// The channel a binary reporting `version` came from.
+    ///
+    /// Used as the default so `update` keeps you where you are: a dev build
+    /// carries a pre-release version (`0.8.1-152`), and offering it only
+    /// stable would strand it — the stable release it sits above is not an
+    /// update, so there would be nothing to install and no way to say so.
+    pub fn of_version(version: &str) -> Channel {
+        match semver::Version::parse(version) {
+            Ok(parsed) if !parsed.pre.is_empty() => Channel::Dev,
+            _ => Channel::Stable,
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Channel> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "stable" => Some(Channel::Stable),
+            "dev" => Some(Channel::Dev),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Channel::Stable => "stable",
+            Channel::Dev => "dev",
+        }
+    }
+
+    fn url(self) -> &'static str {
+        match self {
+            Channel::Stable => LATEST_RELEASE_URL,
+            Channel::Dev => RELEASES_URL,
+        }
+    }
+}
 
 /// The name of the binary inside every archive, and on disk.
 const BIN: &str = if cfg!(windows) {
@@ -177,6 +226,36 @@ pub fn parse_latest_version(body: &[u8]) -> Result<String, UpdateError> {
         )));
     }
     Ok(version.to_string())
+}
+
+/// The newest version in a releases LIST, which is how the dev channel is
+/// resolved: pre-releases are what it is made of, so the stable endpoint
+/// cannot see them.
+///
+/// GitHub returns the list newest first. Two entries are skipped: anything
+/// not tagged `srelens-v…`, and `dev-channel` — a permanent rolling
+/// pre-release that carries only the desktop updater's manifest and none of
+/// the TUI archives, so resolving to it would produce URLs for assets that
+/// are not there.
+pub fn parse_newest_version(body: &[u8]) -> Result<String, UpdateError> {
+    let releases: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|e| UpdateError::BadRelease(format!("the API did not return a list: {e}")))?;
+    for release in releases {
+        let Some(tag) = release.get("tag_name").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        if tag == "dev-channel" {
+            continue;
+        }
+        if let Some(version) = tag.strip_prefix("srelens-v") {
+            if !version.is_empty() {
+                return Ok(version.to_string());
+            }
+        }
+    }
+    Err(UpdateError::BadRelease(
+        "no srelens release found in the list".into(),
+    ))
 }
 
 /// Look one archive up in a `sha256sum`-format file.
@@ -344,19 +423,20 @@ pub struct Plan {
 
 /// What checking for an update found.
 ///
-/// `UpToDate` and `AheadOfStable` are deliberately not the same answer. The
-/// endpoint consulted describes the STABLE channel, so a dev build that sorts
-/// above the newest stable release has not been told it is the latest of
-/// anything — only that no newer stable applies to it. Collapsing the two would
-/// have `update` report a pre-release as "the latest release" while newer
-/// pre-releases exist, which is the difference AGENTS.md is about: say what you
-/// know, not what you guess.
+/// `UpToDate` and `AheadOfChannel` are deliberately not the same answer, and
+/// both name the channel they are about. Only one channel is ever consulted,
+/// so a dev build checked against stable has not been told it is the latest of
+/// anything — only that no newer STABLE release applies to it. Collapsing the
+/// two would have `update` report a pre-release as "the latest release" while
+/// newer pre-releases exist, which is the difference AGENTS.md is about: say
+/// what you know, not what you guess.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Check {
-    /// Running exactly the latest stable release.
-    UpToDate { latest: String },
-    /// Running something that sorts above it — a dev or locally built binary.
-    AheadOfStable { latest: String },
+    /// Running the newest release this channel offers.
+    UpToDate { channel: Channel, latest: String },
+    /// Running something that sorts above it — typically a dev build checked
+    /// against stable, or a locally built one.
+    AheadOfChannel { channel: Channel, latest: String },
     /// A newer stable release is available.
     Available(Box<Plan>),
 }
@@ -365,12 +445,16 @@ pub enum Check {
 /// downloading. Not finding an update is a normal outcome, not a failure.
 pub fn plan(
     current: &str,
+    channel: Channel,
     target: PathBuf,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
 ) -> Result<Check, UpdateError> {
     let triple = current_triple()?;
-    let body = fetch(LATEST_RELEASE_URL)?;
-    let latest = parse_latest_version(&body)?;
+    let body = fetch(channel.url())?;
+    let latest = match channel {
+        Channel::Stable => parse_latest_version(&body)?,
+        Channel::Dev => parse_newest_version(&body)?,
+    };
     if !is_newer(current, &latest) {
         // An unparseable current version lands here too, and is reported as
         // up to date rather than ahead: claiming to be ahead of a release we
@@ -380,9 +464,9 @@ pub fn plan(
             (Ok(current), Ok(latest)) if current > latest
         );
         return Ok(if ahead {
-            Check::AheadOfStable { latest }
+            Check::AheadOfChannel { channel, latest }
         } else {
-            Check::UpToDate { latest }
+            Check::UpToDate { channel, latest }
         });
     }
     let asset = asset_name(&latest, triple);

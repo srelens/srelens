@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use srelens_tui::self_update::{
     apply, asset_name, asset_url, checksum_for, extract_binary, is_newer, package_manager_for,
-    parse_latest_version, plan, replace_running_binary, sums_name, triple_for, verify_sha256,
-    Check, Plan, UpdateError, LATEST_RELEASE_URL,
+    parse_latest_version, parse_newest_version, plan, replace_running_binary, sums_name,
+    triple_for, verify_sha256, Channel, Check, Plan, UpdateError, LATEST_RELEASE_URL, RELEASES_URL,
 };
 
 // ---------------------------------------------------------------------------
@@ -157,6 +157,139 @@ fn asset_names_match_what_the_release_workflow_publishes() {
     assert_eq!(
         asset_url("1.2.3", "srelens-tui-1.2.3-SHA256SUMS.txt"),
         "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srelens-tui-1.2.3-SHA256SUMS.txt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Channels
+// ---------------------------------------------------------------------------
+
+/// The default has to keep a dev user on dev. Offering a pre-release only the
+/// stable channel would strand it: the stable release it already sits above is
+/// not an update, so there would be nothing to install.
+#[test]
+fn the_default_channel_is_the_one_the_binary_came_from() {
+    // Exactly the shape .github/workflows/release.yml gives a dev build.
+    assert_eq!(Channel::of_version("0.8.1-152"), Channel::Dev);
+    assert_eq!(Channel::of_version("1.0.0-1"), Channel::Dev);
+
+    assert_eq!(Channel::of_version("0.8.0"), Channel::Stable);
+    assert_eq!(Channel::of_version("1.2.3"), Channel::Stable);
+    // Unparseable falls to stable rather than assuming someone is on dev.
+    assert_eq!(Channel::of_version("nightly"), Channel::Stable);
+}
+
+#[test]
+fn a_channel_can_be_named_on_the_command_line() {
+    assert_eq!(Channel::parse("stable"), Some(Channel::Stable));
+    assert_eq!(Channel::parse("dev"), Some(Channel::Dev));
+    assert_eq!(Channel::parse("  DEV  "), Some(Channel::Dev));
+    assert_eq!(Channel::parse("nightly"), None);
+    assert_eq!(Channel::parse(""), None);
+    assert_eq!(Channel::Stable.as_str(), "stable");
+    assert_eq!(Channel::Dev.as_str(), "dev");
+}
+
+/// The dev channel reads the releases LIST, because pre-releases are what it
+/// is made of and the stable endpoint hides them by definition.
+#[test]
+fn the_dev_channel_takes_the_newest_release_of_any_kind() {
+    let body = br#"[
+        {"tag_name":"srelens-v0.8.1-152","prerelease":true},
+        {"tag_name":"srelens-v0.8.1-150","prerelease":true},
+        {"tag_name":"srelens-v0.8.0","prerelease":false}
+    ]"#;
+    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+}
+
+/// The rolling `dev-channel` release is a permanent pre-release carrying only
+/// the desktop updater's manifest — no TUI archives — so resolving to it would
+/// build URLs for assets that are not there.
+#[test]
+fn the_dev_channel_skips_the_rolling_manifest_release() {
+    let body = br#"[
+        {"tag_name":"dev-channel","prerelease":true},
+        {"tag_name":"some-other-tag","prerelease":true},
+        {"tag_name":"srelens-v0.8.1-152","prerelease":true}
+    ]"#;
+    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+}
+
+#[test]
+fn a_list_with_no_srelens_release_is_an_error_not_a_guess() {
+    assert!(matches!(
+        parse_newest_version(br#"[{"tag_name":"dev-channel"}]"#),
+        Err(UpdateError::BadRelease(_))
+    ));
+    assert!(matches!(
+        parse_newest_version(b"[]"),
+        Err(UpdateError::BadRelease(_))
+    ));
+    assert!(matches!(
+        parse_newest_version(b"not a list"),
+        Err(UpdateError::BadRelease(_))
+    ));
+}
+
+#[test]
+fn each_channel_asks_its_own_endpoint() {
+    let stable = |url: &str| -> Result<Vec<u8>, UpdateError> {
+        assert_eq!(url, LATEST_RELEASE_URL);
+        Ok(release_json("srelens-v0.8.0"))
+    };
+    assert!(matches!(
+        plan("0.7.0", Channel::Stable, PathBuf::from("/tmp/x"), &stable).unwrap(),
+        Check::Available(_)
+    ));
+
+    let dev = |url: &str| -> Result<Vec<u8>, UpdateError> {
+        assert_eq!(url, RELEASES_URL);
+        Ok(br#"[{"tag_name":"srelens-v0.8.1-152"}]"#.to_vec())
+    };
+    match plan("0.8.1-150", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap() {
+        Check::Available(plan) => {
+            assert_eq!(plan.latest, "0.8.1-152");
+            // Pre-release versions order by their numeric identifier, so 152
+            // is an update over 150 — a string comparison would agree here by
+            // luck and disagree at 99 against 100.
+            assert!(
+                plan.archive_url.contains("/srelens-v0.8.1-152/"),
+                "{}",
+                plan.archive_url
+            );
+        }
+        other => panic!("expected an update on the dev channel, got {other:?}"),
+    }
+}
+
+/// A dev build checked against dev is up to date; the same build checked
+/// against stable is ahead of it. Two different facts, two different answers.
+#[test]
+fn a_dev_build_is_up_to_date_on_dev_and_ahead_on_stable() {
+    let dev = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"[{"tag_name":"srelens-v0.8.1-152"}]"#.to_vec())
+    };
+    assert_eq!(
+        plan("0.8.1-152", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap(),
+        Check::UpToDate {
+            channel: Channel::Dev,
+            latest: "0.8.1-152".into()
+        }
+    );
+
+    let stable = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v0.8.0")) };
+    assert_eq!(
+        plan(
+            "0.8.1-152",
+            Channel::Stable,
+            PathBuf::from("/tmp/x"),
+            &stable
+        )
+        .unwrap(),
+        Check::AheadOfChannel {
+            channel: Channel::Stable,
+            latest: "0.8.0".into()
+        }
     );
 }
 
@@ -361,8 +494,15 @@ fn being_up_to_date_is_a_quiet_success_not_an_error() {
         Ok(release_json("srelens-v1.0.0"))
     };
     assert_eq!(
-        plan("1.0.0", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
+        plan(
+            "1.0.0",
+            Channel::Stable,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
         Check::UpToDate {
+            channel: Channel::Stable,
             latest: "1.0.0".into()
         }
     );
@@ -376,8 +516,15 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v0.8.0")) };
     // Exactly the shape the dev channel produces: 0.8.1-152 sorts above 0.8.0.
     assert_eq!(
-        plan("0.8.1-152", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
-        Check::AheadOfStable {
+        plan(
+            "0.8.1-152",
+            Channel::Stable,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::AheadOfChannel {
+            channel: Channel::Stable,
             latest: "0.8.0".into()
         }
     );
@@ -386,7 +533,13 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
     // so that one is a real update rather than being ahead.
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v0.8.0")) };
     assert!(matches!(
-        plan("0.8.0-7", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
+        plan(
+            "0.8.0-7",
+            Channel::Stable,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
         Check::Available(_)
     ));
 }
@@ -398,8 +551,15 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
 fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v1.0.0")) };
     assert_eq!(
-        plan("nightly", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
+        plan(
+            "nightly",
+            Channel::Stable,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
         Check::UpToDate {
+            channel: Channel::Stable,
             latest: "1.0.0".into()
         }
     );
@@ -408,7 +568,14 @@ fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
 #[test]
 fn a_newer_release_plans_urls_under_its_own_tag() {
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v2.0.0")) };
-    let plan = match plan("1.0.0", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap() {
+    let plan = match plan(
+        "1.0.0",
+        Channel::Stable,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap()
+    {
         Check::Available(plan) => *plan,
         other => panic!("expected an update, got {other:?}"),
     };
@@ -433,7 +600,12 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
         Err(UpdateError::Download("503 Service Unavailable".into()))
     };
     assert!(matches!(
-        plan("1.0.0", PathBuf::from("/tmp/srelens-tui"), &fetch),
+        plan(
+            "1.0.0",
+            Channel::Stable,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        ),
         Err(UpdateError::Download(_))
     ));
 }

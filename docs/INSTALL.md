@@ -153,11 +153,24 @@ srelens-tui update --check   # what is available, without changing anything
 srelens-tui update           # download it and replace this binary
 ```
 
-It follows the **stable** channel, and only ever replaces the binary you ran
-it from. Before writing anything it checks the download against the published
-SHA-256, so a corrupted or substituted archive is refused and the copy you
-already have is left alone. The last step is a rename, so an interrupted
-update cannot leave a half-written binary on your `PATH`.
+It only ever replaces the binary you ran it from. Before writing anything it
+checks the download against the published SHA-256, so a corrupted or
+substituted archive is refused and the copy you already have is left alone.
+The last step is a rename, so an interrupted update cannot leave a
+half-written binary on your `PATH`.
+
+**Channels.** The same two the desktop app offers under Settings → Updates:
+
+```bash
+srelens-tui update --channel stable   # released versions
+srelens-tui update --channel dev      # rolling pre-releases, cut daily
+```
+
+Without the flag it stays on the channel your binary came from — a
+pre-release version means a dev build, anything else means stable — so
+updating never moves you between channels by accident. Pass the flag to
+switch; the choice is not remembered, so the next plain `update` goes back to
+following the binary you are then running.
 
 Two cases where it declines rather than acting, both on purpose:
 
