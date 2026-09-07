@@ -1275,6 +1275,23 @@ jobs:
   # BY HAND for an already-released version. Welded to this pipeline, a failed
   # AUR push could only be retried by cutting another release — which is how AUR
   # sat at 0.2.0 while four stable releases came and went.
+  # Homebrew formula for the TUI (#451). Stable only, for the same reason AUR
+  # is: a tap carries one version per formula, and a dev pre-release version
+  # is not what someone typing `brew install` is asking for.
+  #
+  # Needs tui-publish as well as publish-release — the formula is rendered
+  # from the release's own SHA256SUMS, so it cannot be built before the
+  # archives are attached.
+  homebrew:
+    needs: [version, tui-publish, publish-release]
+    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/homebrew-publish.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
   aur:
     # Also needs publish-release: updpkgsums fetches the release assets over
     # plain HTTPS, which only works once the release is out of draft.

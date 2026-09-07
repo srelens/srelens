@@ -615,10 +615,17 @@ pub fn apply(
     plan: &Plan,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
 ) -> Result<(), UpdateError> {
-    if let Some(manager) = package_manager_for(&plan.target) {
+    // Resolved before the check, because a package manager's binary is
+    // usually reached through a link: Homebrew installs into
+    // `<prefix>/Cellar/<formula>/<version>/bin` and links that into
+    // `<prefix>/bin`. Testing the invoked path would see `/usr/local/bin`,
+    // which is also where the install guide tells people to put a copy by
+    // hand — so the two are only distinguishable after following the link.
+    let real = std::fs::canonicalize(&plan.target).unwrap_or_else(|_| plan.target.clone());
+    if let Some(manager) = package_manager_for(&real) {
         return Err(UpdateError::PackageManaged {
             manager,
-            path: plan.target.clone(),
+            path: real,
         });
     }
     let dir = plan.target.parent().unwrap_or_else(|| Path::new("."));
