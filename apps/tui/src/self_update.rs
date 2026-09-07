@@ -725,11 +725,23 @@ fn writable_dir(dir: &Path) -> bool {
 /// `/tmp` acceptable: entries there can only be removed by their owner.
 #[cfg(unix)]
 fn world_writable_without_sticky(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(dir) {
         Ok(meta) => {
             let mode = meta.permissions().mode();
-            mode & 0o002 != 0 && mode & 0o1000 == 0
+            if mode & 0o002 == 0 {
+                return false;
+            }
+            // The sticky bit lets an entry be removed by its owner, THE
+            // DIRECTORY'S OWNER, or root. That is what makes `/tmp` safe —
+            // root owns it. A world-writable sticky directory owned by
+            // someone else still lets that person unlink the staged file
+            // and put their own at the path, so the bit alone proves
+            // nothing.
+            let sticky = mode & 0o1000 != 0;
+            let owner_is_trusted = meta.uid() == 0 || meta.uid() == unsafe { libc::geteuid() };
+            !(sticky && owner_is_trusted)
         }
         // Unreadable metadata is not evidence of a problem; the write probe
         // below will fail on its own if the directory is unusable.
@@ -783,9 +795,12 @@ fn displaced_original(exe: &Path) -> Option<PathBuf> {
     }
     let name = exe.file_name()?.to_str()?;
     let restored = name.strip_prefix(".")?.strip_suffix(".old")?;
-    if restored != BIN {
+    if restored.is_empty() {
         return None;
     }
+    // Whatever name it was, not the compiled-in one: the updater names the
+    // displaced file after the binary it is replacing, so a renamed copy
+    // must come back as the name its user invoked.
     let target = exe.with_file_name(restored);
     (!target.exists()).then_some(target)
 }
@@ -809,7 +824,7 @@ pub fn installed_path(exe: &Path) -> PathBuf {
     let displaced = || -> Option<PathBuf> {
         let name = exe.file_name()?.to_str()?;
         let restored = name.strip_prefix(".")?.strip_suffix(".old")?;
-        if restored != BIN {
+        if restored.is_empty() {
             return None;
         }
         let target = exe.with_file_name(restored);
@@ -848,7 +863,16 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     // Created with `create_new` rather than written to a predictable path:
     // see `create_new_file`. Writing through a planted symlink here would
     // put a downloaded executable wherever the link pointed.
-    let (staged, mut file) = create_new_file(dir, &format!(".{BIN}.new-"))?;
+    // Named after the file being replaced rather than after the compiled-in
+    // name. Someone who renames the binary to `lens` gets `.lens.old` and
+    // `.lens.new-…`, so an interrupted update recovers the command they
+    // actually had — the fixed name restored `srelens-tui` and left `lens`
+    // missing.
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| BIN.to_string());
+    let (staged, mut file) = create_new_file(dir, &format!(".{name}.new-"))?;
     // From here every exit removes the staged file, including the ones added
     // later by someone who did not read this far. It used to be a cleanup line
     // per early return, and the one that got missed leaked a whole downloaded
@@ -857,11 +881,14 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     // removal is a no-op, so the success path needs no special case either.
     let staged = Staged(staged);
 
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(io)?;
-    drop(file);
+    file.write_all(bytes).map_err(io)?;
+    // The mode change goes BEFORE the sync. Syncing first left the
+    // permission change unsynced, so a power loss after the rename could
+    // leave the installed command durable in content and still at its
+    // private staging mode — present, correct, and not executable.
     set_executable(&staged.0)?;
+    file.sync_all().map_err(io)?;
+    drop(file);
 
     // Read back what is actually at that path before installing it.
     //
@@ -888,7 +915,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
         // so a real update destroyed it. `fs::rename` overwrites on Windows
         // too, so choosing a name nobody else would pick is the fix, not the
         // explicit removal.
-        let displaced = dir.join(format!(".{BIN}.old"));
+        let displaced = dir.join(format!(".{name}.old"));
         let _ = std::fs::remove_file(&displaced);
         std::fs::rename(target, &displaced).map_err(io)?;
         if let Err(e) = std::fs::rename(&staged.0, target) {
@@ -1066,6 +1093,79 @@ mod tests {
         );
 
         set(0o755);
+    }
+
+    /// A sticky bit only makes a world-writable directory safe when its
+    /// OWNER is trusted. Sticky lets an entry be removed by its owner, the
+    /// directory's owner, or root — so a directory owned by someone else
+    /// still lets them unlink the staged file and put their own at the path.
+    ///
+    /// A temp dir is owned by the current user, so it stands in for the
+    /// trusted case; the untrusted one cannot be built without another
+    /// account, and is asserted through the predicate's own inputs instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_sticky_directory_is_only_safe_when_its_owner_is() {
+        use super::world_writable_without_sticky;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = file_test_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let set = |mode: u32| {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode))
+                .expect("set mode");
+        };
+
+        // Owned by us: sticky makes it acceptable, exactly as /tmp is.
+        set(0o1777);
+        assert!(!world_writable_without_sticky(dir.path()));
+
+        // Without the bit it is refused whoever owns it.
+        set(0o777);
+        assert!(world_writable_without_sticky(dir.path()));
+
+        // And a directory nobody else can write to never needed either.
+        set(0o755);
+        assert!(!world_writable_without_sticky(dir.path()));
+        set(0o755);
+    }
+
+    /// The staged and displaced names follow the file being replaced, so a
+    /// renamed binary recovers under the name its user invoked rather than
+    /// the one compiled in.
+    #[test]
+    fn a_renamed_binary_stages_and_recovers_under_its_own_name() {
+        use super::{installed_path, replace_running_binary};
+
+        let _guard = file_test_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let renamed = dir
+            .path()
+            .join(if cfg!(windows) { "lens.exe" } else { "lens" });
+        std::fs::write(&renamed, b"old").expect("seed");
+
+        replace_running_binary(&renamed, b"new").expect("replace");
+        assert_eq!(std::fs::read(&renamed).unwrap(), b"new");
+
+        // Nothing named after the compiled-in binary was created.
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.contains("srelens-tui")),
+            "displaced under the wrong name: {names:?}"
+        );
+
+        // And the displaced file, where Windows leaves one, maps back to the
+        // invoked name rather than to srelens-tui.
+        if cfg!(windows) {
+            let displaced = dir.path().join(".lens.exe.old");
+            if displaced.exists() {
+                assert_eq!(installed_path(&displaced), renamed);
+            }
+        }
     }
 
     /// Two calls never collide, which is what lets the name be unpredictable
