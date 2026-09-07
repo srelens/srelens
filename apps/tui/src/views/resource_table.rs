@@ -1218,7 +1218,7 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                                     })
                                     .collect::<Vec<_>>()
                                     .join(",");
-                                total_len += 1 + format!("[PF: {}]", pf_str).len();
+                                total_len += 1 + format!("[PF: {}]", pf_str).chars().count();
                             }
                         }
                     }

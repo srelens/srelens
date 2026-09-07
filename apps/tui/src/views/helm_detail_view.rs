@@ -464,10 +464,11 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
             let left_str = dl.line_num_left.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
             let right_str = dl.line_num_right.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
 
+            let clean_text = super::sanitize_span_text(&dl.text);
             Line::from(vec![
                 Span::styled(format!("{} {} ", left_str, right_str), Style::default().fg(Theme::dim())),
                 Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
-                Span::styled(&dl.text, style),
+                Span::styled(clean_text, style),
             ])
         })
         .collect();
@@ -611,9 +612,10 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
                 Style::default().fg(Theme::dim())
             };
 
+            let clean_l = super::sanitize_span_text(l);
             Line::from(vec![
                 Span::styled(format!("{:>5} │ ", line_idx), Style::default().fg(Theme::dim())),
-                Span::styled(l, style),
+                Span::styled(clean_l, style),
             ])
         })
         .collect();
@@ -646,7 +648,7 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .lines()
         .skip(state.scroll_offset)
         .take(viewport_height)
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(Theme::fg()))))
+        .map(|l| Line::from(Span::styled(super::sanitize_span_text(l), Style::default().fg(Theme::fg()))))
         .collect();
 
     let para = Paragraph::new(lines);

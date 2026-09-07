@@ -787,8 +787,6 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
             Style::default().bg(row_bg)
         };
 
-        let ip_str = if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip };
-
         let status_color = match pod.phase.as_str() {
             "Running" => Theme::GREEN,
             "Succeeded" => Theme::CYAN,
@@ -832,18 +830,23 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
             ("-".to_string(), Style::default().fg(Theme::DIM).bg(row_bg))
         };
 
+        let ns_clean = super::sanitize_span_text(&pod.namespace);
+        let name_clean = super::sanitize_span_text(&pod.name);
+        let ip_clean = super::sanitize_span_text(if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip });
+        let age_clean = super::sanitize_span_text(&pod.age);
+
         let row = Line::from(vec![
             Span::styled(marker, marker_style),
-            Span::styled(format!("{:<width$}", pod.namespace, width = ns_w), Style::default().fg(Theme::CYAN).bg(row_bg)),
-            Span::styled(format!("{:<width$}", pod.name, width = name_w), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
-            Span::styled(format!("{:<width$}", ip_str, width = ip_w), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<width$}", ns_clean, width = ns_w), Style::default().fg(Theme::CYAN).bg(row_bg)),
+            Span::styled(format!("{:<width$}", name_clean, width = name_w), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(format!("{:<width$}", ip_clean, width = ip_w), Style::default().fg(Theme::DIM).bg(row_bg)),
             Span::styled(format!("{:<width$}", pod.phase, width = status_w), Style::default().fg(status_color).bg(row_bg)),
             Span::styled(format!("{:<width$}", pod.ready_containers, width = ready_w), Style::default().fg(Theme::FG).bg(row_bg)),
             Span::styled(format!("{:<width$}", pod.restarts, width = rest_w), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
             Span::styled(format!("{:<width$}", cpu_str, width = cpu_w), Style::default().fg(Theme::FG).bg(row_bg)),
             Span::styled(format!("{:<width$}", mem_str, width = mem_w), Style::default().fg(Theme::FG).bg(row_bg)),
             Span::styled(format!("{:<width$}", gpu_str, width = gpu_w), gpu_style),
-            Span::styled(format!("{:<width$}", pod.age, width = age_w), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<width$}", age_clean, width = age_w), Style::default().fg(Theme::DIM).bg(row_bg)),
         ]);
         lines.push(row);
     }
