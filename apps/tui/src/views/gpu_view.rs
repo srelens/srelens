@@ -282,8 +282,7 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
 
     let mut lines = Vec::new();
 
-    let available_node_col = (inner.width as usize).saturating_sub(28);
-    let node_col_width = max_node_name_len.min(available_node_col).max(12);
+    let node_col_width = max_node_name_len + 1;
 
     // Header row
     lines.push(Line::from(vec![
@@ -325,14 +324,9 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
         };
 
         let prefix = if is_sel { ">" } else { " " };
-        let trunc_name = if node.name.len() > node_col_width {
-            format!("{}…", &node.name[..node_col_width.saturating_sub(1)])
-        } else {
-            node.name.clone()
-        };
 
         lines.push(Line::from(vec![
-            Span::styled(format!("{}{:<width$} ", prefix, trunc_name, width = node_col_width), row_style),
+            Span::styled(format!("{}{:<width$} ", prefix, node.name, width = node_col_width), row_style),
             status_span,
             Span::styled(format!(" {:<6} ", gpus_str), row_style),
             Span::styled(format!("{:<8}", vram_str), row_style),
@@ -547,18 +541,45 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
 
     let mut lines = Vec::new();
 
-    let pod_col_width = (inner.width as usize).saturating_sub(74).max(28);
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "POD NAME".len();
+    let mut max_status = "STATUS".len();
+    let mut max_gpus = "GPUS".len();
+    let mut max_vram = "VRAM REQ".len();
+    let mut max_ready = "READY".len();
+    let mut max_restarts = "RESTARTS".len();
+    let mut max_age = "AGE".len();
+
+    for pod in &node.pods {
+        max_ns = max_ns.max(pod.namespace.len());
+        max_name = max_name.max(pod.name.len());
+        max_status = max_status.max(pod.phase.len());
+        max_gpus = max_gpus.max(pod.gpu_requests.to_string().len());
+        max_vram = max_vram.max(format_vram_mib(pod.vram_requests_mib).len());
+        max_ready = max_ready.max(pod.ready_containers.len());
+        max_restarts = max_restarts.max(pod.restarts.to_string().len());
+        max_age = max_age.max(pod.age.len());
+    }
+
+    let ns_col_width = max_ns + 1;
+    let pod_col_width = max_name + 1;
+    let status_col_width = max_status + 1;
+    let gpus_col_width = max_gpus + 1;
+    let vram_col_width = max_vram + 1;
+    let ready_col_width = max_ready + 1;
+    let restarts_col_width = max_restarts + 1;
+    let age_col_width = max_age + 1;
 
     // Table Header
     lines.push(Line::from(vec![
-        Span::styled(format!(" {:<15} ", "NAMESPACE"), Theme::table_header()),
-        Span::styled(format!("{:<width$} ", "POD NAME", width = pod_col_width), Theme::table_header()),
-        Span::styled(format!("{:<11} ", "STATUS"), Theme::table_header()),
-        Span::styled(format!("{:<7} ", "GPUS"), Theme::table_header()),
-        Span::styled(format!("{:<12} ", "VRAM REQ"), Theme::table_header()),
-        Span::styled(format!("{:<7} ", "READY"), Theme::table_header()),
-        Span::styled(format!("{:<9} ", "RESTARTS"), Theme::table_header()),
-        Span::styled(format!("{:<6}", "AGE"), Theme::table_header()),
+        Span::styled(format!(" {:<width$}", "NAMESPACE", width = ns_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "POD NAME", width = pod_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "STATUS", width = status_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "GPUS", width = gpus_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "VRAM REQ", width = vram_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "READY", width = ready_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "RESTARTS", width = restarts_col_width), Theme::table_header()),
+        Span::styled(format!("{:<width$}", "AGE", width = age_col_width), Theme::table_header()),
     ]));
     lines.push(Line::from(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Theme::BORDER))));
 
@@ -586,29 +607,17 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
         };
 
         let prefix = if is_sel { ">" } else { " " };
-        let trunc_ns = if pod.namespace.len() > 15 {
-            format!("{}…", &pod.namespace[..14])
-        } else {
-            pod.namespace.clone()
-        };
-
-        let trunc_name = if pod.name.len() > pod_col_width {
-            format!("{}…", &pod.name[..pod_col_width.saturating_sub(1)])
-        } else {
-            pod.name.clone()
-        };
-
         let vram_str = format_vram_mib(pod.vram_requests_mib);
 
         lines.push(Line::from(vec![
-            Span::styled(format!("{}{:<15} ", prefix, trunc_ns), row_style),
-            Span::styled(format!("{:<width$} ", trunc_name, width = pod_col_width), row_style),
-            Span::styled(format!("{:<11} ", pod.phase), Style::default().fg(status_color)),
-            Span::styled(format!("{:<7} ", pod.gpu_requests), row_style),
-            Span::styled(format!("{:<12} ", vram_str), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<7} ", pod.ready_containers), row_style),
-            Span::styled(format!("{:<9} ", pod.restarts), row_style),
-            Span::styled(format!("{:<6}", pod.age), Style::default().fg(Theme::DIM)),
+            Span::styled(format!("{}{:<width$}", prefix, pod.namespace, width = ns_col_width), row_style),
+            Span::styled(format!("{:<width$}", pod.name, width = pod_col_width), row_style),
+            Span::styled(format!("{:<width$}", pod.phase, width = status_col_width), Style::default().fg(status_color)),
+            Span::styled(format!("{:<width$}", pod.gpu_requests, width = gpus_col_width), row_style),
+            Span::styled(format!("{:<width$}", vram_str, width = vram_col_width), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<width$}", pod.ready_containers, width = ready_col_width), row_style),
+            Span::styled(format!("{:<width$}", pod.restarts, width = restarts_col_width), row_style),
+            Span::styled(format!("{:<width$}", pod.age, width = age_col_width), Style::default().fg(Theme::DIM)),
         ]));
     }
 

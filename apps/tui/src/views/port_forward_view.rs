@@ -125,14 +125,32 @@ pub fn render_port_forward_view(f: &mut Frame, area: Rect, state: &PortForwardVi
         })
         .collect();
 
+    let mut max_status = "STATUS".len();
+    let mut max_local = "LOCAL ADDRESS".len();
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_target = "TARGET".len();
+    let mut max_remote = "REMOTE PORT".len();
+    let mut max_conns = "CONNS".len();
+    let mut max_rxtx = "RX / TX".len();
+
+    for pf in &state.forwards {
+        max_status = max_status.max(format!("● {}", pf.status).chars().count());
+        max_local = max_local.max(format!("127.0.0.1:{}", pf.local_port).len());
+        max_ns = max_ns.max(pf.namespace.len());
+        max_target = max_target.max(format!("{}/{}", pf.target_type, pf.target_name).len());
+        max_remote = max_remote.max(pf.container_port.to_string().len());
+        max_conns = max_conns.max(pf.active_connections.to_string().len());
+        max_rxtx = max_rxtx.max(format!("{} / {}", format_bytes(pf.bytes_rx), format_bytes(pf.bytes_tx)).len());
+    }
+
     let widths = [
-        Constraint::Length(12),
-        Constraint::Length(18),
-        Constraint::Length(18),
-        Constraint::Min(25),
-        Constraint::Length(14),
-        Constraint::Length(10),
-        Constraint::Length(18),
+        Constraint::Length((max_status + 1) as u16),
+        Constraint::Length((max_local + 1) as u16),
+        Constraint::Length((max_ns + 1) as u16),
+        Constraint::Min((max_target + 1) as u16),
+        Constraint::Length((max_remote + 1) as u16),
+        Constraint::Length((max_conns + 1) as u16),
+        Constraint::Length((max_rxtx + 1) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);

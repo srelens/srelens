@@ -629,8 +629,7 @@ fn node_inspector_pods_table_lists_pods_and_marks_the_selected_one() {
     assert!(small.contains("128 MiB"), "{small}");
 
     let long = &lines[row_of(&lines, "a-very-long-pod-name")];
-    assert!(long.contains("a-very-long-pod-name-that-…"), "{long}");
-    assert!(!long.contains("truncated"), "{long}");
+    assert!(long.contains("a-very-long-pod-name-that-will-be-truncated"), "{long}");
 
     let buf = render_buffer(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let sel_row = row_of(&lines, "trainer") as u16;

@@ -689,19 +689,85 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
 
     let mut lines = Vec::new();
 
+    // Dynamically calculate column widths based on longest content: max(header, items) + 1
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "NAME".len();
+    let mut max_ip = "IP".len();
+    let mut max_status = "STATUS".len();
+    let mut max_ready = "READY".len();
+    let mut max_rest = "REST".len();
+    let mut max_cpu = "CPU REQ".len();
+    let mut max_mem = "MEM REQ".len();
+    let mut max_gpu = "GPU REQ".len();
+    let mut max_age = "AGE".len();
+
+    for pod in &d.pods {
+        max_ns = max_ns.max(pod.namespace.len());
+        max_name = max_name.max(pod.name.len());
+        let ip_len = if pod.pod_ip.is_empty() { 1 } else { pod.pod_ip.len() };
+        max_ip = max_ip.max(ip_len);
+        max_status = max_status.max(pod.phase.len());
+        max_ready = max_ready.max(pod.ready_containers.len());
+        let rest_len = if pod.restarts >= 1000 { 5 } else if pod.restarts >= 100 { 3 } else { pod.restarts.to_string().len() };
+        max_rest = max_rest.max(rest_len);
+
+        let cpu_len = if pod.cpu_requests_millicores >= 1000 {
+            format!("{:.1}c", pod.cpu_requests_millicores as f64 / 1000.0).len()
+        } else if pod.cpu_requests_millicores > 0 {
+            format!("{}m", pod.cpu_requests_millicores).len()
+        } else {
+            1
+        };
+        max_cpu = max_cpu.max(cpu_len);
+
+        let mem_len = if pod.mem_requests_mib >= 1024 {
+            format!("{:.1} GiB", pod.mem_requests_mib as f64 / 1024.0).len()
+        } else if pod.mem_requests_mib > 0 {
+            format!("{} MiB", pod.mem_requests_mib).len()
+        } else {
+            1
+        };
+        max_mem = max_mem.max(mem_len);
+
+        let gpu_len = if pod.gpu_mem_requests_mib > 0 {
+            if pod.gpu_mem_requests_mib >= 1024 {
+                format!("⚡ {:.1} GiB", pod.gpu_mem_requests_mib as f64 / 1024.0).chars().count()
+            } else {
+                format!("⚡ {} MiB", pod.gpu_mem_requests_mib).chars().count()
+            }
+        } else if pod.gpu_requests > 0 {
+            format!("⚡ {} GPU", pod.gpu_requests).chars().count()
+        } else {
+            1
+        };
+        max_gpu = max_gpu.max(gpu_len);
+        max_age = max_age.max(pod.age.len());
+    }
+
+    let ns_w = max_ns + 1;
+    let name_w = max_name + 1;
+    let ip_w = max_ip + 1;
+    let status_w = max_status + 1;
+    let ready_w = max_ready + 1;
+    let rest_w = max_rest + 1;
+    let cpu_w = max_cpu + 1;
+    let mem_w = max_mem + 1;
+    let gpu_w = max_gpu + 1;
+    let age_w = max_age + 1;
+
     // Table Header
     let header_line = Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(format!("{:<16}", "NAMESPACE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<28}", "NAME"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<15}", "IP"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<10}", "STATUS"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<6}", "READY"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<5}", "REST"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<8}", "CPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<9}", "MEM REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<11}", "GPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<5}", "AGE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "NAMESPACE", width = ns_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "NAME", width = name_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "IP", width = ip_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "STATUS", width = status_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "READY", width = ready_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "REST", width = rest_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "CPU REQ", width = cpu_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "MEM REQ", width = mem_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "GPU REQ", width = gpu_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "AGE", width = age_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
     ]);
     lines.push(header_line);
 
@@ -721,9 +787,7 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
             Style::default().bg(row_bg)
         };
 
-        let ns_str = truncate_str(&pod.namespace, 15);
-        let name_str = truncate_str(&pod.name, 27);
-        let ip_str = truncate_str(if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip }, 14);
+        let ip_str = if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip };
 
         let status_color = match pod.phase.as_str() {
             "Running" => Theme::GREEN,
@@ -770,16 +834,16 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
 
         let row = Line::from(vec![
             Span::styled(marker, marker_style),
-            Span::styled(format!("{:<16}", ns_str), Style::default().fg(Theme::CYAN).bg(row_bg)),
-            Span::styled(format!("{:<28}", name_str), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
-            Span::styled(format!("{:<15}", ip_str), Style::default().fg(Theme::DIM).bg(row_bg)),
-            Span::styled(format!("{:<10}", pod.phase), Style::default().fg(status_color).bg(row_bg)),
-            Span::styled(format!("{:<6}", pod.ready_containers), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<5}", pod.restarts), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
-            Span::styled(format!("{:<8}", cpu_str), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<9}", mem_str), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<11}", gpu_str), gpu_style),
-            Span::styled(format!("{:<5}", pod.age), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.namespace, width = ns_w), Style::default().fg(Theme::CYAN).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.name, width = name_w), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(format!("{:<width$}", ip_str, width = ip_w), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.phase, width = status_w), Style::default().fg(status_color).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.ready_containers, width = ready_w), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.restarts, width = rest_w), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
+            Span::styled(format!("{:<width$}", cpu_str, width = cpu_w), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<width$}", mem_str, width = mem_w), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<width$}", gpu_str, width = gpu_w), gpu_style),
+            Span::styled(format!("{:<width$}", pod.age, width = age_w), Style::default().fg(Theme::DIM).bg(row_bg)),
         ]);
         lines.push(row);
     }
@@ -823,13 +887,6 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     f.render_widget(p, area);
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}…", &s[..max_len.saturating_sub(1)])
-    } else {
-        s.to_string()
-    }
-}
 
 #[cfg(test)]
 mod tests {

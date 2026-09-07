@@ -541,12 +541,32 @@ fn render_revisions_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) 
         })
         .collect();
 
+    let mut max_rev = "REVISION".len();
+    let mut max_status = "STATUS".len();
+    let mut max_updated = "UPDATED".len();
+    let mut max_chart = "CHART VERSION".len();
+    let mut max_desc = "DESCRIPTION".len();
+
+    for rev in &d.history {
+        let is_current = rev.revision == d.revision;
+        let rev_len = if is_current {
+            format!("{} (current)", rev.revision).len()
+        } else {
+            rev.revision.to_string().len()
+        };
+        max_rev = max_rev.max(rev_len);
+        max_status = max_status.max(rev.status.len());
+        max_updated = max_updated.max(rev.updated.len());
+        max_chart = max_chart.max(rev.chart_version.len());
+        max_desc = max_desc.max(rev.description.len());
+    }
+
     let widths = [
-        Constraint::Length(16),
-        Constraint::Length(14),
-        Constraint::Length(25),
-        Constraint::Length(20),
-        Constraint::Min(30),
+        Constraint::Length((max_rev + 1) as u16),
+        Constraint::Length((max_status + 1) as u16),
+        Constraint::Length((max_updated + 1) as u16),
+        Constraint::Length((max_chart + 1) as u16),
+        Constraint::Length((max_desc + 1) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);
