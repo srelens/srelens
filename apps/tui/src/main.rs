@@ -6,11 +6,16 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
+    cursor::MoveTo,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    style::ResetColor,
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -394,11 +399,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(20)).await;
             while events.try_recv().is_ok() {}
 
-            // Temporarily restore terminal
+            // Temporarily restore terminal for external interactive session in alternate screen
             disable_raw_mode()?;
             execute!(
                 terminal.backend_mut(),
-                LeaveAlternateScreen,
+                Clear(ClearType::All),
+                MoveTo(0, 0),
+                ResetColor,
                 DisableMouseCapture,
                 DisableBracketedPaste
             )?;
@@ -558,6 +565,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             execute!(
                 terminal.backend_mut(),
                 EnterAlternateScreen,
+                ResetColor,
                 EnableMouseCapture,
                 EnableBracketedPaste
             )?;
