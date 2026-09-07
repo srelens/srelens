@@ -115,7 +115,10 @@ impl fmt::Display for UpdateError {
                 f,
                 "no srelens-tui release is built for {os}/{arch} — build from source with `cargo build --release -p srelens-tui`"
             ),
-            Self::BadRelease(why) => write!(f, "could not read the latest release: {why}"),
+            // No prefix: these messages are whole sentences, and a "could not
+            // read" preamble was actively wrong for the common case, where the
+            // release reads fine and simply carries no build for this platform.
+            Self::BadRelease(why) => write!(f, "{why}"),
             Self::ChecksumMissing { asset } => write!(
                 f,
                 "the release's checksum file does not list {asset}, so the download cannot be verified"
@@ -206,39 +209,74 @@ pub fn asset_url(version: &str, file: &str) -> String {
     format!("{DOWNLOAD_BASE}/srelens-v{version}/{file}")
 }
 
-/// The version of the latest release, from the API's JSON.
+/// The version a release tag names, or nothing if the tag is not one of ours
+/// or does not carry a version.
+///
+/// Parsed, not merely non-empty. A tag like `srelens-vnightly` would
+/// otherwise pass, fail to compare later, and be reported as "you are on the
+/// latest" — turning broken release metadata into a confident answer about
+/// the user's version, which is the one thing this command must not do.
+fn version_from_tag(tag: &str) -> Option<String> {
+    let version = tag.strip_prefix("srelens-v")?;
+    semver::Version::parse(version).ok()?;
+    Some(version.to_string())
+}
+
+/// Whether a release actually carries the two files an update needs for this
+/// platform: the archive and the checksum file listing it.
+///
+/// A dev pre-release is published the moment it builds (`releaseDraft: false`
+/// in the release workflow), so if the TUI matrix or `tui-publish` fails
+/// afterwards the tag is public with no archives on it. Resolving to it would
+/// promise an update and then 404 on the download. Every release cut before
+/// the TUI shipped at all looks the same from here.
+fn release_carries_this_platform(release: &serde_json::Value, version: &str, triple: &str) -> bool {
+    let Some(assets) = release.get("assets").and_then(|a| a.as_array()) else {
+        return false;
+    };
+    let names: Vec<&str> = assets
+        .iter()
+        .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
+        .collect();
+    let archive = asset_name(version, triple);
+    let sums = sums_name(version);
+    names.contains(&archive.as_str()) && names.contains(&sums.as_str())
+}
+
+/// The version of the latest stable release, from the API's JSON.
 ///
 /// Tags are `srelens-v<version>`; the prefix is stripped so the rest of the
 /// module deals in versions only.
-pub fn parse_latest_version(body: &[u8]) -> Result<String, UpdateError> {
+pub fn parse_latest_version(body: &[u8], triple: &str) -> Result<String, UpdateError> {
     let value: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| UpdateError::BadRelease(format!("the API did not return JSON: {e}")))?;
     let tag = value
         .get("tag_name")
         .and_then(|t| t.as_str())
         .ok_or_else(|| UpdateError::BadRelease("no tag_name in the response".into()))?;
-    let version = tag
-        .strip_prefix("srelens-v")
+    let version = version_from_tag(tag)
         .ok_or_else(|| UpdateError::BadRelease(format!("unexpected tag {tag}")))?;
-    // Parsed, not merely non-empty. A tag like `srelens-vnightly` would
-    // otherwise pass here, fail to compare later, and be reported as
-    // "you are on the latest" — turning broken release metadata into a
-    // confident answer about the user's version, which is the one thing
-    // this command must not do.
-    semver::Version::parse(version)
-        .map_err(|e| UpdateError::BadRelease(format!("tag {tag} is not a version: {e}")))?;
-    Ok(version.to_string())
+    // Unlike the dev list there is nothing else to fall back to here, so a
+    // release without the archives is reported rather than skipped. Saying so
+    // now beats promising an update and 404ing on the download.
+    if !release_carries_this_platform(&value, &version, triple) {
+        return Err(UpdateError::BadRelease(format!(
+            "release {tag} carries no srelens-tui build for {triple}"
+        )));
+    }
+    Ok(version)
 }
 
 /// The newest version in a releases LIST, which is how the dev channel is
 /// resolved: pre-releases are what it is made of, so the stable endpoint
 /// cannot see them.
 ///
-/// GitHub returns the list newest first. Three kinds of entry are skipped:
+/// GitHub returns the list newest first. Four kinds of entry are skipped:
 /// anything not tagged `srelens-v…`; `dev-channel`, a permanent rolling
 /// pre-release carrying only the desktop updater's manifest and none of the
-/// TUI archives; and stable releases, which belong to the other channel.
-pub fn parse_newest_version(body: &[u8]) -> Result<String, UpdateError> {
+/// TUI archives; stable releases, which belong to the other channel; and any
+/// release that does not actually carry a build for this platform.
+pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateError> {
     let releases: Vec<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|e| UpdateError::BadRelease(format!("the API did not return a list: {e}")))?;
     for release in releases {
@@ -261,20 +299,25 @@ pub fn parse_newest_version(body: &[u8]) -> Result<String, UpdateError> {
         {
             continue;
         }
-        // Unlike the single-release endpoint, a tag that is not a version is
-        // SKIPPED here rather than failing the command: this is a list, so
-        // there is a next entry to try, and one odd tag should not stop a
-        // dev user updating. Failing is right only where there is no
-        // alternative to fall back to.
-        if let Some(version) = tag.strip_prefix("srelens-v") {
-            if semver::Version::parse(version).is_ok() {
-                return Ok(version.to_string());
-            }
+        // Unlike the single-release endpoint, anything unusable is SKIPPED
+        // here rather than failing the command: this is a list, so there is a
+        // next entry to try, and one bad release should not stop a dev user
+        // updating. Failing is right only where there is no alternative.
+        let Some(version) = version_from_tag(tag) else {
+            continue;
+        };
+        if !release_carries_this_platform(&release, &version, triple) {
+            continue;
         }
+        return Ok(version);
     }
-    Err(UpdateError::BadRelease(
-        "no srelens release found in the list".into(),
-    ))
+    // Accurate about which step came up empty: the list was read fine, it just
+    // holds nothing installable here. Naming the platform matters because the
+    // usual cause is a release whose build for THIS target failed while the
+    // others published.
+    Err(UpdateError::BadRelease(format!(
+        "no dev release carries a srelens-tui build for {triple}"
+    )))
 }
 
 /// Look one archive up in a `sha256sum`-format file.
@@ -478,8 +521,8 @@ pub fn plan(
     let triple = current_triple()?;
     let body = fetch(channel.url())?;
     let latest = match channel {
-        Channel::Stable => parse_latest_version(&body)?,
-        Channel::Dev => parse_newest_version(&body)?,
+        Channel::Stable => parse_latest_version(&body, triple)?,
+        Channel::Dev => parse_newest_version(&body, triple)?,
     };
     if !is_newer(current, &latest) {
         // An unparseable current version lands here too, and is reported as

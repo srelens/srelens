@@ -51,8 +51,52 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// The triple under test, so fixtures name assets this platform would want.
+fn here() -> &'static str {
+    triple_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "musl"),
+    )
+    .expect("this platform has a release target")
+}
+
+/// The two asset names a release must carry for `version` to be installable
+/// here, as the GitHub API would list them.
+fn assets_for(version: &str) -> String {
+    format!(
+        r#"[{{"name":"{}"}},{{"name":"{}"}}]"#,
+        asset_name(version, here()),
+        sums_name(version)
+    )
+}
+
+/// A releases-list response. Each entry is (tag, is_prerelease, carries the
+/// archives) — the three things the dev channel filters on.
+fn releases_json(entries: &[(&str, bool, bool)]) -> Vec<u8> {
+    let items: Vec<String> = entries
+        .iter()
+        .map(|(tag, prerelease, complete)| {
+            let version = tag.strip_prefix("srelens-v").unwrap_or("0.0.0");
+            let assets = if *complete {
+                assets_for(version)
+            } else {
+                "[]".to_string()
+            };
+            format!(r#"{{"tag_name":"{tag}","prerelease":{prerelease},"assets":{assets}}}"#)
+        })
+        .collect();
+    format!("[{}]", items.join(",")).into_bytes()
+}
+
+/// A single-release response carrying the assets an update needs.
 fn release_json(tag: &str) -> Vec<u8> {
-    format!(r#"{{"tag_name":"{tag}","prerelease":false}}"#).into_bytes()
+    let version = tag.strip_prefix("srelens-v").unwrap_or("0.0.0");
+    format!(
+        r#"{{"tag_name":"{tag}","prerelease":false,"assets":{}}}"#,
+        assets_for(version)
+    )
+    .into_bytes()
 }
 
 /// The binary name inside an archive for the platform under test.
@@ -71,6 +115,11 @@ fn archive_for(asset: &str, body: &[u8]) -> Vec<u8> {
     } else {
         targz(bin_name(), body)
     }
+}
+
+/// `parse_latest_version` for this platform.
+fn parse_latest_version_here(body: &[u8]) -> Result<String, UpdateError> {
+    parse_latest_version(body, here())
 }
 
 // ---------------------------------------------------------------------------
@@ -194,12 +243,12 @@ fn a_channel_can_be_named_on_the_command_line() {
 /// is made of and the stable endpoint hides them by definition.
 #[test]
 fn the_dev_channel_takes_the_newest_release_of_any_kind() {
-    let body = br#"[
-        {"tag_name":"srelens-v0.8.1-152","prerelease":true},
-        {"tag_name":"srelens-v0.8.1-150","prerelease":true},
-        {"tag_name":"srelens-v0.8.0","prerelease":false}
-    ]"#;
-    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+    let body = releases_json(&[
+        ("srelens-v0.8.1-152", true, true),
+        ("srelens-v0.8.1-150", true, true),
+        ("srelens-v0.8.0", false, false),
+    ]);
+    assert_eq!(parse_newest_version(&body, here()).unwrap(), "0.8.1-152");
 }
 
 /// The rolling `dev-channel` release is a permanent pre-release carrying only
@@ -207,12 +256,12 @@ fn the_dev_channel_takes_the_newest_release_of_any_kind() {
 /// build URLs for assets that are not there.
 #[test]
 fn the_dev_channel_skips_the_rolling_manifest_release() {
-    let body = br#"[
-        {"tag_name":"dev-channel","prerelease":true},
-        {"tag_name":"some-other-tag","prerelease":true},
-        {"tag_name":"srelens-v0.8.1-152","prerelease":true}
-    ]"#;
-    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+    let body = releases_json(&[
+        ("dev-channel", true, false),
+        ("some-other-tag", true, false),
+        ("srelens-v0.8.1-152", true, true),
+    ]);
+    assert_eq!(parse_newest_version(&body, here()).unwrap(), "0.8.1-152");
 }
 
 /// When main cuts a stable release it becomes the newest entry in this
@@ -221,16 +270,16 @@ fn the_dev_channel_skips_the_rolling_manifest_release() {
 /// a pre-release, so the next plain `update` would default to stable.
 #[test]
 fn the_dev_channel_does_not_offer_a_stable_release() {
-    let body = br#"[
-        {"tag_name":"srelens-v0.9.0","prerelease":false},
-        {"tag_name":"srelens-v0.8.1-152","prerelease":true}
-    ]"#;
-    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+    let body = releases_json(&[
+        ("srelens-v0.9.0", false, false),
+        ("srelens-v0.8.1-152", true, true),
+    ]);
+    assert_eq!(parse_newest_version(&body, here()).unwrap(), "0.8.1-152");
 
     // And a list of nothing but stable releases has no dev build to offer.
-    let stable_only = br#"[{"tag_name":"srelens-v0.9.0","prerelease":false}]"#;
+    let stable_only = releases_json(&[("srelens-v0.9.0", false, true)]);
     assert!(matches!(
-        parse_newest_version(stable_only),
+        parse_newest_version(&stable_only, here()),
         Err(UpdateError::BadRelease(_))
     ));
 }
@@ -238,15 +287,15 @@ fn the_dev_channel_does_not_offer_a_stable_release() {
 #[test]
 fn a_list_with_no_srelens_release_is_an_error_not_a_guess() {
     assert!(matches!(
-        parse_newest_version(br#"[{"tag_name":"dev-channel"}]"#),
+        parse_newest_version(br#"[{"tag_name":"dev-channel"}]"#, here()),
         Err(UpdateError::BadRelease(_))
     ));
     assert!(matches!(
-        parse_newest_version(b"[]"),
+        parse_newest_version(b"[]", here()),
         Err(UpdateError::BadRelease(_))
     ));
     assert!(matches!(
-        parse_newest_version(b"not a list"),
+        parse_newest_version(b"not a list", here()),
         Err(UpdateError::BadRelease(_))
     ));
 }
@@ -264,7 +313,7 @@ fn each_channel_asks_its_own_endpoint() {
 
     let dev = |url: &str| -> Result<Vec<u8>, UpdateError> {
         assert_eq!(url, RELEASES_URL);
-        Ok(br#"[{"tag_name":"srelens-v0.8.1-152","prerelease":true}]"#.to_vec())
+        Ok(releases_json(&[("srelens-v0.8.1-152", true, true)]))
     };
     match plan("0.8.1-150", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap() {
         Check::Available(plan) => {
@@ -287,7 +336,7 @@ fn each_channel_asks_its_own_endpoint() {
 #[test]
 fn a_dev_build_is_up_to_date_on_dev_and_ahead_on_stable() {
     let dev = |_: &str| -> Result<Vec<u8>, UpdateError> {
-        Ok(br#"[{"tag_name":"srelens-v0.8.1-152","prerelease":true}]"#.to_vec())
+        Ok(releases_json(&[("srelens-v0.8.1-152", true, true)]))
     };
     assert_eq!(
         plan("0.8.1-152", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap(),
@@ -320,7 +369,7 @@ fn a_dev_build_is_up_to_date_on_dev_and_ahead_on_stable() {
 #[test]
 fn the_release_tag_is_read_without_its_prefix() {
     assert_eq!(
-        parse_latest_version(&release_json("srelens-v0.9.1")).unwrap(),
+        parse_latest_version_here(&release_json("srelens-v0.9.1")).unwrap(),
         "0.9.1"
     );
 }
@@ -334,7 +383,10 @@ fn an_unreadable_release_response_is_an_error_not_a_guess() {
         br#"{"tag_name":"srelens-v"}"#,
     ] {
         assert!(
-            matches!(parse_latest_version(body), Err(UpdateError::BadRelease(_))),
+            matches!(
+                parse_latest_version(body, here()),
+                Err(UpdateError::BadRelease(_))
+            ),
             "{:?} should not parse",
             String::from_utf8_lossy(body)
         );
@@ -354,7 +406,7 @@ fn a_release_tag_that_is_not_a_version_is_rejected() {
     ] {
         assert!(
             matches!(
-                parse_latest_version(&release_json(tag)),
+                parse_latest_version_here(&release_json(tag)),
                 Err(UpdateError::BadRelease(_))
             ),
             "{tag} should be refused"
@@ -362,7 +414,7 @@ fn a_release_tag_that_is_not_a_version_is_rejected() {
     }
     // A pre-release version is still a version.
     assert_eq!(
-        parse_latest_version(&release_json("srelens-v0.8.1-152")).unwrap(),
+        parse_latest_version_here(&release_json("srelens-v0.8.1-152")).unwrap(),
         "0.8.1-152"
     );
 }
@@ -371,11 +423,11 @@ fn a_release_tag_that_is_not_a_version_is_rejected() {
 /// one unreadable tag should not stop a dev user updating.
 #[test]
 fn the_dev_channel_skips_a_tag_it_cannot_read_and_takes_the_next() {
-    let body = br#"[
-        {"tag_name":"srelens-vnightly","prerelease":true},
-        {"tag_name":"srelens-v0.8.1-152","prerelease":true}
-    ]"#;
-    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+    let body = releases_json(&[
+        ("srelens-vnightly", true, false),
+        ("srelens-v0.8.1-152", true, true),
+    ]);
+    assert_eq!(parse_newest_version(&body, here()).unwrap(), "0.8.1-152");
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +462,54 @@ fn a_planted_symlink_beside_the_binary_is_not_written_through() {
         "the linked file must be untouched"
     );
     assert_eq!(std::fs::read(&target).unwrap(), b"new");
+}
+
+/// A dev pre-release goes public the moment it builds, so if the TUI matrix
+/// or `tui-publish` fails afterwards the tag is out there with no archives on
+/// it. Offering it would promise an update and then 404 on the download.
+/// This is not hypothetical: every release cut before the TUI shipped looks
+/// exactly like that, and the dev check offered one.
+#[test]
+fn a_release_without_the_archives_is_passed_over_for_the_last_complete_one() {
+    let body = format!(
+        r#"[
+        {{"tag_name":"srelens-v0.8.1-152","prerelease":true,"assets":[]}},
+        {{"tag_name":"srelens-v0.8.1-150","prerelease":true,"assets":{}}}
+    ]"#,
+        assets_for("0.8.1-150")
+    );
+    assert_eq!(
+        parse_newest_version(body.as_bytes(), here()).unwrap(),
+        "0.8.1-150"
+    );
+}
+
+/// Half a release is no better than none: the archive without the checksum
+/// file cannot be verified, so it is not installable either.
+#[test]
+fn a_release_missing_only_the_checksum_file_is_also_passed_over() {
+    let body = format!(
+        r#"[{{"tag_name":"srelens-v0.8.1-152","prerelease":true,"assets":[{{"name":"{}"}}]}}]"#,
+        asset_name("0.8.1-152", here())
+    );
+    assert!(matches!(
+        parse_newest_version(body.as_bytes(), here()),
+        Err(UpdateError::BadRelease(_))
+    ));
+}
+
+/// On stable there is nothing to fall back to, so the same situation is
+/// reported instead of skipped — a named reason now beats a 404 later.
+#[test]
+fn a_stable_release_without_a_build_for_this_platform_says_so() {
+    let body = br#"{"tag_name":"srelens-v0.9.0","prerelease":false,"assets":[]}"#;
+    match parse_latest_version(body, here()) {
+        Err(UpdateError::BadRelease(why)) => {
+            assert!(why.contains("srelens-v0.9.0"), "{why}");
+            assert!(why.contains(here()), "{why}");
+        }
+        other => panic!("expected BadRelease, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
