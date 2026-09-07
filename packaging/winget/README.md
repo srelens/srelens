@@ -51,7 +51,8 @@ with a bare `srelens-tui.exe` inside; winget unpacks it, registers the command,
 and puts it on `PATH` through its links directory. There is no installer to
 run and nothing lands in Program Files, but a portable package is still
 registered so winget can track and remove it -- it appears in Apps & Features,
-and `winget uninstall` removes it.
+and `winget uninstall srelens.srelens-tui` removes it. The identifier is
+required: `winget uninstall` on its own has nothing to act on.
 
 x64 only, matching the single Windows archive the release builds. An arm64
 Windows target means adding it to the installer template and to `TARGET` in
