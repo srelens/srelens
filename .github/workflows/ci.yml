@@ -219,3 +219,29 @@ jobs:
           name: smoke-failure-artifacts
           path: ${{ runner.temp }}/smoke-artifacts
           if-no-files-found: ignore
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      # Until now nothing but the release workflow ever built this file, and
+      # two dev releases shipped no container image before anyone noticed. Two
+      # separate breaks were waiting in it, one per stage: a pnpm version the
+      # lockfile had outgrown, and a workspace member the backend stage never
+      # copied. Building only the frontend stage here would have caught one of
+      # them.
+      #
+      # So the whole image, which makes this the slowest job in CI on any
+      # change to crates/. That is the price of the image being built at all
+      # before a release depends on it. The layer cache carries the Rust stage
+      # across runs that do not touch it.
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          cache-from: type=gha,scope=docker-ci
+          cache-to: type=gha,mode=max,scope=docker-ci

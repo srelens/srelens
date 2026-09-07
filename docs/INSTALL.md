@@ -79,7 +79,19 @@ Take the **musl** build if your distribution is Alpine, or if the glibc build
 reports a version error — it is statically linked and depends on nothing on the
 host. Otherwise prefer the glibc build.
 
-**Linux and macOS.** Extract and put it on your `PATH`:
+**Homebrew** is the shortest path on macOS and Linux:
+
+```bash
+brew install srelens/tap/srelens-tui
+```
+
+It installs the same prebuilt archive listed above rather than compiling,
+and `brew upgrade srelens-tui` moves it forward. Homebrew then owns the
+copy, so `srelens-tui update` will decline to replace it and point you back
+at `brew` — writing over a file Homebrew tracks would leave its database
+describing a version that is no longer there.
+
+**Or by hand, on Linux and macOS.** Extract and put it on your `PATH`:
 
 ```bash
 tar -xzf srelens-tui-<version>-<target>.tar.gz
