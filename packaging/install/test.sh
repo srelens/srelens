@@ -23,10 +23,14 @@ work="$(mktemp -d)"
 # Anything this run creates, this run removes: a test suite that leaves a
 # login account behind on the host has done more than test.
 made_user=""
+made_users=""
 made_group=""
 cleanup() {
     rm -rf "$work"
     [ -z "$made_user" ] || userdel -r "$made_user" >/dev/null 2>&1 || true
+    for u in $made_users; do
+        userdel -r "$u" >/dev/null 2>&1 || true
+    done
     [ -z "$made_group" ] || groupdel "$made_group" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -457,6 +461,9 @@ fi
 # perfectly well.
 if [ "$made_user" = "tester" ] && command -v useradd >/dev/null 2>&1; then
     if useradd -M -g root primaryroot >/dev/null 2>&1; then
+        # Recorded BEFORE it is used: an interrupt between the useradd and
+        # the userdel below would otherwise leave the account on the host.
+        made_users="$made_users primaryroot"
         dest="$work/primary-gid"
         mkdir -p "$dest"
         chmod 0775 "$dest"
@@ -469,6 +476,21 @@ if [ "$made_user" = "tester" ] && command -v useradd >/dev/null 2>&1; then
 else
     echo "  skip  no account this run created: cannot test primary-group membership"
 fi
+
+echo "destination shapes"
+
+# `mv file dir` moves the file INTO the directory. A destination that is
+# already a directory would swallow the staging file and leave nothing at the
+# path asked for -- and the version line used to hide that inside a command
+# substitution, so the install printed Installed and exited 0.
+dest="$work/dir-dest"
+mkdir -p "$dest/srelens-tui"
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "a directory where the binary goes is refused" "is a directory" "$out" "$rc" 1
+case "$out" in
+    *Installed:*) no "it claimed to have installed something" ;;
+    *) ok "it did not claim to have installed anything" ;;
+esac
 
 echo "temporary directory"
 
@@ -493,6 +515,29 @@ good="$work/trusted-tmp"
 mkdir -p "$good"
 out="$(TMPDIR="$good" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
 check "a trusted TMPDIR still installs" "Installed:" "$out" "$rc" 0
+
+# A hardened host mounts /tmp noexec, and mktemp puts the working tree there.
+# Running the binary to check it must not be the thing that fails, so the
+# check moves to after the install when the working filesystem forbids exec.
+#
+# Needs CAP_SYS_ADMIN to mount, so this skips on an ordinary CI runner and
+# runs under docker --privileged or a local root shell.
+if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
+    noexec="$work/noexec"
+    mkdir -p "$noexec"
+    if mount -t tmpfs -o rw,noexec,nosuid,size=200m tmpfs "$noexec" 2>/dev/null; then
+        dest="$work/noexec-bin"
+        mkdir -p "$dest"
+        out="$(TMPDIR="$noexec" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "a noexec working directory still installs" "Installed:" "$out" "$rc" 0
+        check "and says why the check moved" "mounted noexec" "$out" "$rc" 0
+        umount "$noexec" 2>/dev/null || true
+    else
+        echo "  skip  cannot mount a noexec filesystem here (needs CAP_SYS_ADMIN)"
+    fi
+else
+    echo "  skip  not root, or no mount: cannot test a noexec working directory"
+fi
 
 echo "unpacking"
 

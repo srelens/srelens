@@ -63,6 +63,13 @@ The path is resolved with `cd` + `pwd -P` first, and the resolved path is
 what staging, the rename and the final version check all use — approving one
 path and installing through another leaves a symlink repointable in between.
 
+**A `noexec` working directory is expected, not fatal.** A hardened host
+mounts `/tmp` noexec and `mktemp` puts the working tree there, so running the
+binary to check it would report every good download as broken. The script
+probes whether it can execute anything there at all, and moves the check to
+after the install when it cannot -- where a binary that does not run is
+removed again rather than left on your `PATH`.
+
 **The working directory gets the same walk.** `mktemp -d` makes the directory
 itself 0700 and yours, but places it under `TMPDIR` when that is set -- and
 `sudo` can carry the invoking user's `TMPDIR` straight into a root install. A
@@ -101,7 +108,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Forty-three cases: argument handling, the macOS and unknown-architecture refusals,
+Forty-seven cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

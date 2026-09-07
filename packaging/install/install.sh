@@ -112,14 +112,34 @@ main() {
     # Run it before it is installed, not after. A binary for the wrong
     # architecture or a corrupt one that still hashed correctly fails here,
     # while the only thing that has happened is a write to a temp dir.
-    "$tmp/unpack/$BIN" --version >/dev/null 2>&1 ||
-        die "the downloaded binary does not run on this machine"
+    #
+    # Unless this filesystem forbids running anything at all. A hardened
+    # host mounts /tmp `noexec`, and mktemp puts the working tree there, so
+    # a check that assumed otherwise would report every good binary as
+    # broken. Probed with a script of our own rather than assumed either
+    # way; when it cannot be done here, the same check runs after the
+    # install instead, from the destination.
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/exec-probe"
+    chmod 0755 "$tmp/exec-probe"
+    if "$tmp/exec-probe" 2>/dev/null; then
+        "$tmp/unpack/$BIN" --version >/dev/null 2>&1 ||
+            die "the downloaded binary does not run on this machine"
+    else
+        say "Note: $tmp is mounted noexec, so the binary is checked after it is installed."
+    fi
 
     install_binary "$tmp/unpack/$BIN" "$install_dir/$BIN"
 
     say ""
+    # Not inside `say`. A failure in a command substitution there is
+    # swallowed: the install printed `Installed` and exited 0 while the
+    # binary was never in place.
+    installed_version="$("$install_dir/$BIN" --version 2>/dev/null)" || {
+        rm -f "$install_dir/$BIN"
+        die "installed $install_dir/$BIN but it does not run; removed it again"
+    }
     say "Installed: $install_dir/$BIN"
-    say "  $("$install_dir/$BIN" --version)"
+    say "  $installed_version"
     warn_if_not_on_path "$install_dir"
     say ""
     say "Next: $BIN            # browse the cluster in your current context"
@@ -441,6 +461,15 @@ assert_component() {
 install_binary() {
     src="$1"
     dest="$2"
+
+    # `mv file dir` moves the file INTO the directory rather than over it,
+    # so a destination that is already a directory -- or a link to one --
+    # would leave the staging file inside it and nothing at the path the
+    # caller asked for. `mv -T` says otherwise but is GNU-only, and this
+    # has to run under BusyBox.
+    if [ -d "$dest" ]; then
+        die "$dest is a directory, so a binary cannot be installed at that path. Remove it, or choose another --install-dir."
+    fi
     # Already created, checked and canonicalised by prepare_install_dir and
     # assert_safe_dir. Deliberately not re-derived from $dest here.
     dir="$INSTALL_DIR"
