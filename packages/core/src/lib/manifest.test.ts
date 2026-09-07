@@ -93,7 +93,7 @@ describe("listEvents", () => {
 describe("applyManifest", () => {
   it("passes context+yaml and returns applied", async () => {
     const invoke = vi.fn().mockResolvedValue({ documents: [{ kind: "ConfigMap", name: "cm", applied: true, conflict: null, error: null }], applied: true });
-    const out = await applyManifest("kind-dev", "kind: ConfigMap\n", "team-a", false, invoke);
+    const out = await applyManifest("kind-dev", "kind: ConfigMap\n", false, "team-a", invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", {
       context: "kind-dev",
       yaml: "kind: ConfigMap\n",
@@ -104,7 +104,7 @@ describe("applyManifest", () => {
   });
 
   it("normalises errors", async () => {
-    const out = await applyManifest("c", "bad", null, false, () => Promise.reject(new Error("invalid")));
+    const out = await applyManifest("c", "bad", false, undefined, () => Promise.reject(new Error("invalid")));
     expect(out.error).toContain("invalid");
   });
 });
@@ -137,7 +137,7 @@ describe("applyManifest force + multi-doc", () => {
       documents: [{ kind: "ConfigMap", name: "a", applied: true, conflict: null, error: null }],
       applied: true,
     });
-    const out = await applyManifest("ctx", "kind: ConfigMap", "prod", true, invoke);
+    const out = await applyManifest("ctx", "kind: ConfigMap", true, "prod", invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", namespace: "prod", force: true });
     expect(out.applied).toBe(true);
     expect(out.documents?.[0].name).toBe("a");
@@ -145,13 +145,13 @@ describe("applyManifest force + multi-doc", () => {
 
   it("defaults force to false", async () => {
     const invoke = vi.fn().mockResolvedValue({ documents: [], applied: true });
-    await applyManifest("ctx", "kind: ConfigMap", null, undefined, invoke);
-    expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", namespace: null, force: false });
+    await applyManifest("ctx", "kind: ConfigMap", undefined, undefined, invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", force: false });
   });
 
   it("surfaces call errors", async () => {
     const invoke = vi.fn().mockRejectedValue(new Error("boom"));
-    const out = await applyManifest("ctx", "x", null, false, invoke);
+    const out = await applyManifest("ctx", "x", false, undefined, invoke);
     expect(out.error).toContain("boom");
   });
 });

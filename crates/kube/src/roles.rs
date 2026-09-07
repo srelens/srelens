@@ -26,6 +26,10 @@ pub struct RoleSummary {
     /// Number of policy rules.
     pub rules: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -39,6 +43,7 @@ pub(crate) fn summarise(role: Role) -> RoleSummary {
         namespace: role.metadata.namespace.clone().unwrap_or_default(),
         rules: role.rules.as_ref().map_or(0, |r| r.len()) as i32,
         age: crate::humanize_age(role.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(role.metadata.creation_timestamp.as_ref()),
     }
 }
 
@@ -79,6 +84,10 @@ pub struct ClusterRoleSummary {
     /// Number of policy rules.
     pub rules: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -91,6 +100,7 @@ pub(crate) fn summarise_cluster(role: ClusterRole) -> ClusterRoleSummary {
         name: role.metadata.name.clone().unwrap_or_default(),
         rules: role.rules.as_ref().map_or(0, |r| r.len()) as i32,
         age: crate::humanize_age(role.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(role.metadata.creation_timestamp.as_ref()),
     }
 }
 

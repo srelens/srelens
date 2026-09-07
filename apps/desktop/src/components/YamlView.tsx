@@ -51,7 +51,7 @@ export function YamlView({
   return (
     <ManifestEditor
       context={context}
-      namespace={namespace}
+      namespace={namespace ?? undefined}
       yaml={draft}
       onYamlChange={setDraft}
       confirm={{ kind, name }}

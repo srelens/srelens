@@ -46,7 +46,7 @@ export function EditResourceTab({
   return (
     <ManifestEditor
       context={context}
-      namespace={namespace}
+      namespace={namespace ?? undefined}
       yaml={yaml}
       onYamlChange={setYaml}
       ariaLabel="Edit resource YAML"

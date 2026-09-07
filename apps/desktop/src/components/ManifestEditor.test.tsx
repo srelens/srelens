@@ -83,8 +83,8 @@ describe("ManifestEditor", () => {
       expect(applyManifestMock).toHaveBeenCalledWith(
         "kind-dev",
         expect.stringContaining("ConfigMap"),
-        "team-a",
         false,
+        "team-a",
       ),
     );
     expect(notifyMock.success).toHaveBeenCalled();
@@ -140,9 +140,7 @@ describe("ManifestEditor", () => {
     const force = await screen.findByRole("button", { name: /force apply/i });
     expect(screen.getByText(/kubectl/)).toBeDefined();
     fireEvent.click(force);
-    await waitFor(() =>
-      expect(applyManifestMock).toHaveBeenLastCalledWith("ctx", expect.any(String), null, true),
-    );
+    await waitFor(() => expect(applyManifestMock).toHaveBeenLastCalledWith("ctx", expect.any(String), true, undefined));
   });
 
   it("drawer (non-fill) surfaces conflicts too: Force apply appears and re-applies with force", async () => {
@@ -174,9 +172,7 @@ describe("ManifestEditor", () => {
     const force = await screen.findByRole("button", { name: /force apply/i });
     expect(screen.getByText(/kubectl/)).toBeDefined();
     fireEvent.click(force);
-    await waitFor(() =>
-      expect(applyManifestMock).toHaveBeenLastCalledWith("ctx", expect.any(String), null, true),
-    );
+    await waitFor(() => expect(applyManifestMock).toHaveBeenLastCalledWith("ctx", expect.any(String), true, undefined));
   });
 
   it("multi-doc conflict banner names each conflicting document, not the applied one", async () => {

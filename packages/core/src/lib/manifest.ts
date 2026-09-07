@@ -1,5 +1,6 @@
 import { isMap, isScalar, parse, parseDocument, visit } from "yaml";
 import { invokeCapability, type Invoker } from "../transport/transport";
+import type { NodeTaint } from "./taints";
 
 export interface NodeSummary {
   name: string;
@@ -9,6 +10,12 @@ export interface NodeSummary {
   unschedulable: boolean;
   /** Number of taints, excluding the auto-added unschedulable taint. */
   taints: number;
+  /**
+   * The taints `taints` counts — the same filtered set, so the list badge's
+   * number and its tooltip can never disagree. The Node detail page reads the
+   * live object instead and lists every taint, cordon one included.
+   */
+  taintDetails: NodeTaint[];
   version: string;
   roles: string;
   age: string;
@@ -312,16 +319,18 @@ export interface DiffDoc {
 export async function applyManifest(
   context: string,
   yaml: string,
-  namespace: string | null,
   force = false,
+  /** Namespace to apply a document that names none in. Without it the backend
+   *  falls back to `default` — see `apply_namespace` in crates/kube (#404). */
+  namespace?: string,
   invoke: Invoker = invokeCapability,
 ): Promise<{ documents?: ApplyDoc[]; applied?: boolean; error?: string }> {
   try {
     const out = await invoke<{ documents: ApplyDoc[]; applied: boolean }>("k8s.applyManifest", {
       context,
       yaml,
-      namespace,
       force,
+      namespace,
     });
     return { documents: out.documents, applied: out.applied };
   } catch (e) {
@@ -333,15 +342,12 @@ export async function applyManifest(
 export async function diffManifest(
   context: string,
   yaml: string,
-  namespace: string | null,
+  /** Namespace for a document that names none (#404). */
+  namespace?: string,
   invoke: Invoker = invokeCapability,
 ): Promise<{ documents?: DiffDoc[]; error?: string }> {
   try {
-    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", {
-      context,
-      yaml,
-      namespace,
-    });
+    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", { context, yaml, namespace });
     return { documents: out.documents };
   } catch (e) {
     return { error: String(e) };
@@ -374,7 +380,8 @@ export interface ValidateError {
 export async function validateManifest(
   context: string,
   yaml: string,
-  namespace: string | null,
+  /** Namespace for a document that names none (#404). */
+  namespace?: string,
   invoke: Invoker = invokeCapability,
 ): Promise<{ valid?: boolean; errors?: ValidateError[]; error?: string }> {
   try {

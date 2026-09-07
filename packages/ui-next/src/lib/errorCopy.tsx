@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { describeError } from "@srelens/core";
+import { describeError, type ErrorDomain } from "@srelens/core";
 import { Alert, ErrorState, RawError, type Tone } from "@srelens/ui-kit";
 
 /**
@@ -56,8 +56,8 @@ export interface FriendlyCopy {
 }
 
 /** {@link describeError}, with the "is the original worth offering" rule applied. */
-export function friendly(error: unknown): FriendlyCopy {
-  const { title, detail, raw } = describeError(error);
+export function friendly(error: unknown, domain: ErrorDomain = "cluster"): FriendlyCopy {
+  const { title, detail, raw } = describeError(error, { domain });
   return { title, detail, raw: raw === detail ? undefined : raw };
 }
 
@@ -71,7 +71,9 @@ export function friendly(error: unknown): FriendlyCopy {
  * is not six problems.
  */
 export function summarise(errors: string[]): { detail: string; raw: string | undefined } {
-  const copies = errors.filter((e) => e !== "").map(friendly);
+  // Do not hand `friendly` straight to map: its second parameter is a domain,
+  // while Array.map's second callback argument is the numeric index.
+  const copies = errors.filter((e) => e !== "").map((error) => friendly(error));
   const details = [...new Set(copies.map((c) => c.detail))];
   // The originals are kept apart by a blank line rather than the separator the
   // sentences use: each one is a struct that already contains punctuation, and
@@ -90,6 +92,8 @@ export interface FailureStateProps {
    */
   title?: ReactNode;
   error: unknown;
+  /** What the failing operation contacted; cluster preserves the default copy. */
+  domain?: ErrorDomain;
   onRetry?: () => void;
   retryLabel?: string;
   action?: { label: string; onClick: () => void };
@@ -97,8 +101,8 @@ export interface FailureStateProps {
 }
 
 /** A content area whose load failed, said in words the reader can act on. */
-export function FailureState({ title, error, ...rest }: FailureStateProps) {
-  const copy = friendly(error);
+export function FailureState({ title, error, domain, ...rest }: FailureStateProps) {
+  const copy = friendly(error, domain);
   return <ErrorState title={title ?? copy.title} detail={copy.detail} raw={copy.raw} {...rest} />;
 }
 
@@ -111,6 +115,8 @@ export interface FailureAlertProps {
    */
   title: ReactNode;
   error: unknown;
+  /** What the failing operation contacted; cluster preserves the default copy. */
+  domain?: ErrorDomain;
   /** `warn` by default: a banner over surviving rows is a warning, not a stop. */
   tone?: Tone;
   className?: string;
@@ -125,8 +131,14 @@ export interface FailureAlertProps {
  * has. The title is the caller's for the same reason — those sentences were
  * written on purpose and this only changes what sits under them.
  */
-export function FailureAlert({ title, error, tone = "warn", className }: FailureAlertProps) {
-  const copy = friendly(error);
+export function FailureAlert({
+  title,
+  error,
+  domain,
+  tone = "warn",
+  className,
+}: FailureAlertProps) {
+  const copy = friendly(error, domain);
   return (
     <Alert tone={tone} title={title} className={className}>
       {copy.detail}

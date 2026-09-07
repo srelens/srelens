@@ -34,7 +34,7 @@ const CodeEditor = lazy(() => import("../ui/CodeEditor").then((m) => ({ default:
  */
 export function ManifestEditor({
   context,
-  namespace = null,
+  namespace,
   yaml,
   onYamlChange,
   ariaLabel = "Manifest YAML",
@@ -49,8 +49,9 @@ export function ManifestEditor({
   onApplied,
 }: {
   context: string;
-  /** Namespace to use when a namespaced document omits metadata.namespace. */
-  namespace?: string | null;
+  /** Namespace this editor is scoped to, applied to a document that names
+   *  none. Without it the backend falls back to `default` (#404). */
+  namespace?: string;
   yaml: string;
   onYamlChange: (yaml: string) => void;
   ariaLabel?: string;
@@ -173,7 +174,7 @@ export function ManifestEditor({
   async function doApply(force: boolean) {
     setBusy(true);
     setError("");
-    const out = await applyManifest(context, yaml, namespace, force);
+    const out = await applyManifest(context, yaml, force, namespace);
     setBusy(false);
     if (out.error) {
       setError(describeError(out.error).detail);
@@ -277,9 +278,7 @@ export function ManifestEditor({
         minHeight={fill ? undefined : 320}
         maxHeight={fill ? undefined : 520}
         schemaValidate={(y) =>
-          validateManifest(context, y, namespace).then((r) =>
-            r.valid === false ? r.errors ?? [] : [],
-          )
+          validateManifest(context, y, namespace).then((r) => (r.valid === false ? r.errors ?? [] : []))
         }
         schemaSource={(apiVersion, kind) =>
           openApiSchema(context, apiVersion, kind).then((r) => ("error" in r ? null : r))

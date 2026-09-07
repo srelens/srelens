@@ -28,6 +28,10 @@ pub struct StatefulSetSummary {
     /// The governing headless Service name (`spec.serviceName`), or "".
     pub service: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -53,6 +57,7 @@ pub(crate) fn summarise(sts: StatefulSet) -> StatefulSetSummary {
         updated,
         service,
         age: crate::humanize_age(sts.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(sts.metadata.creation_timestamp.as_ref()),
     }
 }
 

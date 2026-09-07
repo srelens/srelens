@@ -84,6 +84,7 @@ export * from "./lib/skills";
 export * from "./lib/storage";
 export * from "./lib/tabs";
 export * from "./lib/tabView";
+export * from "./lib/taints";
 export * from "./lib/terminal";
 export * from "./lib/terminalDriver";
 export * from "./lib/terminalReconnect";
@@ -94,6 +95,7 @@ export * from "./lib/updater";
 export * from "./lib/watch";
 export * from "./lib/webClusters";
 export * from "./lib/webKubeconfigs";
+export * from "./lib/topology";
 export * from "./lib/workloads";
 
 // Disambiguates the star exports above; see the note in the header.

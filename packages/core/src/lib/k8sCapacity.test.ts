@@ -8,6 +8,7 @@ function node(overrides: Partial<NodeSummary> = {}): NodeSummary {
     status: "Ready",
     unschedulable: false,
     taints: 0,
+    taintDetails: [],
     version: "v1.30.0",
     roles: "worker",
     age: "10d",
