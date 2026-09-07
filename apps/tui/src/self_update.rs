@@ -607,6 +607,29 @@ pub fn plan(
     })))
 }
 
+/// Who owns the binary at `path`, decided AFTER following links, and the
+/// resolved path it was decided from.
+///
+/// The resolution is the whole point. Homebrew installs into
+/// `<prefix>/Cellar/<formula>/<version>/bin` and links that into
+/// `<prefix>/bin`, so the path someone invokes is a symlink — and on Intel
+/// macOS that prefix is `/usr/local`, which is also where the install guide
+/// tells people to put a copy by hand. Matching on the path as given would
+/// either miss every brew install there or refuse every manual one; the two
+/// are indistinguishable until the link is followed.
+///
+/// The resolved path comes back so this is testable without a real
+/// `/opt/homebrew` to point at: a test can assert the link was followed
+/// even where it cannot arrange for the result to match a package root.
+pub fn resolve_owner(path: &Path) -> (PathBuf, Option<&'static str>) {
+    // A path that cannot be resolved — it does not exist yet, a permission
+    // stops the walk — is used as given rather than treated as an error.
+    // Failing to look is not evidence of ownership either way.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let manager = package_manager_for(&resolved);
+    (resolved, manager)
+}
+
 /// Download, verify, and install the binary a [`Plan`] names.
 ///
 /// Verification happens before anything is written, so a mismatched download
@@ -615,14 +638,8 @@ pub fn apply(
     plan: &Plan,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
 ) -> Result<(), UpdateError> {
-    // Resolved before the check, because a package manager's binary is
-    // usually reached through a link: Homebrew installs into
-    // `<prefix>/Cellar/<formula>/<version>/bin` and links that into
-    // `<prefix>/bin`. Testing the invoked path would see `/usr/local/bin`,
-    // which is also where the install guide tells people to put a copy by
-    // hand — so the two are only distinguishable after following the link.
-    let real = std::fs::canonicalize(&plan.target).unwrap_or_else(|_| plan.target.clone());
-    if let Some(manager) = package_manager_for(&real) {
+    let (real, owner) = resolve_owner(&plan.target);
+    if let Some(manager) = owner {
         return Err(UpdateError::PackageManaged {
             manager,
             path: real,
@@ -1073,6 +1090,45 @@ mod tests {
         );
 
         set(0o755);
+    }
+
+    /// Ownership is decided after following links, not before.
+    ///
+    /// Asserting on literal Cellar paths does not test this: those match
+    /// with or without the resolution. Building brew's actual shape — a
+    /// `bin/` link into a `Cellar/` tree — and checking WHICH path the
+    /// decision was made from is what fails if the resolution is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn ownership_is_decided_after_following_the_link() {
+        use super::resolve_owner;
+
+        let _guard = file_test_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cellar = dir.path().join("Cellar/srelens-tui/1.2.3/bin");
+        std::fs::create_dir_all(&cellar).expect("cellar");
+        let installed = cellar.join("srelens-tui");
+        std::fs::write(&installed, b"the real binary").expect("write");
+
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let linked = bin.join("srelens-tui");
+        std::os::unix::fs::symlink(&installed, &linked).expect("symlink");
+
+        let (resolved, _) = resolve_owner(&linked);
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&installed).expect("canonicalize"),
+            "the decision must be made from the link's target"
+        );
+        assert_ne!(resolved, linked, "not from the link itself");
+
+        // A path that does not resolve is used as given rather than
+        // becoming an error.
+        let missing = dir.path().join("not-here");
+        let (resolved, owner) = resolve_owner(&missing);
+        assert_eq!(resolved, missing);
+        assert_eq!(owner, None);
     }
 
     /// Two calls never collide, which is what lets the name be unpredictable

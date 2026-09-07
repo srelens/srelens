@@ -63,12 +63,23 @@ jobs:
           # normal middle of setting it up, not a mistake. Cloning a repository
           # that is not there yet would fail the release for it.
           #
-          # A warning rather than silence: once the token is configured somebody
-          # is expecting a publish, so a skip should say why.
-          if ! GH_TOKEN="$TOKEN" gh api "repos/${TAP_REPO}" >/dev/null 2>&1; then
-            echo "::warning::${TAP_REPO} does not exist, or HOMEBREW_TAP_TOKEN cannot see it — skipping the Homebrew publish. See packaging/homebrew/README.md."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Only a VERIFIED 404 counts as "not set up yet". An expired token, a
+          # revoked grant, a rate limit or a network blip all make this command
+          # fail too, and treating those as absence would report "the tap is not
+          # ready" — a fact about the tap — on the strength of not having been
+          # able to look. The formula would then go stale behind a green run.
+          probe=$(GH_TOKEN="$TOKEN" gh api "repos/${TAP_REPO}" 2>&1) && status=0 || status=$?
+          if [ "$status" -ne 0 ]; then
+            if printf '%s' "$probe" | grep -q 'HTTP 404'; then
+              # A warning rather than silence: once the token is configured
+              # somebody is expecting a publish, so a skip should say why.
+              echo "::warning::${TAP_REPO} does not exist yet — skipping the Homebrew publish. See packaging/homebrew/README.md."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::could not check ${TAP_REPO}, so whether it is ready is unknown — not skipping on a guess. Fix the cause and re-run this workflow; it is dispatchable for any published version."
+            printf '%s\n' "$probe" >&2
+            exit 1
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
