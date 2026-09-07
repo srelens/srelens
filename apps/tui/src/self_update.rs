@@ -106,6 +106,9 @@ pub enum UpdateError {
     },
     /// The binary's directory cannot be written to by this user.
     NotWritable { path: PathBuf },
+    /// The binary lives somewhere anyone on the machine can write, which no
+    /// amount of care during the update can compensate for.
+    UnsafeDirectory { path: PathBuf },
     /// The staged download changed between being written and being
     /// installed — someone else can write to the directory.
     StagedChanged,
@@ -153,6 +156,11 @@ impl fmt::Display for UpdateError {
             Self::NotWritable { path } => write!(
                 f,
                 "cannot write to {} — re-run with the rights to change it, or install srelens-tui somewhere you own",
+                path.display()
+            ),
+            Self::UnsafeDirectory { path } => write!(
+                f,
+                "anyone on this machine can create files in {}, so an update there cannot be made safe — move srelens-tui somewhere only you can write, then update",
                 path.display()
             ),
             Self::StagedChanged => write!(
@@ -589,6 +597,11 @@ pub fn apply(
         });
     }
     let dir = plan.target.parent().unwrap_or_else(|| Path::new("."));
+    if world_writable_without_sticky(dir) {
+        return Err(UpdateError::UnsafeDirectory {
+            path: dir.to_path_buf(),
+        });
+    }
     if !writable_dir(dir) {
         return Err(UpdateError::NotWritable {
             path: dir.to_path_buf(),
@@ -669,6 +682,44 @@ fn writable_dir(dir: &Path) -> bool {
     }
 }
 
+/// Whether anyone on the machine can create and replace entries in `dir`.
+///
+/// Where that is true, no amount of care with temporary files makes an
+/// update safe: writing and renaming are separate operations on a NAME, and
+/// on Unix there is no way to rename by file descriptor, so the path can
+/// always be swapped between the last check and the rename. The read-back
+/// before replacement narrows that to a race an attacker must win, but a
+/// race is not a guarantee. Refusing is the only honest answer.
+///
+/// The test is deliberately WORLD-writable and not sticky, not merely
+/// group-writable. A group-writable install directory is an ordinary
+/// configuration — `/usr/local/bin` belongs to `admin` on macOS — and group
+/// membership is a trust decision someone already made. World-writable
+/// without the sticky bit is not a place to keep an executable, and saying
+/// so beats pretending the update was safe. The sticky bit is what makes
+/// `/tmp` acceptable: entries there can only be removed by their owner.
+#[cfg(unix)]
+fn world_writable_without_sticky(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(dir) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode();
+            mode & 0o002 != 0 && mode & 0o1000 == 0
+        }
+        // Unreadable metadata is not evidence of a problem; the write probe
+        // below will fail on its own if the directory is unusable.
+        Err(_) => false,
+    }
+}
+
+/// Windows has no equivalent this cheap. Its ACLs would need a real query,
+/// and the common failure there — a directory a package manager owns — is
+/// already caught by `package_manager_for`.
+#[cfg(not(unix))]
+fn world_writable_without_sticky(_dir: &Path) -> bool {
+    false
+}
+
 /// Confirm the file at `path` still holds exactly `bytes`.
 ///
 /// Split out so it can be tested directly: the race it defends against
@@ -732,7 +783,14 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     assert_staged_is_unchanged(&staged.0, bytes)?;
 
     if cfg!(windows) {
-        let displaced = dir.join(format!("{BIN}.old"));
+        // Dot-prefixed, matching the staging files, so this is plainly the
+        // updater's and not something a person put here. The previous name
+        // was `<binary>.old`, which is exactly what someone would call a
+        // backup they made themselves — and it was removed unconditionally,
+        // so a real update destroyed it. `fs::rename` overwrites on Windows
+        // too, so choosing a name nobody else would pick is the fix, not the
+        // explicit removal.
+        let displaced = dir.join(format!(".{BIN}.old"));
         let _ = std::fs::remove_file(&displaced);
         std::fs::rename(target, &displaced).map_err(io)?;
         if let Err(e) = std::fs::rename(&staged.0, target) {
@@ -848,6 +906,50 @@ mod tests {
             assert_staged_is_unchanged(&path, b"the verified bytes"),
             Err(UpdateError::Io(_))
         ));
+    }
+
+    /// A directory anyone can write to is refused; the ordinary ones are not.
+    ///
+    /// The group-writable case is the one worth pinning: `/usr/local/bin` is
+    /// group-writable on macOS, so refusing it would break a normal install
+    /// rather than protect anyone.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_directory_anyone_can_write_to_is_refused() {
+        use super::world_writable_without_sticky;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let set = |mode: u32| {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode))
+                .expect("set mode");
+        };
+
+        set(0o755);
+        assert!(!world_writable_without_sticky(dir.path()), "0755 is fine");
+
+        set(0o775);
+        assert!(
+            !world_writable_without_sticky(dir.path()),
+            "group-writable is an ordinary configuration, not a refusal"
+        );
+
+        set(0o777);
+        assert!(
+            world_writable_without_sticky(dir.path()),
+            "world-writable without the sticky bit must be refused"
+        );
+
+        // The sticky bit is what makes /tmp acceptable: only an entry's
+        // owner may remove it, so the swap this guards against cannot
+        // happen.
+        set(0o1777);
+        assert!(
+            !world_writable_without_sticky(dir.path()),
+            "sticky world-writable is how /tmp is set up"
+        );
+
+        set(0o755);
     }
 
     /// Two calls never collide, which is what lets the name be unpredictable
