@@ -811,6 +811,36 @@ fn windows_package_markers_do_not_apply_on_unix() {
     }
 }
 
+/// The layouts `brew install srelens/tap/srelens-tui` actually produces.
+///
+/// Homebrew installs into `<prefix>/Cellar/<formula>/<version>/bin` and links
+/// that into `<prefix>/bin`, so what `apply` checks is the resolved Cellar
+/// path — `/usr/local/bin` alone is where the install guide tells people to
+/// put a copy by hand, and must stay updatable.
+#[test]
+fn a_homebrew_install_is_recognised_on_both_prefixes() {
+    for path in [
+        "/opt/homebrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
+        "/usr/local/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
+        "/home/linuxbrew/.linuxbrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
+        "/opt/homebrew/bin/srelens-tui",
+        "/home/linuxbrew/.linuxbrew/bin/srelens-tui",
+    ] {
+        assert_eq!(
+            package_manager_for(Path::new(path)),
+            Some("Homebrew"),
+            "{path}"
+        );
+    }
+
+    // The hand-install location, which shares a prefix with Intel Homebrew
+    // and must not be mistaken for it.
+    assert_eq!(
+        package_manager_for(Path::new("/usr/local/bin/srelens-tui")),
+        None
+    );
+}
+
 /// A package-manager root only counts at the START of the path.
 ///
 /// An unpacked root filesystem, a container image being edited, a chroot
