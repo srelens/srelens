@@ -31,6 +31,10 @@ pub struct JobSummary {
     /// Owning CronJob name from ownerReferences, or "".
     pub owner: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -67,6 +71,7 @@ pub(crate) fn summarise(job: Job) -> JobSummary {
         duration,
         owner,
         age: crate::humanize_age(job.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(job.metadata.creation_timestamp.as_ref()),
     }
 }
 

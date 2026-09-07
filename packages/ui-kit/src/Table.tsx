@@ -90,6 +90,14 @@ export interface Column<T> {
    *  sortable column stays clickable regardless of which one is the active
    *  sort — this only gates the header button existing at all. */
   sortable?: boolean;
+  /**
+   * Start this column hidden, so the ColumnPicker offers it rather than the
+   * default view carrying it. For a column that is useful when you go looking
+   * for it and clutter when you are not — a Nodes list's taint tally. Only the
+   * *default* is affected: once a reader has toggled the column either way for
+   * a kind, their choice is what is stored and this is not consulted again.
+   */
+  defaultHidden?: boolean;
   /** Dual role with opposite defaults:
    *  (1) Opt-in for the header filter funnel button: `filterable === true` shows
    *      a funnel that scopes the toolbar search to this column alone.

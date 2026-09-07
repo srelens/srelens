@@ -24,6 +24,14 @@ export interface FriendlyError {
   raw: string;
 }
 
+/** The system a caller actually contacted when it received the error. */
+export type ErrorDomain = "cluster" | "http" | "local";
+
+export interface DescribeErrorOptions {
+  /** Cluster calls remain the default so existing callers keep their guidance. */
+  domain?: ErrorDomain;
+}
+
 /**
  * The two wrappers that get printed in front of a message on the way here,
  * neither of which is news to anyone:
@@ -107,7 +115,10 @@ export function isExecAuthError(input: unknown): boolean {
 }
 
 /** Classify a raw error into a friendly, actionable message. */
-export function describeError(input: unknown): FriendlyError {
+export function describeError(
+  input: unknown,
+  { domain = "cluster" }: DescribeErrorOptions = {},
+): FriendlyError {
   const raw = cleanErrorMessage(input);
   const lower = raw.toLowerCase();
 
@@ -133,6 +144,22 @@ export function describeError(input: unknown): FriendlyError {
   }
 
   if (/timed out|timeout|deadline exceeded/.test(lower)) {
+    if (domain === "http") {
+      return {
+        title: "Request timed out",
+        detail:
+          "The request didn't finish in time. Check your network connection and try again.",
+        raw,
+      };
+    }
+    if (domain === "local") {
+      return {
+        title: "Operation timed out",
+        detail:
+          "The local operation didn't finish in time. Try again; if it keeps happening, check that the file or device is still available.",
+        raw,
+      };
+    }
     // The remedy is platform-specific: the Settings slider only exists on the
     // desktop, so pointing a web user at it would be an impossible
     // instruction. The server honours SRELENS_TIMEOUT_SECS instead.
@@ -193,6 +220,16 @@ export function describeError(input: unknown): FriendlyError {
     };
   }
   if (/certificate|x509|\btls\b|self.signed|unknown authority/.test(lower)) {
+    if (domain !== "cluster") {
+      return {
+        title: "Couldn't verify the connection",
+        detail:
+          domain === "http"
+            ? "The server's TLS certificate couldn't be verified. It may be self-signed or expired, or this machine may not trust its issuer."
+            : "A TLS certificate couldn't be verified. It may be self-signed or expired, or this machine may not trust its issuer.",
+        raw,
+      };
+    }
     return {
       title: "Couldn't verify the cluster",
       detail:

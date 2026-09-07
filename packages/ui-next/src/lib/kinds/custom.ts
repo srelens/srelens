@@ -59,6 +59,7 @@ export const CUSTOM_RESOURCE_ACTIONS: KindActions = { delete: false };
 export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
   return {
     k8sKind: crd.kind,
+    group: crd.group,
     columns: customColumns(crd),
     source: "poll",
     scope: crd.namespaced ? "namespaced" : "cluster",

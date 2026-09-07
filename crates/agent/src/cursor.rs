@@ -38,6 +38,15 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 vec![AgentEvent::TurnDone]
             }
         }
+        Some("error") => {
+            let message = v
+                .get("message")
+                .or_else(|| v.get("error"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("the agent encountered an error")
+                .to_string();
+            vec![AgentEvent::Error { message }, AgentEvent::TurnDone]
+        }
         _ => Vec::new(),
     }
 }

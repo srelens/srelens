@@ -602,10 +602,11 @@ export function HelmOpDialog({
             <Field label="Chart" className="min-w-0">
               <TextInput value={chart} onValueChange={setChart} placeholder="bitnami/nginx" />
             </Field>
-            {/* No hint here: the kit's `Field` renders one INSIDE the label,
-                so a hint becomes part of the control's accessible name — the
-                placeholder says the same thing without renaming the field. */}
-            <Field label="Chart version" className="min-w-0">
+            <Field
+              label="Chart version"
+              hint="Leave empty to use the latest chart version."
+              className="min-w-0"
+            >
               <TextInput value={chartVersion} onValueChange={setChartVersion} placeholder="18.3.0" />
             </Field>
           </div>

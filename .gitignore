@@ -27,3 +27,6 @@ srelens-revoke.asc
 # Coverage reports (root workspace run and per-package runs)
 coverage/
 **/coverage/
+
+# Local webdriver smoke host (macOS cannot run tauri-driver; see .smoke/Dockerfile)
+.smoke/

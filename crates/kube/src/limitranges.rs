@@ -25,6 +25,10 @@ pub struct LimitRangeSummary {
     /// Number of limit entries (`spec.limits`).
     pub limits: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -39,6 +43,7 @@ pub(crate) fn summarise(lr: LimitRange) -> LimitRangeSummary {
         namespace: lr.metadata.namespace.clone().unwrap_or_default(),
         limits: limits as i32,
         age: crate::humanize_age(lr.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(lr.metadata.creation_timestamp.as_ref()),
     }
 }
 

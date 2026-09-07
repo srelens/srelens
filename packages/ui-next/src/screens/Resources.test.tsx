@@ -397,6 +397,19 @@ describe("Resources", () => {
 
   // Correction 1: the design mock titles every kind's identifier column
   // "Name" — never "Pod", "Deployment", "Secret". Classic named it by kind.
+  it("offers New, which opens the create editor on this cluster", async () => {
+    // The create half of the editor had a route and a screen and no door:
+    // nothing in the app opened /new. This is the door.
+    open("/k/pods");
+    await screen.findByRole("heading", { level: 1, name: "Pods" });
+    await userEvent.click(screen.getByRole("button", { name: "New" }));
+    const created = store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/new/"));
+    expect(created).toHaveLength(1);
+    // The cluster is in the route: the editor pins it, and New on a second
+    // cluster must not land on this one's draft.
+    expect(created[0].route).toBe("/new/prod-eu");
+  });
+
   it("titles the identifier column Name, not the kind", async () => {
     open("/k/pods");
 

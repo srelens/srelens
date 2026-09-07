@@ -143,9 +143,10 @@ export function AccessibilityPane() {
       <Panel title="Screen readers">
         <p data-testid="live-region-note" className="text-[0.75rem] leading-relaxed text-muted">
           Tabs expose <code className="code">role=&quot;tab&quot;</code> with selected state, and
-          every failure surface is a live region that reads itself out when it appears. The console
-          announces nothing yet: the agent is not in the new design, so there are no replies for it
-          to read.
+          every failure surface is a live region that reads itself out when it appears. The
+          console&rsquo;s transcript is one too, so an agent&rsquo;s reply is read as it arrives
+          &mdash; and it goes quiet while you type a command, so a list that re-filters on every
+          keystroke is not read out again with each one.
         </p>
         <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
           Every icon-only control carries a label, switches report{" "}

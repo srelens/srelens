@@ -64,6 +64,13 @@ export interface KindActions {
 export interface KindDescriptor<Row extends ListRow = ListRow> {
   /** The Kubernetes kind, for actions and for the detail route. */
   k8sKind: string;
+  /**
+   * The API group — set only for a custom kind, whose kind NAME alone does
+   * not identify it: a CRD may legally reuse a built-in kind's name in its
+   * own group (`Deployment` in `acme.io`), and anything that resolves by
+   * kind alone then lands on the built-in. Carried into the edit route.
+   */
+  group?: string;
   columns: Column<Row>[];
   /** `watch` streams snapshots; `poll` re-lists on an interval. */
   source: "watch" | "poll";

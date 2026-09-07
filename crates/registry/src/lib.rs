@@ -52,8 +52,22 @@ pub fn default_kubeconfig_paths() -> Vec<PathBuf> {
             return paths;
         }
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    vec![PathBuf::from(home).join(".kube").join("config")]
+    // `HOME` first, so a deliberate override keeps working on every platform
+    // — including the Windows shells (Git Bash, MSYS, WSL interop) that set it
+    // on purpose. Then `dirs::home_dir()`, which is the only one of the two
+    // that answers on stock Windows: `HOME` is not part of the Windows
+    // environment, so reading it alone yielded an EMPTY string and this
+    // resolved to a relative `.kube/config` — searched in whatever directory
+    // the app happened to be started from. A Windows user therefore saw zero
+    // contexts unless they set `KUBECONFIG` themselves. The desktop app shares
+    // this function, so it had the same blind spot.
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_default();
+    vec![home.join(".kube").join("config")]
 }
 
 /// Every kubeconfig source as of RIGHT NOW: the static ones plus whatever is
@@ -257,6 +271,7 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::logs::pod_logs_capability(cache.clone()));
+    reg.register(srelens_kube::endpoint_query::query_pod_endpoint_capability(cache.clone()));
     reg.register(srelens_kube::deployments::list_deployments_capability(
         cache.clone(),
     ));
@@ -339,6 +354,21 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::metrics::pod_metrics_capability(cache.clone()));
     reg.register(srelens_kube::pod_count::pod_count_capability(cache.clone()));
     reg.register(srelens_kube::pod_overview::pod_overview_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::topology::topology_graph_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::topology::topology_probe_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::prometheus::prometheus_discover_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::prometheus::prometheus_query_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::connections::pod_connections_capability(
         cache.clone(),
     ));
     reg.register(srelens_kube::nodes::list_nodes_capability(cache.clone()));
@@ -477,6 +507,33 @@ mod tests {
         assert!(
             path.to_string_lossy().contains(".kube/config") || std::env::var("KUBECONFIG").is_ok()
         );
+    }
+
+    /// The default kubeconfig path must be ABSOLUTE. It was not on Windows:
+    /// `HOME` is not part of that platform's environment, so an empty string
+    /// made this a relative `.kube/config`, resolved against the current
+    /// directory. Launched from a stock PowerShell the TUI found zero
+    /// contexts, and so did the desktop app, which calls the same function.
+    ///
+    /// Asserting "absolute" rather than a specific prefix is what makes this
+    /// meaningful on every platform at once: it fails for the empty-home case
+    /// on Windows and for an empty `HOME` on Unix, without pinning either to
+    /// a directory layout.
+    #[test]
+    fn the_default_kubeconfig_path_is_absolute_on_every_platform() {
+        // Only meaningful for the HOME branch; KUBECONFIG is the caller's to
+        // get right and may legitimately hold relative entries.
+        if std::env::var_os("KUBECONFIG").is_some() {
+            return;
+        }
+        let paths = default_kubeconfig_paths();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(
+            paths[0].is_absolute(),
+            "the default kubeconfig path must not depend on the working directory: {:?}",
+            paths[0]
+        );
+        assert!(paths[0].ends_with("config"), "{:?}", paths[0]);
     }
 
     #[test]
