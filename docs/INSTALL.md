@@ -60,6 +60,112 @@ just Linux — is being enabled; see
 > "Windows protected your PC" prompt. Click **More info → Run anyway** to
 > proceed. Signed installers will remove this step in a future release.
 
+## Terminal UI (`srelens-tui`)
+
+The terminal UI ships as one self-contained binary, separate from the desktop
+app and with nothing to install. Every release carries an archive per platform:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86-64 | `srelens-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64, static | `srelens-tui-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `srelens-tui-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux arm64, static | `srelens-tui-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple Silicon | `srelens-tui-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `srelens-tui-<version>-x86_64-apple-darwin.tar.gz` |
+| Windows x86-64 | `srelens-tui-<version>-x86_64-pc-windows-msvc.zip` |
+
+Take the **musl** build if your distribution is Alpine, or if the glibc build
+reports a version error — it is statically linked and depends on nothing on the
+host. Otherwise prefer the glibc build.
+
+**Linux and macOS.** Extract and put it on your `PATH`:
+
+```bash
+tar -xzf srelens-tui-<version>-<target>.tar.gz
+chmod +x srelens-tui
+sudo mv srelens-tui /usr/local/bin/
+srelens-tui --version
+```
+
+**Windows.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
+`PATH`, then run `srelens-tui --version` in a terminal. Windows may warn that
+the file came from the internet, for the same reason the desktop installer
+does: code signing is on the roadmap ([#32]).
+
+The macOS builds on a **stable** release are signed with the same Apple
+Developer ID as the desktop app and notarized with the same account, so
+Gatekeeper admits them — a stable release cannot be cut without them, the same
+rule that governs the GPG signatures below. Dev-channel pre-releases are built
+even when those credentials are unavailable, so treat an unsigned macOS binary
+there as a pre-release that skipped signing rather than as evidence of
+tampering. The
+notarization ticket is **not stapled** — Apple only staples to `.app`, `.dmg`
+and `.pkg`, and this ships as a tarball — so the first run of a quarantined
+copy is checked against Apple online. If that first run happens offline and
+macOS refuses the binary, either reconnect and try again or clear the
+quarantine flag yourself:
+
+```bash
+xattr -d com.apple.quarantine ./srelens-tui
+```
+
+Most people never see this at all: extracting a `.tar.gz` with `tar` in a
+terminal does not mark the contents as quarantined in the first place.
+
+**Checking the download.** Each release lists the SHA-256 of every TUI archive
+in `srelens-tui-<version>-SHA256SUMS.txt`. Download it next to the archive and
+check the one file you took. The tool differs per platform — `sha256sum` is GNU
+coreutils, so it is absent on a stock macOS and on Windows.
+
+Linux:
+
+```bash
+sha256sum -c --ignore-missing srelens-tui-<version>-SHA256SUMS.txt
+```
+
+macOS (`shasum` ships with the system; `-c -` reads the one line you pass it,
+and `--ignore-missing` does not exist here):
+
+```bash
+grep "srelens-tui-<version>-<target>.tar.gz$" \
+  srelens-tui-<version>-SHA256SUMS.txt | shasum -a 256 -c -
+```
+
+Windows (PowerShell):
+
+```powershell
+$archive = "srelens-tui-<version>-x86_64-pc-windows-msvc.zip"
+$expected = (Select-String -Path "srelens-tui-<version>-SHA256SUMS.txt" -Pattern ([regex]::Escape($archive))).Line.Split(" ")[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+if ($expected -eq $actual) { "OK" } else { "MISMATCH — do not run this file" }
+```
+
+That proves the file arrived intact, not who built it. For that, the archives
+carry detached GPG signatures like every other release asset — see
+[Verifying a download](#verifying-a-download) below, which applies to them
+unchanged.
+
+Run `srelens-tui --help` for the full set of flags. `srelens-tui info` lists
+the contexts found in your kubeconfig with the cluster and server each names —
+it reads the file and does not contact any cluster, so it tells you what is
+configured, not what is reachable. `srelens-tui toolbox` reports whether
+`kubectl`, `helm` and `krew` are on your `PATH`.
+
+> **Windows: anything that looks for another program on your `PATH` may not
+> find it.** Executable lookup is Unix-shaped in several places — it shells out
+> to `which`, which Windows does not have, and the in-process fallback matches
+> a bare program name without consulting `PATHEXT`, so it never sees
+> `kubectl.exe` or `helm.exe`. What that affects: `srelens-tui toolbox` reports
+> every tool as missing, Helm operations may report Helm as absent, and the
+> Cursor AI provider may not find its binary. Browsing clusters, logs, YAML and
+> everything else that talks to the API server is unaffected. Tracked in
+> [#445].
+
+[#445]: https://github.com/srelens/srelens/issues/445
+
+[#32]: https://github.com/srelens/srelens/issues/32
+
 ## Verifying a download
 
 > **srelens 0.6.0 and earlier are unsigned.** Release signing begins with
