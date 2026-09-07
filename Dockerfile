@@ -2,12 +2,20 @@
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
 FROM node:26-slim@sha256:c0753125a3789977aefe869cbebccf70e3cfd7ea84ca48547458f02e4f1d7146 AS frontend
+WORKDIR /src
+# package.json alone, ahead of the lockfile: it names the pnpm version, and
+# copying it by itself keeps the pnpm install layer cached when only the
+# lockfile moves.
+COPY package.json ./
 # pnpm via npm, not corepack: Node 26 ships without corepack (it was unbundled
 # upstream), so `corepack enable` is a command-not-found in this image. The
-# pinned major is what pnpm-lock.yaml was written by.
-RUN npm install -g pnpm@9
-WORKDIR /src
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+# version comes from `packageManager` -- the same field pnpm/action-setup reads
+# in CI -- because a hardcoded one here is a second source of truth, and it was
+# wrong: the image ran pnpm 9 against a lockfile written by 11, and pnpm 9
+# cannot see the overrides in pnpm-workspace.yaml at all, so every frozen
+# install failed with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
+RUN npm install -g "pnpm@$(node -p "require('./package.json').packageManager.split('@').pop()")"
+COPY pnpm-workspace.yaml pnpm-lock.yaml ./
 # Every workspace member's manifest must land before install: @srelens/desktop
 # depends on @srelens/core as workspace:*, and pnpm cannot link a package whose
 # package.json is not in the image.
