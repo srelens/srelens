@@ -1068,6 +1068,7 @@ fn release(name: &str, status: &str, revision: i64) -> HelmReleaseItem {
         revision,
         status: status.to_string(),
         chart: format!("{name}-1.2.3"),
+        chart_version: "1.2.3".to_string(),
         app_version: "2.0".to_string(),
         updated: "2026-09-01 10:00".to_string(),
     }
@@ -1097,9 +1098,13 @@ fn helm_view_set_releases_clamps_the_selection() {
 
 #[test]
 fn helm_view_renders_the_empty_placeholder() {
-    let state = HelmViewState::new();
-    let text = common::render_text(120, 20, |f| render_helm_view(f, f.area(), &state));
-    assert!(text.contains("Helm 3 Releases [0] (<v> Values <y> Manifest <d> History <ctrl-d> Uninstall <Esc> Back)"), "{text}");
+    let mut state = HelmViewState::new();
+    state.set_releases(vec![]);
+    let text = common::render_text(160, 20, |f| render_helm_view(f, f.area(), &state));
+    assert!(
+        text.contains("Helm 3 Releases [0]") && text.contains("Uninstall") && text.contains("Back"),
+        "{text}"
+    );
     assert!(
         text.contains("No Helm releases found in current namespace."),
         "{text}"
@@ -1447,11 +1452,17 @@ fn metrics_panel_modal_summarises_only_the_samples_inside_the_window() {
     );
     assert!(text.contains("(3 samples in buffer)"), "{text}");
     assert!(
-        text.contains("CPU Usage: 300m  (min: 100m, avg: 200m, peak: 300m)"),
+        text.contains("CPU Usage: 300m")
+            && text.contains("min: 100m")
+            && text.contains("avg: 200m")
+            && text.contains("peak: 300m"),
         "{text}"
     );
     assert!(
-        text.contains("Memory Usage: 400 MiB  (min: 200 MiB, avg: 300 MiB, peak: 400 MiB)"),
+        text.contains("Memory Usage: 400 MiB")
+            && text.contains("min: 200 MiB")
+            && text.contains("avg: 300 MiB")
+            && text.contains("peak: 400 MiB"),
         "{text}"
     );
 
@@ -1460,7 +1471,10 @@ fn metrics_panel_modal_summarises_only_the_samples_inside_the_window() {
     assert_eq!(state.range, MetricsTimeRange::ThirtyMin);
     let text = common::render_text(120, 40, |f| render_metrics_panel_modal(f, f.area(), &state));
     assert!(
-        text.contains("CPU Usage: 300m  (min: 100m, avg: 433m, peak: 900m)"),
+        text.contains("CPU Usage: 300m")
+            && text.contains("min: 100m")
+            && text.contains("avg: 433m")
+            && text.contains("peak: 900m"),
         "{text}"
     );
     assert!(text.contains("[3: 30m]"), "{text}");

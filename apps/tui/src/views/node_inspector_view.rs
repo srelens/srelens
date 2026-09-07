@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+pub use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone)]

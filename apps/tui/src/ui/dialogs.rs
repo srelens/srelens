@@ -17,6 +17,14 @@ pub enum Modal {
         action_name: String,
         is_destructive: bool,
     },
+    InputConfirm {
+        title: String,
+        message: String,
+        action_name: String,
+        required_input: String,
+        current_input: String,
+        is_destructive: bool,
+    },
     Scale {
         workload_name: String,
         current_replicas: i32,
@@ -27,6 +35,7 @@ pub enum Modal {
         namespace: String,
         container_port: u16,
         local_port_input: String,
+        kind: String,
     },
     ContainerPicker {
         pod_name: String,
@@ -61,6 +70,10 @@ pub enum Modal {
         selected_idx: usize,
         active_filter: Option<String>,
     },
+    ThemePicker {
+        selected_idx: usize,
+        initial_theme_idx: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +89,7 @@ pub enum QuickActionId {
     ViewLogs,
     OpenShell,
     PortForward,
+    StopPortForward,
     Describe,
     ViewYaml,
     EditYaml,
@@ -122,6 +136,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let border_color = if *is_destructive { Theme::RED } else { Theme::ACCENT };
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(border_color))
                 .title(format!(" {} ", title));
 
@@ -152,12 +167,65 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[1]);
         }
+        Modal::InputConfirm { title, message, action_name: _, required_input, current_input, is_destructive } => {
+            let modal_area = centered_rect(55, 34, area);
+            f.render_widget(Clear, modal_area);
+
+            let border_color = if *is_destructive { Theme::red() } else { Theme::accent() };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(border_color))
+                .title(Span::styled(format!(" {} ", title), Style::default().fg(border_color).add_modifier(Modifier::BOLD)));
+
+            let inner = block.inner(modal_area);
+            f.render_widget(block, modal_area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                ])
+                .split(inner);
+
+            let msg_widget = Paragraph::new(message.as_str())
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center);
+            f.render_widget(msg_widget, chunks[0]);
+
+            let is_matched = current_input == required_input;
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(if is_matched { Theme::green() } else { Theme::yellow() }))
+                .title(format!(" Type \"{}\" to confirm ", required_input));
+
+            let input_widget = Paragraph::new(format!("{}█", current_input))
+                .style(Style::default().fg(if is_matched { Theme::green() } else { Theme::fg() }).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center)
+                .block(input_block);
+            f.render_widget(input_widget, chunks[1]);
+
+            let prompt_line = Line::from(vec![
+                Span::styled("Press ", Style::default().fg(Theme::dim())),
+                Span::styled("[Enter]", Style::default().fg(if is_matched { Theme::green() } else { Theme::dim() }).add_modifier(if is_matched { Modifier::BOLD } else { Modifier::empty() })),
+                Span::styled(if is_matched { " Confirm" } else { " (type word to enable)" }, Style::default().fg(if is_matched { Theme::fg() } else { Theme::dim() })),
+                Span::styled("  |  ", Style::default().fg(Theme::dim())),
+                Span::styled("[Esc]", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(" Cancel", Style::default().fg(Theme::dim())),
+            ]);
+            let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
+            f.render_widget(prompt_widget, chunks[2]);
+        }
         Modal::Scale { workload_name, current_replicas, input } => {
             let modal_area = centered_rect(45, 25, area);
             f.render_widget(Clear, modal_area);
 
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::ACCENT))
                 .title(format!(" Scale Workload: {} ", workload_name));
 
@@ -179,6 +247,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let input_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::CYAN))
                 .title(" Desired Replicas ");
             let input_widget = Paragraph::new(format!("{}█", input))
@@ -195,14 +264,20 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             ])).alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
-        Modal::PortForward { pod_name, namespace, container_port, local_port_input } => {
+        Modal::PortForward { pod_name, namespace, container_port, local_port_input, kind } => {
             let modal_area = centered_rect(50, 30, area);
             f.render_widget(Clear, modal_area);
 
+            let title_str = if kind.is_empty() || kind == "Pod" {
+                format!(" Start Port Forward: {} ({}) ", pod_name, namespace)
+            } else {
+                format!(" Start Port Forward: {}/{} ({}) ", kind, pod_name, namespace)
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::ACCENT))
-                .title(format!(" Start Port Forward: {} ({}) ", pod_name, namespace));
+                .title(title_str);
 
             let inner = block.inner(modal_area);
             f.render_widget(block, modal_area);
@@ -222,6 +297,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let input_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::CYAN))
                 .title(" Local Port (127.0.0.1) ");
             let input_widget = Paragraph::new(format!("{}█", local_port_input))
@@ -249,6 +325,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::ACCENT))
                 .title(format!(" {} ({}) ", action_title, pod_name));
 
@@ -279,6 +356,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::ACCENT))
                 .title(" Switch Kubernetes Context (Type to filter, ↑/↓ Navigate, Enter Switch, Esc Close) ");
 
@@ -297,6 +375,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             // 1. Search input box
             let search_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::CYAN))
                 .title(" Filter Contexts ");
             let search_para = Paragraph::new(Line::from(vec![
@@ -395,6 +474,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::ACCENT))
                 .title(" Switch Namespace (0: All Namespaces, ↑/↓ Navigate, Enter Select) ");
 
@@ -411,6 +491,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let filter_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::CYAN))
                 .title(" Filter ");
             let filter_widget = Paragraph::new(format!("{}█", filter))
@@ -458,6 +539,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let ns_str = namespace.as_deref().map(|n| format!(" ({})", n)).unwrap_or_default();
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::ACCENT))
                 .title(Span::styled(
                     format!(" ⚡ Actions: {}/{}{} [Type to filter, ↑/↓ Navigate, Enter Run, Esc Close] ", resource_kind, resource_name, ns_str),
@@ -479,6 +561,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             // 1. Search box
             let search_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::CYAN))
                 .title(" Filter Actions ");
             let search_para = Paragraph::new(Line::from(vec![
@@ -549,6 +632,91 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
         }
         Modal::ReasonRail { tallies, selected_idx, active_filter } => {
             crate::views::reason_rail::render_reason_rail_modal(f, area, tallies, *selected_idx, active_filter.as_deref());
+        }
+        Modal::ThemePicker { selected_idx, initial_theme_idx: _ } => {
+            let modal_area = centered_rect(75, 75, area);
+            f.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(Theme::accent()))
+                .title(Span::styled(" Themes & Visual Styles (↑/↓ or j/k Preview • Enter Select • Esc Cancel) ", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)));
+
+            let inner = block.inner(modal_area);
+            f.render_widget(block, modal_area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(6),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+
+            let active_idx = Theme::active_index();
+            let items: Vec<ListItem> = Theme::all_themes()
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let is_sel = i == *selected_idx;
+                    let is_current = i == active_idx;
+                    let cursor = if is_sel { "▶ " } else { "  " };
+
+                    let visual_badge = match p.header_style {
+                        crate::theme::HeaderStyle::FinoTime => "[Fino • Live Clock • Tree] ",
+                        crate::theme::HeaderStyle::Minimal => "[Minimalist Chrome] ",
+                        crate::theme::HeaderStyle::Standard => {
+                            if p.border_type == ratatui::widgets::BorderType::Thick {
+                                "[Thick Neon Borders] "
+                            } else {
+                                ""
+                            }
+                        }
+                    };
+
+                    let mut spans = vec![
+                        Span::styled(cursor, if is_sel { Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Theme::dim()) }),
+                        Span::styled(format!("{:<20}", p.display_name), if is_sel { Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Theme::fg()) }),
+                        Span::raw(" "),
+                        Span::styled("■ ", Style::default().fg(p.accent)),
+                        Span::styled("■ ", Style::default().fg(p.cyan)),
+                        Span::styled("■ ", Style::default().fg(p.green)),
+                        Span::styled("■ ", Style::default().fg(p.yellow)),
+                        Span::styled("■ ", Style::default().fg(p.red)),
+                        Span::raw(" "),
+                    ];
+
+                    if !visual_badge.is_empty() {
+                        spans.push(Span::styled(visual_badge, Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)));
+                    }
+
+                    if is_current {
+                        spans.push(Span::styled("✔ ACTIVE ", Style::default().fg(p.green).add_modifier(Modifier::BOLD)));
+                    }
+
+                    spans.push(Span::styled(format!("— {}", p.description), Style::default().fg(Theme::dim())));
+
+                    let row_style = if is_sel {
+                        Theme::selected_row()
+                    } else {
+                        Style::default()
+                    };
+
+                    ListItem::new(Line::from(spans)).style(row_style)
+                })
+                .collect();
+
+            let list = List::new(items);
+            f.render_widget(list, chunks[0]);
+
+            let active_name = Theme::active_palette().display_name;
+            let footer = Paragraph::new(Line::from(vec![
+                Span::styled("Live Previewing: ", Style::default().fg(Theme::dim())),
+                Span::styled(active_name, Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+                Span::styled("  •  [Enter] Save  [Esc] Cancel", Style::default().fg(Theme::dim())),
+            ])).alignment(Alignment::Center);
+            f.render_widget(footer, chunks[1]);
         }
     }
 }
