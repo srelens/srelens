@@ -38,11 +38,11 @@ what someone typing `brew install` is asking for.
 
 Two things this repository cannot do for itself:
 
-1. **The tap repository.** Someone with organisation rights creates a public
-   `srelens/homebrew-tap`. The name matters: Homebrew maps `srelens/tap` to
-   exactly that, and `brew install srelens/tap/srelens-tui` will not resolve
-   without it. A `Formula/` directory is all it needs; the first publish
-   creates the file.
+1. **The tap repository** — ~~to create~~ **done**: [srelens/homebrew-tap](https://github.com/srelens/homebrew-tap)
+   exists, public, default branch `main`. The name matters: Homebrew maps
+   `srelens/tap` to exactly that, and `brew install srelens/tap/srelens-tui`
+   will not resolve without it. It can stay empty — the first publish creates
+   `Formula/srelens-tui.rb` and the branch with it.
 2. **A token.** Set `HOMEBREW_TAP_TOKEN` as a repository secret — a
    fine-grained token with **Contents: read and write** on the tap repository
    only. `GITHUB_TOKEN` cannot be used: it is scoped to this repository and
