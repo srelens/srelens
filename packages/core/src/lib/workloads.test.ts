@@ -40,6 +40,19 @@ describe("listNamespaces", () => {
     expect(outcome.summaries).toEqual(summaries);
   });
 
+  it("synthesises resource rows from names returned by an older backend", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      namespaces: ["default", "kube-system"],
+    });
+
+    const outcome = await listNamespaces("kind-dev", invoke);
+
+    expect(outcome.summaries).toEqual([
+      { name: "default", phase: "Unknown", labels: {}, age: "-" },
+      { name: "kube-system", phase: "Unknown", labels: {}, age: "-" },
+    ]);
+  });
+
   it("normalises errors", async () => {
     const outcome = await listNamespaces("x", () => Promise.reject(new Error("forbidden")));
     expect(outcome.namespaces).toBeUndefined();

@@ -134,7 +134,7 @@ pub async fn stream_pod_logs_resilient<F, G>(
         } else {
             StreamOpts { tail_lines: 0, since_seconds: None, timestamps: opts.timestamps }
         };
-        let _ = stream_pod_logs(
+        let res = stream_pod_logs(
             cache.clone(),
             context.clone(),
             namespace.clone(),
@@ -145,6 +145,9 @@ pub async fn stream_pod_logs_resilient<F, G>(
             || on_status("live"),
         )
         .await;
+        if let Err(e) = res {
+            on_line(format!("[error: {}]", e));
+        }
         first = false;
         // Stream ended or errored — signal the outage, back off, then retry.
         on_status("reconnecting");

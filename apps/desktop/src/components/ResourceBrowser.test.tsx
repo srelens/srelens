@@ -705,7 +705,14 @@ describe("ResourceBrowser", () => {
     listNamespacesMock.mockResolvedValue({ namespaces: ["default"] });
     listNodesMock.mockResolvedValue({
       nodes: [
-        { name: "worker-1", status: "Ready", unschedulable: true, taints: 2, version: "v1.35.0", roles: "<none>" },
+        {
+          name: "worker-1", status: "Ready", unschedulable: true, version: "v1.35.0", roles: "<none>",
+          taints: 2,
+          taintDetails: [
+            { key: "node.kubernetes.io/memory-pressure", value: "", effect: "NoSchedule" },
+            { key: "team", value: "payments", effect: "NoExecute" },
+          ],
+        },
       ],
     });
     render(<ResourceBrowser context="kind-dev" kind="nodes" />);
@@ -713,7 +720,14 @@ describe("ResourceBrowser", () => {
     await waitFor(() => expect(screen.getByText("worker-1")).toBeDefined());
     expect(screen.getByText("Ready")).toBeDefined();
     expect(screen.getByText("SchedulingDisabled")).toBeDefined();
-    expect(screen.getByText("Tainted (2)")).toBeDefined();
+    // "(2)" until #426 put the count on every tainted node's badge, singular
+    // included, with the taints themselves on hover and the number spelled out
+    // for a screen reader.
+    expect(screen.getByText("Tainted \u00b7 2")).toBeDefined();
+    const badge = screen.getByLabelText("2 taints");
+    expect(badge.getAttribute("title")).toBe(
+      "team=payments:NoExecute\nnode.kubernetes.io/memory-pressure=:NoSchedule",
+    );
   });
 
   it("hides a node column via the column picker and remembers it", async () => {
@@ -737,7 +751,12 @@ describe("ResourceBrowser", () => {
       expect(screen.queryByRole("columnheader", { name: /Version/ })).toBeNull(),
     );
     // …and the choice is persisted.
-    expect(JSON.parse(localStorage.getItem("srelens.hiddenColumns")!)).toEqual({ nodes: ["version"] });
+    // "taints" rides along: since #426 the Taints column starts hidden, and the
+    // first toggle of ANY column on this view is what turns "no choice yet"
+    // into a stored choice — so the default it was showing is written down.
+    expect(JSON.parse(localStorage.getItem("srelens.hiddenColumns")!)).toEqual({
+      nodes: ["taints", "version"],
+    });
 
     // Remounting the nodes view keeps the column hidden.
     view.unmount();

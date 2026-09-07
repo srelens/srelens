@@ -289,6 +289,11 @@ export function toggleNextDesignTheme(): void {
 export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   { route: "/applog", name: "Application log" },
   { route: "/notes", name: "Release notes" },
+  // The full view of the one agent run this window holds — the transcript,
+  // the composer, and the 312px rail. The console dock at the bottom of the
+  // window is a second, compact renderer over the SAME run, not a screen of
+  // its own.
+  { route: "/agent", name: "Agent" },
   { route: "/resources", name: "Workloads" },
   // Not one screen: every `/k/<slug>` route, around 34 built-in kinds plus
   // every custom resource the cluster has, all sharing one screen keyed off
@@ -331,6 +336,13 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // managed kubectl, helm and krew under ~/.srelens/bin, and what the active
   // context's exec-auth needs on PATH.
   { route: "/toolbox", name: "Toolbox" },
+  // One namespace at a time: how traffic reaches a workload, from the joins
+  // the cluster can prove — an Ingress route, a Service selector, a controller
+  // owning its revisions. Listed after toolbox because it is the newest, and
+  // narrower than its name suggests: the design draws service-to-service calls
+  // and external systems too, and Kubernetes reports neither.
+  { route: "/topology", name: "Topology" },
+
   // Every cluster srelens can see at once, rather than one of them: the file
   // each context was read from, which credential it uses, and what the last
   // reachability probe said. Reached from the cluster rail's

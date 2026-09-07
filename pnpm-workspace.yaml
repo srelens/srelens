@@ -23,10 +23,12 @@ allowBuilds:
 # advisory — and afterwards check that pnpm-lock.yaml still carries an
 # `overrides:` block, because losing it is the failure mode and it is silent.
 overrides:
-  "fast-uri@>=3.0.0 <3.1.4": "^3.1.4"
+  "fast-uri@>=3.0.0 <3.1.6": "^3.1.6"
   "brace-expansion@>=2.0.0 <2.1.3": "^2.1.3"
   "brace-expansion@>=4.0.0 <5.0.8": "^5.0.8"
   "postcss@<8.5.18": "^8.5.18"
   "@hono/node-server@<2.0.5": "^2.0.5"
   "nanoid@<3.3.17": "^3.3.17"
   "js-yaml@>=4.0.0 <4.3.1": "^4.3.1"
+  "qs@>=6.14.2 <6.16.0": "^6.16.0"
+  "browserslist@<4.28.7": "^4.28.7"

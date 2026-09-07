@@ -14,7 +14,9 @@ export interface TextInputProps {
   autoFocus?: boolean;
   /** Marks the field as failing validation, in colour and to assistive tech. */
   invalid?: boolean;
+  id?: string;
   "aria-label"?: string;
+  "aria-describedby"?: string;
 }
 
 /**
@@ -39,7 +41,9 @@ export function TextInput({
   type = "text",
   autoFocus,
   invalid,
+  id,
   "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy,
 }: TextInputProps) {
   return (
     <input
@@ -53,7 +57,9 @@ export function TextInput({
       disabled={disabled}
       type={type}
       autoFocus={autoFocus}
+      id={id}
       aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
       aria-invalid={invalid ? true : undefined}
       className={cx("w-full rounded-md border px-2 py-1 text-[0.8125rem] outline-none", className)}
       style={{

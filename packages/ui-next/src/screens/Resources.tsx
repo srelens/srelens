@@ -8,6 +8,7 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
+  Button,
   ColumnPicker,
   ErrorState,
   FilterBar,
@@ -23,7 +24,7 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
-import { detailRoute, parseDetailRoute } from "../lib/detailRoute";
+import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
@@ -46,6 +47,7 @@ import {
   NoClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
+  defaultHiddenKeys,
   emptyTableCopy,
   toggleColumnVisibility,
   useResourceTabView,
@@ -167,8 +169,9 @@ function KindList({
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
   const list = useResourceList<ListRow>(name, slug, descriptor, namespace, files);
 
-  const hidden = useHiddenColumns(slug);
   const allColumns = descriptor?.columns ?? NO_COLUMNS;
+  const defaultHidden = useMemo(() => defaultHiddenKeys(allColumns), [allColumns]);
+  const hidden = useHiddenColumns(slug, defaultHidden);
   const columns = useMemo(
     // The identifier is never hidden: a table whose rows lost their name is
     // not a table any more. `ColumnPicker` pins the same key.
@@ -214,6 +217,7 @@ function KindList({
     context: name,
     kind: descriptor?.k8sKind ?? "",
     actions: descriptor?.actions ?? {},
+    group: descriptor?.group,
   });
 
   // The checkbox column's selection. Table owns the interaction (toggle,
@@ -312,7 +316,7 @@ function KindList({
   const lower = title.toLocaleLowerCase();
 
   function onToggleColumn(key: string) {
-    toggleColumnVisibility({ key, storageKey: slug, hidden, filterKey, tabId });
+    toggleColumnVisibility({ key, storageKey: slug, hidden, filterKey, tabId, defaultHidden });
   }
 
   if (!descriptor) {
@@ -480,6 +484,13 @@ function KindList({
             onToggle={onToggleColumn}
             pinnedKey={NAME_KEY}
           />
+          <Button
+            variant="secondary"
+            title={`Create a resource on ${name} from a template`}
+            onClick={() => openTab(newRoute(name), { clusterName: name })}
+          >
+            New
+          </Button>
         </>
       }
     >

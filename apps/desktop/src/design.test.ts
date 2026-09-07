@@ -57,6 +57,7 @@ describe("the list of ported screens", () => {
     expect(PORTED_SCREENS.map((s) => s.route)).toEqual([
       "/applog",
       "/notes",
+      "/agent",
       "/resources",
       "/k",
       "/events",
@@ -66,6 +67,7 @@ describe("the list of ported screens", () => {
       "/terminals",
       "/helm",
       "/toolbox",
+      "/topology",
       "/connections",
       "/connect",
       "/settings",
@@ -76,6 +78,7 @@ describe("the list of ported screens", () => {
     expect(PORTED_SCREENS.map((s) => s.name)).toEqual([
       "Application log",
       "Release notes",
+      "Agent",
       "Workloads",
       "Resource lists and details",
       "Events",
@@ -85,6 +88,7 @@ describe("the list of ported screens", () => {
       "Terminals",
       "Helm",
       "Toolbox",
+      "Topology",
       "Connections",
       "Connect a cluster",
       "Settings",

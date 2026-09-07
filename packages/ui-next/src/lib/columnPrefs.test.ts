@@ -71,3 +71,64 @@ describe("column preferences", () => {
     expect([...result.current]).toEqual([]);
   });
 });
+
+/**
+ * #426 needed a column that starts hidden — a Nodes list's taint tally, useful
+ * when you go looking for it and clutter when you are not. The record holds
+ * HIDDEN keys, so the whole difficulty is that "the reader turned the
+ * default-off column on" and "the reader has said nothing" are both an absent
+ * key, and the naive version springs the column back to hidden on relaunch.
+ */
+describe("a column that starts hidden", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    loadColumnPrefs();
+  });
+
+  it("is hidden before the reader has said anything", () => {
+    expect(hiddenColumns("nodes", ["taints"]).has("taints")).toBe(true);
+  });
+
+  it("leaves every other column of that kind alone", () => {
+    expect(hiddenColumns("nodes", ["taints"]).has("age")).toBe(false);
+  });
+
+  it("stays on once turned on — including across a reload", () => {
+    toggleColumn("nodes", "taints", undefined, ["taints"]);
+    expect(hiddenColumns("nodes", ["taints"]).has("taints")).toBe(false);
+    loadColumnPrefs();
+    expect(hiddenColumns("nodes", ["taints"]).has("taints")).toBe(false);
+  });
+
+  it("goes back off when turned off again", () => {
+    toggleColumn("nodes", "taints", undefined, ["taints"]);
+    toggleColumn("nodes", "taints", undefined, ["taints"]);
+    expect(hiddenColumns("nodes", ["taints"]).has("taints")).toBe(true);
+  });
+
+  it("does not drag another column down with it on that first toggle", () => {
+    toggleColumn("nodes", "taints", undefined, ["taints"]);
+    toggleColumn("nodes", "version", undefined, ["taints"]);
+    const hidden = hiddenColumns("nodes", ["taints"]);
+    expect(hidden.has("taints")).toBe(false);
+    expect(hidden.has("version")).toBe(true);
+  });
+
+  it("comes back to its default once the kind is reset", () => {
+    toggleColumn("nodes", "taints", undefined, ["taints"]);
+    resetColumns("nodes");
+    expect(hiddenColumns("nodes", ["taints"]).has("taints")).toBe(true);
+  });
+
+  it("is still stable per set of defaults, so a subscriber cannot tear", () => {
+    expect(hiddenColumns("nodes", ["taints"])).toBe(hiddenColumns("nodes", ["taints"]));
+    // …and asking with different defaults is a different question, not the
+    // memoised answer to the first one.
+    expect(hiddenColumns("nodes", ["taints"])).not.toBe(hiddenColumns("nodes", []));
+  });
+
+  it("changes nothing for a kind that declares no defaults", () => {
+    toggleColumn("pods", "node");
+    expect([...hiddenColumns("pods")]).toEqual(["node"]);
+  });
+});

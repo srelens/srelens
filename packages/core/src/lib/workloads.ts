@@ -7,6 +7,11 @@ export interface PodSummary {
   ready: string;
   restarts: number;
   node: string;
+  /** `creationTimestamp` (RFC 3339), for deriving a LIVE age. Prefer this over
+   *  `age`, which the backend renders once per watch event and which therefore
+   *  freezes for an object nothing is changing (#405). Absent when the object
+   *  carries no timestamp. */
+  created?: string | null;
   age: string;
   /** Container image(s) the pod runs; multiple containers are comma-joined,
    *  e.g. "acme/checkout-api:118a7e, envoyproxy/envoy:v1.30". Empty when the
@@ -78,7 +83,15 @@ export async function listNamespaces(
       "k8s.listNamespaces",
       { context },
     );
-    return { namespaces: out.namespaces, summaries: out.summaries };
+    const summaries =
+      out.summaries ??
+      out.namespaces.map((name) => ({
+        name,
+        phase: "Unknown",
+        labels: {},
+        age: "-",
+      }));
+    return { namespaces: out.namespaces, summaries };
   } catch (e) {
     return { error: String(e) };
   }

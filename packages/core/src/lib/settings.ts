@@ -179,15 +179,25 @@ export function saveKubeconfigFiles(paths: string[]): void {
 const HIDDEN_COLUMNS_KEY = "srelens.hiddenColumns";
 
 /** Column keys the user has hidden for a given table view (keyed by view id). */
-export function loadHiddenColumns(view: string): string[] {
+/**
+ * The stored hidden-column keys for a view, or `null` when the view has never
+ * been touched. The distinction is what makes a default-hidden column
+ * possible: an absent entry means "no choice made, use the column's default",
+ * while a stored empty array means "the reader turned everything on".
+ */
+export function loadHiddenColumnsEntry(view: string): string[] | null {
   try {
     const parsed = JSON.parse(stored(HIDDEN_COLUMNS_KEY) ?? "{}") as unknown;
     const map = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
     const keys = map[view];
-    return Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
+    return Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : null;
   } catch {
-    return [];
+    return null;
   }
+}
+
+export function loadHiddenColumns(view: string): string[] {
+  return loadHiddenColumnsEntry(view) ?? [];
 }
 
 /** Persist the hidden column keys for a view, merging into the per-view map. */
