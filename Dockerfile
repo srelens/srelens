@@ -40,6 +40,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
 COPY apps/desktop/src-tauri apps/desktop/src-tauri
+# apps/tui is a workspace member too, and cargo loads every member's manifest
+# even when a single package is being built -- with an explicit [[bin]] path
+# it checks that src/main.rs is really where the manifest says. Nothing here
+# builds or ships the TUI; the workspace just has to be whole, and without
+# this the server build stops at "failed to load manifest for workspace
+# member /src/apps/tui".
+COPY apps/tui apps/tui
 # rust-embed reads apps/desktop/dist at compile time; copy the built bundle in.
 COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
 RUN cargo build --release -p srelens-server --bin srelens-server
