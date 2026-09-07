@@ -690,5 +690,177 @@ mod tests {
 
         state.select_prev_lane();
         assert_eq!(state.selected_lane, 2); // Moves back to Workloads
+
+        // Test node selection within lane
+        state.select_next_node();
+        state.select_prev_node();
+        state.select_last_node();
+        state.select_first_node();
+        assert_eq!(state.selected_in_lane, 0);
+
+        // Test empty / None edge cases
+        let empty_state = TopologyViewState::new(vec![]);
+        let (conn, in_e, out_e) = empty_state.connected_path_node_ids();
+        assert!(conn.is_empty());
+        assert!(in_e.is_empty());
+        assert!(out_e.is_empty());
+
+        let mut error_state = TopologyViewState::new(vec!["test".to_string()]);
+        error_state.set_error("Connection refused".to_string());
+        assert_eq!(error_state.error, Some("Connection refused".to_string()));
+        assert!(!error_state.is_loading);
+    }
+
+    #[test]
+    fn test_render_topology_view_states_and_branches() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        // 1. Loading state
+        let loading_state = TopologyViewState::new(vec!["prod".to_string()]);
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &loading_state);
+            })
+            .unwrap();
+
+        // 2. Error state
+        let mut error_state = TopologyViewState::new(vec!["prod".to_string()]);
+        error_state.set_error("Cluster timeout".to_string());
+        terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &error_state);
+            })
+            .unwrap();
+
+        // 3. No graph
+        let mut no_graph = TopologyViewState::new(vec!["prod".to_string()]);
+        no_graph.is_loading = false;
+        terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &no_graph);
+            })
+            .unwrap();
+
+        // 4. Empty graph
+        let mut empty_graph = TopologyViewState::new(vec![]);
+        empty_graph.set_graph(TopologyGraphOut {
+            nodes: vec![],
+            edges: vec![],
+            probe: None,
+        });
+        terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &empty_graph);
+            })
+            .unwrap();
+
+        // 5. Populated graph with all health variants and replica lane
+        let mut full_state = TopologyViewState::new(vec!["prod".to_string(), "staging".to_string()]);
+        let mut graph = sample_graph();
+        // Add a ReplicaSet node to exercise the Revisions lane
+        graph.nodes.push(TopologyNode {
+            id: "ReplicaSet/prod/checkout-api-rs1".to_string(),
+            kind: "ReplicaSet".to_string(),
+            name: "checkout-api-rs1".to_string(),
+            namespace: "prod".to_string(),
+            lane: Lane::ReplicaSet,
+            detail: String::new(),
+            ready: Some(3),
+            desired: Some(3),
+            health: Health::Degraded,
+        });
+        // Add another node with Health::Failing and another with Health::Unknown
+        graph.nodes.push(TopologyNode {
+            id: "Deployment/prod/failing-worker".to_string(),
+            kind: "Deployment".to_string(),
+            name: "failing-worker".to_string(),
+            namespace: "prod".to_string(),
+            lane: Lane::Workload,
+            detail: "CrashLoopBackOff".to_string(),
+            ready: Some(0),
+            desired: Some(2),
+            health: Health::Failing,
+        });
+        graph.nodes.push(TopologyNode {
+            id: "Deployment/prod/unknown-svc".to_string(),
+            kind: "Deployment".to_string(),
+            name: "unknown-svc".to_string(),
+            namespace: "prod".to_string(),
+            lane: Lane::Workload,
+            detail: String::new(),
+            ready: None,
+            desired: None,
+            health: Health::Unknown,
+        });
+        // Add edges with Provenance::Allowed and Observed
+        graph.edges.push(TopologyEdge {
+            from: "Deployment/prod/checkout-api".to_string(),
+            to: "Deployment/prod/failing-worker".to_string(),
+            kind: EdgeKind::Calls,
+            provenance: Provenance::Allowed,
+            detail: "internal-rpc".to_string(),
+            weight: None,
+            unit: None,
+            health: Health::Degraded,
+        });
+        graph.edges.push(TopologyEdge {
+            from: "Deployment/prod/unknown-svc".to_string(),
+            to: "Deployment/prod/checkout-api".to_string(),
+            kind: EdgeKind::Calls,
+            provenance: Provenance::Observed,
+            detail: String::new(),
+            weight: None,
+            unit: None,
+            health: Health::Ok,
+        });
+        full_state.set_graph(graph);
+
+        // Render with full detail (height >= 14)
+        terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &full_state);
+            })
+            .unwrap();
+
+        // Render with small height (height < 14) to test no-detail branch
+        let small_backend = TestBackend::new(100, 10);
+        let mut small_terminal = Terminal::new(small_backend).unwrap();
+        small_terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &full_state);
+            })
+            .unwrap();
+
+        // Test scrolling inside a lane with many nodes
+        let mut scroll_state = TopologyViewState::new(vec!["prod".to_string()]);
+        let mut many_nodes_graph = TopologyGraphOut {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            probe: None,
+        };
+        for i in 0..15 {
+            many_nodes_graph.nodes.push(TopologyNode {
+                id: format!("Deployment/prod/app-{}", i),
+                kind: "Deployment".to_string(),
+                name: format!("app-{}", i),
+                namespace: "prod".to_string(),
+                lane: Lane::Workload,
+                detail: format!("{}/1 ready", i),
+                ready: Some(i),
+                desired: Some(1),
+                health: Health::Ok,
+            });
+        }
+        scroll_state.set_graph(many_nodes_graph);
+        // Select deep node to trigger scrolling logic
+        scroll_state.selected_in_lane = 10;
+        terminal
+            .draw(|f| {
+                render_topology_view(f, f.area(), &scroll_state);
+            })
+            .unwrap();
     }
 }

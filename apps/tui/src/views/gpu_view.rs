@@ -760,4 +760,137 @@ mod tests {
         assert!(content.contains("data-processing-stage-gpu-s79cj"), "Rendered output should contain full node name without truncation");
         assert!(!content.contains("data-processing-st…"));
     }
+
+    #[test]
+    fn test_gpu_view_all_branches_and_pod_navigation() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut state = GpuViewState::new();
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Loading state
+        assert!(state.is_loading);
+        terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+
+        // 2. Error state
+        state.set_error("Cannot connect to Kubelet".to_string());
+        assert_eq!(state.error.as_deref(), Some("Cannot connect to Kubelet"));
+        terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+
+        // 3. Empty nodes state
+        let empty_info = GpuClusterInfo {
+            nodes: vec![],
+            total_gpu_nodes: 0,
+            total_gpus: 0,
+            total_allocated_gpus: 0,
+            total_vram_mib: 0,
+            total_allocated_vram_mib: 0,
+            total_gpu_pods: 0,
+        };
+        state.set_info(empty_info);
+        terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+
+        // 4. Populated with diverse node states: Cordoned, NotReady, High GPU/VRAM %, No VRAM info
+        let pod1 = GpuPodItem {
+            name: "vllm-mistral-0".to_string(),
+            namespace: "prod".to_string(),
+            phase: "Running".to_string(),
+            gpu_requests: 4,
+            vram_requests_mib: 32768,
+            ready_containers: "1/1".to_string(),
+            restarts: 0,
+            age: "2d".to_string(),
+            containers: vec!["mistral".to_string()],
+        };
+        let pod2 = GpuPodItem {
+            name: "vllm-mistral-1".to_string(),
+            namespace: "prod".to_string(),
+            phase: "Pending".to_string(),
+            gpu_requests: 4,
+            vram_requests_mib: 0,
+            ready_containers: "0/1".to_string(),
+            restarts: 0,
+            age: "5m".to_string(),
+            containers: vec![],
+        };
+
+        let node_cordon = GpuNodeInfo {
+            name: "gpu-cordon-node".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: true,
+            roles: "worker".to_string(),
+            instance_type: "p3.8xlarge".to_string(),
+            gpu_model: Some("Tesla V100".to_string()),
+            gpu_driver_version: None,
+            gpu_cuda_version: None,
+            gpu_capacity: 4,
+            gpu_allocatable: 4,
+            gpu_requests: 4,
+            vram_per_gpu_mib: Some(16384),
+            vram_capacity_total_mib: Some(65536),
+            vram_requests_total_mib: 60000, // > 90% -> Red
+            pods: vec![pod1.clone(), pod2.clone()],
+        };
+
+        let node_notready = GpuNodeInfo {
+            name: "gpu-notready-node".to_string(),
+            status: "NotReady".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "custom".to_string(),
+            gpu_model: None,
+            gpu_driver_version: None,
+            gpu_cuda_version: None,
+            gpu_capacity: 2,
+            gpu_allocatable: 2,
+            gpu_requests: 1,
+            vram_per_gpu_mib: None,
+            vram_capacity_total_mib: None,
+            vram_requests_total_mib: 0,
+            pods: vec![],
+        };
+
+        let populated_info = GpuClusterInfo {
+            nodes: vec![node_cordon, node_notready],
+            total_gpu_nodes: 2,
+            total_gpus: 6,
+            total_allocated_gpus: 5,
+            total_vram_mib: 65536,
+            total_allocated_vram_mib: 60000,
+            total_gpu_pods: 2,
+        };
+
+        state.set_info(populated_info);
+
+        // Test pod selection and navigation
+        assert_eq!(state.selected_pod().unwrap().name, "vllm-mistral-0");
+        state.select_next_pod();
+        assert_eq!(state.selected_pod().unwrap().name, "vllm-mistral-1");
+        state.select_prev_pod();
+        assert_eq!(state.selected_pod().unwrap().name, "vllm-mistral-0");
+        state.select_last_pod();
+        assert_eq!(state.selected_pod().unwrap().name, "vllm-mistral-1");
+        state.select_first_pod();
+        assert_eq!(state.selected_pod().unwrap().name, "vllm-mistral-0");
+        state.set_pod_by_index(1);
+        assert_eq!(state.selected_pod().unwrap().name, "vllm-mistral-1");
+
+        // Test node navigation
+        state.select_first_node();
+        state.select_last_node();
+        assert_eq!(state.selected_node().unwrap().name, "gpu-notready-node");
+        state.set_node_by_index(0);
+        assert_eq!(state.selected_node().unwrap().name, "gpu-cordon-node");
+
+        // Focus Pods pane and render
+        state.focused_pane = GpuPane::Pods;
+        terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+
+        // Render with narrow width to exercise responsive sizing (< 90 width)
+        let narrow_backend = TestBackend::new(80, 25);
+        let mut narrow_terminal = Terminal::new(narrow_backend).unwrap();
+        narrow_terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+    }
 }

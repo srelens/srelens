@@ -548,23 +548,7 @@ mod tests {
         assert!(non_zeros_1h < non_zeros_10m, "1h window should compress data even more");
         assert!(non_zeros_1h <= 6);
 
-        // Samples falling completely outside the window still return width elements
-        let old_samples = vec![
-            MetricSample {
-                timestamp_epoch_ms: 1000,
-                cpu_millicores: 120,
-                memory_mib: 250,
-            },
-            MetricSample {
-                timestamp_epoch_ms: 2000,
-                cpu_millicores: 150,
-                memory_mib: 300,
-            },
-        ];
-        // Window from 2000 to 2000 with window_ms = 500 means start_time is 1500, but with window_samples empty:
-        // If we have samples, but filter yields empty (e.g. timestamps in future or filtered out)
-        // With now = 2000, start_time = 2000 (window_ms=0), window_samples includes sample at 2000.
-        // Let's test window_samples.is_empty() with a mock where filter excludes:
+        // Samples windowing test:
         let out_of_window = vec![MetricSample {
             timestamp_epoch_ms: 5000,
             cpu_millicores: 120,

@@ -702,4 +702,147 @@ mod tests {
         assert!(rendered.contains("Ready"));
         assert!(rendered.contains("3.20c") || rendered.contains("3200m"));
     }
+
+    #[test]
+    fn test_top_pod_rendering_and_full_navigation() {
+        let mut state = TopViewState::new(TopTab::Pods);
+        assert_eq!(state.active_tab, TopTab::Pods);
+
+        // 1. Empty state
+        let backend = TestBackend::new(120, 25);
+        let mut terminal = Terminal::new(backend).unwrap();
+        state.set_data(vec![], vec![]);
+        terminal.draw(|f| render_top_view(f, f.area(), &state)).unwrap();
+
+        // Switch to Nodes empty state
+        state.toggle_tab();
+        assert_eq!(state.active_tab, TopTab::Nodes);
+        terminal.draw(|f| render_top_view(f, f.area(), &state)).unwrap();
+        state.toggle_tab();
+
+        // 2. Populated Pods with port forwards and high % thresholds
+        let pods = vec![
+            TopPodRow {
+                namespace: "default".to_string(),
+                name: "api-gw".to_string(),
+                cpu_millicores: 1500,
+                cpu_req_millicores: 1000,
+                cpu_lim_millicores: 2000,
+                mem_mib: 2500,
+                mem_req_mib: 2048,
+                mem_lim_mib: 2048,
+            },
+            TopPodRow {
+                namespace: "kube-system".to_string(),
+                name: "coredns".to_string(),
+                cpu_millicores: 50,
+                cpu_req_millicores: 100,
+                cpu_lim_millicores: 0,
+                mem_mib: 70,
+                mem_req_mib: 100,
+                mem_lim_mib: 0,
+            },
+            TopPodRow {
+                namespace: "monitoring".to_string(),
+                name: "prometheus-0".to_string(),
+                cpu_millicores: 950,
+                cpu_req_millicores: 1000,
+                cpu_lim_millicores: 1000,
+                mem_mib: 4000,
+                mem_req_mib: 4000,
+                mem_lim_mib: 4000,
+            },
+        ];
+
+        let nodes = vec![
+            TopNodeRow {
+                name: "node-1".to_string(),
+                status: "Ready".to_string(),
+                cpu_millicores: 3500,
+                cpu_alloc_millicores: 4000,
+                mem_mib: 15000,
+                mem_alloc_mib: 16000,
+            },
+            TopNodeRow {
+                name: "node-2".to_string(),
+                status: "NotReady".to_string(),
+                cpu_millicores: 100,
+                cpu_alloc_millicores: 4000,
+                mem_mib: 1000,
+                mem_alloc_mib: 16000,
+            },
+        ];
+
+        state.set_data(pods, nodes);
+        // Active port forwards on api-gw with both same port and mapped port
+        state.active_port_forwards.insert(
+            ("default".to_string(), "api-gw".to_string()),
+            vec![(8080, 8080, "http".to_string()), (9090, 80, "web".to_string())],
+        );
+
+        // Render populated Pods table
+        terminal.draw(|f| render_top_view(f, f.area(), &state)).unwrap();
+
+        // Check selected pod
+        assert!(state.selected_pod().is_some());
+
+        // Test navigation
+        state.select_next();
+        state.select_prev();
+        state.select_last();
+        state.select_first();
+        state.scroll_page_down(2);
+        state.scroll_page_up(2);
+
+        // Test filter
+        state.filter = "coredns".to_string();
+        assert_eq!(state.filtered_pods().len(), 1);
+        assert_eq!(state.filtered_pods()[0].name, "coredns");
+        state.filter.clear();
+
+        // Test sort variants
+        state.set_sort_by(TopSortBy::Memory);
+        state.set_sort_by(TopSortBy::Cpu);
+
+        // Switch to Nodes tab and test sorting / navigation
+        state.set_tab(TopTab::Nodes);
+        assert_eq!(state.active_tab, TopTab::Nodes);
+        assert!(state.selected_node().is_some());
+        state.set_sort_by(TopSortBy::Memory);
+        state.set_sort_by(TopSortBy::Cpu);
+
+        // Render populated Nodes table (exercises NotReady status style)
+        terminal.draw(|f| render_top_view(f, f.area(), &state)).unwrap();
+
+        // Test format_pct_span edge cases
+        let _ = format_pct_span(None);
+        let _ = format_pct_span(Some(50.0));
+        let _ = format_pct_span(Some(85.0));
+        let _ = format_pct_span(Some(95.0));
+
+        // Test extract_pod_resources
+        let mock_pod_json = serde_json::json!({
+            "cpuReqMillicores": 250,
+            "cpuLimMillicores": 500,
+            "memReqMiB": 128,
+            "memLimMiB": 256,
+        });
+        let res = TopViewState::extract_pod_resources(&mock_pod_json);
+        assert_eq!(res, (250, 500, 128, 256));
+
+        let mock_pod_spec = serde_json::json!({
+            "spec": {
+                "containers": [
+                    {
+                        "resources": {
+                            "requests": { "cpu": "100m", "memory": "64Mi" },
+                            "limits": { "cpu": "200m", "memory": "128Mi" }
+                        }
+                    }
+                ]
+            }
+        });
+        let res_spec = TopViewState::extract_pod_resources(&mock_pod_spec);
+        assert_eq!(res_spec, (100, 200, 64, 128));
+    }
 }
