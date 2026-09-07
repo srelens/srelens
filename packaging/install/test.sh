@@ -56,6 +56,15 @@ check "an unknown flag is refused, not ignored" "unknown option" "$out" "$rc" 1
 out="$(sh "$script" --version 2>&1)" && rc=0 || rc=$?
 check "--version without a value is refused" "needs a value" "$out" "$rc" 1
 
+# `--version="$UNSET"` reaches the script as `--version=`. Accepting that
+# as "no version given" would silently install the latest release instead
+# of the pin the caller asked for.
+out="$(sh "$script" --version= 2>&1)" && rc=0 || rc=$?
+check "an empty --version= is refused too" "needs a value" "$out" "$rc" 1
+
+out="$(sh "$script" --install-dir= 2>&1)" && rc=0 || rc=$?
+check "an empty --install-dir= is refused too" "needs a value" "$out" "$rc" 1
+
 echo "platform"
 
 mkdir -p "$work/fake"
@@ -168,6 +177,40 @@ if [ -z "$(find "$dest" -name '.srelens-tui.install.*' 2>/dev/null)" ]; then
     ok "no staging file is left behind"
 else
     no "a staging file was left in $dest"
+fi
+
+echo "through a pipe"
+
+# How the documented one-liner actually runs. Options cannot follow a bare
+# `sh` -- it reads them as its own -- so the docs say `sh -s --`, and this
+# proves that form reaches the script's parser.
+dest="$work/piped"
+out="$(cat "$script" | sh -s -- --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "options survive sh -s --" "Installed: $dest/srelens-tui" "$out" "$rc" 0
+
+echo "staging file"
+
+# The staging name must not be derivable from the pid: installed as root
+# into a directory another user can write to, a predictable name can be
+# pre-created as a symlink, and cp writes through it. mktemp names cannot
+# be aimed at, and a symlink sitting in the directory is left alone.
+dest="$work/staging"
+mkdir -p "$dest"
+echo "do not touch me" > "$work/canary"
+ln -sf "$work/canary" "$dest/.srelens-tui.install.99999"
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "installs alongside a planted symlink" "Installed:" "$out" "$rc" 0
+if [ "$(cat "$work/canary")" = "do not touch me" ]; then
+    ok "a planted symlink is not written through"
+else
+    no "the canary was overwritten"
+fi
+# The pattern is the literal source line, so single quotes are the point.
+# shellcheck disable=SC2016
+if grep -q 'mktemp "$dir/.$BIN.install.XXXXXX"' "$script"; then
+    ok "the staging file is created by mktemp, not from the pid"
+else
+    no "the staging file is no longer created with mktemp"
 fi
 
 echo "hashing tool"

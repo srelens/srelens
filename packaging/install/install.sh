@@ -29,6 +29,11 @@ main() {
                 ;;
             --version=*)
                 version="${1#--version=}"
+                # An unset variable expanded into --version="$V" arrives
+                # here as an empty value. Treating that as "no --version"
+                # would silently install the latest release instead of the
+                # pin the caller asked for.
+                [ -n "$version" ] || die "--version needs a value, e.g. --version=0.9.0"
                 shift
                 ;;
             --install-dir)
@@ -38,6 +43,7 @@ main() {
                 ;;
             --install-dir=*)
                 install_dir="${1#--install-dir=}"
+                [ -n "$install_dir" ] || die "--install-dir needs a value"
                 shift
                 ;;
             -h | --help)
@@ -253,8 +259,18 @@ install_binary() {
     [ -w "$dir" ] ||
         die "$dir is not writable. Re-run with --install-dir <somewhere you own>, or with sudo."
 
-    staged="$dir/.$BIN.install.$$"
-    cp "$src" "$staged" || die "cannot write to $dir"
+    # mktemp, not a name built from the pid. Installing as root into a directory
+    # someone else can write to, the old `.srelens-tui.install.<pid>` was
+    # predictable enough to pre-create as a symlink -- and `cp` follows a
+    # destination symlink, so the copy would have written through it as root,
+    # to a file of the attacker's choosing. mktemp creates the file itself,
+    # exclusively and 0600, under a name nobody can aim at.
+    staged="$(mktemp "$dir/.$BIN.install.XXXXXX")" ||
+        die "cannot create a staging file in $dir"
+    cp "$src" "$staged" || {
+        rm -f "$staged"
+        die "cannot write to $dir"
+    }
     chmod 0755 "$staged"
     mv -f "$staged" "$dest" || {
         rm -f "$staged"

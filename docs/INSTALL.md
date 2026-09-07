@@ -93,7 +93,16 @@ It never invokes `sudo` on your behalf — run the whole line under `sudo` if
 you want it system-wide from an unprivileged shell.
 
 `--version <x.y.z>` installs a specific release and `--install-dir <path>`
-puts it somewhere else. Read it first if you would rather not pipe a script
+puts it somewhere else. Options cannot be appended to the line above:
+everything after `sh` is read by the shell, not by the script, so `sh` would
+reject `--version` as its own flag. Pass them after `-s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh \
+  | sh -s -- --version 0.9.0 --install-dir ~/bin
+```
+
+Read it first if you would rather not pipe a script
 from the internet into a shell; it is short, and
 [`packaging/install/install.sh`](../packaging/install/install.sh) is the file
 that URL serves.
