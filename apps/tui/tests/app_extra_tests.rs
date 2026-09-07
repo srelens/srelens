@@ -1448,18 +1448,22 @@ async fn cordoning_and_uncordoning_a_node_patches_it_and_reports_which_way_it_we
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     assert_eq!(toast(&app), "Cordoning node 'gpu-1'...");
     assert_eq!(
         action_result(&mut rx, "cordon_node:gpu-1").await,
-        Ok("Cordoned node 'gpu-1'".to_string())
+        Ok("✓ Cordoned node 'gpu-1'".to_string())
     );
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", true, false));
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     assert_eq!(toast(&app), "Uncordoning node 'gpu-1'...");
     assert_eq!(
         action_result(&mut rx, "cordon_node:gpu-1").await,
-        Ok("Uncordoned node 'gpu-1'".to_string())
+        Ok("✓ Uncordoned node 'gpu-1'".to_string())
     );
 }
 
@@ -1470,6 +1474,8 @@ async fn a_cordon_the_apiserver_rejects_is_reported_as_an_error() {
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     let err = action_result(&mut rx, "cordon_node:gpu-1")
         .await
         .expect_err("a 409 fails the patch");
@@ -1785,6 +1791,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
             revision: 3,
             status: "deployed".into(),
             chart: "nginx-15.0.0".into(),
+            chart_version: "15.0.0".into(),
             app_version: "1.25".into(),
             updated: "2026-01-01".into(),
         }]);
@@ -1809,9 +1816,9 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.active_view = ActiveView::Helm(helm());
     app.handle_key_event(common::ch('v')).await;
     match &app.active_view {
-        ActiveView::Yaml(y) => {
-            assert_eq!(y.resource_kind, "HelmValues");
-            assert_eq!(y.resource_name, "nginx");
+        ActiveView::HelmDetail(d) => {
+            assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::ValuesDiff);
+            assert_eq!(d.release_name, "nginx");
         }
         _ => panic!("expected the Helm values view"),
     }
@@ -1819,7 +1826,10 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.active_view = ActiveView::Helm(helm());
     app.handle_key_event(common::ch('y')).await;
     match &app.active_view {
-        ActiveView::Yaml(y) => assert_eq!(y.resource_kind, "HelmManifest"),
+        ActiveView::HelmDetail(d) => {
+            assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Manifest);
+            assert_eq!(d.release_name, "nginx");
+        }
         _ => panic!("expected the Helm manifest view"),
     }
 }

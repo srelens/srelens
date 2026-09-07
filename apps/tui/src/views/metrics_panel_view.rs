@@ -27,6 +27,15 @@ impl MetricsTimeRange {
         }
     }
 
+    pub fn half_label(&self) -> &'static str {
+        match self {
+            Self::FiveMin => "2.5m",
+            Self::TenMin => "5m",
+            Self::ThirtyMin => "15m",
+            Self::OneHour => "30m",
+        }
+    }
+
     pub fn window_ms(&self) -> u64 {
         match self {
             Self::FiveMin => 5 * 60 * 1000,
@@ -44,6 +53,15 @@ impl MetricsTimeRange {
             Self::OneHour => Self::FiveMin,
         }
     }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::FiveMin => Self::OneHour,
+            Self::TenMin => Self::FiveMin,
+            Self::ThirtyMin => Self::TenMin,
+            Self::OneHour => Self::ThirtyMin,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +71,7 @@ pub struct MetricsPanelState {
     pub namespace: Option<String>,
     pub range: MetricsTimeRange,
     pub samples: Vec<MetricSample>,
+    pub range_button_rects: std::sync::Arc<std::sync::Mutex<Vec<(Rect, MetricsTimeRange)>>>,
 }
 
 impl MetricsPanelState {
@@ -63,6 +82,7 @@ impl MetricsPanelState {
             namespace,
             range: MetricsTimeRange::FiveMin,
             samples,
+            range_button_rects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -70,9 +90,90 @@ impl MetricsPanelState {
         self.range = self.range.next();
     }
 
+    pub fn cycle_time_range_prev(&mut self) {
+        self.range = self.range.prev();
+    }
+
     pub fn update_samples(&mut self, samples: &[MetricSample]) {
         self.samples = samples.to_vec();
     }
+}
+
+/// Downsamples and scales recorded samples into `width` discrete time buckets spanning `window_ms`.
+/// Each column represents a bucket across the selected time range ending at `now`.
+pub fn bucket_samples(
+    samples: &[MetricSample],
+    window_ms: u64,
+    width: usize,
+) -> (Vec<u64>, Vec<u64>) {
+    if width == 0 || samples.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let now = samples.last().map(|s| s.timestamp_epoch_ms).unwrap_or(0);
+    let start_time = now.saturating_sub(window_ms);
+
+    // Filter samples within the window
+    let window_samples: Vec<&MetricSample> = samples
+        .iter()
+        .filter(|s| s.timestamp_epoch_ms >= start_time && s.timestamp_epoch_ms <= now)
+        .collect();
+
+    if window_samples.is_empty() {
+        let cpu = samples.last().map(|s| s.cpu_millicores).unwrap_or(0);
+        let mem = samples.last().map(|s| s.memory_mib).unwrap_or(0);
+        return (vec![cpu], vec![mem]);
+    }
+
+    // Each column i in 0..width represents a time slice of bucket_duration_ms
+    let mut buckets: Vec<(u64, u64, usize)> = vec![(0, 0, 0); width];
+
+    for s in &window_samples {
+        let offset = s.timestamp_epoch_ms.saturating_sub(start_time);
+        let col = if window_ms > 0 {
+            let c = (offset as u128 * width as u128 / window_ms as u128) as usize;
+            c.min(width.saturating_sub(1))
+        } else {
+            width.saturating_sub(1)
+        };
+        buckets[col].0 += s.cpu_millicores;
+        buckets[col].1 += s.memory_mib;
+        buckets[col].2 += 1;
+    }
+
+    // Earliest recorded sample offset determines where data starts in the window
+    let earliest_offset = window_samples.first().unwrap().timestamp_epoch_ms.saturating_sub(start_time);
+    let earliest_col = if window_ms > 0 {
+        ((earliest_offset as u128 * width as u128 / window_ms as u128) as usize).min(width.saturating_sub(1))
+    } else {
+        0
+    };
+
+    let mut cpu_data = Vec::with_capacity(width);
+    let mut mem_data = Vec::with_capacity(width);
+    let mut last_cpu = 0;
+    let mut last_mem = 0;
+
+    for (col_idx, (sum_c, sum_m, count)) in buckets.into_iter().enumerate() {
+        if col_idx < earliest_col {
+            // Before earliest sample in this window: empty timeline
+            cpu_data.push(0);
+            mem_data.push(0);
+        } else if count > 0 {
+            let avg_c = sum_c / count as u64;
+            let avg_m = sum_m / count as u64;
+            last_cpu = avg_c;
+            last_mem = avg_m;
+            cpu_data.push(avg_c);
+            mem_data.push(avg_m);
+        } else {
+            // Sample gap: carry forward last known value
+            cpu_data.push(last_cpu);
+            mem_data.push(last_mem);
+        }
+    }
+
+    (cpu_data, mem_data)
 }
 
 /// Renders the interactive Metrics Panel modal overlay with real-time Sparklines.
@@ -148,6 +249,9 @@ pub fn render_metrics_panel_modal(
         Span::styled("Time Range: ", Theme::header_label()),
     ];
 
+    let mut btn_rects = Vec::new();
+    let mut current_btn_x = body_chunks[0].x + 12;
+
     for (idx, r) in ranges.iter().enumerate() {
         let is_selected = *r == state.range;
         let style = if is_selected {
@@ -158,8 +262,25 @@ pub fn render_metrics_panel_modal(
         } else {
             Style::default().fg(Theme::DIM)
         };
-        range_spans.push(Span::styled(format!(" [{}: {}] ", idx + 1, r.label()), style));
+        let label_str = format!(" [{}: {}] ", idx + 1, r.label());
+        let btn_w = label_str.len() as u16;
+        btn_rects.push((
+            Rect {
+                x: current_btn_x,
+                y: body_chunks[0].y,
+                width: btn_w,
+                height: 1,
+            },
+            *r,
+        ));
+        current_btn_x += btn_w + 1;
+
+        range_spans.push(Span::styled(label_str, style));
         range_spans.push(Span::raw(" "));
+    }
+
+    if let Ok(mut lock) = state.range_button_rects.lock() {
+        *lock = btn_rects;
     }
 
     range_spans.push(Span::styled(
@@ -182,7 +303,7 @@ pub fn render_metrics_panel_modal(
         return;
     }
 
-    // Filter samples within window
+    // Filter samples within window for metrics stats
     let now = samples.last().map(|s| s.timestamp_epoch_ms).unwrap_or(0);
     let window_ms = state.range.window_ms();
     let window_samples: Vec<&MetricSample> = samples
@@ -196,31 +317,28 @@ pub fn render_metrics_panel_modal(
         window_samples
     };
 
-    let cpu_data: Vec<u64> = active_samples.iter().map(|s| s.cpu_millicores).collect();
-    let mem_data: Vec<u64> = active_samples.iter().map(|s| s.memory_mib).collect();
-
-    let cur_cpu = cpu_data.last().copied().unwrap_or(0);
-    let min_cpu = cpu_data.iter().copied().min().unwrap_or(0);
-    let max_cpu = cpu_data.iter().copied().max().unwrap_or(0);
-    let avg_cpu = if !cpu_data.is_empty() {
-        cpu_data.iter().sum::<u64>() / cpu_data.len() as u64
+    let cur_cpu = samples.last().map(|s| s.cpu_millicores).unwrap_or(0);
+    let min_cpu = active_samples.iter().map(|s| s.cpu_millicores).min().unwrap_or(0);
+    let max_cpu = active_samples.iter().map(|s| s.cpu_millicores).max().unwrap_or(0);
+    let avg_cpu = if !active_samples.is_empty() {
+        active_samples.iter().map(|s| s.cpu_millicores).sum::<u64>() / active_samples.len() as u64
     } else {
         0
     };
 
-    let cur_mem = mem_data.last().copied().unwrap_or(0);
-    let min_mem = mem_data.iter().copied().min().unwrap_or(0);
-    let max_mem = mem_data.iter().copied().max().unwrap_or(0);
-    let avg_mem = if !mem_data.is_empty() {
-        mem_data.iter().sum::<u64>() / mem_data.len() as u64
+    let cur_mem = samples.last().map(|s| s.memory_mib).unwrap_or(0);
+    let min_mem = active_samples.iter().map(|s| s.memory_mib).min().unwrap_or(0);
+    let max_mem = active_samples.iter().map(|s| s.memory_mib).max().unwrap_or(0);
+    let avg_mem = if !active_samples.is_empty() {
+        active_samples.iter().map(|s| s.memory_mib).sum::<u64>() / active_samples.len() as u64
     } else {
         0
     };
 
     // 1. CPU Sparkline Box
     let cpu_title = format!(
-        " CPU Usage: {}m  (min: {}m, avg: {}m, peak: {}m) ",
-        cur_cpu, min_cpu, avg_cpu, max_cpu
+        " CPU Usage: {}m  ({} min: {}m, avg: {}m, peak: {}m) ",
+        cur_cpu, state.range.label(), min_cpu, avg_cpu, max_cpu
     );
     let cpu_block = Block::default()
         .borders(Borders::ALL)
@@ -230,16 +348,37 @@ pub fn render_metrics_panel_modal(
     let cpu_inner = cpu_block.inner(body_chunks[1]);
     f.render_widget(cpu_block, body_chunks[1]);
 
+    let cpu_splits = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+        ])
+        .split(cpu_inner);
+
+    let (cpu_data, mem_data) = bucket_samples(samples, window_ms, cpu_splits[0].width as usize);
+
     let cpu_sparkline = Sparkline::default()
         .data(&cpu_data)
         .style(Style::default().fg(Theme::CYAN))
         .max(max_cpu.max(10));
-    f.render_widget(cpu_sparkline, cpu_inner);
+    f.render_widget(cpu_sparkline, cpu_splits[0]);
+
+    let axis_width = (cpu_splits[1].width as usize).saturating_sub(12);
+    let cpu_axis = Line::from(vec![
+        Span::styled(format!(" -{}", state.range.label()), Style::default().fg(Theme::DIM)),
+        Span::styled(
+            format!("{:^width$}", format!("-{}", state.range.half_label()), width = axis_width),
+            Style::default().fg(Theme::DIM),
+        ),
+        Span::styled("now ", Style::default().fg(Theme::CYAN)),
+    ]);
+    f.render_widget(Paragraph::new(cpu_axis), cpu_splits[1]);
 
     // 2. Memory Sparkline Box
     let mem_title = format!(
-        " Memory Usage: {} MiB  (min: {} MiB, avg: {} MiB, peak: {} MiB) ",
-        cur_mem, min_mem, avg_mem, max_mem
+        " Memory Usage: {} MiB  ({} min: {} MiB, avg: {} MiB, peak: {} MiB) ",
+        cur_mem, state.range.label(), min_mem, avg_mem, max_mem
     );
     let mem_block = Block::default()
         .borders(Borders::ALL)
@@ -249,19 +388,37 @@ pub fn render_metrics_panel_modal(
     let mem_inner = mem_block.inner(body_chunks[2]);
     f.render_widget(mem_block, body_chunks[2]);
 
+    let mem_splits = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+        ])
+        .split(mem_inner);
+
     let mem_sparkline = Sparkline::default()
         .data(&mem_data)
         .style(Style::default().fg(Color::Rgb(168, 85, 247)))
         .max(max_mem.max(10));
-    f.render_widget(mem_sparkline, mem_inner);
+    f.render_widget(mem_sparkline, mem_splits[0]);
+
+    let mem_axis = Line::from(vec![
+        Span::styled(format!(" -{}", state.range.label()), Style::default().fg(Theme::DIM)),
+        Span::styled(
+            format!("{:^width$}", format!("-{}", state.range.half_label()), width = axis_width),
+            Style::default().fg(Theme::DIM),
+        ),
+        Span::styled("now ", Style::default().fg(Color::Rgb(168, 85, 247))),
+    ]);
+    f.render_widget(Paragraph::new(mem_axis), mem_splits[1]);
 
     // 3. Footer Key Hints
     let footer_hints = Line::from(vec![
-        Span::styled("<Tab/1-4>", Theme::header_label()),
+        Span::styled("<Tab/1-4/←/→>", Theme::header_label()),
         Span::raw(" Switch Range  "),
         Span::styled("<r>", Theme::header_label()),
         Span::raw(" Refresh  "),
-        Span::styled("<Esc>", Theme::header_label()),
+        Span::styled("<Esc/q>", Theme::header_label()),
         Span::raw(" Close"),
     ]);
     f.render_widget(Paragraph::new(footer_hints).alignment(Alignment::Center), body_chunks[3]);
@@ -320,5 +477,75 @@ mod tests {
 
         panel.cycle_time_range();
         assert_eq!(panel.range, MetricsTimeRange::TenMin);
+    }
+
+    #[test]
+    fn test_render_modal_50_samples() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut samples = Vec::new();
+        for i in 0..50 {
+            samples.push(MetricSample {
+                timestamp_epoch_ms: 10000 + i * 4000,
+                cpu_millicores: 579,
+                memory_mib: 14787,
+            });
+        }
+        let panel = MetricsPanelState::new("Node".to_string(), "test-node".to_string(), None, samples);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_metrics_panel_modal(f, f.area(), &panel)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(content.contains("Live Metrics Timeline"));
+        assert!(content.contains("-5m"));
+        assert!(content.contains("-2.5m"));
+        assert!(content.contains("now"));
+        assert!(content.contains("5m min: 579m"));
+    }
+
+    #[test]
+    fn test_bucket_samples_rescaling_with_range_change() {
+        let mut samples = Vec::new();
+        let base_time: u64 = 1_700_000_000_000;
+        // 50 samples spaced 4s apart = 196s duration ending at base_time + 196,000
+        for i in 0..50 {
+            samples.push(MetricSample {
+                timestamp_epoch_ms: base_time + i * 4000,
+                cpu_millicores: 500 + i * 10,
+                memory_mib: 1000 + i * 20,
+            });
+        }
+
+        // Window 5m (300,000 ms), width = 75
+        let (cpu_5m, _) = bucket_samples(&samples, 5 * 60 * 1000, 75);
+        assert_eq!(cpu_5m.len(), 75);
+        let non_zeros_5m = cpu_5m.iter().filter(|&&v| v > 0).count();
+        assert!(non_zeros_5m >= 45, "5m window should contain most samples across 75 width");
+
+        // Window 10m (600,000 ms), width = 75
+        let (cpu_10m, _) = bucket_samples(&samples, 10 * 60 * 1000, 75);
+        assert_eq!(cpu_10m.len(), 75);
+        let non_zeros_10m = cpu_10m.iter().filter(|&&v| v > 0).count();
+        assert!(non_zeros_10m < non_zeros_5m, "10m window should compress timeline compared to 5m");
+        assert!(non_zeros_10m >= 20 && non_zeros_10m <= 30);
+
+        // Window 1h (3,600,000 ms), width = 75
+        let (cpu_1h, _) = bucket_samples(&samples, 60 * 60 * 1000, 75);
+        let non_zeros_1h = cpu_1h.iter().filter(|&&v| v > 0).count();
+        assert!(non_zeros_1h < non_zeros_10m, "1h window should compress data even more");
+        assert!(non_zeros_1h <= 6);
     }
 }

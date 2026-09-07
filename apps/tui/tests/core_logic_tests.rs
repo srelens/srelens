@@ -3,7 +3,6 @@
 //! bridge driven against an in-process fake OpenAI-compatible endpoint on
 //! loopback (no real provider, no agent subprocess).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

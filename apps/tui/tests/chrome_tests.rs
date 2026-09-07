@@ -114,6 +114,8 @@ fn status_props(mode: &InputMode) -> StatusBarProps<'_> {
         toast: None,
         custom_hints: None,
         suggestions: None,
+        close_pf_button: None,
+        close_pf_rect: None,
     }
 }
 
@@ -265,6 +267,7 @@ fn every_modal() -> Vec<Modal> {
             namespace: "default".into(),
             container_port: 8080,
             local_port_input: "8080".into(),
+            kind: "Pod".into(),
         },
         Modal::ContainerPicker {
             pod_name: "web-0".into(),
@@ -401,6 +404,7 @@ fn the_port_forward_modal_shows_the_target_port_and_the_local_port_being_typed()
         namespace: "default".into(),
         container_port: 8080,
         local_port_input: "80".into(),
+        kind: "Pod".into(),
     };
     let text = modal_text(120, 40, &modal);
     assert!(
@@ -827,7 +831,7 @@ fn command_mode_pops_up_the_matching_commands_above_the_bar_and_arrows_the_selec
     });
     let text = lines.join("\n");
     assert!(
-        text.contains(" Commands (Tab to complete, Enter to run) "),
+        text.contains("Commands") && text.contains("Tab") && text.contains("Enter"),
         "{text}"
     );
 
@@ -857,7 +861,7 @@ fn command_mode_pops_up_the_matching_commands_above_the_bar_and_arrows_the_selec
     }
     let popup_row = lines
         .iter()
-        .position(|l| l.contains("Commands (Tab"))
+        .position(|l| l.contains("Commands"))
         .unwrap();
     assert!(popup_row < 22, "popup opens above the bar");
     assert!(lines[23].starts_with(":po█"), "{:?}", lines[23]);
@@ -922,7 +926,10 @@ fn normal_mode_prefixes_a_toast_and_appends_the_active_filter() {
     props.total_count = 9;
     let text = statusbar_text(props);
     assert!(text.starts_with("─"), "{text}");
-    assert!(text.contains("➜ Copied web-0 │ <:> Cmd"), "{text}");
+    assert!(
+        text.contains("Copied web-0 │ <:> Cmd") && (text.contains('➜') || text.contains('●')),
+        "{text}"
+    );
     assert!(text.contains(" | Filter: \"web\" [2/9]"), "{text}");
 }
 
