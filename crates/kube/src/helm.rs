@@ -260,7 +260,11 @@ pub async fn fetch_helm_release_detail(
         ));
     }
     // Newest revision first.
-    revisions.sort_by_key(|v| -v.get("version").and_then(Value::as_i64).unwrap_or(0));
+    revisions.sort_by(|a, b| {
+        let ver_a = a.get("version").and_then(Value::as_i64).unwrap_or(0);
+        let ver_b = b.get("version").and_then(Value::as_i64).unwrap_or(0);
+        ver_b.cmp(&ver_a)
+    });
     let history = revisions
         .iter()
         .map(|v| HelmRevision {

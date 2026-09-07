@@ -2207,9 +2207,9 @@ fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
     );
     assert_eq!(fg_of(&buf, y0 as u16, "Running"), Theme::status_ok().fg);
     let (y1, r1) = row_containing(&rows, "✔ web-1").unwrap();
-    // STATUS is a fixed 14-column cell, so the 16-char phase is clipped.
+    // STATUS column is dynamically sized to the longest status, so CrashLoopBackOff is unclipped.
     assert!(
-        r1.contains("CrashLoopBackO") && r1.contains("12") && r1.contains("0/1"),
+        r1.contains("CrashLoopBackOff") && r1.contains("12") && r1.contains("0/1"),
         "{r1}"
     );
     assert_eq!(

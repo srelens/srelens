@@ -2,12 +2,16 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{
+        canvas::{Canvas, Line as CanvasLine},
+        Block, Borders, Gauge, Paragraph,
+    },
     Frame,
 };
 
 pub use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 use crate::theme::Theme;
+use crate::views::metrics_panel_view::{compute_y_bounds, format_axis_val};
 
 #[derive(Debug, Clone)]
 pub struct NodeInspectorState {
@@ -145,7 +149,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // Layout hierarchy:
     // 1. Header Card (height: 4)
     // 2. Resource & GPU Allocation Gauges (height: 4)
-    // 3. Live Metrics Timeline (Sparklines for CPU & Memory) (height: 4 if height >= 26)
+    // 3. Live Metrics Timeline (Canvas line charts for CPU & Memory) (height: 4 if height >= 26)
     // 4. Conditions & Taints Strip (height: 3)
     // 5. Scheduled Pods Table (min: 6)
     // 6. Footer Key Hints (height: 1)
@@ -157,7 +161,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
         .constraints([
             Constraint::Length(4),                 // Header
             Constraint::Length(4),                 // Gauges
-            Constraint::Length(sparkline_height),  // Live Sparklines
+            Constraint::Length(sparkline_height),  // Live Metrics Timeline
             Constraint::Length(3),                 // Conditions & Taints
             Constraint::Min(6),                    // Pods table
             Constraint::Length(1),                 // Footer
@@ -170,7 +174,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // --- 2. Gauges Area ---
     render_gauges_card(f, chunks[1], d);
 
-    // --- 3. Live Sparklines Timeline ---
+    // --- 3. Live Metrics Timeline ---
     if show_sparklines {
         render_metrics_timeline_card(f, chunks[2], state, d);
     }
@@ -194,9 +198,11 @@ fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspector
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // 1. CPU Sparkline
+    // 1. CPU Canvas Line Chart
     let cur_cpu = state.cpu_history.last().copied().unwrap_or(d.cpu_requests_millicores.max(0) as u64);
+    let min_cpu = state.cpu_history.iter().copied().min().unwrap_or(cur_cpu);
     let peak_cpu = state.cpu_history.iter().copied().max().unwrap_or(cur_cpu);
+
     let cpu_title = format!(" 📈 CPU Usage Trend [cur: {}m | peak: {}m | alloc: {}m] ", cur_cpu, peak_cpu, d.cpu_allocatable_millicores);
     let cpu_block = Block::default()
         .borders(Borders::ALL)
@@ -209,16 +215,87 @@ fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspector
         let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
         f.render_widget(p, cpu_inner);
     } else {
-        let sparkline = ratatui::widgets::Sparkline::default()
-            .data(&state.cpu_history)
-            .style(Style::default().fg(Theme::CYAN))
-            .max(peak_cpu.max(10));
-        f.render_widget(sparkline, cpu_inner);
+        let splits = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(8), // Y-axis labels & tick marks
+                Constraint::Min(10),   // Canvas line plot
+            ])
+            .split(cpu_inner);
+
+        let (cpu_y_floor, cpu_y_ceil, cpu_y_top, cpu_y_mid, cpu_y_bot) = compute_y_bounds(min_cpu, peak_cpu);
+
+        let y_height = splits[0].height as usize;
+        let mut y_spans = Vec::new();
+        if y_height >= 3 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_top, false)), Style::default().fg(Theme::DIM))));
+            let blanks = y_height.saturating_sub(3);
+            let top_blanks = blanks / 2;
+            let bot_blanks = blanks - top_blanks;
+            for _ in 0..top_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_mid, false)), Style::default().fg(Theme::DIM))));
+            for _ in 0..bot_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_bot, false)), Style::default().fg(Theme::DIM))));
+        } else if y_height >= 2 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_top, false)), Style::default().fg(Theme::DIM))));
+            for _ in 0..y_height.saturating_sub(2) {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_bot, false)), Style::default().fg(Theme::DIM))));
+        } else {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_top, false)), Style::default().fg(Theme::DIM))));
+        }
+        f.render_widget(Paragraph::new(y_spans), splits[0]);
+
+        let n = state.cpu_history.len();
+        let x_max = (n.saturating_sub(1)).max(1) as f64;
+        let cpu_pts = state.cpu_history.clone();
+
+        let canvas = Canvas::default()
+            .x_bounds([0.0, x_max])
+            .y_bounds([cpu_y_floor, cpu_y_ceil])
+            .paint(move |ctx| {
+                let y_mid_f = (cpu_y_floor + cpu_y_ceil) / 2.0;
+                ctx.draw(&CanvasLine {
+                    x1: 0.0,
+                    y1: y_mid_f,
+                    x2: x_max,
+                    y2: y_mid_f,
+                    color: Color::Rgb(45, 55, 72),
+                });
+
+                if cpu_pts.len() == 1 {
+                    ctx.draw(&CanvasLine {
+                        x1: 0.0,
+                        y1: cpu_pts[0] as f64,
+                        x2: x_max,
+                        y2: cpu_pts[0] as f64,
+                        color: Theme::CYAN,
+                    });
+                } else if cpu_pts.len() > 1 {
+                    for i in 0..cpu_pts.len() - 1 {
+                        ctx.draw(&CanvasLine {
+                            x1: i as f64,
+                            y1: cpu_pts[i] as f64,
+                            x2: (i + 1) as f64,
+                            y2: cpu_pts[i + 1] as f64,
+                            color: Theme::CYAN,
+                        });
+                    }
+                }
+            });
+        f.render_widget(canvas, splits[1]);
     }
 
-    // 2. Memory Sparkline
+    // 2. Memory Canvas Line Chart
     let cur_mem = state.mem_history.last().copied().unwrap_or(d.mem_requests_mib.max(0) as u64);
+    let min_mem = state.mem_history.iter().copied().min().unwrap_or(cur_mem);
     let peak_mem = state.mem_history.iter().copied().max().unwrap_or(cur_mem);
+
     let mem_title = format!(" 📈 Memory Usage Trend [cur: {}MiB | peak: {}MiB | alloc: {}MiB] ", cur_mem, peak_mem, d.mem_allocatable_mib);
     let mem_block = Block::default()
         .borders(Borders::ALL)
@@ -231,11 +308,80 @@ fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspector
         let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
         f.render_widget(p, mem_inner);
     } else {
-        let sparkline = ratatui::widgets::Sparkline::default()
-            .data(&state.mem_history)
-            .style(Style::default().fg(Color::Rgb(168, 85, 247)))
-            .max(peak_mem.max(10));
-        f.render_widget(sparkline, mem_inner);
+        let splits = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(8), // Y-axis labels & tick marks
+                Constraint::Min(10),   // Canvas line plot
+            ])
+            .split(mem_inner);
+
+        let (mem_y_floor, mem_y_ceil, mem_y_top, mem_y_mid, mem_y_bot) = compute_y_bounds(min_mem, peak_mem);
+
+        let y_height = splits[0].height as usize;
+        let mut y_spans = Vec::new();
+        if y_height >= 3 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_top, true)), Style::default().fg(Theme::DIM))));
+            let blanks = y_height.saturating_sub(3);
+            let top_blanks = blanks / 2;
+            let bot_blanks = blanks - top_blanks;
+            for _ in 0..top_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_mid, true)), Style::default().fg(Theme::DIM))));
+            for _ in 0..bot_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_bot, true)), Style::default().fg(Theme::DIM))));
+        } else if y_height >= 2 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_top, true)), Style::default().fg(Theme::DIM))));
+            for _ in 0..y_height.saturating_sub(2) {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_bot, true)), Style::default().fg(Theme::DIM))));
+        } else {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_top, true)), Style::default().fg(Theme::DIM))));
+        }
+        f.render_widget(Paragraph::new(y_spans), splits[0]);
+
+        let n = state.mem_history.len();
+        let x_max = (n.saturating_sub(1)).max(1) as f64;
+        let mem_pts = state.mem_history.clone();
+
+        let canvas = Canvas::default()
+            .x_bounds([0.0, x_max])
+            .y_bounds([mem_y_floor, mem_y_ceil])
+            .paint(move |ctx| {
+                let y_mid_f = (mem_y_floor + mem_y_ceil) / 2.0;
+                ctx.draw(&CanvasLine {
+                    x1: 0.0,
+                    y1: y_mid_f,
+                    x2: x_max,
+                    y2: y_mid_f,
+                    color: Color::Rgb(45, 55, 72),
+                });
+
+                if mem_pts.len() == 1 {
+                    ctx.draw(&CanvasLine {
+                        x1: 0.0,
+                        y1: mem_pts[0] as f64,
+                        x2: x_max,
+                        y2: mem_pts[0] as f64,
+                        color: Color::Rgb(168, 85, 247),
+                    });
+                } else if mem_pts.len() > 1 {
+                    for i in 0..mem_pts.len() - 1 {
+                        ctx.draw(&CanvasLine {
+                            x1: i as f64,
+                            y1: mem_pts[i] as f64,
+                            x2: (i + 1) as f64,
+                            y2: mem_pts[i + 1] as f64,
+                            color: Color::Rgb(168, 85, 247),
+                        });
+                    }
+                }
+            });
+        f.render_widget(canvas, splits[1]);
     }
 }
 
@@ -543,19 +689,85 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
 
     let mut lines = Vec::new();
 
+    // Dynamically calculate column widths based on longest content: max(header, items) + 1
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "NAME".len();
+    let mut max_ip = "IP".len();
+    let mut max_status = "STATUS".len();
+    let mut max_ready = "READY".len();
+    let mut max_rest = "REST".len();
+    let mut max_cpu = "CPU REQ".len();
+    let mut max_mem = "MEM REQ".len();
+    let mut max_gpu = "GPU REQ".len();
+    let mut max_age = "AGE".len();
+
+    for pod in &d.pods {
+        max_ns = max_ns.max(pod.namespace.len());
+        max_name = max_name.max(pod.name.len());
+        let ip_len = if pod.pod_ip.is_empty() { 1 } else { pod.pod_ip.len() };
+        max_ip = max_ip.max(ip_len);
+        max_status = max_status.max(pod.phase.len());
+        max_ready = max_ready.max(pod.ready_containers.len());
+        let rest_len = if pod.restarts >= 1000 { 5 } else if pod.restarts >= 100 { 3 } else { pod.restarts.to_string().len() };
+        max_rest = max_rest.max(rest_len);
+
+        let cpu_len = if pod.cpu_requests_millicores >= 1000 {
+            format!("{:.1}c", pod.cpu_requests_millicores as f64 / 1000.0).len()
+        } else if pod.cpu_requests_millicores > 0 {
+            format!("{}m", pod.cpu_requests_millicores).len()
+        } else {
+            1
+        };
+        max_cpu = max_cpu.max(cpu_len);
+
+        let mem_len = if pod.mem_requests_mib >= 1024 {
+            format!("{:.1} GiB", pod.mem_requests_mib as f64 / 1024.0).len()
+        } else if pod.mem_requests_mib > 0 {
+            format!("{} MiB", pod.mem_requests_mib).len()
+        } else {
+            1
+        };
+        max_mem = max_mem.max(mem_len);
+
+        let gpu_len = if pod.gpu_mem_requests_mib > 0 {
+            if pod.gpu_mem_requests_mib >= 1024 {
+                format!("⚡ {:.1} GiB", pod.gpu_mem_requests_mib as f64 / 1024.0).chars().count()
+            } else {
+                format!("⚡ {} MiB", pod.gpu_mem_requests_mib).chars().count()
+            }
+        } else if pod.gpu_requests > 0 {
+            format!("⚡ {} GPU", pod.gpu_requests).chars().count()
+        } else {
+            1
+        };
+        max_gpu = max_gpu.max(gpu_len);
+        max_age = max_age.max(pod.age.len());
+    }
+
+    let ns_w = max_ns + 1;
+    let name_w = max_name + 1;
+    let ip_w = max_ip + 1;
+    let status_w = max_status + 1;
+    let ready_w = max_ready + 1;
+    let rest_w = max_rest + 1;
+    let cpu_w = max_cpu + 1;
+    let mem_w = max_mem + 1;
+    let gpu_w = max_gpu + 1;
+    let age_w = max_age + 1;
+
     // Table Header
     let header_line = Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(format!("{:<16}", "NAMESPACE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<28}", "NAME"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<15}", "IP"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<10}", "STATUS"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<6}", "READY"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<5}", "REST"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<8}", "CPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<9}", "MEM REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<11}", "GPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:<5}", "AGE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "NAMESPACE", width = ns_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "NAME", width = name_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "IP", width = ip_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "STATUS", width = status_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "READY", width = ready_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "REST", width = rest_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "CPU REQ", width = cpu_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "MEM REQ", width = mem_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "GPU REQ", width = gpu_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<width$}", "AGE", width = age_w), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
     ]);
     lines.push(header_line);
 
@@ -574,10 +786,6 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
         } else {
             Style::default().bg(row_bg)
         };
-
-        let ns_str = truncate_str(&pod.namespace, 15);
-        let name_str = truncate_str(&pod.name, 27);
-        let ip_str = truncate_str(if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip }, 14);
 
         let status_color = match pod.phase.as_str() {
             "Running" => Theme::GREEN,
@@ -622,18 +830,23 @@ fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &
             ("-".to_string(), Style::default().fg(Theme::DIM).bg(row_bg))
         };
 
+        let ns_clean = super::sanitize_span_text(&pod.namespace);
+        let name_clean = super::sanitize_span_text(&pod.name);
+        let ip_clean = super::sanitize_span_text(if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip });
+        let age_clean = super::sanitize_span_text(&pod.age);
+
         let row = Line::from(vec![
             Span::styled(marker, marker_style),
-            Span::styled(format!("{:<16}", ns_str), Style::default().fg(Theme::CYAN).bg(row_bg)),
-            Span::styled(format!("{:<28}", name_str), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
-            Span::styled(format!("{:<15}", ip_str), Style::default().fg(Theme::DIM).bg(row_bg)),
-            Span::styled(format!("{:<10}", pod.phase), Style::default().fg(status_color).bg(row_bg)),
-            Span::styled(format!("{:<6}", pod.ready_containers), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<5}", pod.restarts), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
-            Span::styled(format!("{:<8}", cpu_str), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<9}", mem_str), Style::default().fg(Theme::FG).bg(row_bg)),
-            Span::styled(format!("{:<11}", gpu_str), gpu_style),
-            Span::styled(format!("{:<5}", pod.age), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<width$}", ns_clean, width = ns_w), Style::default().fg(Theme::CYAN).bg(row_bg)),
+            Span::styled(format!("{:<width$}", name_clean, width = name_w), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(format!("{:<width$}", ip_clean, width = ip_w), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.phase, width = status_w), Style::default().fg(status_color).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.ready_containers, width = ready_w), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<width$}", pod.restarts, width = rest_w), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
+            Span::styled(format!("{:<width$}", cpu_str, width = cpu_w), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<width$}", mem_str, width = mem_w), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<width$}", gpu_str, width = gpu_w), gpu_style),
+            Span::styled(format!("{:<width$}", age_clean, width = age_w), Style::default().fg(Theme::DIM).bg(row_bg)),
         ]);
         lines.push(row);
     }
@@ -649,7 +862,7 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         ("<c>", "Cordon")
     };
 
-    let hints: &[(&str, &str)] = &[
+    let mut hints: Vec<(&str, &str)> = vec![
         ("<↑/↓>", "Select Pod"),
         ("<Enter>", "Jump"),
         ("<l>", "Logs"),
@@ -660,9 +873,14 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         ("<x>", "Actions"),
         cordon_hint,
         ("<s>", "Shell"),
-        ("<r>", "Refresh"),
-        ("<Esc>", "Back"),
     ];
+
+    if !d.pods.is_empty() {
+        hints.push(("<S>", "Node Debug"));
+    }
+
+    hints.push(("<r>", "Refresh"));
+    hints.push(("<Esc>", "Back"));
 
     let mut spans = Vec::new();
     for (i, (k, label)) in hints.iter().enumerate() {
@@ -677,13 +895,6 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     f.render_widget(p, area);
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}…", &s[..max_len.saturating_sub(1)])
-    } else {
-        s.to_string()
-    }
-}
 
 #[cfg(test)]
 mod tests {
