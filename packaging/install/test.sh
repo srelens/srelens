@@ -358,12 +358,26 @@ else
 fi
 
 # The per-user-group case must keep working, or every Fedora install with a
-# 002 umask breaks.
-dest="$work/own-group"
-mkdir -p "$dest"
-chmod 0775 "$dest"
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-check "group-writable by the owner's own group still installs" "Installed:" "$out" "$rc" 0
+# 002 umask breaks: there ~/.local/bin is `alice:alice` mode 0775.
+#
+# As the user, into their own group -- which is the actual shape. Root into
+# ROOT's group is a different thing and rightly refused: on Alpine, GID 0 is
+# the primary group of sync, shutdown and halt.
+if [ "$made_user" = "tester" ]; then
+    dest="$work/own-group"
+    mkdir -p "$dest"
+    chown tester:tester "$dest" 2>/dev/null || chown tester "$dest" 2>/dev/null || true
+    chmod 0775 "$dest"
+    # Traversable so the account can reach it; still owned by root and
+    # writable by nobody else, so the walk above it stays clean.
+    chmod 0711 "$work"
+    chmod 644 "$script" 2>/dev/null || true
+    out="$(su tester -c "sh $script --version $version --install-dir $dest" 2>&1)" && rc=0 || rc=$?
+    check "group-writable by the owner's own group still installs" "Installed:" "$out" "$rc" 0
+    chmod 0700 "$work"
+else
+    echo "  skip  no account this run created: cannot test a per-user group"
+fi
 
 # A directory can be impeccable itself and still sit under one somebody
 # else owns, who can rename it and put their own in its place after the
@@ -410,25 +424,75 @@ fi
 # A group named after its owner is the per-user-group CONVENTION, not a
 # guarantee. If the group really has other members, any of them can replace
 # the binary, so membership is looked up rather than assumed.
-if [ "$(id -u)" = "0" ] && command -v usermod >/dev/null 2>&1; then
-    if ! id -u tester >/dev/null 2>&1; then
-        if useradd -m tester >/dev/null 2>&1; then
-            made_user="tester"
-        fi
+#
+# Only ever on an account this run created. Adding a pre-existing `tester`
+# to group root and then removing it again would strip a membership the
+# host meant to have -- a test that edits the machine it runs on is worse
+# than a test that skips.
+if ! id -u tester >/dev/null 2>&1 && [ "$(id -u)" = "0" ] &&
+    command -v useradd >/dev/null 2>&1; then
+    if useradd -m tester >/dev/null 2>&1; then
+        made_user="tester"
     fi
+fi
+if [ "$made_user" = "tester" ] && command -v usermod >/dev/null 2>&1; then
     if usermod -aG root tester >/dev/null 2>&1; then
         dest="$work/owner-group-shared"
         mkdir -p "$dest"
         chmod 0775 "$dest"
         out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
         check "an owner-named group with real members is refused" "members besides root" "$out" "$rc" 1
+        # Safe to undo unconditionally: this membership was added a few
+        # lines up, to an account created a few lines before that.
         gpasswd -d tester root >/dev/null 2>&1 || true
     else
         echo "  skip  could not add a member to a group"
     fi
 else
-    echo "  skip  not root, or no usermod: cannot test group membership"
+    echo "  skip  no account this run created: not touching an existing one's groups"
 fi
+
+# Supplementary members are only half of a group: an account whose PRIMARY
+# group it is never appears in the member list, while it can write there
+# perfectly well.
+if [ "$made_user" = "tester" ] && command -v useradd >/dev/null 2>&1; then
+    if useradd -M -g root primaryroot >/dev/null 2>&1; then
+        dest="$work/primary-gid"
+        mkdir -p "$dest"
+        chmod 0775 "$dest"
+        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "a group that is someone else's primary group is refused" "primaryroot" "$out" "$rc" 1
+        userdel primaryroot >/dev/null 2>&1 || true
+    else
+        echo "  skip  could not create an account with a primary GID of 0"
+    fi
+else
+    echo "  skip  no account this run created: cannot test primary-group membership"
+fi
+
+echo "temporary directory"
+
+# mktemp -d honours TMPDIR, and sudo can carry the invoking user's straight
+# into a root install. The private tree is only private if its parents are,
+# so the destination walk is applied to it as well.
+dest="$work/tmpdir-bin"
+mkdir -p "$dest"
+bad="$work/untrusted-tmp"
+mkdir -p "$bad"
+chmod 0777 "$bad"
+out="$(TMPDIR="$bad" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "an untrusted TMPDIR is refused" "writable by anyone" "$out" "$rc" 1
+if [ -e "$dest/srelens-tui" ]; then
+    no "it installed with the working tree in an untrusted place"
+else
+    ok "nothing was installed from an untrusted working tree"
+fi
+
+# And a TMPDIR that is fine must still work.
+good="$work/trusted-tmp"
+mkdir -p "$good"
+out="$(TMPDIR="$good" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "a trusted TMPDIR still installs" "Installed:" "$out" "$rc" 0
 
 echo "unpacking"
 

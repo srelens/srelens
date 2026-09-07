@@ -76,9 +76,17 @@ main() {
 
     say "Installing $BIN $version ($target) into $install_dir"
 
-    tmp="$(mktemp -d)"
+    tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
     trap 'rm -rf "$tmp"' EXIT INT TERM
+
+    # The same walk the destination gets. `mktemp -d` makes the directory
+    # itself 0700 and ours, but it puts it under $TMPDIR when that is set --
+    # and `sudo` can carry the invoking user's TMPDIR straight into a root
+    # install. A parent someone else owns can rename the tree after the
+    # checksum passes and put their own binary where the verified one was,
+    # to be run at the version check below.
+    assert_safe_dir "$tmp"
 
     archive="$BIN-$version-$target.tar.gz"
     base="https://github.com/$REPO/releases/download/srelens-v$version"
@@ -398,9 +406,29 @@ assert_component() {
             die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
         fi
         if command -v getent >/dev/null 2>&1; then
-            members="$(getent group "$group" 2>/dev/null | cut -d: -f4)" || members=""
+            entry="$(getent group "$group" 2>/dev/null)" || entry=""
+            members="$(printf %s "$entry" | cut -d: -f4)"
             if [ -n "$members" ] && [ "$members" != "$owner" ]; then
                 die "$path is writable by the group $group, which has members besides $owner ($members). Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+            fi
+
+            # The member list is only half of a group. An account whose
+            # PRIMARY group this is never appears in it -- `getent group
+            # root` reads `root:x:0:` on a host where another account has
+            # GID 0, while that account can write here perfectly well. So
+            # the passwd table is asked as well.
+            #
+            # Still not a complete answer: `getent passwd` enumerates local
+            # accounts, and an LDAP or SSSD source may decline to be listed
+            # at all. A destination that is not group-writable depends on
+            # none of this.
+            gid="$(printf %s "$entry" | cut -d: -f3)"
+            if [ -n "$gid" ]; then
+                primary="$(getent passwd 2>/dev/null |
+                    awk -F: -v g="$gid" -v o="$owner" '$4 == g && $1 != o { printf "%s ", $1 }')" || primary=""
+                if [ -n "$primary" ]; then
+                    die "$path is writable by the group $group, which is the primary group of ${primary%% }. Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+                fi
             fi
         else
             die "$path is group-writable and there is no getent here to establish who is in group $group. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"

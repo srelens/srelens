@@ -50,7 +50,9 @@ each component must be:
   world-writable, so treating either bit as disqualifying on its own would
   refuse every path running through it;
 - if group-writable without sticky, owned by its own group AND that group
-  must really have no other members. `alice:alice` is the per-user-group
+  must really have no other members, counted from both the member list and
+  the passwd table -- an account whose PRIMARY group it is never appears in
+  the former. `alice:alice` is the per-user-group
   convention Fedora leaves on `~/.local/bin` under a 002 umask, but a
   convention is not a guarantee, so the membership is looked up. Accounts
   whose PRIMARY group is that one stay invisible to it — a group-writable
@@ -60,6 +62,12 @@ each component must be:
 The path is resolved with `cd` + `pwd -P` first, and the resolved path is
 what staging, the rename and the final version check all use — approving one
 path and installing through another leaves a symlink repointable in between.
+
+**The working directory gets the same walk.** `mktemp -d` makes the directory
+itself 0700 and yours, but places it under `TMPDIR` when that is set -- and
+`sudo` can carry the invoking user's `TMPDIR` straight into a root install. A
+parent someone else owns can rename the tree after the checksum passes and
+put their own binary where the verified one was.
 
 **Unpredictable staging, and a private unpack.** The staging file is created
 with `mktemp` rather than at `.srelens-tui.install.<pid>`, which could be
@@ -93,7 +101,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Thirty-nine cases: argument handling, the macOS and unknown-architecture refusals,
+Forty-three cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped
