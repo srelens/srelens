@@ -112,6 +112,15 @@ describe("namespace columns", () => {
     expect(active.props).toMatchObject({ status: "Active", kind: "success" });
   });
 
+  it("renders an unavailable legacy phase neutrally instead of inventing a cluster failure", () => {
+    const status = namespaceColumns.find((column) => column.key === "phase")!;
+    const unavailable = status.render!({ ...namespace, phase: "-" }) as {
+      props: { status: string; kind: string };
+    };
+
+    expect(unavailable.props).toMatchObject({ status: "-", kind: "neutral" });
+  });
+
   it("shows two user labels plus an overflow, suppresses the automatic label, and exposes all user labels by keyboard", async () => {
     const labels = namespaceColumns.find((column) => column.key === "labels")!;
     const view = render(labels.render!(namespace) as ReactElement);

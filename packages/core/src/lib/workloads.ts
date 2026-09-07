@@ -87,7 +87,9 @@ export async function listNamespaces(
       out.summaries ??
       out.namespaces.map((name) => ({
         name,
-        phase: "Unknown",
+        // A legacy backend did not report phase at all. Keep that distinct
+        // from a real `Unknown` phase, which is an unhealthy cluster verdict.
+        phase: "-",
         labels: {},
         age: "-",
       }));

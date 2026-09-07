@@ -48,8 +48,8 @@ describe("listNamespaces", () => {
     const outcome = await listNamespaces("kind-dev", invoke);
 
     expect(outcome.summaries).toEqual([
-      { name: "default", phase: "Unknown", labels: {}, age: "-" },
-      { name: "kube-system", phase: "Unknown", labels: {}, age: "-" },
+      { name: "default", phase: "-", labels: {}, age: "-" },
+      { name: "kube-system", phase: "-", labels: {}, age: "-" },
     ]);
   });
 
