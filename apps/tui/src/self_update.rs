@@ -514,6 +514,13 @@ pub fn package_manager_for(path: &Path) -> Option<&'static str> {
         ("/winget/packages/", "winget"),
         ("/chocolatey/", "Chocolatey"),
     ];
+    // Only on Windows. Applied everywhere, `/home/me/scoop/apps/demo/...`
+    // on Linux read as Scoop-owned and the update was refused before
+    // anything was downloaded — these names mean a package manager on one
+    // platform and nothing in particular on the others.
+    if !cfg!(windows) {
+        return None;
+    }
     let folded = text.to_lowercase();
     WINDOWS_MARKERS
         .iter()
@@ -554,9 +561,15 @@ pub enum Check {
 
 /// Resolve the latest stable release and decide whether it is worth
 /// downloading. Not finding an update is a normal outcome, not a failure.
+/// `requested` is whether the caller NAMED this channel rather than
+/// falling into it. It is the difference between "nothing newer here" and
+/// "put me on this channel": a dev build sorts above the stable release, so
+/// without it `--channel stable` could never do the switch the install
+/// guide promises.
 pub fn plan(
     current: &str,
     channel: Channel,
+    requested: bool,
     target: PathBuf,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
 ) -> Result<Check, UpdateError> {
@@ -566,7 +579,10 @@ pub fn plan(
         Channel::Stable => parse_latest_version(&body, triple)?,
         Channel::Dev => parse_newest_version(&body, triple)?,
     };
-    if !is_newer(current, &latest) {
+    // Asking for a channel by name means asking to be ON it, even where
+    // that means going backwards — the usual case, since any dev build
+    // sorts above the stable release it was cut after.
+    if !is_newer(current, &latest) && !(requested && current != latest) {
         // An unparseable current version lands here too, and is reported as
         // up to date rather than ahead: claiming to be ahead of a release we
         // could not compare against would be the same overclaim in reverse.
@@ -782,6 +798,14 @@ fn displaced_original(exe: &Path) -> Option<PathBuf> {
 /// that would stage beside `.<binary>.old` and rename onto it, leaving the
 /// command path untouched and the mess intact.
 pub fn installed_path(exe: &Path) -> PathBuf {
+    // Windows only, matching the recovery it exists to follow. Applied on
+    // Unix it would take someone running a backup they named
+    // `.srelens-tui.old` and update the sibling instead — replacing a
+    // binary they did not invoke, which is the one promise this command
+    // makes about what it touches.
+    if !cfg!(windows) {
+        return exe.to_path_buf();
+    }
     let displaced = || -> Option<PathBuf> {
         let name = exe.file_name()?.to_str()?;
         let restored = name.strip_prefix(".")?.strip_suffix(".old")?;

@@ -622,6 +622,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
     let current = env!("CARGO_PKG_VERSION");
     // Default to the channel this binary came from, so `update` keeps someone
     // where they are instead of quietly moving a dev user onto stable.
+    let requested = channel.is_some();
     let channel = match channel {
         Some(name) => Channel::parse(&name)
             .ok_or_else(|| format!("unknown channel {name:?} — use \"stable\" or \"dev\""))?,
@@ -660,7 +661,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
     // written-out sentence into `Download("404 Not Found for https://…")` —
     // the quotes and the variant name are noise, and the message is the part
     // that tells the user what to do.
-    let plan = match self_update::plan(current, channel, exe.clone(), &fetch) {
+    let plan = match self_update::plan(current, channel, requested, exe.clone(), &fetch) {
         Ok(Check::Available(plan)) => *plan,
         Ok(Check::UpToDate { channel, .. }) => {
             println!(
@@ -702,8 +703,13 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         return Ok(());
     }
 
+    let verb = if self_update::is_newer(&plan.current, &plan.latest) {
+        "Updating"
+    } else {
+        "Switching"
+    };
     println!(
-        "Updating srelens-tui {} -> {} ({} channel)…",
+        "{verb} srelens-tui {} -> {} ({} channel)…",
         plan.current,
         plan.latest,
         channel.as_str()

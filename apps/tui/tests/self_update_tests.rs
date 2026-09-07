@@ -307,7 +307,14 @@ fn each_channel_asks_its_own_endpoint() {
         Ok(release_json("srelens-v0.8.0"))
     };
     assert!(matches!(
-        plan("0.7.0", Channel::Stable, PathBuf::from("/tmp/x"), &stable).unwrap(),
+        plan(
+            "0.7.0",
+            Channel::Stable,
+            false,
+            PathBuf::from("/tmp/x"),
+            &stable
+        )
+        .unwrap(),
         Check::Available(_)
     ));
 
@@ -315,7 +322,15 @@ fn each_channel_asks_its_own_endpoint() {
         assert_eq!(url, RELEASES_URL);
         Ok(releases_json(&[("srelens-v0.8.1-152", true, true)]))
     };
-    match plan("0.8.1-150", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap() {
+    match plan(
+        "0.8.1-150",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/x"),
+        &dev,
+    )
+    .unwrap()
+    {
         Check::Available(plan) => {
             assert_eq!(plan.latest, "0.8.1-152");
             // Pre-release versions order by their numeric identifier, so 152
@@ -331,6 +346,64 @@ fn each_channel_asks_its_own_endpoint() {
     }
 }
 
+/// Naming a channel means asking to be ON it, even when that goes backwards.
+///
+/// The usual case rather than a corner: any dev build sorts above the
+/// stable release it was cut after, so without this `--channel stable`
+/// could never perform the switch the install guide promises.
+#[test]
+fn naming_the_stable_channel_from_a_dev_build_installs_stable() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v0.8.0")) };
+
+    // Asked for: the downgrade is the point.
+    match plan(
+        "0.8.1-152",
+        Channel::Stable,
+        true,
+        PathBuf::from("/tmp/x"),
+        &fetch,
+    )
+    .unwrap()
+    {
+        Check::Available(plan) => assert_eq!(plan.latest, "0.8.0"),
+        other => panic!("expected the switch to be planned, got {other:?}"),
+    }
+
+    // Not asked for: falling into stable by default is no reason to move
+    // someone backwards.
+    assert_eq!(
+        plan(
+            "0.8.1-152",
+            Channel::Stable,
+            false,
+            PathBuf::from("/tmp/x"),
+            &fetch
+        )
+        .unwrap(),
+        Check::AheadOfChannel {
+            channel: Channel::Stable,
+            latest: "0.8.0".into()
+        }
+    );
+
+    // Already on it, asked for or not: nothing to do.
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v1.0.0")) };
+    assert_eq!(
+        plan(
+            "1.0.0",
+            Channel::Stable,
+            true,
+            PathBuf::from("/tmp/x"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Stable,
+            latest: "1.0.0".into()
+        }
+    );
+}
+
 /// A dev build checked against dev is up to date; the same build checked
 /// against stable is ahead of it. Two different facts, two different answers.
 #[test]
@@ -339,7 +412,14 @@ fn a_dev_build_is_up_to_date_on_dev_and_ahead_on_stable() {
         Ok(releases_json(&[("srelens-v0.8.1-152", true, true)]))
     };
     assert_eq!(
-        plan("0.8.1-152", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap(),
+        plan(
+            "0.8.1-152",
+            Channel::Dev,
+            false,
+            PathBuf::from("/tmp/x"),
+            &dev
+        )
+        .unwrap(),
         Check::UpToDate {
             channel: Channel::Dev,
             latest: "0.8.1-152".into()
@@ -351,6 +431,7 @@ fn a_dev_build_is_up_to_date_on_dev_and_ahead_on_stable() {
         plan(
             "0.8.1-152",
             Channel::Stable,
+            false,
             PathBuf::from("/tmp/x"),
             &stable
         )
@@ -673,20 +754,34 @@ fn a_binary_a_package_manager_owns_is_recognised() {
         ),
         ("/snap/srelens/current/bin/srelens-tui", "snap"),
         ("/nix/store/abc-srelens/bin/srelens-tui", "Nix"),
-        // Windows paths are case-insensitive, and the real Chocolatey root
-        // is `C:\\ProgramData\\chocolatey` — lower case. A case-sensitive
-        // match let a Chocolatey-managed copy through this guard entirely.
+    ] {
+        assert_eq!(
+            package_manager_for(Path::new(path)),
+            Some(manager),
+            "{path}"
+        );
+    }
+}
+
+/// The Windows markers are Windows-only. Applied everywhere,
+/// `/home/me/scoop/apps/…` on Linux read as Scoop-owned and the update was
+/// refused before anything was downloaded — these names mean a package
+/// manager on one platform and nothing in particular on the others.
+#[cfg(windows)]
+#[test]
+fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
+    for (path, manager) in [
         (
             r"C:\ProgramData\chocolatey\bin\srelens-tui.exe",
             "Chocolatey",
         ),
         (
-            r"C:\Users\me\Scoop\Apps\srelens-tui\current\srelens-tui.exe",
-            "Scoop",
-        ),
-        (
             r"C:\PROGRAMDATA\CHOCOLATEY\bin\srelens-tui.exe",
             "Chocolatey",
+        ),
+        (
+            r"C:\Users\me\Scoop\Apps\srelens-tui\current\srelens-tui.exe",
+            "Scoop",
         ),
         (r"C:\Users\me\scoop\shims\srelens-tui.exe", "Scoop"),
         (
@@ -699,6 +794,20 @@ fn a_binary_a_package_manager_owns_is_recognised() {
             Some(manager),
             "{path}"
         );
+    }
+}
+
+/// The same names on Unix mean nothing in particular, and refusing there
+/// would block an update to a file its owner controls.
+#[cfg(unix)]
+#[test]
+fn windows_package_markers_do_not_apply_on_unix() {
+    for path in [
+        "/home/me/scoop/apps/demo/srelens-tui",
+        "/home/me/scoop/shims/srelens-tui",
+        "/opt/chocolatey/srelens-tui",
+    ] {
+        assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 }
 
@@ -762,6 +871,7 @@ fn being_up_to_date_is_a_quiet_success_not_an_error() {
         plan(
             "1.0.0",
             Channel::Stable,
+            false,
             PathBuf::from("/tmp/srelens-tui"),
             &fetch
         )
@@ -784,6 +894,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
         plan(
             "0.8.1-152",
             Channel::Stable,
+            false,
             PathBuf::from("/tmp/srelens-tui"),
             &fetch
         )
@@ -801,6 +912,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
         plan(
             "0.8.0-7",
             Channel::Stable,
+            false,
             PathBuf::from("/tmp/srelens-tui"),
             &fetch
         )
@@ -819,6 +931,7 @@ fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
         plan(
             "nightly",
             Channel::Stable,
+            false,
             PathBuf::from("/tmp/srelens-tui"),
             &fetch
         )
@@ -836,6 +949,7 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
     let plan = match plan(
         "1.0.0",
         Channel::Stable,
+        false,
         PathBuf::from("/tmp/srelens-tui"),
         &fetch,
     )
@@ -868,6 +982,7 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
         plan(
             "1.0.0",
             Channel::Stable,
+            false,
             PathBuf::from("/tmp/srelens-tui"),
             &fetch
         ),
