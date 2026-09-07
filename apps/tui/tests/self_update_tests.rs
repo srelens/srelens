@@ -438,6 +438,33 @@ fn the_dev_channel_skips_a_tag_it_cannot_read_and_takes_the_next() {
 /// advance cannot be written through. On Unix that is the difference between
 /// truncating a symlink's target and refusing; the same guard is what stops
 /// a stale leftover being reused on any platform.
+/// A staged download must not survive a failure. Unix only because the
+/// failure has to be forced, and a directory where the binary belongs makes
+/// the final rename fail there; on Windows the same setup renames the
+/// directory aside instead and succeeds.
+///
+/// This matters more than it reads: the staged names are random, so a leak
+/// accumulates a full copy of the binary per attempt rather than reusing one
+/// path.
+#[cfg(unix)]
+#[test]
+fn a_failed_replacement_leaves_nothing_staged_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join(bin_name());
+    std::fs::create_dir(&target).expect("a directory where the binary should be");
+
+    let result = replace_running_binary(&target, b"new");
+    assert!(result.is_err(), "renaming onto a directory must fail");
+
+    let strays: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != bin_name())
+        .collect();
+    assert!(strays.is_empty(), "left behind: {strays:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_planted_symlink_beside_the_binary_is_not_written_through() {

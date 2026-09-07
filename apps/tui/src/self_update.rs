@@ -643,37 +643,49 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     // see `create_new_file`. Writing through a planted symlink here would
     // put a downloaded executable wherever the link pointed.
     let (staged, mut file) = create_new_file(dir, &format!(".{BIN}.new-"))?;
-    let written = file
-        .write_all(bytes)
+    // From here every exit removes the staged file, including the ones added
+    // later by someone who did not read this far. It used to be a cleanup line
+    // per early return, and the one that got missed leaked a whole downloaded
+    // binary on each attempt — with random names now, those accumulate rather
+    // than overwrite. After a successful rename the path is gone and the
+    // removal is a no-op, so the success path needs no special case either.
+    let staged = Staged(staged);
+
+    file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(io);
+        .map_err(io)?;
     drop(file);
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&staged);
-        return Err(e);
-    }
-    set_executable(&staged)?;
+    set_executable(&staged.0)?;
 
     if cfg!(windows) {
         let displaced = dir.join(format!("{BIN}.old"));
         let _ = std::fs::remove_file(&displaced);
-        if let Err(e) = std::fs::rename(target, &displaced) {
-            let _ = std::fs::remove_file(&staged);
-            return Err(io(e));
-        }
-        if let Err(e) = std::fs::rename(&staged, target) {
+        std::fs::rename(target, &displaced).map_err(io)?;
+        if let Err(e) = std::fs::rename(&staged.0, target) {
             // Put the original back rather than leaving the user with nothing.
             let _ = std::fs::rename(&displaced, target);
-            let _ = std::fs::remove_file(&staged);
             return Err(io(e));
         }
         // Fails while this process holds the image open; the next run clears it.
         let _ = std::fs::remove_file(&displaced);
-    } else if let Err(e) = std::fs::rename(&staged, target) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(io(e));
+    } else {
+        std::fs::rename(&staged.0, target).map_err(io)?;
     }
     Ok(())
+}
+
+/// A staged download that deletes itself unless it was renamed into place.
+///
+/// The point is that no future early return can forget: a half-finished
+/// update leaves nothing behind whichever way it failed.
+struct Staged(PathBuf);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // A no-op once the file has been renamed away, which is the
+        // successful case.
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[cfg(unix)]
