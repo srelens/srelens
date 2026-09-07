@@ -106,6 +106,14 @@ pub enum UpdateError {
     },
     /// The binary's directory cannot be written to by this user.
     NotWritable { path: PathBuf },
+    /// The update failed AND the original could not be put back. The user
+    /// has no working binary until they move it themselves, so this says
+    /// exactly where it is rather than only why the update failed.
+    LeftDisplaced {
+        displaced: PathBuf,
+        target: PathBuf,
+        why: String,
+    },
 }
 
 impl fmt::Display for UpdateError {
@@ -143,6 +151,16 @@ impl fmt::Display for UpdateError {
                 f,
                 "cannot write to {} — re-run with the rights to change it, or install srelens-tui somewhere you own",
                 path.display()
+            ),
+            Self::LeftDisplaced {
+                displaced,
+                target,
+                why,
+            } => write!(
+                f,
+                "the update failed and your previous binary could not be put back: it is at {}. Move it to {} to restore it. ({why})",
+                displaced.display(),
+                target.display()
             ),
         }
     }
@@ -596,11 +614,29 @@ fn create_new_file(dir: &Path, prefix: &str) -> Result<(PathBuf, std::fs::File),
     let mut last = None;
     for _ in 0..8 {
         let path = dir.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            // 0600 AT CREATION, not afterwards. The default is 0666 masked
+            // by the umask, so a umask of 0002 — normal on systems with
+            // per-group directories — would publish the file group-writable
+            // for the window before the mode is corrected. Someone watching
+            // the directory could open it in that window, hold the
+            // descriptor, and change the contents after the archive was
+            // verified. Opening restrictively closes the window instead of
+            // narrowing it.
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ only: while this handle is open nobody else
+            // may open the file for writing or delete it.
+            options.share_mode(0x0000_0001);
+        }
+        match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             // Lost a race, or someone is planting names. Try another.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
@@ -662,8 +698,18 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
         let _ = std::fs::remove_file(&displaced);
         std::fs::rename(target, &displaced).map_err(io)?;
         if let Err(e) = std::fs::rename(&staged.0, target) {
-            // Put the original back rather than leaving the user with nothing.
-            let _ = std::fs::rename(&displaced, target);
+            // Put the original back rather than leaving the user with
+            // nothing — and if even that fails, say so. Reporting only the
+            // first error would tell the user the update failed while
+            // leaving them with no binary on their PATH and no idea their
+            // old one is sitting next to it under another name.
+            if let Err(rollback) = std::fs::rename(&displaced, target) {
+                return Err(UpdateError::LeftDisplaced {
+                    displaced: displaced.clone(),
+                    target: target.to_path_buf(),
+                    why: format!("{e}; restoring it also failed: {rollback}"),
+                });
+            }
             return Err(io(e));
         }
         // Fails while this process holds the image open; the next run clears it.
@@ -697,4 +743,48 @@ fn set_executable(path: &Path) -> Result<(), UpdateError> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> Result<(), UpdateError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_new_file;
+
+    /// The staged file must be private to its owner from the instant it
+    /// exists, not from the moment its mode is corrected.
+    ///
+    /// The umask is set to 0 for the check, which is the point: a default
+    /// creation would then be 0666, so seeing 0600 proves the mode comes from
+    /// the open call rather than from whatever the machine's umask happens to
+    /// be. Under a real umask of 0002 — normal where users share a group —
+    /// the default would have been group-writable, and someone watching the
+    /// directory could have opened the file, held the descriptor, and changed
+    /// the contents after the archive's checksum was verified.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_file_is_created_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let previous = unsafe { libc::umask(0) };
+        let created = create_new_file(dir.path(), ".probe-");
+        unsafe { libc::umask(previous) };
+
+        let (path, _file) = created.expect("the file is created");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "created as {mode:o}, not 0600");
+    }
+
+    /// Two calls never collide, which is what lets the name be unpredictable
+    /// rather than derived from the process id.
+    #[test]
+    fn staged_files_do_not_reuse_a_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (first, _a) = create_new_file(dir.path(), ".probe-").expect("first");
+        let (second, _b) = create_new_file(dir.path(), ".probe-").expect("second");
+        assert_ne!(first, second);
+    }
 }
