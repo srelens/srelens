@@ -622,6 +622,22 @@ pub fn plan(
 /// `/opt/homebrew` to point at: a test can assert the link was followed
 /// even where it cannot arrange for the result to match a package root.
 pub fn resolve_owner(path: &Path) -> (PathBuf, Option<&'static str>) {
+    // The LINK'S OWN LOCATION is checked first, because it can carry ownership
+    // that its target does not. A distribution package may install
+    // `/usr/bin/srelens-tui` pointing into `/usr/lib/srelens/`, and following
+    // the link throws away the `/usr/bin/` that said who owns it — leaving the
+    // updater to report a permissions problem, or to overwrite a packaged
+    // symlink when re-run with enough privilege.
+    if let Some(manager) = package_manager_for(path) {
+        return (path.to_path_buf(), Some(manager));
+    }
+
+    // Then the target, which is where Homebrew's ownership lives: it links
+    // `<prefix>/bin/x` to `<prefix>/Cellar/x/<version>/bin/x`, and on Intel
+    // macOS that prefix is `/usr/local` — the same place the install guide
+    // tells people to put a copy by hand. Those two are indistinguishable
+    // until the link is followed.
+    //
     // A path that cannot be resolved — it does not exist yet, a permission
     // stops the walk — is used as given rather than treated as an error.
     // Failing to look is not evidence of ownership either way.
@@ -1167,6 +1183,22 @@ mod tests {
             "the decision must be made from the link's target"
         );
         assert_ne!(resolved, linked, "not from the link itself");
+
+        // The link's OWN location decides when it is the one that carries
+        // ownership: a distribution may install `/usr/bin/x` pointing into
+        // `/usr/lib/...`, where following the link would throw away the
+        // `/usr/bin/` that said who owns it.
+        let packaged = Path::new("/usr/bin/srelens-tui");
+        let (from, owner) = resolve_owner(packaged);
+        assert_eq!(
+            owner,
+            Some("your distribution's package manager"),
+            "ownership carried by the link's location must survive"
+        );
+        assert_eq!(
+            from, packaged,
+            "and the deciding path is the one that matched"
+        );
 
         // A path that does not resolve is used as given rather than
         // becoming an error.
