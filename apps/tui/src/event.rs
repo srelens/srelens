@@ -29,6 +29,27 @@ pub enum AppEvent {
         node_name: String,
         result: Result<srelens_kube::node_inspector::NodeInspectorDetails, String>,
     },
+    TopologyResult {
+        context: String,
+        namespaces: Vec<String>,
+        result: Result<srelens_kube::topology::TopologyGraphOut, String>,
+    },
+    GpuInfoResult {
+        context: String,
+        result: Result<srelens_kube::gpu_info::GpuClusterInfo, String>,
+    },
+    HelmReleasesResult {
+        context: String,
+        namespace: String,
+        result: Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
+    },
+    HelmDetailResult {
+        context: String,
+        namespace: String,
+        name: String,
+        revision: Option<i64>,
+        result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
+    },
 }
 
 pub struct EventHandler {

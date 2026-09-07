@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::commands::ResourceKind;
 use crate::theme::{status_style, Theme};
@@ -84,6 +84,8 @@ pub struct ResourceTableState {
     pub last_viewport_rect: std::cell::Cell<Rect>,
     pub last_start_idx: std::cell::Cell<usize>,
     pub last_area_width: std::cell::Cell<u16>,
+    /// Active port forwards: (namespace, name) -> Vec<(local_port, remote_port, forward_id)>
+    pub active_port_forwards: HashMap<(String, String), Vec<(u16, u16, String)>>,
 }
 
 impl ResourceTableState {
@@ -108,6 +110,7 @@ impl ResourceTableState {
             last_viewport_rect: std::cell::Cell::new(Rect::default()),
             last_start_idx: std::cell::Cell::new(0),
             last_area_width: std::cell::Cell::new(0),
+            active_port_forwards: HashMap::new(),
         }
     }
 
@@ -425,8 +428,8 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
             ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
         ],
         ResourceKind::Nodes => vec![
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(14) },
+            ColumnDef { name: "NAME", key: "name", width: Constraint::Length(24) },
+            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(26) },
             ColumnDef { name: "ROLES", key: "roles", width: Constraint::Length(16) },
             ColumnDef { name: "VERSION", key: "version", width: Constraint::Length(14) },
             ColumnDef { name: "CPU", key: "allocatableCpuMillicores", width: Constraint::Length(12) },
@@ -775,6 +778,53 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         }
     }
 
+    // Node & workload status resolution (including cordoned/SchedulingDisabled nodes)
+    if key_lower == "status" {
+        let is_unschedulable = val
+            .get("unschedulable")
+            .and_then(|v| v.as_bool())
+            .or_else(|| val.pointer("/spec/unschedulable").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+
+        let mut status_str = if let Some(s) = val.get("status").and_then(|v| v.as_str()) {
+            s.to_string()
+        } else if let Some(phase) = val.get("phase").or_else(|| val.pointer("/status/phase")).and_then(|v| v.as_str()) {
+            phase.to_string()
+        } else if let Some(conds) = val.pointer("/status/conditions").and_then(|v| v.as_array()) {
+            if let Some(ready_cond) = conds.iter().find(|c| c.get("type").and_then(|t| t.as_str()) == Some("Ready")) {
+                if ready_cond.get("status").and_then(|s| s.as_str()) == Some("True") {
+                    "Ready".to_string()
+                } else {
+                    "NotReady".to_string()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        if is_unschedulable {
+            if status_str.is_empty() {
+                status_str = "SchedulingDisabled".to_string();
+            } else if !status_str.contains("SchedulingDisabled") {
+                status_str = format!("{status_str},SchedulingDisabled");
+            }
+            return status_str;
+        } else if !status_str.is_empty() {
+            return status_str;
+        }
+    }
+
+    if key_lower == "unschedulable" {
+        let is_unschedulable = val
+            .get("unschedulable")
+            .and_then(|v| v.as_bool())
+            .or_else(|| val.pointer("/spec/unschedulable").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        return if is_unschedulable { "true".to_string() } else { "false".to_string() };
+    }
+
     // 1. Direct key lookup
     if let Some(v) = val.get(key) {
         if let Some(s) = raw_value_to_string(v) {
@@ -992,14 +1042,20 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         format!(" [{}]", state.filtered_indices.len())
     };
 
-    let title = format!(" {}{}{}{}{} ", state.kind.display_name(), segment_badge, count_badge, triage_badge, reason_badge);
+    let pf_badge = if !state.active_port_forwards.is_empty() && (state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services) {
+        format!(" [PF: {} active]", state.active_port_forwards.len())
+    } else {
+        String::new()
+    };
+
+    let title = format!(" {}{}{}{}{}{} ", state.kind.display_name(), segment_badge, count_badge, pf_badge, triage_badge, reason_badge);
 
     let border_color = if state.kind == ResourceKind::Events && state.reason_rail_focused {
-        Theme::BORDER
+        Theme::border()
     } else if state.kind == ResourceKind::Events && state.warning_triage {
         Color::Yellow
     } else {
-        Theme::BORDER
+        Theme::border()
     };
 
     let block = Block::default()
@@ -1016,8 +1072,8 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
 
     if state.is_loading {
         let loading_msg = Paragraph::new(Line::from(vec![
-            Span::styled("⚡ Loading ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{} from cluster API...", state.kind.display_name()), Style::default().fg(Theme::DIM)),
+            Span::styled("⚡ Loading ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} from cluster API...", state.kind.display_name()), Style::default().fg(Theme::dim())),
         ]));
         f.render_widget(loading_msg, inner);
         return;
@@ -1025,7 +1081,7 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
 
     if state.filtered_indices.is_empty() {
         let empty_msg = Paragraph::new(Line::from(vec![
-            Span::styled(format!("No {} found in this scope.", state.kind.display_name()), Style::default().fg(Theme::DIM)),
+            Span::styled(format!("No {} found in this scope.", state.kind.display_name()), Style::default().fg(Theme::dim())),
         ]));
         f.render_widget(empty_msg, inner);
         return;
@@ -1068,12 +1124,44 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                 let cell_style = if is_status_col {
                     status_style(&text)
                 } else if is_selected {
-                    Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
+                    Style::default().fg(Theme::sel_fg()).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Theme::FG)
+                    Style::default().fg(Theme::fg())
                 };
 
                 let prefix = if col.key == "name" && is_marked { "✔ " } else { "" };
+                if col.key == "name" {
+                    let ns = extract_field_str(item, "namespace");
+                    let name = extract_field_str(item, "name");
+                    let active_forwards = state.active_port_forwards.get(&(ns.clone(), name.clone()))
+                        .or_else(|| state.active_port_forwards.get(&(String::new(), name.clone())));
+
+                    if let Some(forwards) = active_forwards {
+                        if !forwards.is_empty() {
+                            let pf_str = forwards
+                                .iter()
+                                .map(|(loc, rem, _)| {
+                                    if loc == rem {
+                                        format!("{}", loc)
+                                    } else {
+                                        format!("{}→{}", loc, rem)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+
+                            let line = Line::from(vec![
+                                Span::styled(format!("{}{}", prefix, text), cell_style),
+                                Span::raw(" "),
+                                Span::styled(
+                                    format!("[PF: {}]", pf_str),
+                                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                                ),
+                            ]);
+                            return Cell::from(line);
+                        }
+                    }
+                }
                 Cell::from(format!("{}{}", prefix, text)).style(cell_style)
             });
 
@@ -1082,7 +1170,12 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
             } else if is_marked {
                 Theme::marked_row()
             } else if display_idx % 2 == 0 {
-                Style::default().bg(Color::Rgb(22, 24, 30))
+                let alt_bg = if Theme::active_palette().is_light {
+                    Color::Rgb(242, 244, 248)
+                } else {
+                    Color::Rgb(22, 24, 30)
+                };
+                Style::default().bg(alt_bg)
             } else {
                 Style::default()
             };
@@ -1091,7 +1184,46 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         })
         .collect();
 
-    let widths: Vec<Constraint> = state.columns.iter().map(|c| c.width).collect();
+    let widths: Vec<Constraint> = if state.kind == ResourceKind::Nodes {
+        let max_name_len = state
+            .filtered_indices
+            .iter()
+            .map(|&idx| {
+                let is_marked = state.marked_indices.contains(&idx);
+                let prefix_len = if is_marked { 2 } else { 0 };
+                prefix_len + extract_field_str(&state.raw_items[idx], "name").len()
+            })
+            .max()
+            .unwrap_or(12)
+            .max("NAME".len());
+        let name_width = (max_name_len + 3) as u16;
+
+        let max_status_len = state
+            .filtered_indices
+            .iter()
+            .map(|&idx| extract_field_str(&state.raw_items[idx], "status").len())
+            .max()
+            .unwrap_or(8)
+            .max("STATUS".len());
+        let status_width = (max_status_len + 3) as u16;
+
+        state
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == 0 && c.key == "name" {
+                    Constraint::Length(name_width)
+                } else if i == 1 && c.key == "status" {
+                    Constraint::Length(status_width)
+                } else {
+                    c.width
+                }
+            })
+            .collect()
+    } else {
+        state.columns.iter().map(|c| c.width).collect()
+    };
     let table = Table::new(rows, widths).header(header);
     f.render_widget(table, inner);
 }
@@ -1450,5 +1582,46 @@ mod tests {
         // Clear reason filter
         state.set_reason_filter(None, "");
         assert_eq!(state.filtered_indices.len(), 4);
+    }
+
+    #[test]
+    fn test_node_cordon_status_and_style() {
+        let normal_node = json!({
+            "name": "worker-1",
+            "status": "Ready",
+            "unschedulable": false
+        });
+        assert_eq!(extract_field_str(&normal_node, "status"), "Ready");
+        assert_eq!(extract_field_str(&normal_node, "unschedulable"), "false");
+        assert_eq!(status_style(&extract_field_str(&normal_node, "status")), Theme::status_ok());
+
+        let cordoned_node = json!({
+            "name": "worker-2",
+            "status": "Ready",
+            "unschedulable": true
+        });
+        assert_eq!(extract_field_str(&cordoned_node, "status"), "Ready,SchedulingDisabled");
+        assert_eq!(extract_field_str(&cordoned_node, "unschedulable"), "true");
+        assert_eq!(status_style(&extract_field_str(&cordoned_node, "status")), Theme::status_warn());
+
+        let notready_cordoned = json!({
+            "name": "worker-3",
+            "status": "NotReady",
+            "unschedulable": true
+        });
+        assert_eq!(extract_field_str(&notready_cordoned, "status"), "NotReady,SchedulingDisabled");
+        assert_eq!(status_style(&extract_field_str(&notready_cordoned, "status")), Theme::status_error());
+
+        // Raw k8s node json format
+        let raw_cordoned = json!({
+            "metadata": { "name": "k8s-node-1" },
+            "spec": { "unschedulable": true },
+            "status": {
+                "conditions": [
+                    { "type": "Ready", "status": "True" }
+                ]
+            }
+        });
+        assert_eq!(extract_field_str(&raw_cordoned, "status"), "Ready,SchedulingDisabled");
     }
 }

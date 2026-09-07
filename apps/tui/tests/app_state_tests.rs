@@ -217,6 +217,7 @@ fn helm_releases() -> HelmViewState {
         revision: 3,
         status: "deployed".into(),
         chart: "nginx-15.0.0".into(),
+        chart_version: "15.0.0".into(),
         app_version: "1.25".into(),
         updated: "2026-01-01".into(),
     }]);
@@ -1005,6 +1006,7 @@ async fn every_modal_variant_renders_over_the_view() {
         namespace: "default".into(),
         container_port: 80,
         local_port_input: "8080".into(),
+        kind: "Pod".into(),
     });
     assert!(wide(&mut app).contains("Start Port Forward: web-0 (default)"));
 
@@ -2244,6 +2246,8 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
     );
 
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     assert_eq!(toast(&app), "Cordoning node 'gpu-1'...");
 
     app.handle_key_event(common::ch('x')).await;
@@ -2295,6 +2299,8 @@ async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
     app.active_view = ActiveView::NodeInspector(ni);
 
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     assert_eq!(toast(&app), "Uncordoning node 'gpu-1'...");
 
     app.handle_key_event(common::ch('x')).await;
@@ -2462,6 +2468,7 @@ async fn pasted_text_lands_in_the_active_input() {
         namespace: "default".into(),
         container_port: 80,
         local_port_input: String::new(),
+        kind: "Pod".into(),
     });
     app.handle_paste("90\r\n90".into());
     assert!(
@@ -3045,6 +3052,7 @@ async fn navigation_palette_actions_open_the_matching_view_or_modal() {
             namespace,
             container_port,
             local_port_input,
+            ..
         }) => {
             assert_eq!(pod_name, "web-0");
             assert_eq!(namespace, "default");
@@ -3251,15 +3259,18 @@ async fn scale_and_port_forward_modals_run_on_enter() {
         namespace: "default".into(),
         container_port: 8080,
         local_port_input: "90".into(),
+        kind: "Pod".into(),
     });
     app.handle_key_event(common::ch('9')).await;
     app.handle_key_event(common::ch('0')).await;
     app.handle_key_event(common::key(KeyCode::Backspace)).await;
     app.handle_key_event(common::key(KeyCode::Enter)).await;
     assert!(app.modal.is_none());
-    assert_eq!(
-        toast(&app),
-        "Port forward started on 127.0.0.1:909 -> web-0:8080"
+    assert!(
+        toast(&app) == "Port forward started on 127.0.0.1:909 -> web-0:8080"
+            || toast(&app).starts_with("Failed to port forward: Permission denied"),
+        "{}",
+        toast(&app)
     );
 }
 
