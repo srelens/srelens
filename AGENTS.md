@@ -145,6 +145,28 @@ Before you push, run the failing crate the way CI does — at minimum
 and check `cargo tree -e features -i <dep>` when a test depends on a
 dependency's behaviour.
 
+## Never run rustfmt on a binary target
+
+`rustfmt apps/tui/src/main.rs` does not format one file. It follows the
+`mod` declarations and reformats every module behind them — 31 files and
+~5,400 lines in `apps/tui`, none of it asked for, all of it landing in your
+commit if you `git add` the directory afterwards.
+
+Format the file you edited:
+
+```bash
+rustfmt --edition 2021 apps/tui/src/self_update.rs   # this file only
+rustfmt --edition 2021 apps/tui/src/main.rs          # and 31 others
+```
+
+It has caught two commits so far. If it catches you, restore the files you
+did not mean to touch from the base branch rather than force-pushing over
+the mistake — a follow-up commit is honest history and costs nothing.
+
+The same applies to `cargo fmt`, which formats the whole workspace. In a
+repository where much of the tree is not rustfmt-clean, that is a very large
+diff hiding a small change.
+
 ## Windows
 
 Three suites fail on Windows only and are unrelated to your change:

@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exactly what someone whose binary vanished is likely to type first.
     //
     // An update interrupted between its two renames leaves this binary at
-    // `.srelens-tui.exe.old` with nothing at the real name — and no way to
+    // `.srelens-tui.exe.srelens-update.old` with nothing at the real name — and no
     // run `update` to repair it, since there is nothing left to run. If
     // this process IS that displaced file, put it back. A no-op anywhere
     // else, and off Windows entirely.
