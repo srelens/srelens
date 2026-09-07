@@ -79,7 +79,29 @@ Take the **musl** build if your distribution is Alpine, or if the glibc build
 reports a version error — it is statically linked and depends on nothing on the
 host. Otherwise prefer the glibc build.
 
-**Homebrew** is the shortest path on macOS and Linux:
+**On Linux, the install script** is the shortest path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh | sh
+```
+
+It picks the right architecture, always takes the static musl build so no
+distribution's glibc version matters, checks the download against the
+release's published SHA-256 before installing anything, and puts the binary
+in `/usr/local/bin` when that is writable or `~/.local/bin` when it is not.
+It never invokes `sudo` on your behalf — run the whole line under `sudo` if
+you want it system-wide from an unprivileged shell.
+
+`--version <x.y.z>` installs a specific release and `--install-dir <path>`
+puts it somewhere else. Read it first if you would rather not pipe a script
+from the internet into a shell; it is short, and
+[`packaging/install/install.sh`](../packaging/install/install.sh) is the file
+that URL serves.
+
+A copy installed this way is yours rather than a package manager's, so
+`srelens-tui update` will replace it in place.
+
+**Homebrew** is the shortest path on macOS, and works on Linux too:
 
 ```bash
 brew install srelens/tap/srelens-tui

@@ -220,6 +220,23 @@ jobs:
           path: ${{ runner.temp }}/smoke-artifacts
           if-no-files-found: ignore
 
+  install-script:
+    name: install script
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # An install script is the easiest file in the repository to leave
+      # broken: nothing builds it, nothing imports it, and the first person to
+      # notice is a stranger following the README. `sh` on this runner is
+      # dash, which is the point -- the script promises POSIX sh, and bash
+      # would happily accept bashisms that Debian and Alpine users would not.
+      - name: Lint
+        run: shellcheck -s sh packaging/install/install.sh packaging/install/test.sh
+      - name: Test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: sh packaging/install/test.sh
+
   docker:
     name: docker image
     runs-on: ubuntu-22.04
