@@ -47,7 +47,12 @@ function die(message) {
 
 async function main() {
   const version = process.argv[2];
-  if (!version) die("usage: render.mjs <version> [--out <dir>] [--sums <path>]");
+  // A flag in the version slot means the version was omitted, not that someone
+  // named a release `--out`. Saying so beats "'--out' is not a stable X.Y.Z
+  // version", which reads as though the flag itself were the problem.
+  if (!version || version.startsWith("-")) {
+    die("usage: render.mjs <version> [--out <dir>] [--sums <path>]");
+  }
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     // winget is a public catalogue of stable software. A dev pre-release
     // (`0.8.1-152`) is not what someone typing `winget install` is asking for,

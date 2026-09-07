@@ -59,6 +59,19 @@ The checksum comes from the release's own `SHA256SUMS.txt` rather than from
 re-downloading and hashing here — re-hashing would only prove that whatever
 this machine received hashes to itself.
 
+## Tests
+
+```bash
+node --test packaging/winget/render.test.mjs
+```
+
+Eight cases, all offline: they pass `--sums` with a checksum file written by
+the test, so nothing depends on a release existing or on GitHub being
+reachable. They cover a full render, the uppercase hash and ASCII-only
+output, and the refusals -- a pre-release version, a checksum file that does
+not list the archive, a hash that is not a hash, an empty file, and a missing
+version argument. CI runs them on every pull request.
+
 ## Checking a render before submitting
 
 The rendered manifests are ordinary winget manifests, and the client validates

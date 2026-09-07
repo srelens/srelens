@@ -220,6 +220,21 @@ jobs:
           path: ${{ runner.temp }}/smoke-artifacts
           if-no-files-found: ignore
 
+  packaging:
+    name: packaging renderers
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      # The renderer builds every manifest submitted to winget-pkgs, and a
+      # wrong hash there fails on a stranger's machine at install time --
+      # after moderation has approved it, with nothing pointing back here.
+      # The tests pass `--sums`, so they need no release and no network.
+      - name: Test the winget renderer
+        run: node --test packaging/winget/render.test.mjs
+
   docker:
     name: docker image
     runs-on: ubuntu-22.04

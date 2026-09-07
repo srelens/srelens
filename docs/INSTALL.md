@@ -108,9 +108,13 @@ winget install srelens.srelens-tui
 
 It unpacks the same archive listed above and registers `srelens-tui` as a
 command, so nothing appears in Add/Remove Programs and `winget uninstall
-srelens.srelens-tui` removes it again. `winget upgrade` moves it forward, and
-since winget owns that copy, `srelens-tui update` will decline to replace it
-and point you back at winget.
+srelens.srelens-tui` removes it again.
+
+`winget upgrade srelens.srelens-tui` moves it forward. Name the package: a
+bare `winget upgrade` only lists what is upgradable without touching
+anything, and `winget upgrade --all` moves everything on the machine. Since
+winget owns that copy, `srelens-tui update` will decline to replace it and
+point you back at winget.
 
 **Or by hand.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
 `PATH`, then run `srelens-tui --version` in a terminal. Windows may warn that
