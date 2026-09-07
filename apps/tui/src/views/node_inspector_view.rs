@@ -2,12 +2,16 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{
+        canvas::{Canvas, Line as CanvasLine},
+        Block, Borders, Gauge, Paragraph,
+    },
     Frame,
 };
 
 pub use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 use crate::theme::Theme;
+use crate::views::metrics_panel_view::{compute_y_bounds, format_axis_val};
 
 #[derive(Debug, Clone)]
 pub struct NodeInspectorState {
@@ -145,7 +149,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // Layout hierarchy:
     // 1. Header Card (height: 4)
     // 2. Resource & GPU Allocation Gauges (height: 4)
-    // 3. Live Metrics Timeline (Sparklines for CPU & Memory) (height: 4 if height >= 26)
+    // 3. Live Metrics Timeline (Canvas line charts for CPU & Memory) (height: 4 if height >= 26)
     // 4. Conditions & Taints Strip (height: 3)
     // 5. Scheduled Pods Table (min: 6)
     // 6. Footer Key Hints (height: 1)
@@ -157,7 +161,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
         .constraints([
             Constraint::Length(4),                 // Header
             Constraint::Length(4),                 // Gauges
-            Constraint::Length(sparkline_height),  // Live Sparklines
+            Constraint::Length(sparkline_height),  // Live Metrics Timeline
             Constraint::Length(3),                 // Conditions & Taints
             Constraint::Min(6),                    // Pods table
             Constraint::Length(1),                 // Footer
@@ -170,7 +174,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // --- 2. Gauges Area ---
     render_gauges_card(f, chunks[1], d);
 
-    // --- 3. Live Sparklines Timeline ---
+    // --- 3. Live Metrics Timeline ---
     if show_sparklines {
         render_metrics_timeline_card(f, chunks[2], state, d);
     }
@@ -194,9 +198,11 @@ fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspector
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    // 1. CPU Sparkline
+    // 1. CPU Canvas Line Chart
     let cur_cpu = state.cpu_history.last().copied().unwrap_or(d.cpu_requests_millicores.max(0) as u64);
+    let min_cpu = state.cpu_history.iter().copied().min().unwrap_or(cur_cpu);
     let peak_cpu = state.cpu_history.iter().copied().max().unwrap_or(cur_cpu);
+
     let cpu_title = format!(" 📈 CPU Usage Trend [cur: {}m | peak: {}m | alloc: {}m] ", cur_cpu, peak_cpu, d.cpu_allocatable_millicores);
     let cpu_block = Block::default()
         .borders(Borders::ALL)
@@ -209,16 +215,87 @@ fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspector
         let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
         f.render_widget(p, cpu_inner);
     } else {
-        let sparkline = ratatui::widgets::Sparkline::default()
-            .data(&state.cpu_history)
-            .style(Style::default().fg(Theme::CYAN))
-            .max(peak_cpu.max(10));
-        f.render_widget(sparkline, cpu_inner);
+        let splits = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(8), // Y-axis labels & tick marks
+                Constraint::Min(10),   // Canvas line plot
+            ])
+            .split(cpu_inner);
+
+        let (cpu_y_floor, cpu_y_ceil, cpu_y_top, cpu_y_mid, cpu_y_bot) = compute_y_bounds(min_cpu, peak_cpu);
+
+        let y_height = splits[0].height as usize;
+        let mut y_spans = Vec::new();
+        if y_height >= 3 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_top, false)), Style::default().fg(Theme::DIM))));
+            let blanks = y_height.saturating_sub(3);
+            let top_blanks = blanks / 2;
+            let bot_blanks = blanks - top_blanks;
+            for _ in 0..top_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_mid, false)), Style::default().fg(Theme::DIM))));
+            for _ in 0..bot_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_bot, false)), Style::default().fg(Theme::DIM))));
+        } else if y_height >= 2 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_top, false)), Style::default().fg(Theme::DIM))));
+            for _ in 0..y_height.saturating_sub(2) {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_bot, false)), Style::default().fg(Theme::DIM))));
+        } else {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(cpu_y_top, false)), Style::default().fg(Theme::DIM))));
+        }
+        f.render_widget(Paragraph::new(y_spans), splits[0]);
+
+        let n = state.cpu_history.len();
+        let x_max = (n.saturating_sub(1)).max(1) as f64;
+        let cpu_pts = state.cpu_history.clone();
+
+        let canvas = Canvas::default()
+            .x_bounds([0.0, x_max])
+            .y_bounds([cpu_y_floor, cpu_y_ceil])
+            .paint(move |ctx| {
+                let y_mid_f = (cpu_y_floor + cpu_y_ceil) / 2.0;
+                ctx.draw(&CanvasLine {
+                    x1: 0.0,
+                    y1: y_mid_f,
+                    x2: x_max,
+                    y2: y_mid_f,
+                    color: Color::Rgb(45, 55, 72),
+                });
+
+                if cpu_pts.len() == 1 {
+                    ctx.draw(&CanvasLine {
+                        x1: 0.0,
+                        y1: cpu_pts[0] as f64,
+                        x2: x_max,
+                        y2: cpu_pts[0] as f64,
+                        color: Theme::CYAN,
+                    });
+                } else if cpu_pts.len() > 1 {
+                    for i in 0..cpu_pts.len() - 1 {
+                        ctx.draw(&CanvasLine {
+                            x1: i as f64,
+                            y1: cpu_pts[i] as f64,
+                            x2: (i + 1) as f64,
+                            y2: cpu_pts[i + 1] as f64,
+                            color: Theme::CYAN,
+                        });
+                    }
+                }
+            });
+        f.render_widget(canvas, splits[1]);
     }
 
-    // 2. Memory Sparkline
+    // 2. Memory Canvas Line Chart
     let cur_mem = state.mem_history.last().copied().unwrap_or(d.mem_requests_mib.max(0) as u64);
+    let min_mem = state.mem_history.iter().copied().min().unwrap_or(cur_mem);
     let peak_mem = state.mem_history.iter().copied().max().unwrap_or(cur_mem);
+
     let mem_title = format!(" 📈 Memory Usage Trend [cur: {}MiB | peak: {}MiB | alloc: {}MiB] ", cur_mem, peak_mem, d.mem_allocatable_mib);
     let mem_block = Block::default()
         .borders(Borders::ALL)
@@ -231,11 +308,80 @@ fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspector
         let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
         f.render_widget(p, mem_inner);
     } else {
-        let sparkline = ratatui::widgets::Sparkline::default()
-            .data(&state.mem_history)
-            .style(Style::default().fg(Color::Rgb(168, 85, 247)))
-            .max(peak_mem.max(10));
-        f.render_widget(sparkline, mem_inner);
+        let splits = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(8), // Y-axis labels & tick marks
+                Constraint::Min(10),   // Canvas line plot
+            ])
+            .split(mem_inner);
+
+        let (mem_y_floor, mem_y_ceil, mem_y_top, mem_y_mid, mem_y_bot) = compute_y_bounds(min_mem, peak_mem);
+
+        let y_height = splits[0].height as usize;
+        let mut y_spans = Vec::new();
+        if y_height >= 3 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_top, true)), Style::default().fg(Theme::DIM))));
+            let blanks = y_height.saturating_sub(3);
+            let top_blanks = blanks / 2;
+            let bot_blanks = blanks - top_blanks;
+            for _ in 0..top_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_mid, true)), Style::default().fg(Theme::DIM))));
+            for _ in 0..bot_blanks {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_bot, true)), Style::default().fg(Theme::DIM))));
+        } else if y_height >= 2 {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_top, true)), Style::default().fg(Theme::DIM))));
+            for _ in 0..y_height.saturating_sub(2) {
+                y_spans.push(Line::from(Span::styled("       │", Style::default().fg(Theme::DIM))));
+            }
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_bot, true)), Style::default().fg(Theme::DIM))));
+        } else {
+            y_spans.push(Line::from(Span::styled(format!("{:>6} ┤", format_axis_val(mem_y_top, true)), Style::default().fg(Theme::DIM))));
+        }
+        f.render_widget(Paragraph::new(y_spans), splits[0]);
+
+        let n = state.mem_history.len();
+        let x_max = (n.saturating_sub(1)).max(1) as f64;
+        let mem_pts = state.mem_history.clone();
+
+        let canvas = Canvas::default()
+            .x_bounds([0.0, x_max])
+            .y_bounds([mem_y_floor, mem_y_ceil])
+            .paint(move |ctx| {
+                let y_mid_f = (mem_y_floor + mem_y_ceil) / 2.0;
+                ctx.draw(&CanvasLine {
+                    x1: 0.0,
+                    y1: y_mid_f,
+                    x2: x_max,
+                    y2: y_mid_f,
+                    color: Color::Rgb(45, 55, 72),
+                });
+
+                if mem_pts.len() == 1 {
+                    ctx.draw(&CanvasLine {
+                        x1: 0.0,
+                        y1: mem_pts[0] as f64,
+                        x2: x_max,
+                        y2: mem_pts[0] as f64,
+                        color: Color::Rgb(168, 85, 247),
+                    });
+                } else if mem_pts.len() > 1 {
+                    for i in 0..mem_pts.len() - 1 {
+                        ctx.draw(&CanvasLine {
+                            x1: i as f64,
+                            y1: mem_pts[i] as f64,
+                            x2: (i + 1) as f64,
+                            y2: mem_pts[i + 1] as f64,
+                            color: Color::Rgb(168, 85, 247),
+                        });
+                    }
+                }
+            });
+        f.render_widget(canvas, splits[1]);
     }
 }
 

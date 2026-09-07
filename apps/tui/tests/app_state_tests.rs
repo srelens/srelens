@@ -952,14 +952,18 @@ async fn the_node_inspector_renders_loading_error_and_detail_states() {
     app.active_view = ActiveView::NodeInspector(NodeInspectorState::new("gpu-1".into()));
     let screen = wide(&mut app);
     assert!(screen.contains("Node Inspector: gpu-1"), "{screen}");
-    assert!(screen.contains("Cordon"), "{screen}");
-    assert!(screen.contains("PodDesc"), "{screen}");
+    assert!(screen.contains("Cmd"), "{screen}");
 
     let mut failed = NodeInspectorState::new("gpu-1".into());
     failed.set_error("node not found".into());
     app.active_view = ActiveView::NodeInspector(failed);
     let screen = wide(&mut app);
     assert!(screen.contains("Node Inspector Error: gpu-1"), "{screen}");
+
+    app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
+    let screen = wide(&mut app);
+    assert!(screen.contains("Cordon"), "{screen}");
+    assert!(screen.contains("Pod Describe"), "{screen}");
 
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", true));
     let screen = wide(&mut app);

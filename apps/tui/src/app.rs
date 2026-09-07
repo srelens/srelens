@@ -7440,27 +7440,10 @@ impl App {
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            ActiveView::NodeInspector(ni) => {
-                let cordon_act = if ni.details.as_ref().map(|d| d.unschedulable).unwrap_or(false) {
-                    "Uncordon"
-                } else {
-                    "Cordon"
-                };
-                Some(&[
-                    ("<:>", "Cmd"),
-                    ("<↑/↓>", "Pod"),
-                    ("<Enter>", "Jump"),
-                    ("<l>", "Logs"),
-                    ("<d>", "PodDesc"),
-                    ("<D>", "NodeDesc"),
-                    ("<y>", "YAML"),
-                    ("<x>", "Actions"),
-                    ("<c>", cordon_act),
-                    ("<s>", "Shell"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..])
-            }
+            ActiveView::NodeInspector(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Tree(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<↑/↓>", "Move"),
@@ -7670,62 +7653,20 @@ impl App {
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            ActiveView::HelmDetail(detail) => match detail.active_tab {
-                HelmDetailTab::Overview => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<c>", "CopyURL"),
-                    ("<r>", "Rollback"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::ValuesDiff => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<m>", "ToggleDiffMode"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Revisions => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "SelectRev"),
-                    ("<r>", "Rollback"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Manifest => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Notes => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-            },
+            ActiveView::HelmDetail(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Settings(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Toolbox(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<c>", "CopyPath"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            _ => None,
         };
 
         render_statusbar(
