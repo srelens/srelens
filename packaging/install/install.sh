@@ -68,6 +68,7 @@ main() {
     version="${version#v}"
 
     install_dir="$(resolve_install_dir "$install_dir")"
+    assert_safe_dir "$install_dir"
 
     say "Installing $BIN $version ($target) into $install_dir"
 
@@ -246,6 +247,64 @@ verify_checksum() {
     say "Checksum verified: $actual"
 }
 
+# Refuse a destination that another user could tamper with mid-install.
+#
+# mktemp closes the file it creates and `cp` reopens it by name, so anyone
+# who can unlink entries in the directory can swap a symlink in between the
+# two and have the copy write through it -- as root, when this is run under
+# sudo. The same window lets them replace the finished binary before the
+# version line runs it. An unpredictable name does not close that; only the
+# directory's own permissions do.
+#
+# Two rules, both narrow enough not to catch an ordinary machine:
+#
+#   * world-writable without the sticky bit. With the sticky bit set only an
+#     entry's owner may unlink it, so a staged file cannot be taken away --
+#     which is exactly why /tmp has it.
+#   * running as root into a directory root does not own. That is the case
+#     worth refusing outright: the owner can arrange the swap at leisure and
+#     gets a root-written file out of it.
+#
+# Group-writable alone is deliberately NOT refused. Distributions with
+# per-user groups leave ~/.local/bin group-writable under a 002 umask, where
+# the only member of that group is the user themselves.
+#
+# This is the rule srelens-tui's own `update` applies to the binary it
+# replaces, for the same reason.
+assert_safe_dir() {
+    dir="$1"
+    [ -d "$dir" ] || return 0
+
+    # `ls -ld` rather than stat: stat's flags differ between GNU and BSD, and
+    # this has to run under BusyBox too.
+    listing="$(ls -ld "$dir" 2>/dev/null)" || return 0
+    [ -n "$listing" ] || return 0
+    perms="$(printf %s "$listing" | cut -c1-10)"
+    owner="$(printf %s "$listing" | awk '{print $3}')"
+
+    # Anything that is not a mode string is not something to guess from.
+    case "$perms" in
+        d?????????) ;;
+        *) return 0 ;;
+    esac
+
+    sticky="$(printf %s "$perms" | cut -c10)"
+    other_w="$(printf %s "$perms" | cut -c9)"
+
+    if [ "$other_w" = "w" ]; then
+        case "$sticky" in
+            t | T) ;;
+            *)
+                die "$dir is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Install somewhere you control: --install-dir \$HOME/.local/bin"
+                ;;
+        esac
+    fi
+
+    if [ "$(id -u)" = "0" ] && [ -n "$owner" ] && [ "$owner" != "root" ]; then
+        die "$dir belongs to $owner, and installing there as root would let $owner substitute the file being installed. Install it somewhere root owns, or run as $owner without sudo."
+    fi
+}
+
 # Install by rename where possible: a running binary being overwritten in
 # place gets ETXTBSY on Linux, while replacing the directory entry does not
 # disturb a process already holding the old inode.
@@ -258,6 +317,7 @@ install_binary() {
         die "cannot create $dir"
     [ -w "$dir" ] ||
         die "$dir is not writable. Re-run with --install-dir <somewhere you own>, or with sudo."
+    assert_safe_dir "$dir"
 
     # mktemp, not a name built from the pid. Installing as root into a directory
     # someone else can write to, the old `.srelens-tui.install.<pid>` was

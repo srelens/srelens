@@ -33,6 +33,16 @@ Debian 11 or RHEL 9, which is exactly the sort of host a cluster gets
 administered from. The failure is a `GLIBC_2.3x not found` before `main()`,
 which tells the reader nothing actionable. The static build has no floor.
 
+**Unsafe destinations are refused.** A world-writable directory without the
+sticky bit, and -- when running as root -- a directory root does not own.
+An unpredictable staging name is not enough on its own: mktemp closes the
+file it creates and `cp` reopens it by name, so anyone who can unlink entries
+in that directory can swap in a symlink between the two, or replace the
+finished binary before it is run. Only the directory permissions close that.
+Group-writable alone is allowed, because distributions with per-user groups
+leave `~/.local/bin` group-writable under a 002 umask. This is the same rule
+`srelens-tui update` applies to the binary it replaces.
+
 **Unpredictable staging.** The file is created with `mktemp` inside the
 destination directory rather than at `.srelens-tui.install.<pid>`. Installed
 as root into a directory someone else can write to, a name derived from the
@@ -63,12 +73,12 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Twenty-two cases: argument handling, the macOS and unknown-architecture refusals,
+Twenty-seven cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped
-`sh -s --` form the docs tell people to use, and a symlink planted in the
-install directory to prove the staging file is not written through it. The refusal cases
+`sh -s --` form the docs tell people to use, a symlink planted in the
+install directory, and the destination refusals below. The refusal cases
 put a fake `curl` and `uname` ahead of the real ones on `PATH`.
 
 Only one call reaches the real GitHub API, and the test makes it with a token

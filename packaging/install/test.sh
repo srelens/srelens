@@ -213,6 +213,53 @@ else
     no "the staging file is no longer created with mktemp"
 fi
 
+echo "unsafe destinations"
+
+# An unpredictable staging name does not survive a directory other users
+# can unlink from: they can take the staged file away and leave a symlink,
+# or replace the finished binary before it is run. Only the directory's own
+# permissions close that, so an unsafe one is refused outright.
+dest="$work/world"
+mkdir -p "$dest"
+chmod 0777 "$dest"
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "a world-writable destination is refused" "writable by anyone" "$out" "$rc" 1
+if [ -e "$dest/srelens-tui" ]; then
+    no "it installed into the world-writable directory anyway"
+else
+    ok "nothing was installed there"
+fi
+
+# The sticky bit is what makes /tmp safe: only an entry's owner may unlink
+# it, so the staged file cannot be taken away. That case must still work.
+dest="$work/sticky"
+mkdir -p "$dest"
+chmod 1777 "$dest"
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "world-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
+
+# Root writing into a directory root does not own is the case worth
+# refusing outright: the owner can arrange the swap at leisure and gets a
+# root-written file out of it.
+if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
+    id -u tester >/dev/null 2>&1 || useradd -m tester >/dev/null 2>&1 || true
+    dest="$work/theirs"
+    mkdir -p "$dest"
+    if chown tester "$dest" 2>/dev/null; then
+        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "root into another user's directory is refused" "belongs to tester" "$out" "$rc" 1
+        if [ -e "$dest/srelens-tui" ]; then
+            no "it installed into the other user's directory anyway"
+        else
+            ok "nothing was installed there either"
+        fi
+    else
+        echo "  skip  could not chown a directory to another user"
+    fi
+else
+    echo "  skip  not root, or no useradd: cannot test the root-into-foreign-dir refusal"
+fi
+
 echo "hashing tool"
 
 # Every image this was first tested on has sha256sum, which is why the
@@ -222,7 +269,7 @@ if command -v shasum >/dev/null 2>&1; then
     limited="$work/limited"
     mkdir -p "$limited"
     missing=''
-    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm cat shasum; do
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm cat ls awk id shasum; do
         path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
         ln -sf "$path" "$limited/$tool"
     done
