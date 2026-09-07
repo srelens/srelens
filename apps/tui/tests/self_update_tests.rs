@@ -321,6 +321,77 @@ fn an_unreadable_release_response_is_an_error_not_a_guess() {
     }
 }
 
+/// A tag that is not a version must be reported as bad metadata. Accepting
+/// it would fail the later comparison, and that failure reads as "nothing
+/// newer" — so a broken release would tell the user they are up to date.
+#[test]
+fn a_release_tag_that_is_not_a_version_is_rejected() {
+    for tag in [
+        "srelens-vnightly",
+        "srelens-vlatest",
+        "srelens-v1.2",
+        "srelens-v",
+    ] {
+        assert!(
+            matches!(
+                parse_latest_version(&release_json(tag)),
+                Err(UpdateError::BadRelease(_))
+            ),
+            "{tag} should be refused"
+        );
+    }
+    // A pre-release version is still a version.
+    assert_eq!(
+        parse_latest_version(&release_json("srelens-v0.8.1-152")).unwrap(),
+        "0.8.1-152"
+    );
+}
+
+/// The list endpoint is the other way round: there is a next entry to try, so
+/// one unreadable tag should not stop a dev user updating.
+#[test]
+fn the_dev_channel_skips_a_tag_it_cannot_read_and_takes_the_next() {
+    let body = br#"[
+        {"tag_name":"srelens-vnightly"},
+        {"tag_name":"srelens-v0.8.1-152"}
+    ]"#;
+    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+}
+
+// ---------------------------------------------------------------------------
+// Temporary files
+// ---------------------------------------------------------------------------
+
+/// The staged file is created with `create_new`, so a path planted in
+/// advance cannot be written through. On Unix that is the difference between
+/// truncating a symlink's target and refusing; the same guard is what stops
+/// a stale leftover being reused on any platform.
+#[cfg(unix)]
+#[test]
+fn a_planted_symlink_beside_the_binary_is_not_written_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join(bin_name());
+    std::fs::write(&target, b"old").unwrap();
+
+    // What an attacker with write access to the directory would leave: a
+    // link named the way the updater's staging file used to be named.
+    let victim = dir.path().join("private-file");
+    std::fs::write(&victim, b"do not truncate me").unwrap();
+    let planted = dir
+        .path()
+        .join(format!(".{}.new-{}", bin_name(), std::process::id()));
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+    replace_running_binary(&target, b"new").expect("the update still succeeds");
+
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        b"do not truncate me",
+        "the linked file must be untouched"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
+}
+
 // ---------------------------------------------------------------------------
 // Checksums
 // ---------------------------------------------------------------------------

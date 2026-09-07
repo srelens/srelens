@@ -220,11 +220,13 @@ pub fn parse_latest_version(body: &[u8]) -> Result<String, UpdateError> {
     let version = tag
         .strip_prefix("srelens-v")
         .ok_or_else(|| UpdateError::BadRelease(format!("unexpected tag {tag}")))?;
-    if version.is_empty() {
-        return Err(UpdateError::BadRelease(format!(
-            "empty version in tag {tag}"
-        )));
-    }
+    // Parsed, not merely non-empty. A tag like `srelens-vnightly` would
+    // otherwise pass here, fail to compare later, and be reported as
+    // "you are on the latest" — turning broken release metadata into a
+    // confident answer about the user's version, which is the one thing
+    // this command must not do.
+    semver::Version::parse(version)
+        .map_err(|e| UpdateError::BadRelease(format!("tag {tag} is not a version: {e}")))?;
     Ok(version.to_string())
 }
 
@@ -247,8 +249,13 @@ pub fn parse_newest_version(body: &[u8]) -> Result<String, UpdateError> {
         if tag == "dev-channel" {
             continue;
         }
+        // Unlike the single-release endpoint, a tag that is not a version is
+        // SKIPPED here rather than failing the command: this is a list, so
+        // there is a next entry to try, and one odd tag should not stop a
+        // dev user updating. Failing is right only where there is no
+        // alternative to fall back to.
         if let Some(version) = tag.strip_prefix("srelens-v") {
-            if !version.is_empty() {
+            if semver::Version::parse(version).is_ok() {
                 return Ok(version.to_string());
             }
         }
@@ -513,13 +520,43 @@ pub fn apply(
     replace_running_binary(&plan.target, &binary)
 }
 
+/// Create a file in `dir` that did not exist a moment ago, and hand back
+/// both it and its path.
+///
+/// `create_new` is the point: it fails if anything is already at the path,
+/// INCLUDING a symlink, so it cannot be tricked into writing through one.
+/// A predictable name plus a following open is a real hazard here — the
+/// install guide has people extract and run from a working directory, and a
+/// directory another user can write to lets them pre-create the path as a
+/// link to a file the victim owns, which the update would then truncate.
+/// The name is random as well, so the attempt cannot be aimed.
+fn create_new_file(dir: &Path, prefix: &str) -> Result<(PathBuf, std::fs::File), UpdateError> {
+    let mut last = None;
+    for _ in 0..8 {
+        let path = dir.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            // Lost a race, or someone is planting names. Try another.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(io(e)),
+        }
+    }
+    Err(io(last.unwrap_or_else(|| {
+        std::io::Error::other("could not create a temporary file")
+    })))
+}
+
 /// Can this process create files in `dir`? Asked by trying, because the
 /// permission bits do not account for ownership, ACLs or a read-only mount,
 /// and a wrong guess here turns into a confusing failure halfway through.
 fn writable_dir(dir: &Path) -> bool {
-    let probe = dir.join(format!(".srelens-tui-write-test-{}", std::process::id()));
-    match std::fs::File::create(&probe) {
-        Ok(_) => {
+    match create_new_file(dir, ".srelens-tui-write-test-") {
+        Ok((probe, file)) => {
+            drop(file);
             let _ = std::fs::remove_file(&probe);
             true
         }
@@ -538,9 +575,21 @@ fn writable_dir(dir: &Path) -> bool {
 /// the new one takes its place. The displaced file cannot be deleted until the
 /// process exits, so it is left for the next run to clear.
 pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateError> {
+    use std::io::Write;
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
-    let staged = dir.join(format!(".{}.new-{}", BIN, std::process::id()));
-    std::fs::write(&staged, bytes).map_err(io)?;
+    // Created with `create_new` rather than written to a predictable path:
+    // see `create_new_file`. Writing through a planted symlink here would
+    // put a downloaded executable wherever the link pointed.
+    let (staged, mut file) = create_new_file(dir, &format!(".{BIN}.new-"))?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(io);
+    drop(file);
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
+    }
     set_executable(&staged)?;
 
     if cfg!(windows) {
