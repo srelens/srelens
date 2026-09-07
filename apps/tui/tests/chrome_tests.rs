@@ -2051,3 +2051,113 @@ async fn the_app_renders_the_assistant_view_with_the_active_context_in_its_title
     );
     assert!(text.contains("/oo█"), "{text}");
 }
+
+#[tokio::test]
+async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
+    use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState, render_helm_view};
+    use srelens_tui::views::helm_detail_view::{
+        HelmDetailTab, HelmDetailViewState, render_helm_detail_view,
+    };
+    use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
+
+    // 1. render_helm_view states
+    let mut helm_state = HelmViewState::new();
+    let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
+    assert!(text.contains("Loading Helm releases"), "{text}");
+
+    helm_state.set_error("cluster unreachable".into());
+    let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
+    assert!(text.contains("Failed to load Helm releases"), "{text}");
+
+    helm_state.set_releases(vec![]);
+    let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
+    assert!(text.contains("No Helm releases found"), "{text}");
+
+    helm_state.set_releases(vec![HelmReleaseItem {
+        name: "test-release".into(),
+        namespace: "default".into(),
+        revision: 3,
+        status: "deployed".into(),
+        chart: "my-chart".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "2.1.0".into(),
+        updated: "2026-09-01T00:00:00Z".into(),
+    }]);
+    let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
+    assert!(text.contains("test-release") && text.contains("my-chart"), "{text}");
+
+    helm_state.filter_query = "nonexistent".into();
+    let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
+    assert!(text.contains("No releases matching filter"), "{text}");
+
+    // 2. render_helm_detail_view across all tabs
+    let mut detail_state = HelmDetailViewState::new("test-release".into(), "default".into());
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Loading Helm release details"), "{text}");
+
+    detail_state.set_error("failed to query helm".into());
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Failed to load release"), "{text}");
+
+    let mock_detail = HelmReleaseDetail {
+        name: "test-release".into(),
+        namespace: "default".into(),
+        revision: 2,
+        status: "deployed".into(),
+        chart: "my-chart".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "2.1.0".into(),
+        updated: "2026-09-01T00:00:00Z".into(),
+        values_yaml: "replicaCount: 3\nservice:\n  type: LoadBalancer\n".into(),
+        chart_values_yaml: "replicaCount: 1\nservice:\n  type: ClusterIP\n".into(),
+        computed_values_yaml: "replicaCount: 3\nservice:\n  type: LoadBalancer\n".into(),
+        manifest: "---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: test-app\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: test-svc\n".into(),
+        notes: "Release notes for test-release: everything is ready.".into(),
+        history: vec![
+            HelmRevision {
+                revision: 2,
+                status: "deployed".into(),
+                updated: "2026-09-01".into(),
+                chart_version: "my-chart-1.0.0".into(),
+                description: "Upgrade complete".into(),
+            },
+            HelmRevision {
+                revision: 1,
+                status: "superseded".into(),
+                updated: "2026-08-01".into(),
+                chart_version: "my-chart-0.9.0".into(),
+                description: "Install complete".into(),
+            },
+        ],
+    };
+    detail_state.set_detail(mock_detail);
+
+    // Overview tab
+    detail_state.set_tab(HelmDetailTab::Overview);
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Release Overview") && text.contains("Deployment") && text.contains("Service"), "{text}");
+
+    // Values Diff tab (both modes)
+    detail_state.set_tab(HelmDetailTab::ValuesDiff);
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Values Diff") && text.contains("replicaCount"), "{text}");
+
+    detail_state.toggle_diff_mode();
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Current Revision vs Previous Revision Values"), "{text}");
+
+    // Revisions tab
+    detail_state.set_tab(HelmDetailTab::Revisions);
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Revision History") && text.contains("2 (current)") && text.contains("Upgrade complete"), "{text}");
+
+    // Manifest tab
+    detail_state.set_tab(HelmDetailTab::Manifest);
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Rendered Kubernetes Manifests") && text.contains("kind: Deployment"), "{text}");
+
+    // Notes tab
+    detail_state.set_tab(HelmDetailTab::Notes);
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("Chart Release Notes") && text.contains("everything is ready"), "{text}");
+}

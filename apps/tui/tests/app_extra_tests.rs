@@ -1832,6 +1832,95 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
         }
         _ => panic!("expected the Helm manifest view"),
     }
+
+    // Direct HelmDetail key handling: tabs, diff toggle, scrolling, copy, esc
+    let mut detail_state = srelens_tui::views::HelmDetailViewState::new("nginx".into(), "default".into());
+    detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
+        name: "nginx".into(),
+        namespace: "default".into(),
+        revision: 3,
+        status: "deployed".into(),
+        chart: "nginx".into(),
+        chart_version: "15.0.0".into(),
+        app_version: "1.25".into(),
+        updated: "2026-01-01".into(),
+        values_yaml: "replicaCount: 2\n".into(),
+        chart_values_yaml: "replicaCount: 1\n".into(),
+        computed_values_yaml: "replicaCount: 2\n".into(),
+        manifest: "---\nkind: Deployment\nmetadata:\n  name: nginx\n".into(),
+        notes: "Notes for nginx.\n".into(),
+        history: vec![
+            srelens_kube::helm::HelmRevision {
+                revision: 3,
+                status: "deployed".into(),
+                updated: "2026-01-01".into(),
+                chart_version: "15.0.0".into(),
+                description: "Upgrade".into(),
+            },
+            srelens_kube::helm::HelmRevision {
+                revision: 2,
+                status: "superseded".into(),
+                updated: "2025-12-01".into(),
+                chart_version: "14.0.0".into(),
+                description: "Upgrade".into(),
+            },
+        ],
+    });
+    app.active_view = ActiveView::HelmDetail(detail_state);
+
+    // Number keys switch tabs
+    app.handle_key_event(common::ch('1')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Overview);
+    }
+    app.handle_key_event(common::ch('2')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::ValuesDiff);
+    }
+    app.handle_key_event(common::ch('m')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.values_diff_mode, srelens_tui::views::ValuesDiffMode::RevisionVsPrevious);
+    }
+    app.handle_key_event(common::ch('3')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Revisions);
+    }
+    app.handle_key_event(common::ch('j')).await;
+    app.handle_key_event(common::ch('k')).await;
+    app.handle_key_event(common::ch('4')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Manifest);
+    }
+    app.handle_key_event(common::ch('j')).await;
+    app.handle_key_event(common::ch('k')).await;
+    app.handle_key_event(common::ch('g')).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::PageDown)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::PageUp)).await;
+    app.handle_key_event(common::ch('5')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Notes);
+    }
+
+    // Copy deep link and manifest/yaml
+    app.handle_key_event(common::ch('c')).await;
+    assert!(toast(&app).contains("Copied deep link"));
+    app.handle_key_event(common::ch('y')).await;
+    assert!(toast(&app).contains("Copied"));
+
+    // Tab and BackTab cycle tabs
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Tab)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::BackTab)).await;
+    app.handle_key_event(common::ch('l')).await;
+    app.handle_key_event(common::ch('h')).await;
+
+    // Rollback triggers modal
+    app.handle_key_event(common::ch('r')).await;
+    assert!(app.modal.is_some());
+    app.modal = None;
+
+    // Esc returns to previous view
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_) | ActiveView::Helm(_)));
 }
 
 #[tokio::test]
