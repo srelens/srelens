@@ -107,8 +107,10 @@ winget install srelens.srelens-tui
 ```
 
 It unpacks the same archive listed above and registers `srelens-tui` as a
-command, so nothing appears in Add/Remove Programs and `winget uninstall
-srelens.srelens-tui` removes it again.
+command on your `PATH`. There is no installer to run and nothing is written
+into Program Files, but winget does register the package so it can track it:
+it appears in Apps & Features, and `winget uninstall srelens.srelens-tui`
+or that entry will remove it again.
 
 `winget upgrade srelens.srelens-tui` moves it forward. Name the package: a
 bare `winget upgrade` only lists what is upgradable without touching

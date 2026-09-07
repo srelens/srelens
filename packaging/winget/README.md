@@ -48,8 +48,10 @@ the catalogue, the release workflow keeps it current on its own.
 
 `zip` + `portable`, not an installer. The release publishes a portable archive
 with a bare `srelens-tui.exe` inside; winget unpacks it, registers the command,
-and puts it on `PATH` through its links directory. Nothing appears in
-Add/Remove Programs and `winget uninstall` removes it again.
+and puts it on `PATH` through its links directory. There is no installer to
+run and nothing lands in Program Files, but a portable package is still
+registered so winget can track and remove it -- it appears in Apps & Features,
+and `winget uninstall` removes it.
 
 x64 only, matching the single Windows archive the release builds. An arm64
 Windows target means adding it to the installer template and to `TARGET` in
