@@ -106,6 +106,9 @@ pub enum UpdateError {
     },
     /// The binary's directory cannot be written to by this user.
     NotWritable { path: PathBuf },
+    /// The staged download changed between being written and being
+    /// installed — someone else can write to the directory.
+    StagedChanged,
     /// The update failed AND the original could not be put back. The user
     /// has no working binary until they move it themselves, so this says
     /// exactly where it is rather than only why the update failed.
@@ -151,6 +154,10 @@ impl fmt::Display for UpdateError {
                 f,
                 "cannot write to {} — re-run with the rights to change it, or install srelens-tui somewhere you own",
                 path.display()
+            ),
+            Self::StagedChanged => write!(
+                f,
+                "the downloaded file changed on disk before it could be installed, so nothing was replaced — someone else can write to that directory"
             ),
             Self::LeftDisplaced {
                 displaced,
@@ -662,6 +669,20 @@ fn writable_dir(dir: &Path) -> bool {
     }
 }
 
+/// Confirm the file at `path` still holds exactly `bytes`.
+///
+/// Split out so it can be tested directly: the race it defends against
+/// cannot be staged from a test without becoming the very timing problem it
+/// is about.
+fn assert_staged_is_unchanged(path: &Path, bytes: &[u8]) -> Result<(), UpdateError> {
+    let on_disk = std::fs::read(path).map_err(io)?;
+    if on_disk == bytes {
+        Ok(())
+    } else {
+        Err(UpdateError::StagedChanged)
+    }
+}
+
 /// Put `bytes` at `target`, replacing the binary that is currently running.
 ///
 /// The new file is written beside the target and renamed in, so the last step
@@ -692,6 +713,23 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
         .map_err(io)?;
     drop(file);
     set_executable(&staged.0)?;
+
+    // Read back what is actually at that path before installing it.
+    //
+    // Closing the handle gives up the only hold on the NAME. On Windows
+    // that ends the share-mode protection; on Unix a handle never protected
+    // the name anyway — anyone who can write to a non-sticky directory may
+    // unlink a 0600 file they cannot read and put their own there. Either
+    // way the rename below could pick up a file nobody verified. Comparing
+    // against the bytes in hand costs one read and makes the guarantee
+    // whole: what gets installed is what came out of the archive whose
+    // checksum matched, or nothing does.
+    //
+    // This does NOT make a directory other people can write to safe. They
+    // can overwrite the installed binary a moment later, with or without
+    // this command. It means only that THIS command never installs bytes it
+    // did not verify.
+    assert_staged_is_unchanged(&staged.0, bytes)?;
 
     if cfg!(windows) {
         let displaced = dir.join(format!("{BIN}.old"));
@@ -776,6 +814,40 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "created as {mode:o}, not 0600");
+    }
+
+    /// Nothing is installed unless the file on disk is still the file that
+    /// came out of the verified archive.
+    #[test]
+    fn a_staged_file_that_changed_underneath_us_is_refused() {
+        use super::{assert_staged_is_unchanged, UpdateError};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("staged");
+
+        std::fs::write(&path, b"the verified bytes").unwrap();
+        assert!(assert_staged_is_unchanged(&path, b"the verified bytes").is_ok());
+
+        // What an attacker who can write to the directory would leave.
+        std::fs::write(&path, b"something else entirely").unwrap();
+        assert!(matches!(
+            assert_staged_is_unchanged(&path, b"the verified bytes"),
+            Err(UpdateError::StagedChanged)
+        ));
+
+        // Same length, one byte different — a truncation check would miss it.
+        std::fs::write(&path, b"the verified byteS").unwrap();
+        assert!(matches!(
+            assert_staged_is_unchanged(&path, b"the verified bytes"),
+            Err(UpdateError::StagedChanged)
+        ));
+
+        // Gone entirely is an IO error, not a silent pass.
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            assert_staged_is_unchanged(&path, b"the verified bytes"),
+            Err(UpdateError::Io(_))
+        ));
     }
 
     /// Two calls never collide, which is what lets the name be unpredictable
