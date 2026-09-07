@@ -5,11 +5,11 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (93)
+## Tools (94)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (53)
+### Kubernetes — read-only (54)
 
 | Tool | Summary |
 | --- | --- |
@@ -59,6 +59,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.podsForPvc` | list pods in a namespace that mount a given PersistentVolumeClaim |
 | `k8s.podsForSelector` | list pods matching a label selector (a workload's managed pods) |
 | `k8s.podsForServiceAccount` | list pods in a namespace running as a given ServiceAccount |
+| `k8s.podsOnNode` | list pods scheduled on a node across all namespaces |
 | `k8s.prometheusDiscover` | find a Prometheus-compatible query API running in the cluster |
 | `k8s.prometheusQuery` | run a PromQL instant query against an in-cluster Prometheus |
 | `k8s.queryPodEndpoint` | Query an HTTP endpoint (such as /metrics, /healthz, or custom app endpoints) inside any running pod via an on-demand API port-forward tunnel. Automatically resolves pod by selector or name, auto-detects metric/service ports, and supports line filtering. |

@@ -420,6 +420,12 @@
     "requiresConfirm": false
   },
   {
+    "id": "k8s.podsOnNode",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.prometheusDiscover",
     "readOnly": true,
     "destructive": false,
