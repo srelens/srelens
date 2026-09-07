@@ -862,7 +862,7 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         ("<c>", "Cordon")
     };
 
-    let hints: &[(&str, &str)] = &[
+    let mut hints: Vec<(&str, &str)> = vec![
         ("<↑/↓>", "Select Pod"),
         ("<Enter>", "Jump"),
         ("<l>", "Logs"),
@@ -873,9 +873,14 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         ("<x>", "Actions"),
         cordon_hint,
         ("<s>", "Shell"),
-        ("<r>", "Refresh"),
-        ("<Esc>", "Back"),
     ];
+
+    if !d.pods.is_empty() {
+        hints.push(("<S>", "Node Debug"));
+    }
+
+    hints.push(("<r>", "Refresh"));
+    hints.push(("<Esc>", "Back"));
 
     let mut spans = Vec::new();
     for (i, (k, label)) in hints.iter().enumerate() {

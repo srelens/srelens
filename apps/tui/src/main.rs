@@ -517,25 +517,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                SuspendAction::PodShell { pod, container } => {
-                    let _ = views::ExecRunner::run_pod_shell(
+                SuspendAction::PodShell { pod, namespace, container } => {
+                    let target_ns = namespace.as_deref().unwrap_or(app.active_namespace.as_str());
+                    if let Err(e) = views::ExecRunner::run_pod_shell(
                         &app.active_context,
-                        &app.active_namespace,
+                        target_ns,
                         &pod,
                         container.as_deref(),
                         None,
-                    );
+                    ) {
+                        app.set_toast(e, theme::Theme::status_error());
+                    }
                 }
-                SuspendAction::DebugShell { pod, container } => {
-                    let _ = views::ExecRunner::run_debug_shell(
+                SuspendAction::DebugShell { pod, namespace, container } => {
+                    let target_ns = namespace.as_deref().unwrap_or(app.active_namespace.as_str());
+                    if let Err(e) = views::ExecRunner::run_debug_shell(
                         &app.active_context,
-                        &app.active_namespace,
+                        target_ns,
                         &pod,
                         container.as_deref(),
-                    );
+                    ) {
+                        app.set_toast(e, theme::Theme::status_error());
+                    }
                 }
                 SuspendAction::NodeShell { node } => {
-                    let _ = views::ExecRunner::run_node_shell(&app.active_context, &node);
+                    if let Err(e) = views::ExecRunner::run_node_shell(&app.active_context, &node) {
+                        app.set_toast(e, theme::Theme::status_error());
+                    }
                 }
             }
 

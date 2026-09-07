@@ -2244,10 +2244,18 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
     assert_eq!(ni.selected_pod_idx, 0);
 
     app.handle_key_event(common::ch('s')).await;
-    assert_eq!(
-        toast(&app),
-        "Node debug command: kubectl debug node/gpu-1 -it --image=busybox"
-    );
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::PodShell { .. })
+    ));
+    app.requires_terminal_suspend = None;
+
+    app.handle_key_event(common::ch('S')).await;
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeShell { node }) if node == "gpu-1"
+    ));
+    app.requires_terminal_suspend = None;
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
@@ -2853,7 +2861,7 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 
     app.prompt_pod_shell("solo".into(), None).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "solo");
             assert_eq!(container.as_deref(), Some("only"));
         }

@@ -333,7 +333,7 @@ fn node_inspector_gpu_model_falls_back_to_a_generic_label() {
 #[test]
 fn node_inspector_footer_lists_every_shortcut_with_the_cordon_hint() {
     let state = node_state(node_details("node-1"));
-    let lines = common::render_lines(180, 40, |f| render_node_inspector_view(f, f.area(), &state));
+    let lines = common::render_lines(200, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let footer = lines.last().unwrap();
     for hint in [
         "<↑/↓>:Select Pod",
@@ -346,6 +346,7 @@ fn node_inspector_footer_lists_every_shortcut_with_the_cordon_hint() {
         "<x>:Actions",
         "<c>:Cordon",
         "<s>:Shell",
+        "<S>:Node Debug",
         "<r>:Refresh",
         "<Esc>:Back",
     ] {
