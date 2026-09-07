@@ -133,7 +133,11 @@ pub fn render_describe_view(f: &mut Frame, area: Rect, state: &DescribeViewState
         " Describe: {}/{} {} (Line {}/{}) [c: Copy]{} [/: Search] [Esc: Back] ",
         state.resource_kind,
         state.resource_name,
-        state.namespace.as_deref().map(|ns| format!("({})", ns)).unwrap_or_default(),
+        state
+            .namespace
+            .as_deref()
+            .map(|ns| format!("({})", ns))
+            .unwrap_or_default(),
         state.scroll_offset + 1,
         state.lines.len(),
         search_badge
@@ -159,19 +163,39 @@ pub fn render_describe_view(f: &mut Frame, area: Rect, state: &DescribeViewState
 
     for line in state.lines.iter().take(end_idx).skip(state.scroll_offset) {
         let has_match = !state.search_query.is_empty()
-            && line.to_lowercase().contains(&state.search_query.to_lowercase());
+            && line
+                .to_lowercase()
+                .contains(&state.search_query.to_lowercase());
 
         if has_match {
-            let spans = super::highlight_text_matches(line, &state.search_query, Style::default().fg(Theme::FG), match_style);
+            let spans = super::highlight_text_matches(
+                line,
+                &state.search_query,
+                Style::default().fg(Theme::FG),
+                match_style,
+            );
             rendered_lines.push(Line::from(spans));
         } else {
             // Style headers, keys, values
             let mut spans = Vec::new();
             if let Some((k, v)) = line.split_once(':') {
-                spans.push(Span::styled(format!("{}:", k), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    format!("{}:", k),
+                    Style::default()
+                        .fg(Theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 spans.push(Span::styled(v.to_string(), Style::default().fg(Theme::FG)));
-            } else if line.starts_with("Events:") || line.starts_with("Conditions:") || line.starts_with("Containers:") {
-                spans.push(Span::styled(line.clone(), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)));
+            } else if line.starts_with("Events:")
+                || line.starts_with("Conditions:")
+                || line.starts_with("Containers:")
+            {
+                spans.push(Span::styled(
+                    line.clone(),
+                    Style::default()
+                        .fg(Theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ));
             } else {
                 spans.push(Span::styled(line.clone(), Style::default().fg(Theme::FG)));
             }

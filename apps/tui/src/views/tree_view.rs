@@ -183,8 +183,19 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
 
     if state.is_loading {
         let loading_line = Line::from(vec![
-            Span::styled("⚡ Resolving resource lineage... ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("Tracing ownerReferences, dependents, and linked resources for {}/{}...", state.root_kind, state.root_name), Style::default().fg(Theme::DIM)),
+            Span::styled(
+                "⚡ Resolving resource lineage... ",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "Tracing ownerReferences, dependents, and linked resources for {}/{}...",
+                    state.root_kind, state.root_name
+                ),
+                Style::default().fg(Theme::DIM),
+            ),
         ]);
         f.render_widget(Paragraph::new(loading_line), inner);
         return;
@@ -192,7 +203,10 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
 
     if let Some(err) = &state.error {
         let err_line = Line::from(vec![
-            Span::styled("⚠ Failed to resolve lineage: ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "⚠ Failed to resolve lineage: ",
+                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(err.as_str(), Style::default().fg(Theme::FG)),
         ]);
         f.render_widget(Paragraph::new(err_line), inner);
@@ -200,9 +214,10 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
     }
 
     if state.nodes.is_empty() {
-        let empty_line = Line::from(vec![
-            Span::styled("No relationships or lineage found for this resource.", Style::default().fg(Theme::DIM)),
-        ]);
+        let empty_line = Line::from(vec![Span::styled(
+            "No relationships or lineage found for this resource.",
+            Style::default().fg(Theme::DIM),
+        )]);
         f.render_widget(Paragraph::new(empty_line), inner);
         return;
     }
@@ -223,16 +238,29 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
         let mut spans = Vec::new();
 
         // 1. Branch glyphs (prefix)
-        spans.push(Span::styled(node.prefix.as_str(), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            node.prefix.as_str(),
+            Style::default().fg(Color::DarkGray),
+        ));
 
         // 2. Kind tag
         let kind_style = match node.kind.to_lowercase().as_str() {
-            "pod" => Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
-            "deployment" | "replicaset" | "statefulset" | "daemonset" => Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
-            "service" | "ingress" => Style::default().fg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD),
+            "pod" => Style::default()
+                .fg(Theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+            "deployment" | "replicaset" | "statefulset" | "daemonset" => Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+            "service" | "ingress" => Style::default()
+                .fg(Color::Rgb(100, 180, 255))
+                .add_modifier(Modifier::BOLD),
             "configmap" | "secret" => Style::default().fg(Color::Yellow),
-            "persistentvolumeclaim" | "persistentvolume" | "storageclass" => Style::default().fg(Color::Magenta),
-            "node" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            "persistentvolumeclaim" | "persistentvolume" | "storageclass" => {
+                Style::default().fg(Color::Magenta)
+            }
+            "node" => Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
             "container" => Style::default().fg(Color::Rgb(160, 160, 200)),
             _ => Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
         };
@@ -240,9 +268,13 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
 
         // 3. Name
         let name_style = if is_selected {
-            Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Theme::SEL_FG)
+                .add_modifier(Modifier::BOLD)
         } else if node.relationship == LineageRelation::Target {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::FG)
         };
@@ -250,10 +282,14 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
 
         // 4. Relationship badge
         let rel_style = match node.relationship {
-            LineageRelation::Target => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            LineageRelation::Target => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
             LineageRelation::Owner => Style::default().fg(Color::Rgb(255, 140, 60)),
             LineageRelation::Child => Style::default().fg(Color::Rgb(100, 200, 255)),
-            LineageRelation::Service | LineageRelation::Ingress => Style::default().fg(Color::Rgb(120, 180, 255)),
+            LineageRelation::Service | LineageRelation::Ingress => {
+                Style::default().fg(Color::Rgb(120, 180, 255))
+            }
             LineageRelation::Config | LineageRelation::Secret => Style::default().fg(Color::Yellow),
             LineageRelation::Storage => Style::default().fg(Color::Magenta),
             LineageRelation::Node => Style::default().fg(Color::Green),
@@ -264,10 +300,19 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
         // 5. Status badge
         if let Some(status) = &node.status {
             let st_style = match status.to_lowercase().as_str() {
-                s if s.contains("running") || s.contains("ready") || s.contains("bound") || s.contains("completed") || s.contains("active") => {
+                s if s.contains("running")
+                    || s.contains("ready")
+                    || s.contains("bound")
+                    || s.contains("completed")
+                    || s.contains("active") =>
+                {
                     Theme::status_ok()
                 }
-                s if s.contains("crashloop") || s.contains("error") || s.contains("failed") || s.contains("unreachable") => {
+                s if s.contains("crashloop")
+                    || s.contains("error")
+                    || s.contains("failed")
+                    || s.contains("unreachable") =>
+                {
                     Theme::status_error()
                 }
                 _ => Theme::status_warn(),
@@ -279,7 +324,10 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
         // 6. Details
         if let Some(details) = &node.details {
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(format!("({})", details), Style::default().fg(Theme::DIM)));
+            spans.push(Span::styled(
+                format!("({})", details),
+                Style::default().fg(Theme::DIM),
+            ));
         }
 
         let row_style = if is_selected {
@@ -300,14 +348,30 @@ mod tests {
 
     #[test]
     fn test_tree_flattening_and_target_selection() {
-        let mut root = LineageNode::new("Deployment", "auth-api", Some("prod".into()), LineageRelation::Owner);
-        let mut rs = LineageNode::new("ReplicaSet", "auth-api-987", Some("prod".into()), LineageRelation::Owner);
-        let pod = LineageNode::new("Pod", "auth-api-987-abc", Some("prod".into()), LineageRelation::Target);
+        let mut root = LineageNode::new(
+            "Deployment",
+            "auth-api",
+            Some("prod".into()),
+            LineageRelation::Owner,
+        );
+        let mut rs = LineageNode::new(
+            "ReplicaSet",
+            "auth-api-987",
+            Some("prod".into()),
+            LineageRelation::Owner,
+        );
+        let pod = LineageNode::new(
+            "Pod",
+            "auth-api-987-abc",
+            Some("prod".into()),
+            LineageRelation::Target,
+        );
 
         rs.children.push(pod);
         root.children.push(rs);
 
-        let mut state = TreeViewState::new("Pod".into(), "auth-api-987-abc".into(), Some("prod".into()));
+        let mut state =
+            TreeViewState::new("Pod".into(), "auth-api-987-abc".into(), Some("prod".into()));
         state.set_tree(root);
 
         assert_eq!(state.nodes.len(), 3);

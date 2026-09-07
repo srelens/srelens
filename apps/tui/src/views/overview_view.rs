@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Table, Cell},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame,
 };
 
@@ -34,15 +34,28 @@ pub struct ClusterOverviewData {
 impl ClusterOverviewData {
     pub fn to_summary_text(&self) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("Cluster: {} ({})", self.cluster_name, self.context_name));
-        lines.push(format!("Status: {}", if self.is_reachable { "Reachable / Healthy" } else { "Unreachable" }));
+        lines.push(format!(
+            "Cluster: {} ({})",
+            self.cluster_name, self.context_name
+        ));
+        lines.push(format!(
+            "Status: {}",
+            if self.is_reachable {
+                "Reachable / Healthy"
+            } else {
+                "Unreachable"
+            }
+        ));
         if !self.server_url.is_empty() {
             lines.push(format!("Server: {}", self.server_url));
         }
         if !self.k8s_version.is_empty() {
             lines.push(format!("Kubernetes Version: {}", self.k8s_version));
         }
-        lines.push(format!("Nodes: {}/{} Ready", self.ready_nodes, self.node_count));
+        lines.push(format!(
+            "Nodes: {}/{} Ready",
+            self.ready_nodes, self.node_count
+        ));
 
         let cpu_cores_total = self.total_cpu_millicores as f64 / 1000.0;
         let cpu_cores_used = self.used_cpu_millicores as f64 / 1000.0;
@@ -51,7 +64,10 @@ impl ClusterOverviewData {
         } else {
             0
         };
-        lines.push(format!("CPU Allocation: {:.1} / {:.1} Cores ({}%)", cpu_cores_used, cpu_cores_total, cpu_pct));
+        lines.push(format!(
+            "CPU Allocation: {:.1} / {:.1} Cores ({}%)",
+            cpu_cores_used, cpu_cores_total, cpu_pct
+        ));
 
         let mem_gib_total = self.total_mem_mib as f64 / 1024.0;
         let mem_gib_used = self.used_mem_mib as f64 / 1024.0;
@@ -60,7 +76,10 @@ impl ClusterOverviewData {
         } else {
             0
         };
-        lines.push(format!("Memory Allocation: {:.1} / {:.1} GiB ({}%)", mem_gib_used, mem_gib_total, mem_pct));
+        lines.push(format!(
+            "Memory Allocation: {:.1} / {:.1} GiB ({}%)",
+            mem_gib_used, mem_gib_total, mem_pct
+        ));
 
         if self.total_gpus > 0 || self.used_gpu_mem_mib > 0 {
             let gpu_pct = if self.total_gpus > 0 {
@@ -68,15 +87,23 @@ impl ClusterOverviewData {
             } else {
                 0
             };
-            let mut gpu_line = format!("GPU Allocation: {} / {} GPUs ({}%)", self.allocated_gpus, self.total_gpus, gpu_pct);
+            let mut gpu_line = format!(
+                "GPU Allocation: {} / {} GPUs ({}%)",
+                self.allocated_gpus, self.total_gpus, gpu_pct
+            );
             if self.used_gpu_mem_mib > 0 {
-                gpu_line.push_str(&format!(", VRAM Allocated: {:.1} GiB", self.used_gpu_mem_mib as f64 / 1024.0));
+                gpu_line.push_str(&format!(
+                    ", VRAM Allocated: {:.1} GiB",
+                    self.used_gpu_mem_mib as f64 / 1024.0
+                ));
             }
             lines.push(gpu_line);
         }
 
-        lines.push(format!("Workloads: {} Total ({} Running, {} Pending, {} Failed/Crash)",
-            self.total_pods, self.running_pods, self.pending_pods, self.failed_pods));
+        lines.push(format!(
+            "Workloads: {} Total ({} Running, {} Pending, {} Failed/Crash)",
+            self.total_pods, self.running_pods, self.pending_pods, self.failed_pods
+        ));
 
         lines.join("\n")
     }
@@ -118,9 +145,9 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),            // Cluster info cards
+            Constraint::Length(6),             // Cluster info cards
             Constraint::Length(gauges_height), // Resource allocation gauges (CPU, Mem, [GPU])
-            Constraint::Min(8),               // Workload health distribution
+            Constraint::Min(8),                // Workload health distribution
         ])
         .split(inner);
 
@@ -177,7 +204,11 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
 
     // 2. Resource gauges (CPU, Memory, optional GPU)
     let gauge_constraints = if has_gpus {
-        vec![Constraint::Length(3), Constraint::Length(3), Constraint::Length(3)]
+        vec![
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ]
     } else {
         vec![Constraint::Length(3), Constraint::Length(3)]
     };
@@ -209,7 +240,13 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
 
     let cpu_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(cpu_title))
-        .gauge_style(Style::default().fg(if cpu_pct > 85 { Theme::RED } else if cpu_pct > 70 { Theme::YELLOW } else { Theme::CYAN }))
+        .gauge_style(Style::default().fg(if cpu_pct > 85 {
+            Theme::RED
+        } else if cpu_pct > 70 {
+            Theme::YELLOW
+        } else {
+            Theme::CYAN
+        }))
         .percent(cpu_pct.min(100));
     f.render_widget(cpu_gauge, gauge_layout[0]);
 
@@ -235,13 +272,20 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
 
     let mem_gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(mem_title))
-        .gauge_style(Style::default().fg(if mem_pct > 85 { Theme::RED } else if mem_pct > 70 { Theme::YELLOW } else { Theme::ACCENT }))
+        .gauge_style(Style::default().fg(if mem_pct > 85 {
+            Theme::RED
+        } else if mem_pct > 70 {
+            Theme::YELLOW
+        } else {
+            Theme::ACCENT
+        }))
         .percent(mem_pct.min(100));
     f.render_widget(mem_gauge, gauge_layout[1]);
 
     if has_gpus && gauge_layout.len() > 2 {
         let (gpu_title, gpu_pct) = if d.total_gpus > 0 {
-            let pct = (((d.allocated_gpus as f64 / d.total_gpus as f64) * 100.0).round() as u32).min(100) as u16;
+            let pct = (((d.allocated_gpus as f64 / d.total_gpus as f64) * 100.0).round() as u32)
+                .min(100) as u16;
             let title = if d.used_gpu_mem_mib > 0 {
                 let vram_gib = d.used_gpu_mem_mib as f64 / 1024.0;
                 if d.total_gpu_mem_mib > 0 {
@@ -265,7 +309,9 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
             };
             (title, pct)
         } else if d.total_gpu_mem_mib > 0 {
-            let pct = (((d.used_gpu_mem_mib as f64 / d.total_gpu_mem_mib as f64) * 100.0).round() as u32).min(100) as u16;
+            let pct = (((d.used_gpu_mem_mib as f64 / d.total_gpu_mem_mib as f64) * 100.0).round()
+                as u32)
+                .min(100) as u16;
             (
                 format!(
                     " GPU VRAM Allocation: {:.1} / {:.1} GiB ({}%) ",
@@ -277,7 +323,10 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
             )
         } else {
             (
-                format!(" GPU Allocation: {:.1} GiB VRAM allocated ", d.used_gpu_mem_mib as f64 / 1024.0),
+                format!(
+                    " GPU Allocation: {:.1} GiB VRAM allocated ",
+                    d.used_gpu_mem_mib as f64 / 1024.0
+                ),
                 0,
             )
         };
@@ -310,7 +359,10 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
             Span::styled("● Pending:      ", Theme::status_warn()),
             Span::styled(format!("{}", d.pending_pods), Theme::status_warn()),
             if d.pending_pods > 0 {
-                Span::styled("  (Unschedulable or waiting for resources/PVC)", Style::default().fg(Theme::DIM))
+                Span::styled(
+                    "  (Unschedulable or waiting for resources/PVC)",
+                    Style::default().fg(Theme::DIM),
+                )
             } else {
                 Span::raw("")
             },
@@ -319,7 +371,10 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
             Span::styled("● Failed/Crash: ", Theme::status_error()),
             Span::styled(format!("{}", d.failed_pods), Theme::status_error()),
             if d.failed_pods > 0 {
-                Span::styled("  (OOMKilled, CrashLoopBackOff, or Error)", Style::default().fg(Theme::DIM))
+                Span::styled(
+                    "  (OOMKilled, CrashLoopBackOff, or Error)",
+                    Style::default().fg(Theme::DIM),
+                )
             } else {
                 Span::raw("")
             },
@@ -329,9 +384,16 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
     if d.total_gpus > 0 || d.used_gpu_mem_mib > 0 {
         let vram_detail = if d.used_gpu_mem_mib > 0 {
             if d.total_gpu_mem_mib > 0 {
-                format!("  [VRAM: {:.1} / {:.1} GiB allocated]", d.used_gpu_mem_mib as f64 / 1024.0, d.total_gpu_mem_mib as f64 / 1024.0)
+                format!(
+                    "  [VRAM: {:.1} / {:.1} GiB allocated]",
+                    d.used_gpu_mem_mib as f64 / 1024.0,
+                    d.total_gpu_mem_mib as f64 / 1024.0
+                )
             } else {
-                format!("  [VRAM: {:.1} GiB allocated]", d.used_gpu_mem_mib as f64 / 1024.0)
+                format!(
+                    "  [VRAM: {:.1} GiB allocated]",
+                    d.used_gpu_mem_mib as f64 / 1024.0
+                )
             }
         } else {
             String::new()
@@ -339,7 +401,10 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
 
         dist_lines.push(Line::from(vec![
             Span::styled("GPU Slices:     ", Theme::header_label()),
-            Span::styled(format!("{}/{} Physical GPUs", d.allocated_gpus, d.total_gpus), Style::default().fg(Theme::ACCENT)),
+            Span::styled(
+                format!("{}/{} Physical GPUs", d.allocated_gpus, d.total_gpus),
+                Style::default().fg(Theme::ACCENT),
+            ),
             Span::styled(vram_detail, Style::default().fg(Theme::FG)),
         ]));
     }

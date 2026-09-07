@@ -787,21 +787,32 @@ pub fn recover_interrupted_update(exe: &Path) -> Result<Option<PathBuf>, UpdateE
     Ok(Some(target))
 }
 
+/// The suffix the updater gives a binary it has moved aside.
+///
+/// It carries the tool's own name on purpose. `.<name>.old` is what a
+/// PERSON calls a backup, and treating every such file as an interrupted
+/// update meant running `.lens.exe.old` renamed it, or — worse, with a
+/// real `lens.exe` present — made an update replace that sibling instead
+/// of the file invoked. Nobody names a backup this.
+const DISPLACED_SUFFIX: &str = ".srelens-update.old";
+
+/// The name a displaced file should be restored to, if this path is one.
+fn name_under_displaced(exe: &Path) -> Option<String> {
+    let name = exe.file_name()?.to_str()?;
+    let restored = name.strip_prefix(".")?.strip_suffix(DISPLACED_SUFFIX)?;
+    (!restored.is_empty()).then(|| restored.to_string())
+}
+
 /// The name this binary should have, if it is sitting under the displaced
 /// one with the real name free.
 fn displaced_original(exe: &Path) -> Option<PathBuf> {
     if !cfg!(windows) {
         return None;
     }
-    let name = exe.file_name()?.to_str()?;
-    let restored = name.strip_prefix(".")?.strip_suffix(".old")?;
-    if restored.is_empty() {
-        return None;
-    }
     // Whatever name it was, not the compiled-in one: the updater names the
     // displaced file after the binary it is replacing, so a renamed copy
     // must come back as the name its user invoked.
-    let target = exe.with_file_name(restored);
+    let target = exe.with_file_name(name_under_displaced(exe)?);
     (!target.exists()).then_some(target)
 }
 
@@ -815,19 +826,14 @@ fn displaced_original(exe: &Path) -> Option<PathBuf> {
 pub fn installed_path(exe: &Path) -> PathBuf {
     // Windows only, matching the recovery it exists to follow. Applied on
     // Unix it would take someone running a backup they named
-    // `.srelens-tui.old` and update the sibling instead — replacing a
+    // `.srelens-update.old` suffix and update the sibling instead — replacing a
     // binary they did not invoke, which is the one promise this command
     // makes about what it touches.
     if !cfg!(windows) {
         return exe.to_path_buf();
     }
     let displaced = || -> Option<PathBuf> {
-        let name = exe.file_name()?.to_str()?;
-        let restored = name.strip_prefix(".")?.strip_suffix(".old")?;
-        if restored.is_empty() {
-            return None;
-        }
-        let target = exe.with_file_name(restored);
+        let target = exe.with_file_name(name_under_displaced(exe)?);
         target.exists().then_some(target)
     };
     displaced().unwrap_or_else(|| exe.to_path_buf())
@@ -864,7 +870,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     // see `create_new_file`. Writing through a planted symlink here would
     // put a downloaded executable wherever the link pointed.
     // Named after the file being replaced rather than after the compiled-in
-    // name. Someone who renames the binary to `lens` gets `.lens.old` and
+    // name. Someone who renames the binary to `lens` gets `.lens.srelens-update.old` and
     // `.lens.new-…`, so an interrupted update recovers the command they
     // actually had — the fixed name restored `srelens-tui` and left `lens`
     // missing.
@@ -915,7 +921,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
         // so a real update destroyed it. `fs::rename` overwrites on Windows
         // too, so choosing a name nobody else would pick is the fix, not the
         // explicit removal.
-        let displaced = dir.join(format!(".{name}.old"));
+        let displaced = dir.join(format!(".{name}{DISPLACED_SUFFIX}"));
         let _ = std::fs::remove_file(&displaced);
         std::fs::rename(target, &displaced).map_err(io)?;
         if let Err(e) = std::fs::rename(&staged.0, target) {
@@ -1161,10 +1167,47 @@ mod tests {
         // And the displaced file, where Windows leaves one, maps back to the
         // invoked name rather than to srelens-tui.
         if cfg!(windows) {
-            let displaced = dir.path().join(".lens.exe.old");
+            let displaced = dir.path().join(".lens.exe.srelens-update.old");
             if displaced.exists() {
                 assert_eq!(installed_path(&displaced), renamed);
             }
+        }
+    }
+
+    /// Only a file this updater displaced is treated as one.
+    ///
+    /// `.<name>.old` is what a PERSON calls a backup. Treating every such
+    /// file as an interrupted update meant running `.lens.exe.old` renamed
+    /// it out from under its owner — and with a real `lens.exe` present, an
+    /// update would have replaced that sibling instead of the file invoked.
+    #[test]
+    fn only_the_updater_s_own_displaced_name_is_recognised() {
+        use super::installed_path;
+
+        let _guard = file_test_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // A backup somebody made. Both the real name and the backup exist,
+        // which is the dangerous shape: the update must still target the
+        // file it was invoked as.
+        let backup = dir.path().join(".lens.old");
+        let real = dir.path().join("lens");
+        std::fs::write(&backup, b"a backup").unwrap();
+        std::fs::write(&real, b"the real one").unwrap();
+        assert_eq!(
+            installed_path(&backup),
+            backup,
+            "a user's .old backup must not be remapped onto its sibling"
+        );
+
+        // The updater's own, which carries its name.
+        let ours = dir.path().join(".lens.srelens-update.old");
+        std::fs::write(&ours, b"displaced by an update").unwrap();
+        let mapped = installed_path(&ours);
+        if cfg!(windows) {
+            assert_eq!(mapped, real, "the updater's own displaced file maps back");
+        } else {
+            assert_eq!(mapped, ours, "remapping is Windows-only");
         }
     }
 

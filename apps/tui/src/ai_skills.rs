@@ -4,8 +4,8 @@
 //! with interactive slash-command autocomplete, zero-argument discovery fallbacks,
 //! and contextual resource prompts.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDef {
@@ -220,11 +220,7 @@ pub fn expand_slash_command(
 
     let prompt = format!(
         "Playbook: {}\nContext: Cluster '{}', {}\n{}\n\nGuidelines:\n{}",
-        skill.description,
-        active_context,
-        ns_desc,
-        target_statement,
-        skill.instructions
+        skill.description, active_context, ns_desc, target_statement, skill.instructions
     );
 
     Some(prompt)
@@ -261,7 +257,9 @@ impl CavemanLevel {
             "full" | "" => Some(CavemanLevel::Full),
             "ultra" => Some(CavemanLevel::Ultra),
             "wenyan-lite" | "wenyan_lite" | "wenyanlite" => Some(CavemanLevel::WenyanLite),
-            "wenyan-full" | "wenyan_full" | "wenyanfull" | "wenyan" => Some(CavemanLevel::WenyanFull),
+            "wenyan-full" | "wenyan_full" | "wenyanfull" | "wenyan" => {
+                Some(CavemanLevel::WenyanFull)
+            }
             "wenyan-ultra" | "wenyan_ultra" | "wenyanultra" => Some(CavemanLevel::WenyanUltra),
             _ => None,
         }
@@ -438,7 +436,8 @@ mod tests {
 
     #[test]
     fn test_expand_slash_command_targeted() {
-        let expanded = expand_slash_command("crashloop", Some("auth-service-xyz"), "prod", "default").unwrap();
+        let expanded =
+            expand_slash_command("crashloop", Some("auth-service-xyz"), "prod", "default").unwrap();
         assert!(expanded.contains("auth-service-xyz"));
         assert!(expanded.contains("default"));
         assert!(expanded.contains("crashed instance"));
@@ -465,10 +464,22 @@ mod tests {
         assert_eq!(CavemanLevel::parse("lite"), Some(CavemanLevel::Lite));
         assert_eq!(CavemanLevel::parse("full"), Some(CavemanLevel::Full));
         assert_eq!(CavemanLevel::parse("ultra"), Some(CavemanLevel::Ultra));
-        assert_eq!(CavemanLevel::parse("wenyan-lite"), Some(CavemanLevel::WenyanLite));
-        assert_eq!(CavemanLevel::parse("wenyan-full"), Some(CavemanLevel::WenyanFull));
-        assert_eq!(CavemanLevel::parse("wenyan"), Some(CavemanLevel::WenyanFull));
-        assert_eq!(CavemanLevel::parse("wenyan-ultra"), Some(CavemanLevel::WenyanUltra));
+        assert_eq!(
+            CavemanLevel::parse("wenyan-lite"),
+            Some(CavemanLevel::WenyanLite)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-full"),
+            Some(CavemanLevel::WenyanFull)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan"),
+            Some(CavemanLevel::WenyanFull)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-ultra"),
+            Some(CavemanLevel::WenyanUltra)
+        );
         assert_eq!(CavemanLevel::parse(""), Some(CavemanLevel::Full));
         assert_eq!(CavemanLevel::parse("unknown"), None);
     }
@@ -479,7 +490,10 @@ mod tests {
         assert_eq!(parse_caveman_command("   "), CavemanCommandAction::Status);
         assert_eq!(parse_caveman_command("off"), CavemanCommandAction::Disable);
         assert_eq!(parse_caveman_command("stop"), CavemanCommandAction::Disable);
-        assert_eq!(parse_caveman_command("normal"), CavemanCommandAction::Disable);
+        assert_eq!(
+            parse_caveman_command("normal"),
+            CavemanCommandAction::Disable
+        );
 
         assert_eq!(
             parse_caveman_command("ultra"),

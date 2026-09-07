@@ -1,8 +1,10 @@
-use std::time::Duration;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEvent, MouseEvent};
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::sync::mpsc::{error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use std::time::Duration;
+use tokio::sync::mpsc::{
+    error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender,
+};
 use tokio::sync::watch;
 
 #[derive(Debug)]

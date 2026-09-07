@@ -23,7 +23,12 @@ pub struct ToolboxViewState {
     pub selected_idx: usize,
 }
 
-fn detect_tool(name: &str, alt_names: &[&str], required: bool, version_args: &[&str]) -> ToolStatusItem {
+fn detect_tool(
+    name: &str,
+    alt_names: &[&str],
+    required: bool,
+    version_args: &[&str],
+) -> ToolStatusItem {
     let mut resolved_path = None;
 
     // Check primary name and alternatives with `which`

@@ -6,9 +6,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    },
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -89,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exactly what someone whose binary vanished is likely to type first.
     //
     // An update interrupted between its two renames leaves this binary at
-    // `.srelens-tui.exe.old` with nothing at the real name — and no way to
+    // `.srelens-tui.exe.srelens-update.old` with nothing at the real name — and no
     // run `update` to repair it, since there is nothing left to run. If
     // this process IS that displaced file, put it back. A no-op anywhere
     // else, and off Windows entirely.
@@ -135,7 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Found {} contexts across kubeconfigs:", contexts.len());
                 for ctx in contexts {
                     let mark = if ctx.is_current { "* " } else { "  " };
-                    println!("{}{} -> cluster: {}, server: {}", mark, ctx.display_name, ctx.cluster, ctx.server);
+                    println!(
+                        "{}{} -> cluster: {}, server: {}",
+                        mark, ctx.display_name, ctx.cluster, ctx.server
+                    );
                 }
                 return Ok(());
             }
@@ -147,13 +148,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("SRElens Toolbox Status:");
                 for tool in &state.tools {
                     let status = if tool.installed {
-                        format!("available ({})", tool.version.as_deref().unwrap_or("unknown version"))
+                        format!(
+                            "available ({})",
+                            tool.version.as_deref().unwrap_or("unknown version")
+                        )
                     } else if tool.required {
                         "missing (required)".to_string()
                     } else {
                         "not installed (optional)".to_string()
                     };
-                    let path_info = tool.path.as_deref().map(|p| format!(" [{}]", p)).unwrap_or_default();
+                    let path_info = tool
+                        .path
+                        .as_deref()
+                        .map(|p| format!(" [{}]", p))
+                        .unwrap_or_default();
                     println!("  {:<8} : {}{}", tool.name, status, path_info);
                 }
                 return Ok(());
@@ -172,7 +180,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -182,21 +195,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse target deep link if provided
     let parsed_target = cli.target.as_deref().and_then(|t| DeepLink::parse(t).ok());
 
-    let target_context = cli.context.or_else(|| {
-        match &parsed_target {
-            Some(DeepLink::Cluster { context }) => Some(context.clone()),
-            Some(DeepLink::Resource { context, .. }) if !context.is_empty() => Some(context.clone()),
-            Some(DeepLink::View { context, .. }) => context.clone(),
-            _ => None,
-        }
+    let target_context = cli.context.or_else(|| match &parsed_target {
+        Some(DeepLink::Cluster { context }) => Some(context.clone()),
+        Some(DeepLink::Resource { context, .. }) if !context.is_empty() => Some(context.clone()),
+        Some(DeepLink::View { context, .. }) => context.clone(),
+        _ => None,
     });
 
-    let target_namespace = cli.namespace.or_else(|| {
-        match &parsed_target {
-            Some(DeepLink::Resource { namespace, .. }) => namespace.clone(),
-            Some(DeepLink::View { namespace, .. }) => namespace.clone(),
-            _ => None,
-        }
+    let target_namespace = cli.namespace.or_else(|| match &parsed_target {
+        Some(DeepLink::Resource { namespace, .. }) => namespace.clone(),
+        Some(DeepLink::View { namespace, .. }) => namespace.clone(),
+        _ => None,
     });
 
     let initial_resource = match &parsed_target {
@@ -206,12 +215,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => None,
             })
         }
-        Some(DeepLink::View { target, .. }) => {
-            match target {
-                commands::CommandTarget::Resource(k) => Some(k.clone()),
-                _ => None,
-            }
-        }
+        Some(DeepLink::View { target, .. }) => match target {
+            commands::CommandTarget::Resource(k) => Some(k.clone()),
+            _ => None,
+        },
         _ => None,
     };
 
@@ -304,8 +311,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_crd_instances_update(&title, &msg);
                             } else if action.starts_with("ai_") {
                                 let target_state = match event_ctx {
-                                    Some(ctx) if ctx == app.active_context => &mut app.assistant_state,
-                                    Some(ctx) => app.assistant_states.entry(ctx.to_string()).or_insert_with(|| views::assistant_view::AssistantViewState::for_context(ctx)),
+                                    Some(ctx) if ctx == app.active_context => {
+                                        &mut app.assistant_state
+                                    }
+                                    Some(ctx) => app
+                                        .assistant_states
+                                        .entry(ctx.to_string())
+                                        .or_insert_with(|| {
+                                            views::assistant_view::AssistantViewState::for_context(
+                                                ctx,
+                                            )
+                                        }),
                                     None => &mut app.assistant_state,
                                 };
 
@@ -324,7 +340,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let status = if status_str == "ok" {
                                         views::assistant_view::ToolCallStatus::Success
                                     } else {
-                                        views::assistant_view::ToolCallStatus::Error(status_str.to_string())
+                                        views::assistant_view::ToolCallStatus::Error(
+                                            status_str.to_string(),
+                                        )
                                     };
                                     target_state.finish_tool_call(id, status);
                                 } else if action == "ai_usage" {
@@ -335,13 +353,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let cached = parts[2].parse().unwrap_or(0);
                                         let total = parts[3].parse().unwrap_or(prompt + comp);
                                         let duration = parts.get(4).and_then(|s| s.parse().ok());
-                                        target_state.set_token_usage(views::assistant_view::TokenUsage {
-                                            prompt_tokens: prompt,
-                                            completion_tokens: comp,
-                                            cached_tokens: cached,
-                                            total_tokens: total,
-                                            duration_ms: duration,
-                                        });
+                                        target_state.set_token_usage(
+                                            views::assistant_view::TokenUsage {
+                                                prompt_tokens: prompt,
+                                                completion_tokens: comp,
+                                                cached_tokens: cached,
+                                                total_tokens: total,
+                                                duration_ms: duration,
+                                            },
+                                        );
                                     }
                                 } else if action == "ai_chunk" {
                                     target_state.append_stream_chunk(&msg);
@@ -363,12 +383,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_cluster_info_failure(&err);
                             } else if title == "cluster_overview_updated" {
                                 // Best-effort: ignore if cluster overview cannot connect
-                            } else if title == "pod_metrics_updated" || title == "node_metrics_updated" {
+                            } else if title == "pod_metrics_updated"
+                                || title == "node_metrics_updated"
+                            {
                                 // Best-effort: ignore if metrics-server is unavailable
                             } else if action.starts_with("ai_") {
                                 let target_state = match event_ctx {
-                                    Some(ctx) if ctx == app.active_context => &mut app.assistant_state,
-                                    Some(ctx) => app.assistant_states.entry(ctx.to_string()).or_insert_with(|| views::assistant_view::AssistantViewState::for_context(ctx)),
+                                    Some(ctx) if ctx == app.active_context => {
+                                        &mut app.assistant_state
+                                    }
+                                    Some(ctx) => app
+                                        .assistant_states
+                                        .entry(ctx.to_string())
+                                        .or_insert_with(|| {
+                                            views::assistant_view::AssistantViewState::for_context(
+                                                ctx,
+                                            )
+                                        }),
                                     None => &mut app.assistant_state,
                                 };
                                 target_state.append_stream_chunk(&format!("\n[Error: {}]", err));
@@ -426,7 +457,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Err(e) => {
                                             let _ = event_tx.send(AppEvent::ActionResult {
                                                 title: "yaml_error".to_string(),
-                                                result: Err(format!("Cluster connect error: {}", e)),
+                                                result: Err(format!(
+                                                    "Cluster connect error: {}",
+                                                    e
+                                                )),
                                             });
                                             return;
                                         }
@@ -437,7 +471,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Ok(_) => {
                                             let _ = event_tx.send(AppEvent::ActionResult {
                                                 title: "yaml_error".to_string(),
-                                                result: Err("No YAML documents found in file".to_string()),
+                                                result: Err(
+                                                    "No YAML documents found in file".to_string()
+                                                ),
                                             });
                                             return;
                                         }
@@ -465,7 +501,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // Strip server-managed status and metadata noise before applying
                                         if let Some(obj) = doc.as_object_mut() {
                                             obj.remove("status");
-                                            if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                                            if let Some(meta) = obj
+                                                .get_mut("metadata")
+                                                .and_then(|m| m.as_object_mut())
+                                            {
                                                 meta.remove("managedFields");
                                                 meta.remove("resourceVersion");
                                                 meta.remove("generation");
@@ -474,47 +513,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
 
-                                        let (group, version) = srelens_kube::manifest::parse_api_version(&r.api_version);
+                                        let (group, version) =
+                                            srelens_kube::manifest::parse_api_version(
+                                                &r.api_version,
+                                            );
                                         let gvk_info = srelens_kube::manifest::gvk_for(&r.kind);
-                                        let is_namespaced = gvk_info.map(|(_, ns)| ns).unwrap_or_else(|| {
-                                            r.namespace.as_ref().map(|s| !s.is_empty()).unwrap_or(true)
-                                        });
+                                        let is_namespaced =
+                                            gvk_info.map(|(_, ns)| ns).unwrap_or_else(|| {
+                                                r.namespace
+                                                    .as_ref()
+                                                    .map(|s| !s.is_empty())
+                                                    .unwrap_or(true)
+                                            });
 
-                                        let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(&group, &version, &r.kind));
-                                        let api: kube::Api<kube::core::DynamicObject> = if is_namespaced {
-                                            let target_ns = r.namespace.as_deref()
-                                                .filter(|s| !s.is_empty())
-                                                .unwrap_or(if active_ns.is_empty() || active_ns == "all" { "default" } else { &active_ns });
-                                            kube::Api::namespaced_with(client.clone(), target_ns, &ar)
-                                        } else {
-                                            kube::Api::all_with(client.clone(), &ar)
-                                        };
+                                        let ar = kube::core::ApiResource::from_gvk(
+                                            &kube::core::GroupVersionKind::gvk(
+                                                &group, &version, &r.kind,
+                                            ),
+                                        );
+                                        let api: kube::Api<kube::core::DynamicObject> =
+                                            if is_namespaced {
+                                                let target_ns = r
+                                                    .namespace
+                                                    .as_deref()
+                                                    .filter(|s| !s.is_empty())
+                                                    .unwrap_or(
+                                                        if active_ns.is_empty()
+                                                            || active_ns == "all"
+                                                        {
+                                                            "default"
+                                                        } else {
+                                                            &active_ns
+                                                        },
+                                                    );
+                                                kube::Api::namespaced_with(
+                                                    client.clone(),
+                                                    target_ns,
+                                                    &ar,
+                                                )
+                                            } else {
+                                                kube::Api::all_with(client.clone(), &ar)
+                                            };
 
-                                        let params = kube::api::PatchParams::apply("srelens").force();
-                                        match api.patch(&r.name, &params, &kube::api::Patch::Apply(&doc)).await {
+                                        let params =
+                                            kube::api::PatchParams::apply("srelens").force();
+                                        match api
+                                            .patch(&r.name, &params, &kube::api::Patch::Apply(&doc))
+                                            .await
+                                        {
                                             Ok(_) => {
                                                 let _ = event_tx.send(AppEvent::ActionResult {
                                                     title: "yaml_applied".to_string(),
-                                                    result: Ok(format!("Updated {}/{} in cluster", r.kind, r.name)),
+                                                    result: Ok(format!(
+                                                        "Updated {}/{} in cluster",
+                                                        r.kind, r.name
+                                                    )),
                                                 });
                                             }
                                             Err(e) => {
-                                                let clean_err = srelens_kube::manifest::clean_kube_error(e);
+                                                let clean_err =
+                                                    srelens_kube::manifest::clean_kube_error(e);
                                                 let _ = event_tx.send(AppEvent::ActionResult {
                                                     title: "yaml_error".to_string(),
-                                                    result: Err(format!("Apply error: {}", clean_err)),
+                                                    result: Err(format!(
+                                                        "Apply error: {}",
+                                                        clean_err
+                                                    )),
                                                 });
                                             }
                                         }
                                     }
                                 });
-                                app.set_toast("Applying changes to cluster...".to_string(), theme::Theme::status_ok());
+                                app.set_toast(
+                                    "Applying changes to cluster...".to_string(),
+                                    theme::Theme::status_ok(),
+                                );
                             }
                             Ok(None) => {
-                                app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
+                                app.set_toast(
+                                    "No changes made in $EDITOR".to_string(),
+                                    theme::Theme::status_dim(),
+                                );
                             }
                             Err(e) => {
-                                app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
+                                app.set_toast(
+                                    format!("Editor error: {}", e),
+                                    theme::Theme::status_error(),
+                                );
                             }
                         }
                     }
@@ -572,7 +657,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Clean exit
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )?;
     terminal.show_cursor()?;
 
     Ok(())
@@ -582,10 +672,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Written as a plain synchronous function: it runs before the terminal is
 /// touched and exits, so there is nothing to interleave with.
-fn run_update(
-    check_only: bool,
-    channel: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_update(check_only: bool, channel: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // `#[tokio::main]` means this function is called ON a runtime worker
     // thread. `reqwest::blocking` drives its own runtime on a private thread
     // and parks the caller on a channel until it answers; doing that from a
@@ -628,8 +715,8 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
             .ok_or_else(|| format!("unknown channel {name:?} — use \"stable\" or \"dev\""))?,
         None => Channel::of_version(current),
     };
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("could not find this binary on disk: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not find this binary on disk: {e}"))?;
     // After a recovery this process is still reported as running from the
     // displaced name; updating that path would leave the real one alone.
     let exe = self_update::installed_path(&exe);

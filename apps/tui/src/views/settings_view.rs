@@ -121,7 +121,12 @@ impl SettingsViewState {
                 self.set_active_provider();
                 return;
             }
-            SettingField::ApiKey => self.settings.api_keys.get(slug).cloned().unwrap_or_default(),
+            SettingField::ApiKey => self
+                .settings
+                .api_keys
+                .get(slug)
+                .cloned()
+                .unwrap_or_default(),
             SettingField::Model => self.settings.get_model(provider),
             SettingField::BaseUrl => self.settings.get_base_url(provider),
             SettingField::Timeout => self.settings.get_timeout_seconds(provider).to_string(),
@@ -159,7 +164,8 @@ impl SettingsViewState {
             }
             SettingField::Timeout => {
                 if let Ok(secs) = val.parse::<u32>() {
-                    self.settings.set_timeout_seconds(provider, secs.clamp(5, 3600));
+                    self.settings
+                        .set_timeout_seconds(provider, secs.clamp(5, 3600));
                 }
             }
         }
@@ -255,29 +261,39 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         // Header line: Radio icon, Name, Active Badge
         let radio = if is_active_provider { "● " } else { "○ " };
         let radio_style = if is_active_provider {
-            Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::DIM)
         };
 
-        let title_style = if is_selected_provider && state.selected_field == SettingField::ProviderToggle {
-            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
-        } else if is_active_provider {
-            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Theme::FG)
-        };
+        let title_style =
+            if is_selected_provider && state.selected_field == SettingField::ProviderToggle {
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_active_provider {
+                Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::FG)
+            };
 
         let mut header_spans = vec![
             Span::styled(radio, radio_style),
-            Span::styled(format!("{}. {}", idx + 1, provider_display_name(provider)), title_style),
+            Span::styled(
+                format!("{}. {}", idx + 1, provider_display_name(provider)),
+                title_style,
+            ),
         ];
 
         if is_active_provider {
             header_spans.push(Span::raw("  "));
             header_spans.push(Span::styled(
                 "[ACTIVE DEFAULT]",
-                Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -300,7 +316,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         // Field 1: API Key / Auth Display
         let key_focus = is_selected_provider && state.selected_field == SettingField::ApiKey;
         let key_label_style = if key_focus {
-            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::DIM)
         };
@@ -314,19 +332,28 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             } else {
                 "••••••••".to_string()
             };
-            Span::styled(format!("{} [stored in config]", masked), Style::default().fg(Theme::GREEN))
+            Span::styled(
+                format!("{} [stored in config]", masked),
+                Style::default().fg(Theme::GREEN),
+            )
         } else if env_key.is_some() {
             Span::styled(
                 format!("[env: {} set]", env_var_for_provider(provider)),
                 Style::default().fg(Theme::CYAN),
             )
         } else if provider == AiProvider::Cursor {
-            Span::styled("auto (uses logged-in cursor auth or CURSOR_API_KEY)", Style::default().fg(Theme::CYAN))
+            Span::styled(
+                "auto (uses logged-in cursor auth or CURSOR_API_KEY)",
+                Style::default().fg(Theme::CYAN),
+            )
         } else if provider == AiProvider::OpenAiCompatible {
             Span::styled("optional (local Ollama)", Style::default().fg(Theme::DIM))
         } else {
             Span::styled(
-                format!("no key set (press 'e' to set or export {})", env_var_for_provider(provider)),
+                format!(
+                    "no key set (press 'e' to set or export {})",
+                    env_var_for_provider(provider)
+                ),
                 Style::default().fg(Theme::RED),
             )
         };
@@ -334,7 +361,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         // Field 2: Model Display
         let model_focus = is_selected_provider && state.selected_field == SettingField::Model;
         let model_label_style = if model_focus {
-            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::DIM)
         };
@@ -343,7 +372,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         // Field: Timeout Display
         let timeout_focus = is_selected_provider && state.selected_field == SettingField::Timeout;
         let timeout_label_style = if timeout_focus {
-            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::DIM)
         };
@@ -352,14 +383,35 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         let mut lines = vec![
             Line::from(header_spans),
             Line::from(vec![
-                Span::styled(if provider == AiProvider::Cursor { "   Auth:    " } else { "   API Key: " }, key_label_style),
+                Span::styled(
+                    if provider == AiProvider::Cursor {
+                        "   Auth:    "
+                    } else {
+                        "   API Key: "
+                    },
+                    key_label_style,
+                ),
                 key_value_display,
             ]),
             Line::from(vec![
                 Span::styled("   Model:   ", model_label_style),
-                Span::styled(current_model, if model_focus { Style::default().fg(Theme::YELLOW) } else { Style::default().fg(Theme::FG) }),
+                Span::styled(
+                    current_model,
+                    if model_focus {
+                        Style::default().fg(Theme::YELLOW)
+                    } else {
+                        Style::default().fg(Theme::FG)
+                    },
+                ),
                 Span::styled("   │   Timeout: ", timeout_label_style),
-                Span::styled(timeout_display, if timeout_focus { Style::default().fg(Theme::YELLOW) } else { Style::default().fg(Theme::FG) }),
+                Span::styled(
+                    timeout_display,
+                    if timeout_focus {
+                        Style::default().fg(Theme::YELLOW)
+                    } else {
+                        Style::default().fg(Theme::FG)
+                    },
+                ),
             ]),
         ];
 
@@ -367,13 +419,22 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         if provider == AiProvider::OpenAiCompatible {
             let url_focus = is_selected_provider && state.selected_field == SettingField::BaseUrl;
             let url_label_style = if url_focus {
-                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::DIM)
             };
             lines.push(Line::from(vec![
                 Span::styled("   Base URL: ", url_label_style),
-                Span::styled(state.settings.get_base_url(provider), if url_focus { Style::default().fg(Theme::YELLOW) } else { Style::default().fg(Theme::FG) }),
+                Span::styled(
+                    state.settings.get_base_url(provider),
+                    if url_focus {
+                        Style::default().fg(Theme::YELLOW)
+                    } else {
+                        Style::default().fg(Theme::FG)
+                    },
+                ),
             ]));
         }
 
@@ -382,20 +443,53 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
 
     // 3. Bottom Key Hints
     let hints_line = Line::from(vec![
-        Span::styled("[↑/↓/j/k]", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[↑/↓/j/k]",
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Provider  ", Theme::header_label()),
-        Span::styled("[Tab/←/→]", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Tab/←/→]",
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Field  ", Theme::header_label()),
-        Span::styled("[Space]", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Space]",
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Set Active  ", Theme::header_label()),
-        Span::styled("[e/Enter]", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[e/Enter]",
+            Style::default()
+                .fg(Theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Edit  ", Theme::header_label()),
-        Span::styled("[s]", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[s]",
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Save to Disk  ", Theme::header_label()),
-        Span::styled("[Esc/q]", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Esc/q]",
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" Back", Theme::header_label()),
     ]);
-    f.render_widget(Paragraph::new(hints_line).alignment(Alignment::Center), chunks[2]);
+    f.render_widget(
+        Paragraph::new(hints_line).alignment(Alignment::Center),
+        chunks[2],
+    );
 
     // 4. Modal Edit Input Dialog (when editing)
     if state.is_editing {
@@ -403,7 +497,13 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         f.render_widget(Clear, edit_area);
 
         let field_name = match state.selected_field {
-            SettingField::ApiKey => if state.current_provider() == AiProvider::Cursor { "API Key (or leave blank for cursor login)" } else { "API Key" },
+            SettingField::ApiKey => {
+                if state.current_provider() == AiProvider::Cursor {
+                    "API Key (or leave blank for cursor login)"
+                } else {
+                    "API Key"
+                }
+            }
             SettingField::Model => "Model ID",
             SettingField::BaseUrl => "Base URL (e.g. http://localhost:11434/v1)",
             SettingField::Timeout => "Turn Timeout (seconds, e.g. 120)",
@@ -413,7 +513,11 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         let edit_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::YELLOW))
-            .title(format!(" Edit {} for {} ", field_name, provider_display_name(state.current_provider())));
+            .title(format!(
+                " Edit {} for {} ",
+                field_name,
+                provider_display_name(state.current_provider())
+            ));
 
         let edit_inner = edit_block.inner(edit_area);
         f.render_widget(edit_block, edit_area);
@@ -431,23 +535,50 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         f.render_widget(prompt, edit_chunks[0]);
 
         let input_line = Line::from(vec![
-            Span::styled(&state.edit_buffer, Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &state.edit_buffer,
+                Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Theme::CYAN)),
         ]);
-        let input_box = Paragraph::new(input_line)
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Theme::CYAN)));
+        let input_box = Paragraph::new(input_line).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Theme::CYAN)),
+        );
         f.render_widget(input_box, edit_chunks[1]);
 
         let help = Line::from(vec![
-            Span::styled("<Enter> ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Enter> ",
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Confirm  |  ", Theme::header_label()),
-            Span::styled("<Ctrl+v> ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Ctrl+v> ",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Paste  |  ", Theme::header_label()),
-            Span::styled("<Ctrl+w> ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Ctrl+w> ",
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Rubout  |  ", Theme::header_label()),
-            Span::styled("<Esc> ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Esc> ",
+                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Cancel", Theme::header_label()),
         ]);
-        f.render_widget(Paragraph::new(help).alignment(Alignment::Center), edit_chunks[2]);
+        f.render_widget(
+            Paragraph::new(help).alignment(Alignment::Center),
+            edit_chunks[2],
+        );
     }
 }

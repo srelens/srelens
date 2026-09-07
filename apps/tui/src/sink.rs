@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 use serde_json::Value;
 use srelens_streams::EventSink;
+use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::event::AppEvent;
 

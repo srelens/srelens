@@ -64,7 +64,12 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         // Brand
         let brand = Paragraph::new(Line::from(vec![
             Span::styled("⚡ ", Style::default().fg(Theme::YELLOW)),
-            Span::styled("SRELENS", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "SRELENS",
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         f.render_widget(brand, r0_chunks[0]);
 
@@ -89,29 +94,70 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
             props.namespace
         };
 
-        let active_ctx_color = Theme::context_color(props.context, props.contexts.iter().find(|c| c.name == props.context).map(|c| c.is_local).unwrap_or(false));
+        let active_ctx_color = Theme::context_color(
+            props.context,
+            props
+                .contexts
+                .iter()
+                .find(|c| c.name == props.context)
+                .map(|c| c.is_local)
+                .unwrap_or(false),
+        );
 
         let active_line = Line::from(vec![
             Span::styled("Ctx: ", Theme::header_label()),
-            Span::styled(props.context, Style::default().fg(active_ctx_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                props.context,
+                Style::default()
+                    .fg(active_ctx_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled("NS: ", Theme::header_label()),
-            Span::styled(format!("[{}]", ns_display), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{}]", ns_display),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled("View: ", Theme::header_label()),
-            Span::styled(props.active_view_name, Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                props.active_view_name,
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         f.render_widget(Paragraph::new(active_line), r1_chunks[0]);
 
         let hints_line = Line::from(vec![
-            Span::styled("<:ctx>", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<:ctx>",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" All Ctx  ", Theme::header_label()),
-            Span::styled("<F1-F10>", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<F1-F10>",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Hotkeys  ", Theme::header_label()),
-            Span::styled("<?>", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<?>",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Help", Theme::header_label()),
         ]);
-        f.render_widget(Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right), r1_chunks[1]);
+        f.render_widget(
+            Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right),
+            r1_chunks[1],
+        );
     } else {
         // Fallback for compact single-row header
         let chunks = Layout::default()
@@ -125,21 +171,45 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
 
         let brand = Paragraph::new(Line::from(vec![
             Span::styled("⚡ ", Style::default().fg(Theme::YELLOW)),
-            Span::styled("SRELENS", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "SRELENS",
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         f.render_widget(brand, chunks[0]);
 
-        let ns_display = if props.namespace.is_empty() { "all" } else { props.namespace };
+        let ns_display = if props.namespace.is_empty() {
+            "all"
+        } else {
+            props.namespace
+        };
         let active_ctx_color = Theme::context_color(props.context, false);
         let cluster_line = Line::from(vec![
             Span::styled("Ctx: ", Theme::header_label()),
-            Span::styled(props.context, Style::default().fg(active_ctx_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                props.context,
+                Style::default()
+                    .fg(active_ctx_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled("NS: ", Theme::header_label()),
-            Span::styled(format!("[{}]", ns_display), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{}]", ns_display),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled("View: ", Theme::header_label()),
-            Span::styled(props.active_view_name, Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                props.active_view_name,
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         f.render_widget(Paragraph::new(cluster_line), chunks[1]);
         render_stats(f, chunks[2], &props);
@@ -169,7 +239,10 @@ fn render_stats(f: &mut Frame, area: Rect, props: &HeaderProps) {
         Span::styled("Pods: ", Theme::header_label()),
         Span::styled(format!("{}", props.pod_count), Theme::header_val()),
     ]);
-    f.render_widget(Paragraph::new(stats_line).alignment(ratatui::layout::Alignment::Right), area);
+    f.render_widget(
+        Paragraph::new(stats_line).alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 fn render_context_chips(
@@ -202,27 +275,48 @@ fn render_context_chips(
             let overflow_w = unicode_width::UnicodeWidthStr::width(overflow_label.as_str()) as u16;
             if current_col + overflow_w <= max_x {
                 if let Some(r) = rects {
-                    r.borrow_mut().push((Rect { x: current_col, y: area.y, width: overflow_w, height: 1 }, ":ctx".to_string()));
+                    r.borrow_mut().push((
+                        Rect {
+                            x: current_col,
+                            y: area.y,
+                            width: overflow_w,
+                            height: 1,
+                        },
+                        ":ctx".to_string(),
+                    ));
                 }
-                spans.push(Span::styled(overflow_label, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    overflow_label,
+                    Style::default()
+                        .fg(Theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             break;
         }
 
         if let Some(r) = rects {
-            r.borrow_mut().push((Rect { x: current_col, y: area.y, width: chip_w, height: 1 }, ctx.name.clone()));
+            r.borrow_mut().push((
+                Rect {
+                    x: current_col,
+                    y: area.y,
+                    width: chip_w,
+                    height: 1,
+                },
+                ctx.name.clone(),
+            ));
         }
 
         if ctx.is_current {
             spans.push(Span::styled(
                 chip_label,
-                Style::default().fg(color).bg(Color::Rgb(35, 40, 50)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(color)
+                    .bg(Color::Rgb(35, 40, 50))
+                    .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled(
-                chip_label,
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(chip_label, Style::default().fg(color)));
         }
 
         spans.push(Span::raw(" "));

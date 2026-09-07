@@ -14,9 +14,7 @@ pub enum DeepLink {
     },
     /// Deep link to switch to a cluster context
     /// `srelens://cluster/<context>`
-    Cluster {
-        context: String,
-    },
+    Cluster { context: String },
     /// Deep link to a specific view
     /// `srelens://view/<context>/<namespace>/<view>`
     View {
@@ -30,7 +28,12 @@ impl DeepLink {
     /// Formats the canonical URL string for this deep link
     pub fn to_url(&self) -> String {
         match self {
-            Self::Resource { context, namespace, kind, name } => {
+            Self::Resource {
+                context,
+                namespace,
+                kind,
+                name,
+            } => {
                 let ctx = if context.is_empty() { "_" } else { context };
                 let ns = namespace.as_deref().unwrap_or("_");
                 let ns_part = if ns.is_empty() { "_" } else { ns };
@@ -39,7 +42,11 @@ impl DeepLink {
             Self::Cluster { context } => {
                 format!("srelens://cluster/{}", context)
             }
-            Self::View { context, namespace, target } => {
+            Self::View {
+                context,
+                namespace,
+                target,
+            } => {
                 let ctx = context.as_deref().unwrap_or("_");
                 let ns = namespace.as_deref().unwrap_or("_");
                 let target_name = match target {
@@ -171,11 +178,16 @@ impl DeepLink {
                         name,
                     })
                 }
-                _ => Err(format!("Unrecognized shorthand format '{}'. Expected [context/][namespace/]kind/name", trimmed)),
+                _ => Err(format!(
+                    "Unrecognized shorthand format '{}'. Expected [context/][namespace/]kind/name",
+                    trimmed
+                )),
             }
         } else {
             // Direct command target (e.g. "pods", "nodes")
-            if let Some(target) = resolve_command(format!(":{}", trimmed).as_str()).or_else(|| resolve_command(trimmed)) {
+            if let Some(target) = resolve_command(format!(":{}", trimmed).as_str())
+                .or_else(|| resolve_command(trimmed))
+            {
                 Ok(Self::View {
                     context: None,
                     namespace: None,

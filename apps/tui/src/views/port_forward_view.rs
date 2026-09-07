@@ -62,7 +62,10 @@ impl PortForwardViewState {
 }
 
 pub fn render_port_forward_view(f: &mut Frame, area: Rect, state: &PortForwardViewState) {
-    let title = format!(" Active Port Forwards [{}] (<d> Stop Forward <shift-f> New Forward <Esc> Back) ", state.forwards.len());
+    let title = format!(
+        " Active Port Forwards [{}] (<d> Stop Forward <shift-f> New Forward <Esc> Back) ",
+        state.forwards.len()
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -118,7 +121,11 @@ pub fn render_port_forward_view(f: &mut Frame, area: Rect, state: &PortForwardVi
                 Cell::from(format!("{}/{}", pf.target_type, pf.target_name)),
                 Cell::from(pf.container_port.to_string()),
                 Cell::from(pf.active_connections.to_string()),
-                Cell::from(format!("{} / {}", format_bytes(pf.bytes_rx), format_bytes(pf.bytes_tx))),
+                Cell::from(format!(
+                    "{} / {}",
+                    format_bytes(pf.bytes_rx),
+                    format_bytes(pf.bytes_tx)
+                )),
             ])
             .style(row_style)
         })

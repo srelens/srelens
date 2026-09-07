@@ -13,7 +13,16 @@ impl ExecRunner {
     ) -> Result<(), String> {
         let shell = shell_cmd.unwrap_or("/bin/sh");
         let mut cmd = Command::new("kubectl");
-        cmd.args(["--context", context, "-n", namespace, "exec", "-i", "-t", pod_name]);
+        cmd.args([
+            "--context",
+            context,
+            "-n",
+            namespace,
+            "exec",
+            "-i",
+            "-t",
+            pod_name,
+        ]);
 
         if let Some(c) = container {
             cmd.args(["-c", c]);
