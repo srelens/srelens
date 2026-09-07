@@ -154,10 +154,20 @@ srelens-tui update           # download it and replace this binary
 ```
 
 It only ever replaces the binary you ran it from. Before writing anything it
-checks the download against the published SHA-256, so a corrupted or
-substituted archive is refused and the copy you already have is left alone.
+checks the download against the SHA-256 the release published, so a corrupted
+or truncated archive is refused and the copy you already have is left alone.
 The last step is a rename, so an interrupted update cannot leave a
 half-written binary on your `PATH`.
+
+> **What that check does and does not prove.** It proves the file arrived
+> intact. It does not prove who built it: the checksum file lives on the same
+> release as the archive, so anyone able to replace one could replace both.
+> Verifying the GPG signature against a pinned key would close that, and is
+> tracked in [#448]. If that distinction matters to you, install by hand and
+> check the signature as described under
+> [Verifying a download](#verifying-a-download).
+
+[#448]: https://github.com/srelens/srelens/issues/448
 
 **Channels.** The same two the desktop app offers under Settings → Updates:
 

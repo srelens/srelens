@@ -604,9 +604,6 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
     };
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not find this binary on disk: {e}"))?;
-    // A Windows update leaves the displaced binary behind because the running
-    // process still holds it open. This is the next run.
-    self_update::clear_displaced_binary(&exe);
 
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
         let client = reqwest::blocking::Client::builder()

@@ -234,11 +234,10 @@ pub fn parse_latest_version(body: &[u8]) -> Result<String, UpdateError> {
 /// resolved: pre-releases are what it is made of, so the stable endpoint
 /// cannot see them.
 ///
-/// GitHub returns the list newest first. Two entries are skipped: anything
-/// not tagged `srelens-v…`, and `dev-channel` — a permanent rolling
-/// pre-release that carries only the desktop updater's manifest and none of
-/// the TUI archives, so resolving to it would produce URLs for assets that
-/// are not there.
+/// GitHub returns the list newest first. Three kinds of entry are skipped:
+/// anything not tagged `srelens-v…`; `dev-channel`, a permanent rolling
+/// pre-release carrying only the desktop updater's manifest and none of the
+/// TUI archives; and stable releases, which belong to the other channel.
 pub fn parse_newest_version(body: &[u8]) -> Result<String, UpdateError> {
     let releases: Vec<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|e| UpdateError::BadRelease(format!("the API did not return a list: {e}")))?;
@@ -247,6 +246,19 @@ pub fn parse_newest_version(body: &[u8]) -> Result<String, UpdateError> {
             continue;
         };
         if tag == "dev-channel" {
+            continue;
+        }
+        // Pre-releases only. When main cuts a stable release, it is the
+        // newest entry in this list — and taking it would move a dev user
+        // onto stable without saying so. Worse, it would stick: the
+        // installed version would no longer carry a pre-release, so the
+        // next plain `update` would default to the stable channel. A
+        // channel switch has to be something the user asked for.
+        if !release
+            .get("prerelease")
+            .and_then(|p| p.as_bool())
+            .unwrap_or(false)
+        {
             continue;
         }
         // Unlike the single-release endpoint, a tag that is not a version is
@@ -395,21 +407,28 @@ pub fn is_newer(current: &str, latest: &str) -> bool {
 /// database would still name the old version, and the next upgrade would put
 /// it back. The desktop app already declines for AUR on the same grounds.
 pub fn package_manager_for(path: &Path) -> Option<&'static str> {
-    let text = path.to_string_lossy().replace('\\', "/");
+    // Lower-cased because Windows paths are case-insensitive and the real
+    // Chocolatey root is `C:\\ProgramData\\chocolatey` — a case-sensitive
+    // match against `Chocolatey` never fired, so a Chocolatey-managed copy
+    // sailed past this guard and would have been overwritten. Unix paths are
+    // case-sensitive, so this can in principle over-match there; refusing to
+    // update with a named manager is the safe direction to be wrong in.
+    let text = path.to_string_lossy().replace('\\', "/").to_lowercase();
     // Ordered longest-prefix-first where they nest, so a Cellar path is not
     // reported as the more general /usr/local.
     let owners: &[(&str, &str)] = &[
+        // Lower-case, to match the normalisation above.
         ("/opt/homebrew/", "Homebrew"),
         ("/home/linuxbrew/.linuxbrew/", "Homebrew"),
-        ("/usr/local/Cellar/", "Homebrew"),
+        ("/usr/local/cellar/", "Homebrew"),
         ("/usr/bin/", "your distribution's package manager"),
         ("/snap/", "snap"),
         ("/var/lib/flatpak/", "Flatpak"),
         ("/nix/store/", "Nix"),
-        ("scoop/apps/", "Scoop"),
-        ("scoop/shims/", "Scoop"),
-        ("WinGet/Packages/", "winget"),
-        ("Chocolatey/", "Chocolatey"),
+        ("/scoop/apps/", "Scoop"),
+        ("/scoop/shims/", "Scoop"),
+        ("/winget/packages/", "winget"),
+        ("/chocolatey/", "Chocolatey"),
     ];
     owners
         .iter()
@@ -612,16 +631,6 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
         return Err(io(e));
     }
     Ok(())
-}
-
-/// Remove the file a previous Windows update left behind. A no-op everywhere
-/// else, and best-effort: a leftover is untidy, never harmful.
-pub fn clear_displaced_binary(target: &Path) {
-    if cfg!(windows) {
-        if let Some(dir) = target.parent() {
-            let _ = std::fs::remove_file(dir.join(format!("{BIN}.old")));
-        }
-    }
 }
 
 #[cfg(unix)]

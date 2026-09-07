@@ -215,6 +215,26 @@ fn the_dev_channel_skips_the_rolling_manifest_release() {
     assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
 }
 
+/// When main cuts a stable release it becomes the newest entry in this
+/// list. Taking it would move a dev user onto stable without saying so —
+/// and it would stick, because the installed version would no longer carry
+/// a pre-release, so the next plain `update` would default to stable.
+#[test]
+fn the_dev_channel_does_not_offer_a_stable_release() {
+    let body = br#"[
+        {"tag_name":"srelens-v0.9.0","prerelease":false},
+        {"tag_name":"srelens-v0.8.1-152","prerelease":true}
+    ]"#;
+    assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
+
+    // And a list of nothing but stable releases has no dev build to offer.
+    let stable_only = br#"[{"tag_name":"srelens-v0.9.0","prerelease":false}]"#;
+    assert!(matches!(
+        parse_newest_version(stable_only),
+        Err(UpdateError::BadRelease(_))
+    ));
+}
+
 #[test]
 fn a_list_with_no_srelens_release_is_an_error_not_a_guess() {
     assert!(matches!(
@@ -244,7 +264,7 @@ fn each_channel_asks_its_own_endpoint() {
 
     let dev = |url: &str| -> Result<Vec<u8>, UpdateError> {
         assert_eq!(url, RELEASES_URL);
-        Ok(br#"[{"tag_name":"srelens-v0.8.1-152"}]"#.to_vec())
+        Ok(br#"[{"tag_name":"srelens-v0.8.1-152","prerelease":true}]"#.to_vec())
     };
     match plan("0.8.1-150", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap() {
         Check::Available(plan) => {
@@ -267,7 +287,7 @@ fn each_channel_asks_its_own_endpoint() {
 #[test]
 fn a_dev_build_is_up_to_date_on_dev_and_ahead_on_stable() {
     let dev = |_: &str| -> Result<Vec<u8>, UpdateError> {
-        Ok(br#"[{"tag_name":"srelens-v0.8.1-152"}]"#.to_vec())
+        Ok(br#"[{"tag_name":"srelens-v0.8.1-152","prerelease":true}]"#.to_vec())
     };
     assert_eq!(
         plan("0.8.1-152", Channel::Dev, PathBuf::from("/tmp/x"), &dev).unwrap(),
@@ -352,8 +372,8 @@ fn a_release_tag_that_is_not_a_version_is_rejected() {
 #[test]
 fn the_dev_channel_skips_a_tag_it_cannot_read_and_takes_the_next() {
     let body = br#"[
-        {"tag_name":"srelens-vnightly"},
-        {"tag_name":"srelens-v0.8.1-152"}
+        {"tag_name":"srelens-vnightly","prerelease":true},
+        {"tag_name":"srelens-v0.8.1-152","prerelease":true}
     ]"#;
     assert_eq!(parse_newest_version(body).unwrap(), "0.8.1-152");
 }
@@ -526,6 +546,21 @@ fn a_binary_a_package_manager_owns_is_recognised() {
         ),
         ("/snap/srelens/current/bin/srelens-tui", "snap"),
         ("/nix/store/abc-srelens/bin/srelens-tui", "Nix"),
+        // Windows paths are case-insensitive, and the real Chocolatey root
+        // is `C:\\ProgramData\\chocolatey` — lower case. A case-sensitive
+        // match let a Chocolatey-managed copy through this guard entirely.
+        (
+            r"C:\ProgramData\chocolatey\bin\srelens-tui.exe",
+            "Chocolatey",
+        ),
+        (
+            r"C:\Users\me\Scoop\Apps\srelens-tui\current\srelens-tui.exe",
+            "Scoop",
+        ),
+        (
+            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srelens-tui.exe",
+            "Chocolatey",
+        ),
         (r"C:\Users\me\scoop\shims\srelens-tui.exe", "Scoop"),
         (
             r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srelens-tui.exe",
