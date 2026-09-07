@@ -71,10 +71,45 @@ pub enum CliCommand {
     Toolbox,
     /// Print version information
     Version,
+    /// Update srelens-tui to the latest release
+    Update {
+        /// Report what an update would do, without changing anything
+        #[arg(long)]
+        check: bool,
+        /// Which releases to consider: stable, or the rolling dev
+        /// pre-releases. Defaults to the channel this binary came from.
+        #[arg(long, value_parser = ["stable", "dev"])]
+        channel: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // BEFORE parsing: clap exits during `--version` and `--help`, which is
+    // exactly what someone whose binary vanished is likely to type first.
+    //
+    // An update interrupted between its two renames leaves this binary at
+    // `.srelens-tui.exe.old` with nothing at the real name — and no way to
+    // run `update` to repair it, since there is nothing left to run. If
+    // this process IS that displaced file, put it back. A no-op anywhere
+    // else, and off Windows entirely.
+    if let Ok(exe) = std::env::current_exe() {
+        match srelens_tui::self_update::recover_interrupted_update(&exe) {
+            Ok(Some(restored)) => eprintln!(
+                "srelens-tui: an interrupted update left this binary beside its own name; restored it to {}",
+                restored.display()
+            ),
+            Ok(None) => {}
+            // Needed and failed, which is not the same as nothing to do.
+            // The command path is still missing, so say so rather than
+            // letting someone rediscover it later.
+            Err(why) => eprintln!(
+                "srelens-tui: an interrupted update left this binary at {}, and it could not be moved back: {why}. Rename it yourself to restore the command.",
+                exe.display()
+            ),
+        }
+    }
+
     let cli = Cli::parse();
 
     // Resolved BEFORE the subcommand match, because those arms return early.
@@ -103,6 +138,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}{} -> cluster: {}, server: {}", mark, ctx.display_name, ctx.cluster, ctx.server);
                 }
                 return Ok(());
+            }
+            CliCommand::Update { check, channel } => {
+                return run_update(check, channel);
             }
             CliCommand::Toolbox => {
                 let state = views::ToolboxViewState::new();
@@ -538,4 +576,155 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// `srelens-tui update` — see `self_update` for why each step is where it is.
+///
+/// Written as a plain synchronous function: it runs before the terminal is
+/// touched and exits, so there is nothing to interleave with.
+fn run_update(
+    check_only: bool,
+    channel: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `#[tokio::main]` means this function is called ON a runtime worker
+    // thread. `reqwest::blocking` drives its own runtime on a private thread
+    // and parks the caller on a channel until it answers; doing that from a
+    // worker ties up a thread the runtime owns, and reqwest documents using it
+    // from inside a runtime as unsupported. It does not in fact panic here —
+    // the command was run end to end against the real API before this was
+    // written — but there is no reason to depend on that. Nothing in the update
+    // path is async, so it runs on a thread of its own and the question does
+    // not arise.
+    // `String` rather than `Box<dyn Error>`: the boxed trait object is not
+    // `Send`, so it cannot come back across a thread boundary.
+    std::thread::spawn(move || update_off_the_runtime(check_only, channel))
+        .join()
+        .map_err(|_| "the update thread panicked")??;
+    Ok(())
+}
+
+fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(), String> {
+    use srelens_tui::self_update::{self, Channel, Check, UpdateError};
+
+    // reqwest is built with `rustls-no-provider`, which does NOT pick a
+    // provider on its own: building a client without one panics inside
+    // reqwest's runtime thread, which surfaces as "event loop thread panicked"
+    // and tells the user nothing. Elsewhere in the app a kube client is built
+    // first and leaves a provider installed as a side effect; `update` runs
+    // before anything touches a cluster, so it has to say so itself.
+    //
+    // `ring` to match kube-rs. Installing a SECOND provider would be worse than
+    // installing none: rustls refuses to choose between two and panics on the
+    // first handshake. `Err` here means one is already installed, which is the
+    // state we want.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let current = env!("CARGO_PKG_VERSION");
+    // Default to the channel this binary came from, so `update` keeps someone
+    // where they are instead of quietly moving a dev user onto stable.
+    let requested = channel.is_some();
+    let channel = match channel {
+        Some(name) => Channel::parse(&name)
+            .ok_or_else(|| format!("unknown channel {name:?} — use \"stable\" or \"dev\""))?,
+        None => Channel::of_version(current),
+    };
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("could not find this binary on disk: {e}"))?;
+    // After a recovery this process is still reported as running from the
+    // displaced name; updating that path would leave the real one alone.
+    let exe = self_update::installed_path(&exe);
+
+    let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(concat!("srelens-tui/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| UpdateError::Download(e.to_string()))?;
+        let response = client
+            .get(url)
+            .send()
+            .map_err(|e| UpdateError::Download(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(UpdateError::Download(format!(
+                "{} for {url}",
+                response.status()
+            )));
+        }
+        response
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| UpdateError::Download(e.to_string()))
+    };
+
+    // Errors are printed here rather than returned. `main` reports a
+    // `Box<dyn Error>` with its DEBUG formatting, so returning one turns a
+    // written-out sentence into `Download("404 Not Found for https://…")` —
+    // the quotes and the variant name are noise, and the message is the part
+    // that tells the user what to do.
+    let plan = match self_update::plan(current, channel, requested, exe.clone(), &fetch) {
+        Ok(Check::Available(plan)) => *plan,
+        Ok(Check::UpToDate { channel, .. }) => {
+            println!(
+                "srelens-tui {current} is the latest {} release.",
+                channel.as_str()
+            );
+            return Ok(());
+        }
+        Ok(Check::AheadOfChannel { channel, latest }) => {
+            // Only this channel was consulted, so that is all that can be
+            // claimed. Naming the other one turns a dead end into a next step.
+            print!(
+                "srelens-tui {current} is ahead of the latest {} release ({latest}); there is no {} update to install.",
+                channel.as_str(),
+                channel.as_str()
+            );
+            match channel {
+                Channel::Stable => println!(" Try `srelens-tui update --channel dev`."),
+                Channel::Dev => println!(),
+            }
+            return Ok(());
+        }
+        Err(error) => fail(error),
+    };
+
+    if check_only {
+        // The hint has to carry the channel when it is not the default one, or
+        // copying the line installs from a channel the user did not ask about —
+        // which for a stable binary checking dev is the whole point of asking.
+        let flag = if channel == Channel::of_version(current) {
+            String::new()
+        } else {
+            format!(" --channel {}", channel.as_str())
+        };
+        println!(
+            "srelens-tui {} is available (you have {}).\n  {}\nRun `srelens-tui update{}` to install it.",
+            plan.latest, plan.current, plan.archive_url, flag
+        );
+        return Ok(());
+    }
+
+    let verb = if self_update::is_newer(&plan.current, &plan.latest) {
+        "Updating"
+    } else {
+        "Switching"
+    };
+    println!(
+        "{verb} srelens-tui {} -> {} ({} channel)…",
+        plan.current,
+        plan.latest,
+        channel.as_str()
+    );
+    if let Err(error) = self_update::apply(&plan, &fetch) {
+        fail(error);
+    }
+    println!("Installed {} to {}", plan.latest, exe.display());
+    Ok(())
+}
+
+/// Report an update failure the way a command-line tool should: the sentence
+/// the error carries, on stderr, and a non-zero status so a script wrapping
+/// this can tell.
+fn fail(error: srelens_tui::self_update::UpdateError) -> ! {
+    eprintln!("srelens-tui: {error}");
+    std::process::exit(1);
 }

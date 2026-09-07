@@ -146,6 +146,55 @@ carry detached GPG signatures like every other release asset — see
 [Verifying a download](#verifying-a-download) below, which applies to them
 unchanged.
 
+**Keeping it current.** The binary updates itself:
+
+```bash
+srelens-tui update --check   # what is available, without changing anything
+srelens-tui update           # download it and replace this binary
+```
+
+It only ever replaces the binary you ran it from. Before writing anything it
+checks the download against the SHA-256 the release published, so a corrupted
+or truncated archive is refused and the copy you already have is left alone.
+The last step is a rename, so an interrupted update cannot leave a
+half-written binary on your `PATH`.
+
+> **What that check does and does not prove.** It proves the file arrived
+> intact. It does not prove who built it: the checksum file lives on the same
+> release as the archive, so anyone able to replace one could replace both.
+> Verifying the GPG signature against a pinned key would close that, and is
+> tracked in [#448]. If that distinction matters to you, install by hand and
+> check the signature as described under
+> [Verifying a download](#verifying-a-download).
+
+[#448]: https://github.com/srelens/srelens/issues/448
+
+**Channels.** The same two the desktop app offers under Settings → Updates:
+
+```bash
+srelens-tui update --channel stable   # released versions
+srelens-tui update --channel dev      # rolling pre-releases, cut daily
+```
+
+Without the flag it stays on the channel your binary came from — a
+pre-release version means a dev build, anything else means stable — so
+updating never moves you between channels by accident. Pass the flag to
+switch; the choice is not remembered, so the next plain `update` goes back to
+following the binary you are then running.
+
+Two cases where it declines rather than acting, both on purpose:
+
+- **A package manager owns the binary.** If it lives somewhere Homebrew, your
+  distribution, Scoop, winget or Nix put it, srelens says so and names the
+  tool to use instead — writing over those files would leave the manager's
+  database describing a version that is no longer there.
+- **You cannot write to the directory.** A copy in `/usr/local/bin` usually
+  needs elevation. It says which directory refused rather than failing with a
+  bare permission error.
+
+A musl build updates to a musl build, since that binary exists precisely
+because the host cannot run the glibc one.
+
 Run `srelens-tui --help` for the full set of flags. `srelens-tui info` lists
 the contexts found in your kubeconfig with the cluster and server each names —
 it reads the file and does not contact any cluster, so it tells you what is
