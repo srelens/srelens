@@ -66,7 +66,8 @@ pub fn render_port_forward_view(f: &mut Frame, area: Rect, state: &PortForwardVi
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(title, Theme::title()));
 
     let inner = block.inner(area);
@@ -76,7 +77,7 @@ pub fn render_port_forward_view(f: &mut Frame, area: Rect, state: &PortForwardVi
         let empty_msg = Paragraph::new(
             "No active port forwards. Select a Pod or Service and press <shift-f> to start a port forward.",
         )
-        .style(Style::default().fg(Theme::DIM));
+        .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;
     }

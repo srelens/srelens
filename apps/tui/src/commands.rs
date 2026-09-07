@@ -40,6 +40,10 @@ pub enum ResourceKind {
     Assistant,
     Settings,
     Workloads,
+    Topology,
+    GpuInfo,
+    TopPods,
+    TopNodes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -103,6 +107,10 @@ impl ResourceKind {
             Self::Assistant => "SRElens Assistant",
             Self::Settings => "AI & Assistant Settings",
             Self::Workloads => "Workloads",
+            Self::Topology => "Workload & Traffic Topology",
+            Self::GpuInfo => "GPU Info & VRAM Allocation",
+            Self::TopPods => "Top Pods",
+            Self::TopNodes => "Top Nodes",
         }
     }
 
@@ -210,14 +218,52 @@ pub enum CommandTarget {
     Help,
     Quit,
     OpenUrl(String),
+    ThemePicker,
+    SetTheme(String),
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
+    CommandDef {
+        name: "themes",
+        aliases: &["theme", "colors"],
+        description: "Interactive theme selector (Catppuccin, Tokyo Night, Dracula, Nord, Gruvbox, etc.)",
+        target: CommandTarget::ThemePicker,
+    },
     CommandDef {
         name: "workloads",
         aliases: &["wl", "workload"],
         description: "Unified Workloads view (Deployments, StatefulSets, DaemonSets, Pods, CronJobs)",
         target: CommandTarget::Resource(ResourceKind::Workloads),
+    },
+    CommandDef {
+        name: "topology",
+        aliases: &["topo", "flow"],
+        description: "Workload and traffic topology flow map (:topology, :topo, :flow)",
+        target: CommandTarget::Resource(ResourceKind::Topology),
+    },
+    CommandDef {
+        name: "gpuinfo",
+        aliases: &["gpu", "gpus"],
+        description: "GPU nodes, VRAM allocation & GPU workloads (:gpuinfo, :gpu, :gpus)",
+        target: CommandTarget::Resource(ResourceKind::GpuInfo),
+    },
+    CommandDef {
+        name: "top",
+        aliases: &["hotspots", "ranking"],
+        description: "Top Hotspots ranking (Pods & Nodes) (:top, :toppods, :topnodes)",
+        target: CommandTarget::Resource(ResourceKind::TopPods),
+    },
+    CommandDef {
+        name: "toppods",
+        aliases: &["top pods", "top-pods", "tp"],
+        description: "Top Pods ranking by CPU & Memory (:toppods, :top pods)",
+        target: CommandTarget::Resource(ResourceKind::TopPods),
+    },
+    CommandDef {
+        name: "topnodes",
+        aliases: &["top nodes", "top-nodes", "tn"],
+        description: "Top Nodes ranking by CPU & Memory (:topnodes, :top nodes)",
+        target: CommandTarget::Resource(ResourceKind::TopNodes),
     },
     CommandDef {
         name: "pods",
@@ -400,8 +446,8 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Resource(ResourceKind::Assistant),
     },
     CommandDef {
-        name: "settings",
-        aliases: &["config", "ai-config", "ai-settings"],
+        name: "ai-settings",
+        aliases: &["settings", "config", "ai-config"],
         description: "AI & Assistant Settings",
         target: CommandTarget::Resource(ResourceKind::Settings),
     },
@@ -495,19 +541,24 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    // 1. Exact match on static commands & aliases
-    for cmd in COMMAND_REGISTRY {
-        if cmd.name.eq_ignore_ascii_case(trimmed) {
-            return Some(cmd.target.clone());
-        }
-        for alias in cmd.aliases {
-            if alias.eq_ignore_ascii_case(trimmed) {
-                return Some(cmd.target.clone());
+    // Direct theme setter command (e.g. ":theme tokyo-night" or ":colors nord")
+    for prefix in &["theme ", "theme:", "colors ", "colors:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(CommandTarget::SetTheme(name.to_string()));
             }
         }
     }
 
-    // 2. Exact match on CRDs & aliases
+    // 1. Exact match on static command primary name
+    for cmd in COMMAND_REGISTRY {
+        if cmd.name.eq_ignore_ascii_case(trimmed) {
+            return Some(cmd.target.clone());
+        }
+    }
+
+    // 2. Exact match on CRDs & aliases (cluster CRDs take precedence over static command aliases)
     let q = trimmed.to_lowercase();
     for crd in crds {
         if crd.plural.eq_ignore_ascii_case(&q)
@@ -529,7 +580,16 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    // 3. Prefix match on CRDs (e.g. if q is at least 3 chars)
+    // 3. Exact match on static command aliases (e.g. ":po" -> pods, ":settings" -> ai-settings if no CRD exists)
+    for cmd in COMMAND_REGISTRY {
+        for alias in cmd.aliases {
+            if alias.eq_ignore_ascii_case(trimmed) {
+                return Some(cmd.target.clone());
+            }
+        }
+    }
+
+    // 4. Prefix match on CRDs (e.g. if q is at least 3 chars)
     if q.len() >= 3 {
         for crd in crds {
             let norm_plural = crd.plural.to_lowercase().replace("loadbalancer", "lb");
@@ -544,7 +604,7 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    // 4. Prefix match on static commands (e.g. ":deplo" -> deployments)
+    // 5. Prefix match on static commands & aliases (e.g. ":deplo" -> deployments)
     for cmd in COMMAND_REGISTRY {
         if cmd.name.starts_with(&q) {
             return Some(cmd.target.clone());
@@ -591,6 +651,29 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
         return matches;
     }
 
+    // Direct theme name suggestions when typing ":theme <subquery>" or ":colors <subquery>"
+    if q.starts_with("theme ") || q.starts_with("colors ") {
+        let prefix = if q.starts_with("theme ") { "theme " } else { "colors " };
+        let sub = q.strip_prefix(prefix).unwrap().trim();
+        for p in crate::theme::ALL_THEMES {
+            if sub.is_empty() || p.name.starts_with(sub) || p.display_name.to_lowercase().starts_with(sub) {
+                matches.push((
+                    DynamicCommandDef {
+                        name: format!("theme {}", p.name),
+                        aliases: vec![],
+                        description: format!("Theme: {} ({})", p.display_name, p.description),
+                        target: CommandTarget::SetTheme(p.name.to_string()),
+                    },
+                    150,
+                ));
+            }
+        }
+        if !matches.is_empty() {
+            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+            return matches;
+        }
+    }
+
     // Match static registry
     for cmd in COMMAND_REGISTRY {
         if cmd.name == q || cmd.aliases.iter().any(|a| *a == q) {
@@ -620,6 +703,7 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
             matches.push((crd_def, 120));
         } else if crd.plural.to_lowercase().starts_with(&q)
             || crd.singular.to_lowercase().starts_with(&q)
+            || crd.kind.to_lowercase().starts_with(&q)
             || norm_plural.starts_with(&q)
             || norm_singular.starts_with(&q)
         {
@@ -629,6 +713,7 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
         } else if crd.plural.to_lowercase().contains(&q)
             || crd.kind.to_lowercase().contains(&q)
             || crd.group.to_lowercase().contains(&q)
+            || crd.crd_name.to_lowercase().contains(&q)
         {
             matches.push((crd_def, 55));
         }

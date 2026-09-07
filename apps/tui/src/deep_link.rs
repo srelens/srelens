@@ -55,6 +55,8 @@ impl DeepLink {
                     CommandTarget::Contexts => "contexts".to_string(),
                     CommandTarget::Namespaces => "namespaces".to_string(),
                     CommandTarget::Quit => "quit".to_string(),
+                    CommandTarget::ThemePicker => "themes".to_string(),
+                    CommandTarget::SetTheme(t) => format!("theme/{}", t),
                     CommandTarget::OpenUrl(u) => format!("open/{}", u),
                 };
                 format!("srelens://view/{}/{}/{}", ctx, ns, target_name)

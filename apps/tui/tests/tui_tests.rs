@@ -149,6 +149,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             active_context: "prod-cluster".to_string(),
@@ -168,6 +169,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: Some("watch:prod-cluster:default:namespaces".to_string()),
             active_watch_channels: HashSet::new(),
@@ -179,6 +181,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -241,6 +244,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -260,6 +264,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -271,6 +276,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -345,6 +351,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -364,6 +371,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -375,6 +383,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -523,6 +532,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -542,6 +552,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -553,6 +564,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -733,6 +745,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -752,6 +765,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -763,6 +777,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -918,6 +933,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut table = ResourceTableState::new(ResourceKind::Namespaces);
         table.set_items(vec![
@@ -944,6 +960,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -955,6 +972,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1047,6 +1065,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
         table.set_items(vec![
@@ -1080,6 +1099,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1091,6 +1111,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1114,13 +1135,240 @@ mod tests {
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
         app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)).await;
-        match app.modal {
+        match &app.modal {
             Some(Modal::PortForward { pod_name, container_port, .. }) => {
                 assert_eq!(pod_name, "my-api-pod-xyz");
-                assert_eq!(container_port, 3000);
+                assert_eq!(*container_port, 3000);
             }
             other => panic!("Expected PortForward modal, got {:?}", other),
         }
+
+        // Press Enter to submit the modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_port_forward_lifecycle_and_view_sync() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::Modal;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // 1. Initially no forwards
+        assert_eq!(app.forward_manager.list().len(), 0);
+
+        // 2. Start a mock port forward directly
+        app.execute_start_port_forward(
+            "nginx-web".to_string(),
+            "Pod".to_string(),
+            "default".to_string(),
+            0, // random local port
+            80,
+        ).await;
+
+        let forwards = app.forward_manager.list();
+        assert_eq!(forwards.len(), 1);
+        let fwd_id = forwards[0].id;
+        assert_eq!(forwards[0].name, "nginx-web");
+        assert_eq!(forwards[0].remote_port, 80);
+        assert!(forwards[0].local_port > 0);
+
+        // 3. Switch to PortForwards view and verify synced state
+        app.switch_view_to_kind(ResourceKind::PortForwards).await;
+        if let ActiveView::PortForwards(state) = &app.active_view {
+            assert_eq!(state.forwards.len(), 1);
+            assert_eq!(state.forwards[0].target_name, "nginx-web");
+            assert_eq!(state.forwards[0].container_port, 80);
+            assert_eq!(state.forwards[0].local_port, forwards[0].local_port);
+        } else {
+            panic!("Expected PortForwards view");
+        }
+
+        // 4. Press 'd' to open confirm modal for stopping
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).await;
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Confirm { ref action_name, .. }) if action_name == &format!("stop-pf:{}", fwd_id)
+        ));
+
+        // 5. Confirm stop with Enter
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+
+        // 6. Verify stopped in manager
+        assert_eq!(app.forward_manager.list().len(), 0);
+        if let ActiveView::PortForwards(state) = &app.active_view {
+            assert_eq!(state.forwards.len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pod_port_forward_indication_and_close_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use serde_json::json;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Populate table with a pod
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![json!({
+            "name": "nginx-web",
+            "namespace": "default",
+            "status": "Running",
+            "ready": "1/1",
+            "age": "5m"
+        })], "");
+        app.active_view = ActiveView::Table(table);
+
+        // Initially no forwards
+        assert!(app.forward_manager.list().is_empty());
+
+        // Start port forward
+        app.execute_start_port_forward(
+            "nginx-web".to_string(),
+            "Pod".to_string(),
+            "default".to_string(),
+            0,
+            80,
+        ).await;
+
+        let forwards = app.forward_manager.list();
+        assert_eq!(forwards.len(), 1);
+        let loc = forwards[0].local_port;
+
+        // Render frame to populate active_port_forwards and draw button
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        // 1. Verify table indicator [PF: <loc>→80] and [PF: 1 active]
+        let buffer = terminal.backend().buffer();
+        let content: String = (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let expected_pf = format!("[PF: {}→80]", loc);
+        let expected_btn = format!("[ ✕ Close PF: {} ]", loc);
+        assert!(content.contains(&expected_pf), "Content did not contain {}: {}", expected_pf, content);
+        assert!(content.contains("[PF: 1 active]"), "Content did not contain [PF: 1 active]: {}", content);
+        assert!(content.contains(&expected_btn), "Content did not contain Close button {}: {}", expected_btn, content);
+        assert!(app.close_pf_button_rect.borrow().is_some());
+
+        // 2. Press 'F' (Shift+F) to close the active port forward
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT)).await;
+
+        // 3. Verify closed in manager and table
+        assert_eq!(app.forward_manager.list().len(), 0);
+        if let ActiveView::Table(table) = &app.active_view {
+            assert!(table.active_port_forwards.is_empty());
+        }
+
+        // Render again and verify indicators are gone
+        terminal.draw(|f| app.render(f)).unwrap();
+        assert!(app.close_pf_button_rect.borrow().is_none());
+
+        let buffer2 = terminal.backend().buffer();
+        let content2: String = (0..buffer2.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer2.area.width {
+                    line.push_str(buffer2[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!content2.contains("[PF: 8080→80]"));
+        assert!(!content2.contains("[ ✕ Close PF: 8080 ]"));
+    }
+
+    #[tokio::test]
+    async fn test_mouse_click_close_port_forward_button() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use serde_json::json;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        table.set_items(vec![json!({
+            "name": "redis-master",
+            "namespace": "default",
+            "status": "Running",
+            "ready": "1/1",
+            "age": "1d"
+        })], "");
+        app.active_view = ActiveView::Table(table);
+
+        app.execute_start_port_forward(
+            "redis-master".to_string(),
+            "Pod".to_string(),
+            "default".to_string(),
+            6379,
+            6379,
+        ).await;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let btn_rect = app.close_pf_button_rect.borrow().expect("Close button rect should be present");
+
+        // Click on the close button
+        let mouse_event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: btn_rect.x + 1,
+            row: btn_rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(mouse_event).await;
+
+        // Verify port forward is closed
+        assert_eq!(app.forward_manager.list().len(), 0);
     }
 
     #[tokio::test]
@@ -1140,6 +1388,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
         table.set_items(vec![
@@ -1172,6 +1421,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1183,6 +1433,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.31.7".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1278,6 +1529,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1297,6 +1549,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1308,6 +1561,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1370,6 +1624,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1389,6 +1644,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1400,6 +1656,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1454,6 +1711,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1473,6 +1731,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1484,6 +1743,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1554,6 +1814,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1598,6 +1859,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1609,6 +1871,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod-cluster".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1683,6 +1946,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1727,6 +1991,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1738,6 +2003,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod-cluster".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1814,6 +2080,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
         table.set_items(
@@ -1881,6 +2148,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1892,6 +2160,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod-cluster".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -1962,6 +2231,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1981,6 +2251,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -1992,6 +2263,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.34.7+rke2r1".to_string(),
             cluster_name: "prod-cluster-dus1".to_string(),
             server_url: "https://k8s.prod.dus1:6443".to_string(),
@@ -2368,6 +2640,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -2387,6 +2660,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -2397,6 +2671,7 @@ mod tests {
             is_running: true,
             resource_cache: HashMap::new(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             crds: vec![],
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
@@ -2486,6 +2761,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -2505,6 +2781,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -2515,6 +2792,7 @@ mod tests {
             is_running: true,
             resource_cache: HashMap::new(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             crds: vec![],
             cluster_version: "v1.30.0".to_string(),
             cluster_name: "prod".to_string(),
@@ -2711,6 +2989,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             active_context: "prod-cluster".to_string(),
@@ -2730,6 +3009,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
             active_watch_pool: Vec::new(),
@@ -2749,6 +3029,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "prod".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
@@ -2823,6 +3104,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut app = App {
             active_context: "prod-cluster".to_string(),
@@ -2842,6 +3124,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
             active_watch_pool: Vec::new(),
@@ -2861,6 +3144,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "shop".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srelens_tui::AiSettings::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("shop"),
             assistant_states: HashMap::new(),
@@ -2923,6 +3207,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
         let node_json = serde_json::json!({
@@ -2951,6 +3236,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             resource_cache: HashMap::new(),
             active_log_channel: None,
             current_watch_channel: None,
@@ -2961,6 +3247,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "default".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -3122,6 +3409,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
         let mut items = Vec::new();
@@ -3155,6 +3443,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             resource_cache: HashMap::new(),
             active_log_channel: None,
             current_watch_channel: None,
@@ -3165,6 +3454,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "default".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -3330,6 +3620,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let desc_text = "Name: my-pod\nNamespace: default\nContainers:\n  app:\n    Image: nginx:latest\nEvents:\n  Type: Normal\n  Reason: Started";
         let desc_view = DescribeViewState::new("my-pod".to_string(), "Pod".to_string(), Some("default".to_string()), desc_text.to_string());
@@ -3352,6 +3643,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             resource_cache: HashMap::new(),
             active_log_channel: None,
             current_watch_channel: None,
@@ -3362,6 +3654,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "default".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -4095,6 +4388,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut ni_state = NodeInspectorState::new("worker-node-1".to_string());
         let details = NodeInspectorDetails {
@@ -4192,6 +4486,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             resource_cache,
             active_log_channel: None,
             current_watch_channel: None,
@@ -4202,6 +4497,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "default".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -4289,6 +4585,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut ni_state = NodeInspectorState::new("worker-node-1".to_string());
         let details = NodeInspectorDetails {
@@ -4381,6 +4678,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             resource_cache,
             active_log_channel: None,
             current_watch_channel: None,
@@ -4391,6 +4689,7 @@ mod tests {
             crds: vec![],
             last_active_namespace: "default".to_string(),
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -4538,6 +4837,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut resource_cache = HashMap::new();
 
@@ -4608,6 +4908,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -4619,6 +4920,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -4686,9 +4988,9 @@ mod tests {
 
         // Verify status styling
         assert_eq!(status_style("Degraded"), Theme::status_error());
-        assert_eq!(status_style("Scaled down").fg, Some(Theme::DIM));
-        assert_eq!(status_style("Not scheduled").fg, Some(Theme::DIM));
-        assert_eq!(status_style("Suspended").fg, Some(Theme::DIM));
+        assert_eq!(status_style("Scaled down").fg, Theme::status_dim().fg);
+        assert_eq!(status_style("Not scheduled").fg, Theme::status_dim().fg);
+        assert_eq!(status_style("Suspended").fg, Theme::status_dim().fg);
         assert_eq!(status_style("Running"), Theme::status_ok());
         assert_eq!(status_style("Active"), Theme::status_ok());
     }
@@ -4712,6 +5014,7 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
 
         let mut resource_cache = HashMap::new();
         resource_cache.insert(
@@ -4741,6 +5044,7 @@ mod tests {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx: tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -4752,6 +5056,7 @@ mod tests {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "v1.30.2".to_string(),
             cluster_name: "prod".to_string(),
             server_url: "https://127.0.0.1:6443".to_string(),
@@ -4815,7 +5120,1613 @@ mod tests {
             assert_eq!(t.raw_items[t.filtered_indices[0]]["name"], "nginx-dep-abcd");
         }
     }
+
+    static THEME_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_theme_palette_switching_and_lookups() {
+        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        use ratatui::widgets::BorderType;
+        use srelens_tui::theme::{HeaderStyle, Theme, ThemeId, ALL_THEMES};
+
+        assert_eq!(ALL_THEMES.len(), 12);
+
+        // Test theme lookup and setting by id/name
+        let nord = Theme::set_theme_by_name("nord");
+        assert!(nord.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::Nord);
+        assert_eq!(Theme::active_palette().name, "nord");
+
+        let dracula = Theme::set_theme_by_name("dracula");
+        assert!(dracula.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::Dracula);
+
+        let tokyo = Theme::set_theme_by_name("tokyo-night");
+        assert!(tokyo.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::TokyoNight);
+        assert_eq!(Theme::border_type(), BorderType::Rounded);
+
+        let gruvbox = Theme::set_theme_by_name("gruvbox");
+        assert!(gruvbox.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::GruvboxDark);
+
+        let solarized = Theme::set_theme_by_name("solarized");
+        assert!(solarized.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::SolarizedDark);
+        assert_eq!(Theme::header_style(), HeaderStyle::Minimal);
+        assert_eq!(Theme::border_type(), BorderType::Plain);
+
+        let monokai = Theme::set_theme_by_name("monokai");
+        assert!(monokai.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::MonokaiPro);
+
+        let latte = Theme::set_theme_by_name("catppuccin-latte");
+        assert!(latte.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::CatppuccinLatte);
+        assert!(Theme::active_palette().is_light);
+
+        // Test new themes & visual chrome traits
+        let fino = Theme::set_theme_by_name("fino-time");
+        assert!(fino.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::FinoTime);
+        assert_eq!(Theme::header_style(), HeaderStyle::FinoTime);
+        assert_eq!(Theme::border_type(), BorderType::Rounded);
+        assert_eq!(Theme::prompt_glyph(), "╰─○ ");
+        assert_eq!(Theme::bullet_glyph(), "○");
+        assert!(Theme::show_live_clock());
+
+        let cyber = Theme::set_theme_by_name("cyberpunk");
+        assert!(cyber.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::Cyberpunk);
+        assert_eq!(Theme::border_type(), BorderType::Thick);
+        assert_eq!(Theme::prompt_glyph(), "▶ ");
+        assert_eq!(Theme::bullet_glyph(), "▪");
+        assert_eq!(Theme::brand_icon(), "⚡ ");
+        assert!(Theme::show_live_clock());
+
+        let rose = Theme::set_theme_by_name("rose-pine");
+        assert!(rose.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::RosePine);
+        assert_eq!(Theme::prompt_glyph(), "❯ ");
+        assert_eq!(Theme::bullet_glyph(), "◆");
+        assert_eq!(Theme::brand_icon(), "✦ ");
+
+        let onedark = Theme::set_theme_by_name("one-dark");
+        assert!(onedark.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::OneDark);
+        assert_eq!(Theme::header_style(), HeaderStyle::Standard);
+        assert_eq!(Theme::border_type(), BorderType::Plain);
+
+        // Reset to default Mocha
+        let mocha = Theme::set_theme_by_name("catppuccin-mocha");
+        assert!(mocha.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::CatppuccinMocha);
+        assert!(!Theme::active_palette().is_light);
+
+        // Test index switching
+        assert!(Theme::set_theme_by_index(3)); // Nord is index 3
+        assert_eq!(Theme::active_index(), 3);
+        assert_eq!(Theme::active_palette().name, "nord");
+
+        // Out of bounds index
+        assert!(!Theme::set_theme_by_index(999));
+        assert_eq!(Theme::active_index(), 3);
+
+        // Reset to 0
+        Theme::set_theme_by_index(0);
+        assert_eq!(Theme::active_index(), 0);
+    }
+
+    #[test]
+    fn test_theme_command_resolution_and_autocomplete() {
+        use srelens_tui::commands::{command_suggestions, resolve_command, CommandTarget};
+
+        // Modal command resolution
+        assert!(matches!(
+            resolve_command(":themes"),
+            Some(CommandTarget::ThemePicker)
+        ));
+        assert!(matches!(
+            resolve_command(":theme"),
+            Some(CommandTarget::ThemePicker)
+        ));
+        assert!(matches!(
+            resolve_command(":colors"),
+            Some(CommandTarget::ThemePicker)
+        ));
+
+        // Direct theme command resolution
+        assert!(matches!(
+            resolve_command(":theme nord"),
+            Some(CommandTarget::SetTheme(t)) if t == "nord"
+        ));
+        assert!(matches!(
+            resolve_command(":theme:tokyo-night"),
+            Some(CommandTarget::SetTheme(t)) if t == "tokyo-night"
+        ));
+        assert!(matches!(
+            resolve_command(":colors dracula"),
+            Some(CommandTarget::SetTheme(t)) if t == "dracula"
+        ));
+        assert!(matches!(
+            resolve_command(":theme fino-time"),
+            Some(CommandTarget::SetTheme(t)) if t == "fino-time"
+        ));
+        assert!(matches!(
+            resolve_command(":theme fino"),
+            Some(CommandTarget::SetTheme(t)) if t == "fino"
+        ));
+        assert!(matches!(
+            resolve_command(":theme cyberpunk"),
+            Some(CommandTarget::SetTheme(t)) if t == "cyberpunk"
+        ));
+        assert!(matches!(
+            resolve_command(":theme synthwave"),
+            Some(CommandTarget::SetTheme(t)) if t == "synthwave"
+        ));
+        assert!(matches!(
+            resolve_command(":theme rose-pine"),
+            Some(CommandTarget::SetTheme(t)) if t == "rose-pine"
+        ));
+        assert!(matches!(
+            resolve_command(":theme one-dark"),
+            Some(CommandTarget::SetTheme(t)) if t == "one-dark"
+        ));
+
+        // Theme autocompletion suggestions
+        let suggestions = command_suggestions("theme nor");
+        assert!(!suggestions.is_empty());
+        assert!(suggestions.iter().any(|(cmd, _)| cmd.name == "theme nord"));
+
+        let drac_suggs = command_suggestions("theme drac");
+        assert!(!drac_suggs.is_empty());
+        assert!(drac_suggs.iter().any(|(cmd, _)| cmd.name == "theme dracula"));
+
+        let fino_suggs = command_suggestions("theme fin");
+        assert!(!fino_suggs.is_empty());
+        assert!(fino_suggs.iter().any(|(cmd, _)| cmd.name == "theme fino-time"));
+
+        let cyber_suggs = command_suggestions("theme cyber");
+        assert!(!cyber_suggs.is_empty());
+        assert!(cyber_suggs.iter().any(|(cmd, _)| cmd.name == "theme cyberpunk"));
+    }
+
+    #[tokio::test]
+    async fn test_theme_picker_live_preview_revert_and_commit() {
+        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::App;
+        use srelens_tui::commands::CommandTarget;
+        use srelens_tui::theme::Theme;
+        use srelens_tui::ui::dialogs::Modal;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Ensure starting at default Mocha (index 0)
+        Theme::set_theme_by_index(0);
+        assert_eq!(Theme::active_index(), 0);
+
+        // Open theme picker
+        app.execute_view_target(CommandTarget::ThemePicker).await;
+        assert!(matches!(
+            app.modal,
+            Some(Modal::ThemePicker {
+                selected_idx: 0,
+                initial_theme_idx: 0
+            })
+        ));
+
+        // 1. Live preview navigation: Down arrow changes active theme immediately
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        if let Some(Modal::ThemePicker { selected_idx, initial_theme_idx }) = app.modal {
+            assert_eq!(selected_idx, 1);
+            assert_eq!(initial_theme_idx, 0);
+            assert_eq!(Theme::active_index(), 1); // Live preview applied!
+        } else {
+            panic!("Expected ThemePicker modal");
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        if let Some(Modal::ThemePicker { selected_idx, .. }) = app.modal {
+            assert_eq!(selected_idx, 2);
+            assert_eq!(Theme::active_index(), 2);
+        }
+
+        // 2. Cancellation: Esc reverts back to initial_theme_idx (0) and closes modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+        assert_eq!(Theme::active_index(), 0); // Reverted!
+
+        // 3. Commitment: Open again, navigate to Nord (index 3), press Enter
+        Theme::set_theme_by_index(0);
+        app.execute_view_target(CommandTarget::ThemePicker).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // 1
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // 2
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // 3
+        assert_eq!(Theme::active_index(), 3);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+        assert_eq!(Theme::active_index(), 3); // Committed!
+        assert_eq!(app.ai_settings.theme, Some("nord".to_string()));
+
+        // Reset theme back to Mocha for other tests
+        Theme::set_theme_by_index(0);
+    }
+
+    #[tokio::test]
+    async fn test_command_autocomplete_navigation_and_selection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::{CrdMeta, ResourceKind};
+        use srelens_tui::ui::InputMode;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Add CRDs starting with "no" to simulate user's environment
+        app.crds = vec![
+            CrdMeta {
+                crd_name: "nodefeaturegroups.nfd.k8s.bin".to_string(),
+                group: "nfd.k8s.bin".to_string(),
+                version: "v1".to_string(),
+                kind: "NodeFeatureGroup".to_string(),
+                plural: "nodefeaturegroups".to_string(),
+                singular: "nodefeaturegroup".to_string(),
+                namespaced: false,
+                short_names: vec!["nfg".to_string()],
+                printer_columns: vec![],
+            },
+            CrdMeta {
+                crd_name: "nodefeaturerules.nfd.k8s.bin".to_string(),
+                group: "nfd.k8s.bin".to_string(),
+                version: "v1".to_string(),
+                kind: "NodeFeatureRule".to_string(),
+                plural: "nodefeaturerules".to_string(),
+                singular: "nodefeaturerule".to_string(),
+                namespaced: false,
+                short_names: vec!["nfr".to_string()],
+                printer_columns: vec![],
+            },
+        ];
+
+        // 1. Enter command mode by pressing ':'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert_eq!(app.command_buffer, "");
+        assert_eq!(app.command_suggestion_idx, 0);
+
+        // 2. Type "no"
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "no");
+        assert_eq!(app.command_suggestion_idx, 0);
+
+        // 3. Press Down arrow -> Moves selection cursor to index 1 (nodefeaturegroups) WITHOUT altering command_buffer!
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "no"); // Query preserved!
+        assert_eq!(app.command_suggestion_idx, 1);
+
+        // 4. Press Down arrow again -> Moves selection cursor to index 2 (nodefeaturerules)
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "no"); // Query preserved!
+        assert_eq!(app.command_suggestion_idx, 2);
+
+        // 5. Press Up arrow -> Moves selection cursor back to index 1 (nodefeaturegroups)
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "no"); // Query preserved!
+        assert_eq!(app.command_suggestion_idx, 1);
+
+        // 6. Press Enter -> Runs selected suggestion (nodefeaturegroups)
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Normal);
+        if let ActiveView::Table(t) = &app.active_view {
+            assert!(matches!(&t.kind, ResourceKind::CustomResource(crd) if crd.plural == "nodefeaturegroups"));
+        } else {
+            panic!("Expected active view to be Custom CRD table for nodefeaturegroups");
+        }
+
+        // 7. Verify Tab completes selected suggestion
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // select index 1
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "nodefeaturegroups");
+    }
+
+    #[tokio::test]
+    async fn test_crd_settings_vs_ai_settings_autocomplete_and_resolution() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::{
+            command_suggestions_with_crds, resolve_command, resolve_command_with_crds,
+            CommandTarget, CrdMeta, ResourceKind,
+        };
+        use srelens_tui::ui::InputMode;
+
+        let setting_crd = CrdMeta {
+            crd_name: "settings.management.cattle.io".to_string(),
+            group: "management.cattle.io".to_string(),
+            version: "v3".to_string(),
+            kind: "Setting".to_string(),
+            plural: "settings".to_string(),
+            singular: "setting".to_string(),
+            namespaced: false,
+            short_names: vec![],
+            printer_columns: vec![],
+        };
+
+        // 1. Test fallback when no CRD is present
+        assert_eq!(
+            resolve_command(":settings"),
+            Some(CommandTarget::Resource(ResourceKind::Settings))
+        );
+        assert_eq!(
+            resolve_command(":ai-settings"),
+            Some(CommandTarget::Resource(ResourceKind::Settings))
+        );
+        assert_eq!(
+            resolve_command(":config"),
+            Some(CommandTarget::Resource(ResourceKind::Settings))
+        );
+
+        // 2. Test command resolution when CRD is present
+        let crds = vec![setting_crd.clone()];
+
+        // :settings and :setting must resolve to CRD
+        assert_eq!(
+            resolve_command_with_crds(":settings", &crds),
+            Some(CommandTarget::CustomResource(setting_crd.clone()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":setting", &crds),
+            Some(CommandTarget::CustomResource(setting_crd.clone()))
+        );
+        assert_eq!(
+            resolve_command_with_crds("settings.management.cattle.io", &crds),
+            Some(CommandTarget::CustomResource(setting_crd.clone()))
+        );
+
+        // :ai-settings and :config must still resolve to AI Settings
+        assert_eq!(
+            resolve_command_with_crds(":ai-settings", &crds),
+            Some(CommandTarget::Resource(ResourceKind::Settings))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":config", &crds),
+            Some(CommandTarget::Resource(ResourceKind::Settings))
+        );
+
+        // 3. Test suggestions scoring & ranking
+        let suggestions = command_suggestions_with_crds("sett", &crds);
+        assert!(suggestions.len() >= 2);
+        // CRD should be ranked first because its primary name starts with "sett"
+        assert_eq!(suggestions[0].0.name, "settings");
+        assert!(matches!(&suggestions[0].0.target, CommandTarget::CustomResource(ref c) if c.plural == "settings"));
+        // AI Settings should also be present via alias
+        assert_eq!(suggestions[1].0.name, "ai-settings");
+        assert!(matches!(&suggestions[1].0.target, CommandTarget::Resource(ResourceKind::Settings)));
+
+        // 4. Test interactive UI selection in App
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+        app.crds = crds.clone();
+
+        // 4a. Type ":sett" and press Enter immediately (Index 0 = CRD selected by default)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        for c in "sett".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        assert_eq!(app.command_suggestion_idx, 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Normal);
+        // Must open CRD table view, NOT AI Settings!
+        if let ActiveView::Table(t) = &app.active_view {
+            assert!(matches!(&t.kind, ResourceKind::CustomResource(ref c) if c.plural == "settings"));
+        } else {
+            panic!("Expected active view to be Custom CRD table for Setting");
+        }
+
+        // 4b. Type ":sett", press Down arrow (Index 1 = AI Settings), and press Enter
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        for c in "sett".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_suggestion_idx, 1);
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert_eq!(app.input_mode, InputMode::Normal);
+        // Must open AI Settings view!
+        assert!(matches!(app.active_view, ActiveView::Settings(_)));
+
+        // 4c. Verify Tab completion for CRD vs AI Settings
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        for c in "sett".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        // At index 0 (CRD), pressing Tab completes to "settings"
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "settings");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        for c in "sett".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+        }
+        // At index 1 (AI Settings), pressing Tab completes to "ai-settings"
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        assert_eq!(app.command_buffer, "ai-settings");
+    }
+
+    #[tokio::test]
+    async fn test_node_inspector_cordon_typed_confirmation_and_streamlined_hints() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::views::node_inspector_view::{NodeInspectorDetails, NodeInspectorState};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Put app into NodeInspector view
+        let mut state = NodeInspectorState::new("worker-1".to_string());
+        state.details = Some(NodeInspectorDetails {
+            name: "worker-1".to_string(),
+            unschedulable: false, // Currently schedulable
+            ..Default::default()
+        });
+        app.active_view = ActiveView::NodeInspector(state);
+
+        // 1. Pressing 'c' should NOT instantly cordon, but open Modal::InputConfirm requiring "confirm"
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::InputConfirm { title, action_name, required_input, current_input, is_destructive, .. }) => {
+                assert!(title.contains("Cordon Node"));
+                assert_eq!(action_name, "cordon:worker-1");
+                assert_eq!(required_input, "confirm");
+                assert_eq!(current_input, "");
+                assert!(*is_destructive);
+            }
+            other => panic!("Expected Modal::InputConfirm, got: {:?}", other),
+        }
+
+        // 2. Pressing Enter without typing "confirm" does NOT submit
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+
+        // 3. Type partial letters
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+        if let Some(Modal::InputConfirm { current_input, .. }) = &app.modal {
+            assert_eq!(current_input, "con");
+        }
+
+        // 4. Press Esc cancels
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+
+        // 5. Test Uncordon dialog when node is already unschedulable
+        if let ActiveView::NodeInspector(ni) = &mut app.active_view {
+            if let Some(d) = &mut ni.details {
+                d.unschedulable = true;
+            }
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::InputConfirm { title, action_name, required_input, is_destructive, .. }) => {
+                assert!(title.contains("Uncordon Node"));
+                assert_eq!(action_name, "uncordon:worker-1");
+                assert_eq!(required_input, "confirm");
+                assert!(!*is_destructive);
+            }
+            other => panic!("Expected Modal::InputConfirm for uncordon, got: {:?}", other),
+        }
+
+        // 6. Type "confirm" and press Enter
+        for ch in "confirm".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)).await;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_nodes_view_cordoned_status_and_dynamic_spacing() {
+        use srelens_tui::views::resource_table::{extract_field_str, ResourceTableState};
+        use srelens_tui::theme::{status_style, Theme};
+
+        let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
+        let nodes = vec![
+            serde_json::json!({
+                "name": "hpe-2832-t2-cp",
+                "status": "Ready",
+                "unschedulable": false,
+                "roles": "control-plane",
+                "version": "v1.31.1",
+                "allocatableCpuMillicores": 15800,
+                "allocatableMemoryMiB": 64000,
+                "allocatablePods": 110,
+                "age": "42d"
+            }),
+            serde_json::json!({
+                "name": "hpe-2832-t2-worker-1",
+                "status": "Ready",
+                "unschedulable": true,
+                "roles": "worker",
+                "version": "v1.31.1",
+                "allocatableCpuMillicores": 31600,
+                "allocatableMemoryMiB": 128000,
+                "allocatablePods": 110,
+                "age": "42d"
+            }),
+        ];
+
+        node_table.set_items(nodes, "");
+
+        // 1. Verify normal node shows Ready with OK style
+        let cp_status = extract_field_str(&node_table.raw_items[0], "status");
+        assert_eq!(cp_status, "Ready");
+        assert_eq!(status_style(&cp_status), Theme::status_ok());
+
+        // 2. Verify cordoned node shows Ready,SchedulingDisabled with WARN style
+        let worker_status = extract_field_str(&node_table.raw_items[1], "status");
+        assert_eq!(worker_status, "Ready,SchedulingDisabled");
+        assert_eq!(status_style(&worker_status), Theme::status_warn());
+
+        // 3. Verify dynamic width computation adapts to longest name and status
+        let max_name_len = node_table
+            .filtered_indices
+            .iter()
+            .map(|&idx| extract_field_str(&node_table.raw_items[idx], "name").len())
+            .max()
+            .unwrap_or(12)
+            .max("NAME".len());
+        let name_width = (max_name_len + 3) as u16;
+        assert_eq!(name_width, 23); // 20 + 3 = 23
+
+        let max_status_len = node_table
+            .filtered_indices
+            .iter()
+            .map(|&idx| extract_field_str(&node_table.raw_items[idx], "status").len())
+            .max()
+            .unwrap_or(8)
+            .max("STATUS".len());
+        let status_width = (max_status_len + 3) as u16;
+        assert_eq!(status_width, 27); // 24 + 3 = 27
+    }
+
+    #[tokio::test]
+    async fn test_topology_command_resolution_and_flow_navigation() {
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srelens_tui::views::topology_view::TopologyViewState;
+        use srelens_kube::topology::{EdgeKind, Health, Lane, Provenance, TopologyEdge, TopologyGraphOut, TopologyNode};
+
+        // 1. Verify command resolution aliases
+        assert_eq!(
+            resolve_command(":topology"),
+            Some(CommandTarget::Resource(ResourceKind::Topology))
+        );
+        assert_eq!(
+            resolve_command(":topo"),
+            Some(CommandTarget::Resource(ResourceKind::Topology))
+        );
+        assert_eq!(
+            resolve_command(":flow"),
+            Some(CommandTarget::Resource(ResourceKind::Topology))
+        );
+
+        // 2. Setup mock topology graph
+        let nodes = vec![
+            TopologyNode {
+                id: "Ingress/default/ingress-gw".to_string(),
+                kind: "Ingress".to_string(),
+                name: "ingress-gw".to_string(),
+                namespace: "default".to_string(),
+                lane: Lane::Route,
+                detail: ":80, :443".to_string(),
+                ready: None,
+                desired: None,
+                health: Health::Ok,
+            },
+            TopologyNode {
+                id: "Service/default/cart-svc".to_string(),
+                kind: "Service".to_string(),
+                name: "cart-svc".to_string(),
+                namespace: "default".to_string(),
+                lane: Lane::Service,
+                detail: ":80 -> :8080".to_string(),
+                ready: None,
+                desired: None,
+                health: Health::Ok,
+            },
+            TopologyNode {
+                id: "Deployment/default/cart-deploy".to_string(),
+                kind: "Deployment".to_string(),
+                name: "cart-deploy".to_string(),
+                namespace: "default".to_string(),
+                lane: Lane::Workload,
+                detail: "2/2 ready".to_string(),
+                ready: Some(2),
+                desired: Some(2),
+                health: Health::Ok,
+            },
+            TopologyNode {
+                id: "External//redis-cart:6379".to_string(),
+                kind: "External".to_string(),
+                name: "redis-cart:6379".to_string(),
+                namespace: String::new(),
+                lane: Lane::External,
+                detail: "redis-cart:6379".to_string(),
+                ready: None,
+                desired: None,
+                health: Health::Ok,
+            },
+        ];
+
+        let edges = vec![
+            TopologyEdge {
+                from: "Ingress/default/ingress-gw".to_string(),
+                to: "Service/default/cart-svc".to_string(),
+                kind: EdgeKind::Routes,
+                provenance: Provenance::Topology,
+                detail: String::new(),
+                weight: None,
+                unit: None,
+                health: Health::Ok,
+            },
+            TopologyEdge {
+                from: "Service/default/cart-svc".to_string(),
+                to: "Deployment/default/cart-deploy".to_string(),
+                kind: EdgeKind::Routes,
+                provenance: Provenance::Topology,
+                detail: String::new(),
+                weight: None,
+                unit: None,
+                health: Health::Ok,
+            },
+            TopologyEdge {
+                from: "Deployment/default/cart-deploy".to_string(),
+                to: "External//redis-cart:6379".to_string(),
+                kind: EdgeKind::Calls,
+                provenance: Provenance::Declared,
+                detail: String::new(),
+                weight: None,
+                unit: None,
+                health: Health::Ok,
+            },
+        ];
+
+        let graph = TopologyGraphOut { nodes, edges, probe: None };
+
+        let mut topo_state = TopologyViewState::new(vec!["default".to_string()]);
+        topo_state.set_graph(graph);
+
+        // 3. Test App integration with ActiveView::Topology
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string(), "ai-prod".to_string()],
+            active_view: ActiveView::Topology(topo_state),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            forward_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 10,
+            pod_count: 80,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // Initially selected on Workloads (cart-deploy)
+        if let ActiveView::Topology(t) = &app.active_view {
+            assert_eq!(t.selected_node().unwrap().name, "cart-deploy");
+        }
+
+        // Navigate right to External lane with Right
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)).await;
+        if let ActiveView::Topology(t) = &app.active_view {
+            assert_eq!(t.selected_node().unwrap().name, "redis-cart:6379");
+        }
+
+        // Navigate left back to Workloads with Left
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).await;
+        if let ActiveView::Topology(t) = &app.active_view {
+            assert_eq!(t.selected_node().unwrap().name, "cart-deploy");
+        }
+
+        // Press Enter on cart-deploy: drills down into Pods table pre-filtered by cart-deploy!
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(&app.active_view, ActiveView::Table(tbl) if tbl.kind == ResourceKind::Pods));
+        assert_eq!(app.filter_buffer, "cart-deploy");
+
+        // Press Esc: clears the filter buffer first
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert_eq!(app.filter_buffer, "");
+
+        // Press Esc again: pops back to Topology view!
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(&app.active_view, ActiveView::Topology(_)));
+    }
+
+    #[tokio::test]
+    async fn test_gpuinfo_command_resolution_and_node_pod_vram_selection() {
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::InputMode;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srelens_tui::views::gpu_view::{GpuPane, GpuViewState};
+        use srelens_kube::gpu_info::{GpuClusterInfo, GpuNodeInfo, GpuPodItem, format_vram_mib};
+
+        // 1. Verify command resolution aliases
+        assert_eq!(
+            resolve_command(":gpuinfo"),
+            Some(CommandTarget::Resource(ResourceKind::GpuInfo))
+        );
+        assert_eq!(
+            resolve_command(":gpu"),
+            Some(CommandTarget::Resource(ResourceKind::GpuInfo))
+        );
+        assert_eq!(
+            resolve_command(":gpus"),
+            Some(CommandTarget::Resource(ResourceKind::GpuInfo))
+        );
+
+        // 2. Setup mock GPU cluster info
+        let pod_alpha = GpuPodItem {
+            name: "llm-trainer-0".to_string(),
+            namespace: "ai-gen".to_string(),
+            phase: "Running".to_string(),
+            gpu_requests: 2,
+            vram_requests_mib: 163840, // 160 GiB
+            ready_containers: "1/1".to_string(),
+            restarts: 0,
+            age: "3d".to_string(),
+            containers: vec!["pytorch".to_string()],
+        };
+
+        let node_alpha = GpuNodeInfo {
+            name: "gpu-node-alpha".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "p4de.24xlarge".to_string(),
+            gpu_model: Some("NVIDIA A100 SXM4 80GB".to_string()),
+            gpu_driver_version: Some("535.129.03".to_string()),
+            gpu_cuda_version: Some("12.2".to_string()),
+            gpu_capacity: 8,
+            gpu_allocatable: 8,
+            gpu_requests: 2,
+            vram_per_gpu_mib: Some(81920),
+            vram_capacity_total_mib: Some(655360),
+            vram_requests_total_mib: 163840,
+            pods: vec![pod_alpha],
+        };
+
+        let pod_beta = GpuPodItem {
+            name: "whisper-worker".to_string(),
+            namespace: "audio-prod".to_string(),
+            phase: "Running".to_string(),
+            gpu_requests: 1,
+            vram_requests_mib: 15360, // 15 GiB
+            ready_containers: "1/1".to_string(),
+            restarts: 0,
+            age: "1d".to_string(),
+            containers: vec!["whisper".to_string()],
+        };
+
+        let node_beta = GpuNodeInfo {
+            name: "gpu-node-beta".to_string(),
+            status: "Ready".to_string(),
+            unschedulable: false,
+            roles: "worker".to_string(),
+            instance_type: "g4dn.xlarge".to_string(),
+            gpu_model: Some("Tesla T4".to_string()),
+            gpu_driver_version: Some("535.129.03".to_string()),
+            gpu_cuda_version: Some("12.2".to_string()),
+            gpu_capacity: 1,
+            gpu_allocatable: 1,
+            gpu_requests: 1,
+            vram_per_gpu_mib: Some(15360),
+            vram_capacity_total_mib: Some(15360),
+            vram_requests_total_mib: 15360,
+            pods: vec![pod_beta],
+        };
+
+        let info = GpuClusterInfo {
+            nodes: vec![node_alpha, node_beta],
+            total_gpu_nodes: 2,
+            total_gpus: 9,
+            total_allocated_gpus: 3,
+            total_vram_mib: 670720,
+            total_allocated_vram_mib: 179200,
+            total_gpu_pods: 2,
+        };
+
+        let mut gpu_state = GpuViewState::new();
+        gpu_state.set_info(info);
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string(), "ai-gen".to_string()],
+            active_view: ActiveView::GpuInfo(gpu_state),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            forward_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 10,
+            pod_count: 80,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // 3. Initially selected on gpu-node-alpha on the left
+        if let ActiveView::GpuInfo(g) = &app.active_view {
+            let node = g.selected_node().unwrap();
+            assert_eq!(node.name, "gpu-node-alpha");
+            assert_eq!(node.gpu_capacity, 8);
+            assert_eq!(node.gpu_requests, 2);
+            assert_eq!(format_vram_mib(node.vram_capacity_total_mib.unwrap()), "640 GiB");
+            assert_eq!(format_vram_mib(node.vram_requests_total_mib), "160 GiB");
+
+            // Right side shows pods asking for VRAM on gpu-node-alpha
+            let pod = g.selected_pod().unwrap();
+            assert_eq!(pod.name, "llm-trainer-0");
+            assert_eq!(format_vram_mib(pod.vram_requests_mib), "160 GiB");
+        }
+
+        // 4. Navigate down to gpu-node-beta with 'j'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        if let ActiveView::GpuInfo(g) = &app.active_view {
+            let node = g.selected_node().unwrap();
+            assert_eq!(node.name, "gpu-node-beta");
+            assert_eq!(node.gpu_capacity, 1);
+            assert_eq!(node.gpu_requests, 1);
+            assert_eq!(format_vram_mib(node.vram_capacity_total_mib.unwrap()), "15 GiB");
+
+            // Right side immediately updates to whisper-worker on gpu-node-beta!
+            let pod = g.selected_pod().unwrap();
+            assert_eq!(pod.name, "whisper-worker");
+            assert_eq!(format_vram_mib(pod.vram_requests_mib), "15 GiB");
+        }
+
+        // 5. Tab toggles pane to Pods
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::GpuInfo(g) = &app.active_view {
+            assert_eq!(g.focused_pane, GpuPane::Pods);
+        }
+
+        // 6. Enter on whisper-worker pod opens Describe view!
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(&app.active_view, ActiveView::Describe(d) if d.resource_name == "whisper-worker"));
+
+        // 7. Esc pops back to GpuInfo view!
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(&app.active_view, ActiveView::GpuInfo(_)));
+    }
+
+    #[tokio::test]
+    async fn test_multi_pod_logs_from_marked_items_and_workload() {
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use srelens_tui::app::{App, ActiveView};
+        use srelens_tui::ui::InputMode;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use tokio::sync::mpsc::unbounded_channel;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+
+        let mut table = ResourceTableState::new(ResourceKind::Pods);
+        let pod1 = serde_json::json!({
+            "name": "api-server-abc",
+            "namespace": "prod",
+            "status": "Running",
+            "spec": {
+                "containers": [{ "name": "app" }]
+            }
+        });
+        let pod2 = serde_json::json!({
+            "name": "api-server-def",
+            "namespace": "prod",
+            "status": "Running",
+            "spec": {
+                "containers": [{ "name": "app" }]
+            }
+        });
+        table.set_items(vec![pod1.clone(), pod2.clone()], "");
+        // Mark both pods
+        table.marked_indices.insert(0);
+        table.marked_indices.insert(1);
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "prod".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["prod".to_string()],
+            active_view: ActiveView::Table(table),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            forward_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "prod".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 10,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // Populate resource cache with pods
+        app.resource_cache.insert(
+            ("prod".to_string(), "prod".to_string(), "pods".to_string()),
+            vec![pod1, pod2],
+        );
+
+        // Press 'l' on marked pods -> starts multi-pod log stream!
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)).await;
+        if let ActiveView::Logs(ref logs) = app.active_view {
+            assert!(logs.is_multi_pod);
+            assert_eq!(logs.known_sources.len(), 2);
+            assert!(logs.known_sources.contains(&"api-server-abc".to_string()));
+            assert!(logs.known_sources.contains(&"api-server-def".to_string()));
+        } else {
+            panic!("Expected ActiveView::Logs");
+        }
+
+        // Simulate multiplexed log events from both pods arriving on channel
+        let ch = app.active_log_channel.clone().unwrap();
+        app.handle_stream_event(
+            ch.clone(),
+            serde_json::json!({
+                "source": "api-server-abc",
+                "line": "GET /health 200"
+            }),
+        );
+        app.handle_stream_event(
+            ch.clone(),
+            serde_json::json!({
+                "source": "api-server-def",
+                "line": "POST /order 201"
+            }),
+        );
+
+        if let ActiveView::Logs(ref logs) = app.active_view {
+            assert_eq!(logs.entries.len(), 3); // 1 header banner + 2 log lines
+            let e1 = &logs.entries[1];
+            assert_eq!(e1.source.as_deref(), Some("api-server-abc"));
+            assert_eq!(e1.line, "GET /health 200");
+            let e2 = &logs.entries[2];
+            assert_eq!(e2.source.as_deref(), Some("api-server-def"));
+            assert_eq!(e2.line, "POST /order 201");
+        } else {
+            panic!("Expected ActiveView::Logs");
+        }
+
+        // Esc returns back to table
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Table(_)));
+    }
+
+    #[tokio::test]
+    async fn test_top_hotspots_commands_and_sorting() {
+        use srelens_tui::commands::{resolve_command, ResourceKind, CommandTarget};
+        use srelens_tui::views::top_view::{TopTab, TopSortBy, TopPodRow, TopNodeRow};
+        use srelens_tui::app::{App, ActiveView};
+        use srelens_tui::ui::InputMode;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::watch::WatchManager;
+        use srelens_streams::logs::LogStreamManager;
+        use tokio::sync::mpsc::unbounded_channel;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // 1. Verify command resolutions
+        assert_eq!(resolve_command("top"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
+        assert_eq!(resolve_command(":top"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
+        assert_eq!(resolve_command(":toppods"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
+        assert_eq!(resolve_command(":top pods"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
+        assert_eq!(resolve_command(":topnodes"), Some(CommandTarget::Resource(ResourceKind::TopNodes)));
+        assert_eq!(resolve_command(":top nodes"), Some(CommandTarget::Resource(ResourceKind::TopNodes)));
+
+        // 2. Setup App with Top view
+        let (tx, _rx) = unbounded_channel();
+        let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
+        let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+
+        let mut top_state = srelens_tui::views::top_view::TopViewState::new(TopTab::Pods);
+        let pod_rows = vec![
+            TopPodRow {
+                namespace: "default".to_string(),
+                name: "low-cpu-pod".to_string(),
+                cpu_millicores: 100,
+                cpu_req_millicores: 500,
+                cpu_lim_millicores: 1000,
+                mem_mib: 800,
+                mem_req_mib: 1024,
+                mem_lim_mib: 2048,
+            },
+            TopPodRow {
+                namespace: "default".to_string(),
+                name: "high-cpu-pod".to_string(),
+                cpu_millicores: 1200,
+                cpu_req_millicores: 1000,
+                cpu_lim_millicores: 2000,
+                mem_mib: 400,
+                mem_req_mib: 512,
+                mem_lim_mib: 1024,
+            },
+        ];
+        let node_rows = vec![
+            TopNodeRow {
+                name: "node-1".to_string(),
+                status: "Ready".to_string(),
+                cpu_millicores: 2000,
+                cpu_alloc_millicores: 4000,
+                mem_mib: 8000,
+                mem_alloc_mib: 16000,
+            },
+        ];
+        top_state.set_data(pod_rows, node_rows);
+
+        let mut app = App {
+            active_context: "prod".to_string(),
+            active_namespace: "default".to_string(),
+            kubeconfig_paths: vec![],
+            contexts: vec![],
+            namespaces: vec!["default".to_string()],
+            active_view: ActiveView::Top(top_state),
+            nav_stack: vec![],
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            command_suggestion_idx: 0,
+            filter_buffer: String::new(),
+            modal: None,
+            show_help: false,
+            event_tx: tx,
+            client_cache,
+            watch_manager,
+            logs_manager,
+            forward_manager,
+            resource_cache: HashMap::new(),
+            active_log_channel: None,
+            current_watch_channel: None,
+            active_watch_channels: HashSet::new(),
+            active_watch_pool: Vec::new(),
+            is_running: true,
+            requires_terminal_suspend: None,
+            crds: vec![],
+            last_active_namespace: "default".to_string(),
+            context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
+            cluster_version: "v1.30.2".to_string(),
+            cluster_name: "prod".to_string(),
+            server_url: "https://127.0.0.1:6443".to_string(),
+            node_count: 5,
+            pod_count: 10,
+            is_connected: true,
+            connection_attempt_start: std::time::Instant::now(),
+            cluster_unreachable: false,
+            toast: None,
+            ai_settings: srelens_tui::AiSettings::default(),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_states: HashMap::new(),
+            pod_metrics_tick_counter: 0,
+            node_metrics_tick_counter: 0,
+            node_metrics_history: HashMap::new(),
+            pod_metrics_history: HashMap::new(),
+            cluster_overview_data: None,
+            screen_selection: None,
+            screen_selecting: false,
+            screen_selection_text: std::cell::RefCell::new(String::new()),
+        };
+
+        // Verify initial CPU sort puts high-cpu-pod first
+        if let ActiveView::Top(ref top) = app.active_view {
+            assert_eq!(top.selected_pod().unwrap().name, "high-cpu-pod");
+        }
+
+        // Press 'm' to sort by Memory (descending) -> low-cpu-pod has 800MiB vs 400MiB
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
+        if let ActiveView::Top(ref top) = app.active_view {
+            assert_eq!(top.sort_by, TopSortBy::Memory);
+            assert_eq!(top.selected_pod().unwrap().name, "low-cpu-pod");
+        }
+
+        // Press 'S' to reverse direction (ascending) -> high-cpu-pod has 400MiB
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)).await;
+        if let ActiveView::Top(ref top) = app.active_view {
+            assert_eq!(top.selected_pod().unwrap().name, "high-cpu-pod");
+        }
+
+        // Press Tab to toggle to Nodes tab
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::Top(ref top) = app.active_view {
+            assert_eq!(top.active_tab, TopTab::Nodes);
+            assert_eq!(top.selected_node().unwrap().name, "node-1");
+        }
+
+        // Press '1' to switch back to Pods tab
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)).await;
+        if let ActiveView::Top(ref top) = app.active_view {
+            assert_eq!(top.active_tab, TopTab::Pods);
+        }
+
+        // Press 'd' to Describe the selected pod
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Describe(_)));
+
+        // Esc pops back to Top view
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Top(_)));
+    }
+
+    #[tokio::test]
+    async fn test_helm_detail_view_state_and_values_diff() {
+        use srelens_tui::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState, ValuesDiffMode, DiffKind};
+        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
+
+        let mut detail_state = HelmDetailViewState::new("ingress-nginx".to_string(), "default".to_string());
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Overview);
+
+        // Tab transitions
+        detail_state.next_tab();
+        assert_eq!(detail_state.active_tab, HelmDetailTab::ValuesDiff);
+        detail_state.next_tab();
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Revisions);
+        detail_state.next_tab();
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Manifest);
+        detail_state.next_tab();
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Notes);
+        detail_state.next_tab();
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Overview);
+        detail_state.prev_tab();
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Notes);
+
+        // Populate detail
+        let mock_detail = HelmReleaseDetail {
+            name: "ingress-nginx".to_string(),
+            namespace: "default".to_string(),
+            revision: 3,
+            status: "deployed".to_string(),
+            chart: "ingress-nginx".to_string(),
+            chart_version: "4.8.3".to_string(),
+            app_version: "1.9.4".to_string(),
+            updated: "2026-09-01T12:00:00Z".to_string(),
+            values_yaml: "controller:\n  replicaCount: 3\n  service:\n    type: LoadBalancer\n".to_string(),
+            chart_values_yaml: "controller:\n  replicaCount: 1\n  service:\n    type: ClusterIP\n".to_string(),
+            computed_values_yaml: "controller:\n  replicaCount: 3\n  service:\n    type: LoadBalancer\n".to_string(),
+            manifest: "---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ingress-nginx-controller\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: ingress-nginx-controller\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: ingress-nginx-controller-admission\n".to_string(),
+            notes: "The ingress-nginx controller has been installed successfully.".to_string(),
+            history: vec![
+                HelmRevision {
+                    revision: 3,
+                    status: "deployed".to_string(),
+                    updated: "2026-09-01T12:00:00Z".to_string(),
+                    chart_version: "ingress-nginx-4.8.3".to_string(),
+                    description: "Upgrade complete".to_string(),
+                },
+                HelmRevision {
+                    revision: 2,
+                    status: "superseded".to_string(),
+                    updated: "2026-08-15T10:00:00Z".to_string(),
+                    chart_version: "ingress-nginx-4.8.2".to_string(),
+                    description: "Upgrade complete".to_string(),
+                },
+                HelmRevision {
+                    revision: 1,
+                    status: "superseded".to_string(),
+                    updated: "2026-08-01T08:00:00Z".to_string(),
+                    chart_version: "ingress-nginx-4.8.0".to_string(),
+                    description: "Install complete".to_string(),
+                },
+            ],
+        };
+        detail_state.set_detail(mock_detail);
+
+        // Verify resource parsing from manifest
+        let counts = detail_state.parse_manifest_resource_counts();
+        assert_eq!(counts.len(), 2);
+        let dep_count = counts.iter().find(|(k, _)| k == "Deployment").map(|(_, c)| *c);
+        let svc_count = counts.iter().find(|(k, _)| k == "Service").map(|(_, c)| *c);
+        assert_eq!(dep_count, Some(1));
+        assert_eq!(svc_count, Some(2));
+        // Verify values diff: Custom vs Computed (default mode)
+        detail_state.set_tab(HelmDetailTab::ValuesDiff);
+        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::CustomVsComputed);
+        let diff_lines = detail_state.compute_values_diff();
+        assert!(!diff_lines.is_empty());
+
+        // Toggle to CustomVsDefault
+        detail_state.toggle_diff_mode();
+        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::CustomVsDefault);
+        let diff_lines = detail_state.compute_values_diff();
+        assert!(!diff_lines.is_empty());
+        assert!(diff_lines.iter().any(|l| matches!(l.kind, DiffKind::Remove) && l.text.contains("replicaCount: 1")));
+        assert!(diff_lines.iter().any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
+
+        // Toggle diff mode to RevisionVsPrevious
+        detail_state.toggle_diff_mode();
+        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::RevisionVsPrevious);
+
+        // Previous revision detail
+        let prev_detail = HelmReleaseDetail {
+            name: "ingress-nginx".to_string(),
+            namespace: "default".to_string(),
+            revision: 2,
+            status: "superseded".to_string(),
+            chart: "ingress-nginx".to_string(),
+            chart_version: "4.8.2".to_string(),
+            app_version: "1.9.3".to_string(),
+            updated: "2026-08-15T10:00:00Z".to_string(),
+            values_yaml: "controller:\n  replicaCount: 2\n  service:\n    type: LoadBalancer\n".to_string(),
+            chart_values_yaml: "controller:\n  replicaCount: 1\n".to_string(),
+            computed_values_yaml: "controller:\n  replicaCount: 2\n".to_string(),
+            manifest: "".to_string(),
+            notes: "".to_string(),
+            history: vec![],
+        };
+        detail_state.set_previous_detail(prev_detail);
+        let rev_diff = detail_state.compute_values_diff();
+        assert!(rev_diff.iter().any(|l| matches!(l.kind, DiffKind::Remove) && l.text.contains("replicaCount: 2")));
+        assert!(rev_diff.iter().any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
+
+        // Revision selection
+        detail_state.set_tab(HelmDetailTab::Revisions);
+        assert_eq!(detail_state.selected_revision().unwrap().revision, 3);
+        detail_state.select_next_revision();
+        assert_eq!(detail_state.selected_revision().unwrap().revision, 2);
+        detail_state.select_next_revision();
+        assert_eq!(detail_state.selected_revision().unwrap().revision, 1);
+        detail_state.select_prev_revision();
+        assert_eq!(detail_state.selected_revision().unwrap().revision, 2);
+    }
+
+    #[tokio::test]
+    async fn test_helm_views_navigation_and_interactions() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::Modal;
+        use srelens_tui::views::helm_detail_view::{HelmDetailTab, ValuesDiffMode};
+        use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // 1. Setup Helm releases in HelmViewState
+        let mut helm_state = HelmViewState::new();
+        helm_state.set_releases(vec![
+            HelmReleaseItem {
+                name: "prometheus-stack".to_string(),
+                namespace: "monitoring".to_string(),
+                revision: 4,
+                status: "deployed".to_string(),
+                chart: "kube-prometheus-stack".to_string(),
+                chart_version: "51.2.0".to_string(),
+                app_version: "0.68.0".to_string(),
+                updated: "2026-09-01T00:00:00Z".to_string(),
+            },
+            HelmReleaseItem {
+                name: "ingress-nginx".to_string(),
+                namespace: "ingress".to_string(),
+                revision: 2,
+                status: "deployed".to_string(),
+                chart: "ingress-nginx".to_string(),
+                chart_version: "4.8.3".to_string(),
+                app_version: "1.9.4".to_string(),
+                updated: "2026-09-02T00:00:00Z".to_string(),
+            },
+        ]);
+        app.active_view = ActiveView::Helm(helm_state);
+
+        // Navigate releases down
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        if let ActiveView::Helm(ref helm) = app.active_view {
+            assert_eq!(helm.selected_release().unwrap().name, "ingress-nginx");
+        }
+
+        // 2. Press Enter to open Deep Inspector on Overview tab
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        match &app.active_view {
+            ActiveView::HelmDetail(detail) => {
+                assert_eq!(detail.release_name, "ingress-nginx");
+                assert_eq!(detail.namespace, "ingress");
+                assert_eq!(detail.active_tab, HelmDetailTab::Overview);
+            }
+            _ => panic!("Expected ActiveView::HelmDetail"),
+        }
+
+        // 3. Tab navigation inside HelmDetail
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::HelmDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, HelmDetailTab::ValuesDiff);
+        }
+
+        // Toggle diff mode with 'm' (CustomVsComputed -> CustomVsDefault)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
+        if let ActiveView::HelmDetail(ref detail) = app.active_view {
+            assert_eq!(detail.values_diff_mode, ValuesDiffMode::CustomVsDefault);
+        }
+
+        // Jump to Revisions tab with '3'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)).await;
+        if let ActiveView::HelmDetail(ref mut detail) = app.active_view {
+            assert_eq!(detail.active_tab, HelmDetailTab::Revisions);
+            // Mock history
+            detail.detail = Some(srelens_kube::helm::HelmReleaseDetail {
+                name: "ingress-nginx".to_string(),
+                namespace: "ingress".to_string(),
+                revision: 2,
+                status: "deployed".to_string(),
+                chart: "ingress-nginx".to_string(),
+                chart_version: "4.8.3".to_string(),
+                app_version: "1.9.4".to_string(),
+                updated: "2026-09-02T00:00:00Z".to_string(),
+                values_yaml: "".to_string(),
+                chart_values_yaml: "".to_string(),
+                computed_values_yaml: "".to_string(),
+                manifest: "".to_string(),
+                notes: "".to_string(),
+                history: vec![
+                    srelens_kube::helm::HelmRevision {
+                        revision: 2,
+                        status: "deployed".to_string(),
+                        updated: "2026-09-02".to_string(),
+                        chart_version: "4.8.3".to_string(),
+                        description: "".to_string(),
+                    },
+                    srelens_kube::helm::HelmRevision {
+                        revision: 1,
+                        status: "superseded".to_string(),
+                        updated: "2026-09-01".to_string(),
+                        chart_version: "4.8.0".to_string(),
+                        description: "".to_string(),
+                    },
+                ],
+            });
+        }
+
+        // Select revision 1 and press 'r' to rollback to it
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::Confirm { title, action_name, .. }) => {
+                assert!(title.contains("Rollback Helm Release [ingress-nginx]"));
+                assert_eq!(action_name, "helm-rollback:ingress-nginx:ingress:1");
+            }
+            _ => panic!("Expected Confirm modal for rollback"),
+        }
+        app.modal = None;
+
+        // 4. Press Esc to return back to Helm release list
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Helm(_)));
+
+        // 5. From Helm list, press 'r' to trigger rollback modal to revision - 1
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::Confirm { action_name, .. }) => {
+                assert_eq!(action_name, "helm-rollback:ingress-nginx:ingress:1");
+            }
+            _ => panic!("Expected Confirm modal for rollback from release table"),
+        }
+        app.modal = None;
+
+        // 6. From Helm list, press Ctrl+D to trigger uninstall modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)).await;
+        match &app.modal {
+            Some(Modal::Confirm { title, action_name, .. }) => {
+                assert!(title.contains("Uninstall Helm Release [ingress-nginx]"));
+                assert_eq!(action_name, "helm-uninstall:ingress-nginx:ingress");
+            }
+            _ => panic!("Expected Confirm modal for uninstall"),
+        }
+        app.modal = None;
+
+        // 7. Deep link navigation to Helm release
+        let deep_link = srelens_tui::deep_link::DeepLink::Resource {
+            context: "test-ctx".to_string(),
+            namespace: Some("ingress".to_string()),
+            kind: "HelmRelease".to_string(),
+            name: "ingress-nginx".to_string(),
+        };
+        let res = app.navigate_deep_link(&deep_link).await;
+        assert!(res.is_ok());
+        assert!(matches!(app.active_view, ActiveView::HelmDetail(_)));
+    }
 }
+
+
+
 
 
 

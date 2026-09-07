@@ -109,6 +109,34 @@ async fn list_release_secrets(
     Ok(list.items)
 }
 
+/// Fetch the latest revision of each installed Helm release in scope.
+pub async fn fetch_helm_releases(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    namespace: Option<&str>,
+) -> Result<Vec<HelmReleaseSummary>, String> {
+    let ns = namespace.unwrap_or_default();
+    let secrets = list_release_secrets(cache, context, ns, "owner=helm")
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut latest: BTreeMap<(String, String), HelmReleaseSummary> = BTreeMap::new();
+    for secret in &secrets {
+        let Some(raw) = secret.data.as_ref().and_then(|d| d.get("release")) else {
+            continue;
+        };
+        let Ok(rel) = decode_release(&raw.0) else { continue };
+        let sum = summarise_release(&rel);
+        let key = (sum.namespace.clone(), sum.name.clone());
+        match latest.get(&key) {
+            Some(existing) if existing.revision >= sum.revision => {}
+            _ => {
+                latest.insert(key, sum);
+            }
+        }
+    }
+    Ok(latest.into_values().collect())
+}
+
 /// `k8s.listHelmReleases` — latest revision of each Helm release in scope.
 pub fn list_helm_releases_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListHelmReleasesIn, ListHelmReleasesOut, _, _>(
@@ -118,27 +146,10 @@ pub fn list_helm_releases_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListHelmReleasesIn| {
             let cache = cache.clone();
             async move {
-                let ns = input.namespace.unwrap_or_default();
-                let secrets = list_release_secrets(&cache, &input.context, &ns, "owner=helm").await?;
-                // Keep the highest revision per (namespace, name).
-                let mut latest: BTreeMap<(String, String), HelmReleaseSummary> = BTreeMap::new();
-                for secret in &secrets {
-                    let Some(raw) = secret.data.as_ref().and_then(|d| d.get("release")) else {
-                        continue;
-                    };
-                    let Ok(rel) = decode_release(&raw.0) else { continue };
-                    let sum = summarise_release(&rel);
-                    let key = (sum.namespace.clone(), sum.name.clone());
-                    match latest.get(&key) {
-                        Some(existing) if existing.revision >= sum.revision => {}
-                        _ => {
-                            latest.insert(key, sum);
-                        }
-                    }
-                }
-                Ok(ListHelmReleasesOut {
-                    releases: latest.into_values().collect(),
-                })
+                let releases = fetch_helm_releases(&cache, &input.context, input.namespace.as_deref())
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                Ok(ListHelmReleasesOut { releases })
             }
         },
     )
@@ -156,7 +167,7 @@ pub struct GetHelmReleaseIn {
     pub revision: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HelmRevision {
     pub revision: i64,
@@ -166,7 +177,7 @@ pub struct HelmRevision {
     pub description: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HelmReleaseDetail {
     pub name: String,
@@ -179,11 +190,31 @@ pub struct HelmReleaseDetail {
     pub updated: String,
     /// User-supplied values, rendered as YAML.
     pub values_yaml: String,
+    /// Chart default values, rendered as YAML.
+    #[serde(default)]
+    pub chart_values_yaml: String,
+    /// Merged computed values (chart defaults overridden by user values), rendered as YAML.
+    #[serde(default)]
+    pub computed_values_yaml: String,
     /// The rendered manifest for the current revision.
     pub manifest: String,
     pub notes: String,
     /// All revisions, newest first.
     pub history: Vec<HelmRevision>,
+}
+
+/// Recursively merge source JSON object into target JSON object.
+fn merge_json_values(target: &mut Value, source: &Value) {
+    match (target, source) {
+        (Value::Object(target_map), Value::Object(source_map)) => {
+            for (key, val) in source_map {
+                merge_json_values(target_map.entry(key.clone()).or_insert(Value::Null), val);
+            }
+        }
+        (target_slot, new_val) => {
+            *target_slot = new_val.clone();
+        }
+    }
 }
 
 /// Pick one revision's decoded release object out of a release's history
@@ -205,6 +236,82 @@ fn pick_revision(revisions: &[Value], requested: Option<i64>) -> Result<&Value, 
     }
 }
 
+/// Fetch full detail of a Helm release: values, chart defaults, manifest, and revision history.
+pub async fn fetch_helm_release_detail(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    namespace: &str,
+    name: &str,
+    revision: Option<i64>,
+) -> Result<HelmReleaseDetail, String> {
+    let label = format!("owner=helm,name={}", name);
+    let secrets = list_release_secrets(cache, context, namespace, &label)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut revisions: Vec<Value> = secrets
+        .iter()
+        .filter_map(|s| s.data.as_ref().and_then(|d| d.get("release")))
+        .filter_map(|b| decode_release(&b.0).ok())
+        .collect();
+    if revisions.is_empty() {
+        return Err(format!(
+            "no Helm release named {} in {}",
+            name, namespace
+        ));
+    }
+    // Newest revision first.
+    revisions.sort_by_key(|v| -v.get("version").and_then(Value::as_i64).unwrap_or(0));
+    let history = revisions
+        .iter()
+        .map(|v| HelmRevision {
+            revision: v.get("version").and_then(Value::as_i64).unwrap_or(0),
+            status: s(v, &["info", "status"]),
+            updated: s(v, &["info", "last_deployed"]),
+            chart_version: s(v, &["chart", "metadata", "version"]),
+            description: s(v, &["info", "description"]),
+        })
+        .collect();
+
+    let current = pick_revision(&revisions, revision).map_err(|e| e.to_string())?;
+    let sum = summarise_release(current);
+    let values_yaml = match current.get("config") {
+        Some(cfg) if !cfg.is_null() => serde_yaml::to_string(cfg).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let chart_values = current.get("chart").and_then(|c| c.get("values"));
+    let chart_values_yaml = match chart_values {
+        Some(cv) if !cv.is_null() => serde_yaml::to_string(cv).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let computed_values_yaml = match (chart_values, current.get("config")) {
+        (Some(cv), Some(cfg)) if !cv.is_null() && !cfg.is_null() => {
+            let mut merged = cv.clone();
+            merge_json_values(&mut merged, cfg);
+            serde_yaml::to_string(&merged).unwrap_or_default()
+        }
+        (Some(cv), _) if !cv.is_null() => serde_yaml::to_string(cv).unwrap_or_default(),
+        (_, Some(cfg)) if !cfg.is_null() => serde_yaml::to_string(cfg).unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    Ok(HelmReleaseDetail {
+        name: sum.name,
+        namespace: sum.namespace,
+        revision: sum.revision,
+        status: sum.status,
+        chart: sum.chart,
+        chart_version: sum.chart_version,
+        app_version: sum.app_version,
+        updated: sum.updated,
+        values_yaml,
+        chart_values_yaml,
+        computed_values_yaml,
+        manifest: s(current, &["manifest"]),
+        notes: s(current, &["info", "notes"]),
+        history,
+    })
+}
+
 /// `k8s.getHelmRelease` — full detail of a release: values, manifest, history.
 pub fn get_helm_release_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<GetHelmReleaseIn, HelmReleaseDetail, _, _>(
@@ -214,53 +321,15 @@ pub fn get_helm_release_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: GetHelmReleaseIn| {
             let cache = cache.clone();
             async move {
-                let label = format!("owner=helm,name={}", input.name);
-                let secrets =
-                    list_release_secrets(&cache, &input.context, &input.namespace, &label).await?;
-                let mut revisions: Vec<Value> = secrets
-                    .iter()
-                    .filter_map(|s| s.data.as_ref().and_then(|d| d.get("release")))
-                    .filter_map(|b| decode_release(&b.0).ok())
-                    .collect();
-                if revisions.is_empty() {
-                    return Err(CapabilityError::Handler(format!(
-                        "no Helm release named {} in {}",
-                        input.name, input.namespace
-                    )));
-                }
-                // Newest revision first.
-                revisions.sort_by_key(|v| -v.get("version").and_then(Value::as_i64).unwrap_or(0));
-                let history = revisions
-                    .iter()
-                    .map(|v| HelmRevision {
-                        revision: v.get("version").and_then(Value::as_i64).unwrap_or(0),
-                        status: s(v, &["info", "status"]),
-                        updated: s(v, &["info", "last_deployed"]),
-                        chart_version: s(v, &["chart", "metadata", "version"]),
-                        description: s(v, &["info", "description"]),
-                    })
-                    .collect();
-
-                let current = pick_revision(&revisions, input.revision)?;
-                let sum = summarise_release(current);
-                let values_yaml = match current.get("config") {
-                    Some(cfg) if !cfg.is_null() => serde_yaml::to_string(cfg).unwrap_or_default(),
-                    _ => String::new(),
-                };
-                Ok(HelmReleaseDetail {
-                    name: sum.name,
-                    namespace: sum.namespace,
-                    revision: sum.revision,
-                    status: sum.status,
-                    chart: sum.chart,
-                    chart_version: sum.chart_version,
-                    app_version: sum.app_version,
-                    updated: sum.updated,
-                    values_yaml,
-                    manifest: s(current, &["manifest"]),
-                    notes: s(current, &["info", "notes"]),
-                    history,
-                })
+                fetch_helm_release_detail(
+                    &cache,
+                    &input.context,
+                    &input.namespace,
+                    &input.name,
+                    input.revision,
+                )
+                .await
+                .map_err(CapabilityError::Handler)
             }
         },
     )

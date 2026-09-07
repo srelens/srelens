@@ -252,6 +252,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app::ActiveView::Describe(desc) => desc.scroll_up(3),
                                 app::ActiveView::Yaml(yaml) => yaml.scroll_up(3),
                                 app::ActiveView::Table(table) => table.select_prev(),
+                                app::ActiveView::Helm(helm) => helm.select_prev(),
+                                app::ActiveView::HelmDetail(detail) => {
+                                    if detail.active_tab == views::HelmDetailTab::Revisions {
+                                        detail.select_prev_revision();
+                                    } else {
+                                        detail.scroll_up(3);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -263,6 +271,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app::ActiveView::Describe(desc) => desc.scroll_down(3),
                                 app::ActiveView::Yaml(yaml) => yaml.scroll_down(3),
                                 app::ActiveView::Table(table) => table.select_next(),
+                                app::ActiveView::Helm(helm) => helm.select_next(),
+                                app::ActiveView::HelmDetail(detail) => {
+                                    if detail.active_tab == views::HelmDetailTab::Revisions {
+                                        detail.select_next_revision();
+                                    } else {
+                                        detail.scroll_down(3);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -355,6 +371,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if title == "node_metrics_updated" {
                                 app.handle_node_metrics_update(&msg);
                             } else {
+                                if title.starts_with("helm_rollback:") || title.starts_with("helm_uninstall:") {
+                                    app.refresh_helm_releases();
+                                    if let app::ActiveView::HelmDetail(detail) = &app.active_view {
+                                        let name = detail.release_name.clone();
+                                        let ns = detail.namespace.clone();
+                                        app.reload_helm_detail(&name, &ns);
+                                    }
+                                }
                                 app.set_toast(msg, theme::Theme::status_ok());
                             }
                         }
@@ -385,6 +409,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::NodeInspectorResult { node_name, result } => {
                     app.handle_node_inspector_result(&node_name, result);
+                }
+                AppEvent::TopologyResult { context, namespaces, result } => {
+                    app.handle_topology_result(&context, namespaces, result);
+                }
+                AppEvent::GpuInfoResult { context, result } => {
+                    app.handle_gpu_info_result(&context, result);
+                }
+                AppEvent::HelmReleasesResult { context, namespace, result } => {
+                    app.handle_helm_releases_result(&context, &namespace, result);
+                }
+                AppEvent::HelmDetailResult { context, namespace, name, revision, result } => {
+                    app.handle_helm_detail_result(&context, &namespace, &name, revision, result);
                 }
             }
         }
