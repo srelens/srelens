@@ -275,33 +275,50 @@ assert_safe_dir() {
     dir="$1"
     [ -d "$dir" ] || return 0
 
+    # Follow the path to the directory it really is, first. `ls -ld` on a
+    # symlink describes the LINK -- mode `lrwxrwxrwx`, owned by whoever made
+    # it -- which says nothing about where the install lands, and would let
+    # `--install-dir /some/link` sail past both checks below. `cd` + `pwd -P`
+    # is the portable resolution; `readlink -f` is GNU.
+    resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || resolved=""
+    [ -n "$resolved" ] || return 0
+
     # `ls -ld` rather than stat: stat's flags differ between GNU and BSD, and
     # this has to run under BusyBox too.
-    listing="$(ls -ld "$dir" 2>/dev/null)" || return 0
+    listing="$(ls -ld "$resolved" 2>/dev/null)" || return 0
     [ -n "$listing" ] || return 0
     perms="$(printf %s "$listing" | cut -c1-10)"
     owner="$(printf %s "$listing" | awk '{print $3}')"
 
-    # Anything that is not a mode string is not something to guess from.
+    # Anything that is not a directory mode is not something to guess from.
     case "$perms" in
         d?????????) ;;
         *) return 0 ;;
     esac
 
+    me="$(id -un 2>/dev/null)" || me=""
     sticky="$(printf %s "$perms" | cut -c10)"
     other_w="$(printf %s "$perms" | cut -c9)"
 
     if [ "$other_w" = "w" ]; then
         case "$sticky" in
-            t | T) ;;
+            t | T)
+                # Sticky stops OTHER users unlinking entries -- but not the
+                # directory's own owner, who may remove anything inside it.
+                # A world-writable sticky directory belonging to someone else
+                # is therefore still theirs to tamper with.
+                if [ -n "$owner" ] && [ "$owner" != "root" ] && [ "$owner" != "$me" ]; then
+                    die "$resolved is world-writable and owned by $owner, who may replace files in it even with the sticky bit set. Install somewhere you control: --install-dir \$HOME/.local/bin"
+                fi
+                ;;
             *)
-                die "$dir is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Install somewhere you control: --install-dir \$HOME/.local/bin"
+                die "$resolved is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Install somewhere you control: --install-dir \$HOME/.local/bin"
                 ;;
         esac
     fi
 
     if [ "$(id -u)" = "0" ] && [ -n "$owner" ] && [ "$owner" != "root" ]; then
-        die "$dir belongs to $owner, and installing there as root would let $owner substitute the file being installed. Install it somewhere root owns, or run as $owner without sudo."
+        die "$resolved belongs to $owner, and installing there as root would let $owner substitute the file being installed. Install it somewhere root owns, or run as $owner without sudo."
     fi
 }
 

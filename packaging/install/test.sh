@@ -260,6 +260,42 @@ else
     echo "  skip  not root, or no useradd: cannot test the root-into-foreign-dir refusal"
 fi
 
+# A symlink is not the directory it points at. `ls -ld` on one reports
+# `lrwxrwxrwx` owned by whoever made the link, so inspecting the path as
+# given would describe the link and let --install-dir <link> past every
+# check while the install lands somewhere else entirely.
+target="$work/unsafe-target"
+mkdir -p "$target"
+chmod 0777 "$target"
+link="$work/looks-fine"
+ln -sfn "$target" "$link"
+out="$(sh "$script" --version "$version" --install-dir "$link" 2>&1)" && rc=0 || rc=$?
+check "a symlink to an unsafe directory is refused" "writable by anyone" "$out" "$rc" 1
+if [ -e "$target/srelens-tui" ]; then
+    no "it installed through the symlink anyway"
+else
+    ok "nothing was installed through the symlink"
+fi
+
+# The sticky bit stops OTHER users unlinking entries, but never the
+# directory's owner, who may remove anything inside it. A world-writable
+# sticky directory belonging to someone else is still theirs to tamper
+# with -- the same condition self_update.rs already applies.
+if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
+    id -u tester >/dev/null 2>&1 || useradd -m tester >/dev/null 2>&1 || true
+    dest="$work/their-sticky"
+    mkdir -p "$dest"
+    chmod 1777 "$dest"
+    if chown tester "$dest" 2>/dev/null; then
+        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "a sticky directory owned by someone else is refused" "owned by tester" "$out" "$rc" 1
+    else
+        echo "  skip  could not chown a sticky directory to another user"
+    fi
+else
+    echo "  skip  not root, or no useradd: cannot test the foreign sticky directory"
+fi
+
 echo "hashing tool"
 
 # Every image this was first tested on has sha256sum, which is why the
@@ -269,7 +305,7 @@ if command -v shasum >/dev/null 2>&1; then
     limited="$work/limited"
     mkdir -p "$limited"
     missing=''
-    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm cat ls awk id shasum; do
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id shasum; do
         path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
         ln -sf "$path" "$limited/$tool"
     done
