@@ -306,9 +306,11 @@ assert_safe_dir() {
     # `lrwxrwxrwx`, owned by whoever made it -- which says nothing about where
     # the install lands. `cd` + `pwd -P` is portable; `readlink -f` is GNU.
     resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || resolved=""
-    [ -n "$resolved" ] || return 0
+    [ -n "$resolved" ] ||
+        die "cannot resolve $dir, so nothing can be said about where the install would land"
 
     SAFE_ME="$(id -un 2>/dev/null)" || SAFE_ME=""
+    [ -n "$SAFE_ME" ] || die "cannot determine who is running this"
 
     assert_component "/"
     rest="${resolved#/}"
@@ -330,39 +332,79 @@ assert_component() {
 
     # `ls -ld` rather than stat: stat's flags differ between GNU and BSD, and
     # this has to run under BusyBox too.
-    listing="$(ls -ld "$path" 2>/dev/null)" || return 0
-    [ -n "$listing" ] || return 0
+    # Fail CLOSED. An inspection that does not answer is not an answer: a
+    # directory removed at the moment it is read, and recreated before the
+    # staging file lands, would otherwise walk straight through a check that
+    # silently skipped it.
+    listing="$(ls -ld "$path" 2>/dev/null)" ||
+        die "cannot inspect $path, so it cannot be shown to be safe to install into"
+    [ -n "$listing" ] ||
+        die "cannot inspect $path, so it cannot be shown to be safe to install into"
     perms="$(printf %s "$listing" | cut -c1-10)"
     owner="$(printf %s "$listing" | awk '{print $3}')"
     group="$(printf %s "$listing" | awk '{print $4}')"
 
-    # Anything that is not a directory mode is not something to guess from.
+    # Anything that is not a directory mode is not something to guess from --
+    # and not a reason to proceed either.
     case "$perms" in
         d?????????) ;;
-        *) return 0 ;;
+        *) die "$path is not a directory, so the install path cannot be trusted" ;;
     esac
+
+    # `ls -l` marks an extended ACL with a trailing `+`. An ACL can grant
+    # write to any user while the mode bits look impeccable, and reading one
+    # portably is not something a POSIX shell can do -- getfacl is neither
+    # POSIX nor present on Alpine. Refuse rather than pass a directory whose
+    # real permissions have not been seen.
+    if [ "$(printf %s "$listing" | cut -c11)" = "+" ]; then
+        die "$path carries an extended ACL, which may grant write access that its mode does not show. Check it with: getfacl $path"
+    fi
 
     if [ -n "$owner" ] && [ "$owner" != "root" ] && [ "$owner" != "$SAFE_ME" ]; then
         die "$path belongs to $owner, who could replace what is inside it while this installs. Choose a path you control: --install-dir \$HOME/.local/bin"
     fi
 
+    # The sticky bit settles both write bits at once. With it set, only an
+    # entry's owner may unlink or rename that entry, so who else can write
+    # into the directory stops mattering for anything already staged there.
+    # That is what makes /tmp usable -- and /tmp is `drwxrwxrwt`, group- and
+    # world-writable both, so treating either bit as disqualifying on its own
+    # would refuse every install whose path runs through it.
+    case "$(printf %s "$perms" | cut -c10)" in
+        t | T) return 0 ;;
+    esac
+
     if [ "$(printf %s "$perms" | cut -c9)" = "w" ]; then
-        case "$(printf %s "$perms" | cut -c10)" in
-            t | T) ;;
-            *)
-                die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
-                ;;
-        esac
+        die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
     fi
 
-    # Group-writable is only safe when the group is the owner's own, which is
-    # the per-user-group convention (`alice:alice`, one member). Distributions
-    # using it leave ~/.local/bin group-writable under a 002 umask, so
-    # refusing that outright would break an ordinary Fedora install; a group
-    # with a different name is a set of people who can all replace the binary.
-    if [ "$(printf %s "$perms" | cut -c6)" = "w" ] &&
-        [ -n "$group" ] && [ "$group" != "$owner" ]; then
-        die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+    # Group-writable, without the sticky bit, needs the group to contain
+    # nobody but the owner.
+    #
+    # A name matching the owner's is the per-user-group convention -- Fedora
+    # leaves ~/.local/bin as `alice:alice` 0775 under a 002 umask, and refusing
+    # that would break an ordinary install -- but a convention is not a
+    # guarantee. Nothing stops another account joining group `alice`, and any
+    # member could replace the binary between staging and the moment it runs.
+    # So the membership is looked up rather than assumed.
+    #
+    # What this cannot see: accounts whose PRIMARY group is this one do not
+    # appear in the group's member list, and `getent passwd` will not enumerate
+    # LDAP or SSSD directories anyway. A group-writable destination is the
+    # weakest link here; one that is not group-writable does not depend on any
+    # of it.
+    if [ "$(printf %s "$perms" | cut -c6)" = "w" ]; then
+        if [ -z "$group" ] || [ "$group" != "$owner" ]; then
+            die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+        fi
+        if command -v getent >/dev/null 2>&1; then
+            members="$(getent group "$group" 2>/dev/null | cut -d: -f4)" || members=""
+            if [ -n "$members" ] && [ "$members" != "$owner" ]; then
+                die "$path is writable by the group $group, which has members besides $owner ($members). Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+            fi
+        else
+            die "$path is group-writable and there is no getent here to establish who is in group $group. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+        fi
     fi
 }
 # Install by rename where possible: a running binary being overwritten in

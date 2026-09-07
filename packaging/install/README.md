@@ -40,12 +40,22 @@ the check. The walk is the one `sudo` and `ssh` do over their own paths, and
 each component must be:
 
 - owned by root or by you;
-- if world-writable, sticky — only an entry's owner may unlink it, which is
-  what makes `/tmp` usable rather than disqualifying;
-- if group-writable, owned by its own group. That is the per-user-group
-  convention (`alice:alice`, one member), which Fedora leaves on
-  `~/.local/bin` under a 002 umask. A shared group is a set of people who can
-  each replace the binary.
+- inspectable at all. A component that cannot be read fails closed: an
+  inspection that does not answer is not an answer;
+- free of an extended ACL. `ls` marks one with a trailing `+`, and an ACL can
+  grant write where the mode bits show none — reading one portably is beyond a
+  POSIX shell, so the marker itself is a refusal;
+- sticky, if either write bit is set. Sticky settles both at once: only an
+  entry's owner may unlink it. `/tmp` is `drwxrwxrwt`, group- AND
+  world-writable, so treating either bit as disqualifying on its own would
+  refuse every path running through it;
+- if group-writable without sticky, owned by its own group AND that group
+  must really have no other members. `alice:alice` is the per-user-group
+  convention Fedora leaves on `~/.local/bin` under a 002 umask, but a
+  convention is not a guarantee, so the membership is looked up. Accounts
+  whose PRIMARY group is that one stay invisible to it — a group-writable
+  destination is the weakest check here, and one that is not group-writable
+  does not depend on any of it.
 
 The path is resolved with `cd` + `pwd -P` first, and the resolved path is
 what staging, the rename and the final version check all use — approving one
@@ -83,7 +93,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Thirty-seven cases: argument handling, the macOS and unknown-architecture refusals,
+Thirty-nine cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

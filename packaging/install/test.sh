@@ -18,7 +18,18 @@ script="$here/install.sh"
 [ -f "$script" ] || { echo "install.sh not found next to $0" >&2; exit 1; }
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT INT TERM
+
+# Some cases need a second account and a shared group to be meaningful.
+# Anything this run creates, this run removes: a test suite that leaves a
+# login account behind on the host has done more than test.
+made_user=""
+made_group=""
+cleanup() {
+    rm -rf "$work"
+    [ -z "$made_user" ] || userdel -r "$made_user" >/dev/null 2>&1 || true
+    [ -z "$made_group" ] || groupdel "$made_group" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
 
 pass=0
 fail=0
@@ -185,6 +196,9 @@ echo "through a pipe"
 # `sh` -- it reads them as its own -- so the docs say `sh -s --`, and this
 # proves that form reaches the script's parser.
 dest="$work/piped"
+# The `cat` is the point: this reproduces the documented one-liner, where
+# the script arrives on stdin rather than as a path.
+# shellcheck disable=SC2002
 out="$(cat "$script" | sh -s -- --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
 check "options survive sh -s --" "Installed: $dest/srelens-tui" "$out" "$rc" 0
 
@@ -242,7 +256,11 @@ check "world-writable WITH the sticky bit still installs" "Installed:" "$out" "$
 # refusing outright: the owner can arrange the swap at leisure and gets a
 # root-written file out of it.
 if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
-    id -u tester >/dev/null 2>&1 || useradd -m tester >/dev/null 2>&1 || true
+    if ! id -u tester >/dev/null 2>&1; then
+        if useradd -m tester >/dev/null 2>&1; then
+            made_user="tester"
+        fi
+    fi
     dest="$work/theirs"
     mkdir -p "$dest"
     if chown tester "$dest" 2>/dev/null; then
@@ -282,7 +300,11 @@ fi
 # sticky directory belonging to someone else is still theirs to tamper
 # with -- the same condition self_update.rs already applies.
 if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
-    id -u tester >/dev/null 2>&1 || useradd -m tester >/dev/null 2>&1 || true
+    if ! id -u tester >/dev/null 2>&1; then
+        if useradd -m tester >/dev/null 2>&1; then
+            made_user="tester"
+        fi
+    fi
     dest="$work/their-sticky"
     mkdir -p "$dest"
     chmod 1777 "$dest"
@@ -317,7 +339,11 @@ echo "shared groups and ancestors"
 # own -- the per-user-group convention. A shared group is a set of people
 # who can each replace the binary between staging and running it.
 if [ "$(id -u)" = "0" ] && command -v groupadd >/dev/null 2>&1; then
-    groupadd -f shared >/dev/null 2>&1 || true
+    if ! getent group shared >/dev/null 2>&1; then
+        if groupadd shared >/dev/null 2>&1; then
+            made_group="shared"
+        fi
+    fi
     dest="$work/shared-group"
     mkdir -p "$dest"
     if chgrp shared "$dest" 2>/dev/null; then
@@ -343,7 +369,11 @@ check "group-writable by the owner's own group still installs" "Installed:" "$ou
 # else owns, who can rename it and put their own in its place after the
 # check. Every component is walked, so the parent is what fails here.
 if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
-    id -u tester >/dev/null 2>&1 || useradd -m tester >/dev/null 2>&1 || true
+    if ! id -u tester >/dev/null 2>&1; then
+        if useradd -m tester >/dev/null 2>&1; then
+            made_user="tester"
+        fi
+    fi
     parent="$work/theirs-parent"
     mkdir -p "$parent/child"
     if chown tester "$parent" 2>/dev/null; then
@@ -359,6 +389,45 @@ if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
     fi
 else
     echo "  skip  not root, or no useradd: cannot test the ancestor walk"
+fi
+
+# An extended ACL can grant write to any account while the mode bits look
+# impeccable. ls marks one with a trailing +, and reading an ACL portably is
+# not something a POSIX shell can do, so the marker alone is a refusal.
+if [ "$(id -u)" = "0" ] && command -v setfacl >/dev/null 2>&1; then
+    dest="$work/acl"
+    mkdir -p "$dest"
+    if setfacl -m u:nobody:rwx "$dest" 2>/dev/null; then
+        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "a directory with an extended ACL is refused" "extended ACL" "$out" "$rc" 1
+    else
+        echo "  skip  could not set an ACL on this filesystem"
+    fi
+else
+    echo "  skip  not root, or no setfacl: cannot test the ACL refusal"
+fi
+
+# A group named after its owner is the per-user-group CONVENTION, not a
+# guarantee. If the group really has other members, any of them can replace
+# the binary, so membership is looked up rather than assumed.
+if [ "$(id -u)" = "0" ] && command -v usermod >/dev/null 2>&1; then
+    if ! id -u tester >/dev/null 2>&1; then
+        if useradd -m tester >/dev/null 2>&1; then
+            made_user="tester"
+        fi
+    fi
+    if usermod -aG root tester >/dev/null 2>&1; then
+        dest="$work/owner-group-shared"
+        mkdir -p "$dest"
+        chmod 0775 "$dest"
+        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "an owner-named group with real members is refused" "members besides root" "$out" "$rc" 1
+        gpasswd -d tester root >/dev/null 2>&1 || true
+    else
+        echo "  skip  could not add a member to a group"
+    fi
+else
+    echo "  skip  not root, or no usermod: cannot test group membership"
 fi
 
 echo "unpacking"
@@ -383,7 +452,7 @@ if command -v shasum >/dev/null 2>&1; then
     limited="$work/limited"
     mkdir -p "$limited"
     missing=''
-    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id shasum; do
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent shasum; do
         path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
         ln -sf "$path" "$limited/$tool"
     done
