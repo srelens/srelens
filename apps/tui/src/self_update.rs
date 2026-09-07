@@ -712,12 +712,45 @@ fn world_writable_without_sticky(dir: &Path) -> bool {
     }
 }
 
-/// Windows has no equivalent this cheap. Its ACLs would need a real query,
-/// and the common failure there — a directory a package manager owns — is
-/// already caught by `package_manager_for`.
+/// Windows has no equivalent this cheap: its ACLs need the security
+/// descriptor read and every ACE walked, which is a new dependency and a
+/// judgement about which principals count as trusted — and getting that wrong
+/// fails in the direction that stops people updating. Tracked in #450. The
+/// staged handle's share mode and the read-back before the rename narrow the
+/// window there; they do not close it.
 #[cfg(not(unix))]
 fn world_writable_without_sticky(_dir: &Path) -> bool {
     false
+}
+
+/// Put a binary back after an update was interrupted between the two
+/// Windows renames.
+///
+/// That gap is two adjacent syscalls, but a kill or a power cut inside it
+/// leaves the executable only at `.<name>.old` with nothing at the command
+/// path — and the user cannot run `update` to fix it, because there is
+/// nothing left to run. What they CAN run is the displaced file itself, so
+/// every start checks whether that is what is happening and repairs it.
+///
+/// Returns where it restored the binary to, so the caller can say so.
+/// Deliberately narrow: it acts only when this process IS the displaced
+/// file and the real name is free, which cannot be true in ordinary use.
+pub fn recover_interrupted_update(exe: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let name = exe.file_name()?.to_str()?;
+    let restored = name.strip_prefix(".")?.strip_suffix(".old")?;
+    if restored != BIN {
+        return None;
+    }
+    let target = exe.with_file_name(restored);
+    if target.exists() {
+        return None;
+    }
+    // Windows allows renaming a running image, which is the same property
+    // the update itself relies on.
+    std::fs::rename(exe, &target).ok().map(|()| target)
 }
 
 /// Confirm the file at `path` still holds exactly `bytes`.

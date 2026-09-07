@@ -85,6 +85,23 @@ pub enum CliCommand {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // BEFORE parsing: clap exits during `--version` and `--help`, which is
+    // exactly what someone whose binary vanished is likely to type first.
+    //
+    // An update interrupted between its two renames leaves this binary at
+    // `.srelens-tui.exe.old` with nothing at the real name — and no way to
+    // run `update` to repair it, since there is nothing left to run. If
+    // this process IS that displaced file, put it back. A no-op anywhere
+    // else, and off Windows entirely.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(restored) = srelens_tui::self_update::recover_interrupted_update(&exe) {
+            eprintln!(
+                "srelens-tui: an interrupted update left this binary beside its own name; restored it to {}",
+                restored.display()
+            );
+        }
+    }
+
     let cli = Cli::parse();
 
     // Resolved BEFORE the subcommand match, because those arms return early.
