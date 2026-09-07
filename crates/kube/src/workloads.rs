@@ -37,11 +37,16 @@ pub struct PodSummary {
     pub ready: String,
     pub restarts: i32,
     pub node: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and a summary
+    /// is only rebuilt when a watch event arrives for the object — so it goes
+    /// stale (#405). Prefer this; `age` stays for callers that have no clock.
+    pub created: Option<String>,
     pub age: String,
-    /// RFC 3339 creation time, so frontend surfaces can render an age that
-    /// continues to tick instead of freezing this summary's `age` string.
-    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
     /// Container image(s) the pod runs, e.g. `acme/checkout-api:118a7e`.
     /// A pod with several containers joins them as `"img-a, img-b"`; a pod
     /// with no containers (or no status yet) is `""`.
@@ -60,6 +65,9 @@ pub struct PodSummary {
     /// is waiting.
     #[serde(rename = "waitingReason")]
     pub waiting_reason: String,
+    /// Pod IP address from `status.podIP`.
+    #[serde(rename = "podIp", default)]
+    pub pod_ip: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -151,11 +159,12 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         })
         .unwrap_or_default();
 
-    let created_at = pod
-        .metadata
-        .creation_timestamp
+    let pod_ip = pod
+        .status
         .as_ref()
-        .map(|created| created.0.to_string());
+        .and_then(|s| s.pod_ip.clone())
+        .unwrap_or_default();
+
     PodSummary {
         name,
         namespace,
@@ -163,10 +172,12 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         ready: format!("{ready_count}/{total}"),
         restarts,
         node,
+        created: crate::creation_rfc3339(pod.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(pod.metadata.creation_timestamp.as_ref()),
-        created_at,
+        created_at: crate::creation_timestamp_iso(pod.metadata.creation_timestamp.as_ref()),
         image,
         waiting_reason,
+        pod_ip,
     }
 }
 
@@ -490,14 +501,13 @@ mod tests {
             ..Default::default()
         };
         let summary = summarise_pod(pod);
-        assert_eq!(summary.created_at.as_deref(), Some("2026-08-20T00:00:00Z"));
+        assert_eq!(summary.created.as_deref(), Some("2026-08-20T00:00:00Z"));
     }
 
     #[test]
-    fn pod_summary_omits_an_unknown_creation_timestamp() {
+    fn pod_summary_marks_an_unknown_creation_timestamp_as_absent() {
         let summary = summarise_pod(Pod::default());
-        let json = serde_json::to_value(summary).unwrap();
-        assert!(!json.as_object().unwrap().contains_key("createdAt"));
+        assert_eq!(summary.created, None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ClusterContext, PodSummary } from "@srelens/core";
 
 const { podsOnNode } = vi.hoisted(() => ({
@@ -35,7 +35,7 @@ function pod(i: number): PodSummary {
     restarts: 0,
     node: "worker-2",
     age: "stale",
-    createdAt: new Date(NOW - 15_000).toISOString(),
+    created: new Date(NOW - 15_000).toISOString(),
     image: "example.test/app:1",
   };
 }
@@ -65,6 +65,22 @@ describe("NodePodsSection", () => {
 
     act(() => vi.advanceTimersByTime(30_000));
     expect(screen.getAllByText("45s")).toHaveLength(12);
+  });
+
+  it("sorts Age by the timestamp duration across compact units", async () => {
+    podsOnNode.mockResolvedValue({
+      pods: [
+        { ...pod(0), name: "older", age: "1y", created: new Date(NOW - 365 * 86_400_000).toISOString() },
+        { ...pod(1), name: "newer", age: "300d", created: new Date(NOW - 300 * 86_400_000).toISOString() },
+      ],
+    });
+    render(<NodePodsSection context="prod-eu" node="worker-2" />);
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Age" }));
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual(["newer", "older"]);
+    expect(rows.map((row) => within(row).getAllByRole("cell")[2].textContent)).toEqual(["300d", "1y"]);
   });
 
   it("opens a pod detail from a row and the node-filtered Pods list from View all", async () => {

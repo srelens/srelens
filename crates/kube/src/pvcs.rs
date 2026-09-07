@@ -34,6 +34,10 @@ pub struct PvcSummary {
     /// Bound PersistentVolume name, empty until bound.
     pub volume: String,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -71,6 +75,7 @@ pub(crate) fn summarise(pvc: PersistentVolumeClaim) -> PvcSummary {
         storage_class,
         volume,
         age: crate::humanize_age(pvc.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(pvc.metadata.creation_timestamp.as_ref()),
     }
 }
 

@@ -141,6 +141,18 @@ export function Section({
       className={cx("section", className)}
       data-open={folds ? showing : undefined}
       data-padded={padded ? undefined : "false"}
+      /*
+       * A BANDED LIST: a `.subhead-caps` head with content running to both
+       * edges. `.section`'s own vertical padding and the title's bottom margin
+       * put a gap under that band, so the head floated above its rows instead
+       * of capping them — reported against the mock, which draws the band
+       * flush with the first row.
+       *
+       * Derived rather than a new prop: `smallCaps` + `padded={false}` IS the
+       * banded list, and a third boolean saying so again is a third thing to
+       * get wrong.
+       */
+      data-band={smallCaps && !padded ? "" : undefined}
     >
       {headed && (
         <SubHead className="section-title" variant={smallCaps ? "caps" : "bold"}>

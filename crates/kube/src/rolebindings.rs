@@ -33,6 +33,10 @@ pub struct RoleBindingSummary {
     /// Number of subjects.
     pub subjects: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -47,6 +51,7 @@ pub(crate) fn summarise(rb: RoleBinding) -> RoleBindingSummary {
         role: format_role_ref(&rb.role_ref),
         subjects: rb.subjects.as_ref().map_or(0, |s| s.len()) as i32,
         age: crate::humanize_age(rb.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(rb.metadata.creation_timestamp.as_ref()),
     }
 }
 
@@ -89,6 +94,10 @@ pub struct ClusterRoleBindingSummary {
     /// Number of subjects.
     pub subjects: i32,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -102,6 +111,7 @@ pub(crate) fn summarise_cluster(crb: ClusterRoleBinding) -> ClusterRoleBindingSu
         role: format_role_ref(&crb.role_ref),
         subjects: crb.subjects.as_ref().map_or(0, |s| s.len()) as i32,
         age: crate::humanize_age(crb.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(crb.metadata.creation_timestamp.as_ref()),
     }
 }
 

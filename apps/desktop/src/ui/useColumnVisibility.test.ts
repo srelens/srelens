@@ -46,3 +46,58 @@ describe("useColumnVisibility", () => {
     expect(pods.result.current.visibleColumns.map((c) => c.key)).toEqual(["name", "age", "actions"]);
   });
 });
+
+/**
+ * #426 — the classic half of "a column that starts hidden". Same trap as the
+ * new design's store: the record holds hidden keys, so an absent entry has to
+ * mean "no choice yet, use the default" while a stored entry — an empty one
+ * included — is the reader's own answer and outranks it.
+ */
+describe("a column that starts hidden", () => {
+  const withTaints: Column<Row>[] = [
+    { key: "name", header: "Name" },
+    { key: "status", header: "Status" },
+    { key: "taints", header: "Taints", defaultHidden: true },
+    { key: "age", header: "Age" },
+  ];
+  const keys = (result: { visibleColumns: Column<Row>[] }) => result.visibleColumns.map((c) => c.key);
+
+  it("is out of the table before the reader has said anything", () => {
+    const { result } = renderHook(() => useColumnVisibility("nodes", withTaints));
+    expect(keys(result.current)).toEqual(["name", "status", "age"]);
+    expect(result.current.hidden.has("taints")).toBe(true);
+  });
+
+  it("is still offered by the picker, so there is a way to turn it on", () => {
+    const { result } = renderHook(() => useColumnVisibility("nodes", withTaints));
+    expect(result.current.columnOptions.map((o) => o.key)).toContain("taints");
+  });
+
+  it("stays on once turned on, and survives a remount", () => {
+    const first = renderHook(() => useColumnVisibility("nodes", withTaints));
+    act(() => first.result.current.toggle("taints"));
+    expect(keys(first.result.current)).toEqual(["name", "status", "taints", "age"]);
+
+    const second = renderHook(() => useColumnVisibility("nodes", withTaints));
+    expect(keys(second.result.current)).toEqual(["name", "status", "taints", "age"]);
+  });
+
+  it("goes back off when turned off again", () => {
+    const { result } = renderHook(() => useColumnVisibility("nodes", withTaints));
+    act(() => result.current.toggle("taints"));
+    act(() => result.current.toggle("taints"));
+    expect(keys(result.current)).toEqual(["name", "status", "age"]);
+  });
+
+  it("hides only itself — turning it on does not disturb another column", () => {
+    const { result } = renderHook(() => useColumnVisibility("nodes", withTaints));
+    act(() => result.current.toggle("taints"));
+    act(() => result.current.toggle("status"));
+    expect(keys(result.current)).toEqual(["name", "taints", "age"]);
+  });
+
+  it("leaves a view whose columns declare no default exactly as it was", () => {
+    const { result } = renderHook(() => useColumnVisibility("pods", columns));
+    expect(result.current.hidden.size).toBe(0);
+  });
+});

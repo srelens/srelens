@@ -13,9 +13,9 @@
  * one definition of — so it is named for what it is: this design's shared
  * detail sections.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
-  ageFromTimestamp,
+  ageSortValue,
   conditionKindWithReason,
   plural,
   podMetrics,
@@ -38,6 +38,7 @@ import {
 import { Section } from "./Section";
 import { SectionFailure, useSectionList } from "./sectionList";
 import { formatCpu, formatMemory } from "../../lib/kinds/columns";
+import { AgeCell } from "../../lib/ageCell";
 import type { WorkloadSelector } from "../../lib/workloadSelector";
 import { detailRoute } from "../../lib/detailRoute";
 import { currentWorkspace, openTab, setTabView } from "../../lib/tabsStore";
@@ -416,20 +417,22 @@ export function RelatedPodsSection({
 }
 
 const NODE_POD_LIMIT = 12;
-const NODE_POD_AGE_TICK_MS = 30_000;
 
-interface NodePodRow extends PodSummary {
-  liveAge: string;
-}
-
-const NODE_POD_COLUMNS: Column<NodePodRow>[] = [
+const NODE_POD_COLUMNS: Column<PodSummary>[] = [
   { key: "name", header: "Pod", render: (pod) => <span className="font-mono">{pod.name}</span> },
   {
     key: "namespace",
     header: "Namespace",
     render: (pod) => <span className="font-mono">{pod.namespace || "—"}</span>,
   },
-  { key: "liveAge", header: "Age", align: "end", render: (pod) => pod.liveAge },
+  {
+    key: "age",
+    header: "Age",
+    sortable: true,
+    align: "end",
+    render: (pod) => <AgeCell created={pod.created} age={pod.age} />,
+    getSortValue: ageSortValue,
+  },
 ];
 
 /** Pods scheduled on a Node, queried by `spec.nodeName` across namespaces. */
@@ -442,18 +445,9 @@ export function NodePodsSection({ context, node }: { context: string; node: stri
     );
     return { data: pods };
   });
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const tick = setInterval(() => setNow(Date.now()), NODE_POD_AGE_TICK_MS);
-    return () => clearInterval(tick);
-  }, []);
-
   const all = state.data ?? [];
-  const rows: NodePodRow[] = all.slice(0, NODE_POD_LIMIT).map((pod) => ({
-    ...pod,
-    liveAge: ageFromTimestamp(pod.createdAt, now),
-  }));
-  const openPod = (pod: NodePodRow) =>
+  const rows = all.slice(0, NODE_POD_LIMIT);
+  const openPod = (pod: PodSummary) =>
     openTab(detailRoute("Pod", pod.namespace, pod.name), { clusterName: context });
   const viewAll = () => {
     openTab("/k/pods", { clusterName: context });

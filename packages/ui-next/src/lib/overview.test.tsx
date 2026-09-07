@@ -47,6 +47,7 @@ function aNode(name: string, over: Partial<NodeSummary> = {}): NodeSummary {
     status: "Ready",
     unschedulable: false,
     taints: 0,
+    taintDetails: [],
     version: "v1.31.4",
     roles: "worker",
     age: "10d",

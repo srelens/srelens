@@ -236,7 +236,7 @@ describe("podsForSelector", () => {
 
 describe("podsOnNode", () => {
   it("passes context and node and returns timestamped pods", async () => {
-    const pods = [{ name: "web-1", namespace: "default", createdAt: "2026-08-20T00:00:00Z" }];
+    const pods = [{ name: "web-1", namespace: "default", created: "2026-08-20T00:00:00Z" }];
     const invoke = vi.fn().mockResolvedValue({ pods });
     const outcome = await podsOnNode("kind-dev", "worker-2", invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.podsOnNode", {

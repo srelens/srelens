@@ -48,6 +48,22 @@ export function PortalScopeProvider({ scope, children }: { scope: PortalScope; c
  * This is the whole API a menu, a popover or a tooltip needs. A layer that also
  * covers the surface wants {@link useOpenLayer} instead.
  */
+/**
+ * Whether the surface around this component is the one on screen.
+ *
+ * `true` outside a surface at all, since an unscoped component is always
+ * showing. Side-effect free, unlike {@link useOpenLayer}, which also registers
+ * a hold for a layer that is about to open — a component asking only "am I the
+ * visible tab?" must not take one.
+ *
+ * `TabSurface` keeps hidden tabs MOUNTED (`hidden`, not unmounted, so a portal
+ * cannot escape and focus state survives a switch), which means a component
+ * that must exist only once in the window has to ask.
+ */
+export function usePortalShowing(): boolean {
+  return useContext(ScopeContext)?.visible ?? true;
+}
+
 export function usePortalContainer(): HTMLElement | undefined {
   return useContext(ScopeContext)?.container;
 }

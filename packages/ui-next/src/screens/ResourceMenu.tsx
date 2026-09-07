@@ -35,6 +35,9 @@ export interface UseRowMenuArgs {
   /** The Kubernetes kind this list is showing, e.g. "Pod", "CronJob". */
   kind: string;
   actions: KindActions;
+  /** The API group, for a custom kind only — see `KindDescriptor.group`. Edit
+   *  carries it, so a CRD that reuses a built-in kind's name opens ITS object. */
+  group?: string;
 }
 
 /** What a picked entry is waiting to do, once the confirm is taken. */
@@ -139,7 +142,7 @@ interface ShellPick {
  * `danger`, and Run now skips `pending` entirely — it is a call, not a
  * mutation of anything already running.
  */
-export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
+export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
   items: (row: ListRow) => ContextMenuItem[];
   dialog: ReactNode;
 } {
@@ -378,12 +381,20 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
       // under `openTab`'s dedupe, so a name alone collapsed `default/api` and
       // `staging/api` — and a Pod `api` and a Deployment `api` — onto one tab,
       // and the second pick focused the first resource. See {@link editRoute}.
-      onPick: () => openTab(editRoute(kind, row.namespace ?? null, row.name), { clusterName: context }),
+      // The CLUSTER is in it too, because the editor pins the cluster it was
+      // opened on, and a pinned editor for another cluster's same-named
+      // resource must not be the tab this pick lands on.
+      onPick: () =>
+        openTab(editRoute(kind, row.namespace ?? null, row.name, { cluster: context, group }), {
+          clusterName: context,
+        }),
     });
     list.push({
       label: ROW_ACTION_LABEL.copy,
       icon: Icons.copy,
-      onPick: () => void copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
+      confirmLabel: "Copied",
+      // No `void`: the boolean is what tells the bar whether to say "Copied".
+      onPick: () => copyKubectlCommand(toKubectl({ ...kubectlBase, action: "get", output: "yaml" })),
     });
 
     if (actions.suspend) {
@@ -648,7 +659,7 @@ function PendingDialog({
               autoFocus
             />
           )}
-          <KubectlPreview command={command} note={note} onCopy={command ? () => void copyKubectlCommand(command) : undefined} />
+          <KubectlPreview command={command} note={note} onCopy={command ? () => copyKubectlCommand(command) : undefined} />
           {/* The dialog stays open on a refusal rather than closing as if the
               write had happened, so this line is the whole of what the reader
               is told about why. A validation message this component wrote
