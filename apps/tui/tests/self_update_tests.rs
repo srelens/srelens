@@ -702,6 +702,38 @@ fn a_binary_a_package_manager_owns_is_recognised() {
     }
 }
 
+/// A package-manager root only counts at the START of the path.
+///
+/// An unpacked root filesystem, a container image being edited, a chroot
+/// staging directory — all contain `/usr/bin/` partway through, and all
+/// belong to whoever unpacked them. Matching the marker anywhere refused to
+/// update a file its owner controls.
+#[test]
+fn a_package_root_buried_inside_another_path_is_not_its_owner() {
+    for path in [
+        "/home/me/rootfs/usr/bin/srelens-tui",
+        "/home/me/containers/alpine/usr/bin/srelens-tui",
+        "/tmp/extract/snap/srelens-tui",
+        "/home/me/backup/nix/store/srelens-tui",
+    ] {
+        assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
+    }
+
+    // The same markers at the front still count.
+    assert_eq!(
+        package_manager_for(Path::new("/usr/bin/srelens-tui")),
+        Some("your distribution's package manager")
+    );
+}
+
+/// Unix paths are case-sensitive, so a differently-cased lookalike is a
+/// different directory and not the package manager's.
+#[test]
+fn a_unix_root_is_matched_case_sensitively() {
+    assert_eq!(package_manager_for(Path::new("/USR/BIN/srelens-tui")), None);
+    assert_eq!(package_manager_for(Path::new("/Snap/srelens-tui")), None);
+}
+
 /// The locations the install guide tells people to use by hand. Reporting one
 /// of these as package-managed would refuse to update the ordinary install.
 #[test]

@@ -483,32 +483,41 @@ pub fn is_newer(current: &str, latest: &str) -> bool {
 /// database would still name the old version, and the next upgrade would put
 /// it back. The desktop app already declines for AUR on the same grounds.
 pub fn package_manager_for(path: &Path) -> Option<&'static str> {
-    // Lower-cased because Windows paths are case-insensitive and the real
-    // Chocolatey root is `C:\\ProgramData\\chocolatey` — a case-sensitive
-    // match against `Chocolatey` never fired, so a Chocolatey-managed copy
-    // sailed past this guard and would have been overwritten. Unix paths are
-    // case-sensitive, so this can in principle over-match there; refusing to
-    // update with a named manager is the safe direction to be wrong in.
-    let text = path.to_string_lossy().replace('\\', "/").to_lowercase();
-    // Ordered longest-prefix-first where they nest, so a Cellar path is not
-    // reported as the more general /usr/local.
-    let owners: &[(&str, &str)] = &[
-        // Lower-case, to match the normalisation above.
+    let text = path.to_string_lossy().replace('\\', "/");
+
+    // Roots a package manager owns, matched as PREFIXES. Matching them
+    // anywhere was wrong: `/home/me/rootfs/usr/bin/srelens-tui` is a file its
+    // owner controls, and calling it distribution-managed refused to update
+    // it. Compared case-sensitively, because `/usr/bin` and `/USR/BIN` are
+    // different directories on Unix.
+    const ROOTS: &[(&str, &str)] = &[
         ("/opt/homebrew/", "Homebrew"),
         ("/home/linuxbrew/.linuxbrew/", "Homebrew"),
-        ("/usr/local/cellar/", "Homebrew"),
+        ("/usr/local/Cellar/", "Homebrew"),
         ("/usr/bin/", "your distribution's package manager"),
         ("/snap/", "snap"),
         ("/var/lib/flatpak/", "Flatpak"),
         ("/nix/store/", "Nix"),
+    ];
+    if let Some((_, manager)) = ROOTS.iter().find(|(root, _)| text.starts_with(root)) {
+        return Some(manager);
+    }
+
+    // Windows package roots sit at varying depths — under a user profile, or
+    // ProgramData — so they are matched anywhere rather than anchored, and
+    // folded to one case because Windows paths are case-insensitive. The real
+    // Chocolatey root is `C:\\ProgramData\\chocolatey`, lower case, which a
+    // case-sensitive match missed entirely.
+    const WINDOWS_MARKERS: &[(&str, &str)] = &[
         ("/scoop/apps/", "Scoop"),
         ("/scoop/shims/", "Scoop"),
         ("/winget/packages/", "winget"),
         ("/chocolatey/", "Chocolatey"),
     ];
-    owners
+    let folded = text.to_lowercase();
+    WINDOWS_MARKERS
         .iter()
-        .find(|(prefix, _)| text.contains(prefix))
+        .find(|(marker, _)| folded.contains(marker))
         .map(|(_, manager)| *manager)
 }
 
