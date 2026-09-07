@@ -1153,6 +1153,28 @@ mod tests {
         set(0o755);
     }
 
+    /// Ownership carried by the LINK'S OWN location survives.
+    ///
+    /// A distribution may install `/usr/bin/x` pointing into `/usr/lib/…`,
+    /// where following the link first throws away the `/usr/bin/` that said
+    /// who owns it — the opposite of the Homebrew case, where ownership lives
+    /// in the target. That is why both are checked.
+    ///
+    /// NOT gated to Unix: it is string matching over a literal path and needs
+    /// no filesystem. The first version of this lived inside the Unix-only
+    /// test below, so it never compiled on the machine it was written on and
+    /// broke CI on the one platform that runs it.
+    #[test]
+    fn ownership_from_the_links_own_location_survives() {
+        use super::resolve_owner;
+        use std::path::Path;
+
+        let packaged = Path::new("/usr/bin/srelens-tui");
+        let (from, owner) = resolve_owner(packaged);
+        assert_eq!(owner, Some("your distribution's package manager"));
+        assert_eq!(from, packaged, "the deciding path is the one that matched");
+    }
+
     /// Ownership is decided after following links, not before.
     ///
     /// Asserting on literal Cellar paths does not test this: those match
@@ -1183,22 +1205,6 @@ mod tests {
             "the decision must be made from the link's target"
         );
         assert_ne!(resolved, linked, "not from the link itself");
-
-        // The link's OWN location decides when it is the one that carries
-        // ownership: a distribution may install `/usr/bin/x` pointing into
-        // `/usr/lib/...`, where following the link would throw away the
-        // `/usr/bin/` that said who owns it.
-        let packaged = Path::new("/usr/bin/srelens-tui");
-        let (from, owner) = resolve_owner(packaged);
-        assert_eq!(
-            owner,
-            Some("your distribution's package manager"),
-            "ownership carried by the link's location must survive"
-        );
-        assert_eq!(
-            from, packaged,
-            "and the deciding path is the one that matched"
-        );
 
         // A path that does not resolve is used as given rather than
         // becoming an error.
