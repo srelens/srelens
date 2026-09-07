@@ -35,7 +35,8 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::ACCENT))
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::accent()))
         .title(" SRElens & k9s Keybindings Cheat Sheet (Press Esc to close) ");
 
     let inner = block.inner(modal_area);
@@ -52,12 +53,20 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
 
     let rows = vec![
         Row::new(vec![
-            Cell::from(Span::styled("Navigation & Views", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Navigation & Views", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))),
             Cell::from(""),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  : <command>", Theme::key_hint_key())),
-            Cell::from("Open command prompt (:pod, :deploy, :svc, :no, :ns, :helm, :pf, :ai, :ctx, :q)"),
+            Cell::from("Open command prompt (:pod, :deploy, :top, :toppods, :topnodes, :gpuinfo, :svc, :topo, :no, :ns, :helm, :pf, :ai, :ctx, :q)"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  :top / :toppods / :topnodes", Theme::key_hint_key())),
+            Cell::from("Top Hotspots ranking (Pods & Nodes) sorted by CPU / MEM with % Req & % Limit"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  :gpuinfo / :gpu", Theme::key_hint_key())),
+            Cell::from("GPU nodes list, VRAM allocation & GPU pod workloads inspector"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Ctrl+c", Theme::key_hint_key())),
@@ -96,7 +105,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
             Cell::from("Mark / select item for bulk operations"),
         ]),
         Row::new(vec![
-            Cell::from(Span::styled("Resource Actions", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Resource Actions", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))),
             Cell::from(""),
         ]),
         Row::new(vec![
@@ -109,7 +118,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  l", Theme::key_hint_key())),
-            Cell::from("View Logs (options: p previous, t timestamps, w wrap, f follow, s save)"),
+            Cell::from("View Logs (single pod, multi-pod on marked items, or workload replica streams)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  s", Theme::key_hint_key())),
@@ -168,7 +177,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
             Cell::from("Trigger CronJob / Job manual run"),
         ]),
         Row::new(vec![
-            Cell::from(Span::styled("SRElens Superpowers", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("SRElens Superpowers", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))),
             Cell::from(""),
         ]),
         Row::new(vec![

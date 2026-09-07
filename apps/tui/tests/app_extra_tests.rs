@@ -1448,18 +1448,22 @@ async fn cordoning_and_uncordoning_a_node_patches_it_and_reports_which_way_it_we
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     assert_eq!(toast(&app), "Cordoning node 'gpu-1'...");
     assert_eq!(
         action_result(&mut rx, "cordon_node:gpu-1").await,
-        Ok("Cordoned node 'gpu-1'".to_string())
+        Ok("✓ Cordoned node 'gpu-1'".to_string())
     );
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", true, false));
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     assert_eq!(toast(&app), "Uncordoning node 'gpu-1'...");
     assert_eq!(
         action_result(&mut rx, "cordon_node:gpu-1").await,
-        Ok("Uncordoned node 'gpu-1'".to_string())
+        Ok("✓ Uncordoned node 'gpu-1'".to_string())
     );
 }
 
@@ -1470,6 +1474,8 @@ async fn a_cordon_the_apiserver_rejects_is_reported_as_an_error() {
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
+    common::type_str(&mut app, "confirm").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
     let err = action_result(&mut rx, "cordon_node:gpu-1")
         .await
         .expect_err("a 409 fails the patch");
@@ -1785,6 +1791,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
             revision: 3,
             status: "deployed".into(),
             chart: "nginx-15.0.0".into(),
+            chart_version: "15.0.0".into(),
             app_version: "1.25".into(),
             updated: "2026-01-01".into(),
         }]);
@@ -1809,9 +1816,9 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.active_view = ActiveView::Helm(helm());
     app.handle_key_event(common::ch('v')).await;
     match &app.active_view {
-        ActiveView::Yaml(y) => {
-            assert_eq!(y.resource_kind, "HelmValues");
-            assert_eq!(y.resource_name, "nginx");
+        ActiveView::HelmDetail(d) => {
+            assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::ValuesDiff);
+            assert_eq!(d.release_name, "nginx");
         }
         _ => panic!("expected the Helm values view"),
     }
@@ -1819,9 +1826,101 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.active_view = ActiveView::Helm(helm());
     app.handle_key_event(common::ch('y')).await;
     match &app.active_view {
-        ActiveView::Yaml(y) => assert_eq!(y.resource_kind, "HelmManifest"),
+        ActiveView::HelmDetail(d) => {
+            assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Manifest);
+            assert_eq!(d.release_name, "nginx");
+        }
         _ => panic!("expected the Helm manifest view"),
     }
+
+    // Direct HelmDetail key handling: tabs, diff toggle, scrolling, copy, esc
+    let mut detail_state = srelens_tui::views::HelmDetailViewState::new("nginx".into(), "default".into());
+    detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
+        name: "nginx".into(),
+        namespace: "default".into(),
+        revision: 3,
+        status: "deployed".into(),
+        chart: "nginx".into(),
+        chart_version: "15.0.0".into(),
+        app_version: "1.25".into(),
+        updated: "2026-01-01".into(),
+        values_yaml: "replicaCount: 2\n".into(),
+        chart_values_yaml: "replicaCount: 1\n".into(),
+        computed_values_yaml: "replicaCount: 2\n".into(),
+        manifest: "---\nkind: Deployment\nmetadata:\n  name: nginx\n".into(),
+        notes: "Notes for nginx.\n".into(),
+        history: vec![
+            srelens_kube::helm::HelmRevision {
+                revision: 3,
+                status: "deployed".into(),
+                updated: "2026-01-01".into(),
+                chart_version: "15.0.0".into(),
+                description: "Upgrade".into(),
+            },
+            srelens_kube::helm::HelmRevision {
+                revision: 2,
+                status: "superseded".into(),
+                updated: "2025-12-01".into(),
+                chart_version: "14.0.0".into(),
+                description: "Upgrade".into(),
+            },
+        ],
+    });
+    app.active_view = ActiveView::HelmDetail(detail_state);
+
+    // Number keys switch tabs
+    app.handle_key_event(common::ch('1')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Overview);
+    }
+    app.handle_key_event(common::ch('2')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::ValuesDiff);
+    }
+    app.handle_key_event(common::ch('m')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.values_diff_mode, srelens_tui::views::ValuesDiffMode::CustomVsDefault);
+    }
+    app.handle_key_event(common::ch('3')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Revisions);
+    }
+    app.handle_key_event(common::ch('j')).await;
+    app.handle_key_event(common::ch('k')).await;
+    app.handle_key_event(common::ch('4')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Manifest);
+    }
+    app.handle_key_event(common::ch('j')).await;
+    app.handle_key_event(common::ch('k')).await;
+    app.handle_key_event(common::ch('g')).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::PageDown)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::PageUp)).await;
+    app.handle_key_event(common::ch('5')).await;
+    if let ActiveView::HelmDetail(ref d) = app.active_view {
+        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Notes);
+    }
+
+    // Copy deep link and manifest/yaml
+    app.handle_key_event(common::ch('c')).await;
+    assert!(toast(&app).contains("Copied deep link"));
+    app.handle_key_event(common::ch('y')).await;
+    assert!(toast(&app).contains("Copied"));
+
+    // Tab and BackTab cycle tabs
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Tab)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::BackTab)).await;
+    app.handle_key_event(common::ch('l')).await;
+    app.handle_key_event(common::ch('h')).await;
+
+    // Rollback triggers modal
+    app.handle_key_event(common::ch('r')).await;
+    assert!(app.modal.is_some());
+    app.modal = None;
+
+    // Esc returns to previous view
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_) | ActiveView::Helm(_)));
 }
 
 #[tokio::test]

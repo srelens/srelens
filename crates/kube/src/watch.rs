@@ -960,6 +960,10 @@ mod tests {
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
             pod_ip: "10.244.0.1".into(),
+            cpu_req_millicores: 0,
+            cpu_lim_millicores: 0,
+            mem_req_mib: 0,
+            mem_lim_mib: 0,
         }
     }
 

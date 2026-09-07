@@ -4,7 +4,7 @@ use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
 
 /// Comprehensive inspection details for a single Kubernetes Node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NodeInspectorDetails {
     pub name: String,
     pub status: String,

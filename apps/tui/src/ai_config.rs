@@ -126,6 +126,8 @@ pub struct AiSettings {
     pub timeout_seconds: u32,
     #[serde(default)]
     pub caveman_level: Option<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -157,6 +159,7 @@ impl Default for AiSettings {
             max_tokens: 4096,
             timeout_seconds: 120,
             caveman_level: None,
+            theme: None,
         }
     }
 }
