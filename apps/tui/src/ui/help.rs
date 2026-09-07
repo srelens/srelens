@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
+    widgets::{Block, Borders, Clear, Paragraph, Table, Row, Cell},
     Frame,
 };
 
@@ -193,7 +193,8 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
     ];
 
-    let table = Table::new(rows, [Constraint::Length(25), Constraint::Min(40)]).column_spacing(2);
+    let table = Table::new(rows, [Constraint::Length(25), Constraint::Min(40)])
+        .column_spacing(2);
 
     f.render_widget(table, sections[1]);
 }

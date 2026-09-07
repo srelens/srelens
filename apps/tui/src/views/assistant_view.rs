@@ -394,11 +394,7 @@ impl AssistantViewState {
                     let last_char = last.content.chars().last().unwrap();
                     let first_char = chunk.chars().next().unwrap();
                     // If previous content ends with punctuation (. ! ? : ;) and chunk starts without whitespace
-                    if (last_char == '.'
-                        || last_char == '!'
-                        || last_char == '?'
-                        || last_char == ':'
-                        || last_char == ';')
+                    if (last_char == '.' || last_char == '!' || last_char == '?' || last_char == ':' || last_char == ';')
                         && !first_char.is_whitespace()
                     {
                         last.content.push(' ');
@@ -452,12 +448,7 @@ impl AssistantViewState {
     }
 
     pub fn set_token_usage(&mut self, usage: TokenUsage) {
-        if let Some(last_asst) = self
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == "assistant")
-        {
+        if let Some(last_asst) = self.messages.iter_mut().rev().find(|m| m.role == "assistant") {
             last_asst.token_usage = Some(usage);
         }
     }
@@ -522,11 +513,7 @@ impl AssistantViewState {
 
             md.push_str(&format!("{}{}\n\n", role_label, time_str));
 
-            let visible_tools: Vec<_> = msg
-                .tool_calls
-                .iter()
-                .filter(|tc| !is_internal_meta_tool(&tc.tool))
-                .collect();
+            let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| !is_internal_meta_tool(&tc.tool)).collect();
 
             if !visible_tools.is_empty() {
                 md.push_str("#### Executed Tools:\n");
@@ -536,10 +523,7 @@ impl AssistantViewState {
                         ToolCallStatus::Success => "ok",
                         ToolCallStatus::Error(e) => e.as_str(),
                     };
-                    md.push_str(&format!(
-                        "- `{}`: `{}` [{}]\n",
-                        tc.tool, tc.args_summary, status
-                    ));
+                    md.push_str(&format!("- `{}`: `{}` [{}]\n", tc.tool, tc.args_summary, status));
                 }
                 md.push_str("\n");
             }
@@ -550,16 +534,13 @@ impl AssistantViewState {
             }
 
             if let Some(usage) = &msg.token_usage {
-                let duration_str = usage
-                    .duration_ms
-                    .map(|ms| {
-                        if ms >= 1000 {
-                            format!("{:.1}s", ms as f64 / 1000.0)
-                        } else {
-                            format!("{}ms", ms)
-                        }
-                    })
-                    .unwrap_or_default();
+                let duration_str = usage.duration_ms.map(|ms| {
+                    if ms >= 1000 {
+                        format!("{:.1}s", ms as f64 / 1000.0)
+                    } else {
+                        format!("{}ms", ms)
+                    }
+                }).unwrap_or_default();
 
                 let cached_str = if usage.cached_tokens > 0 {
                     format!(" • {} cached", format_number(usage.cached_tokens))
@@ -589,12 +570,7 @@ impl AssistantViewState {
         md
     }
 
-    pub fn save_conversation_to_file(
-        &self,
-        provider_name: &str,
-        model_name: &str,
-        custom_path: Option<&str>,
-    ) -> Result<std::path::PathBuf, String> {
+    pub fn save_conversation_to_file(&self, provider_name: &str, model_name: &str, custom_path: Option<&str>) -> Result<std::path::PathBuf, String> {
         let md_content = self.export_to_markdown(provider_name, model_name);
 
         let path = if let Some(p) = custom_path {
@@ -603,17 +579,12 @@ impl AssistantViewState {
             let base_dir = dirs::config_dir()
                 .map(|d| d.join("srelens").join("conversations"))
                 .unwrap_or_else(|| std::path::PathBuf::from("srelens_conversations"));
-            std::fs::create_dir_all(&base_dir)
-                .map_err(|e| format!("Failed to create export directory: {}", e))?;
-            let filename = format!(
-                "srelens_ai_{}.md",
-                chrono::Local::now().format("%Y%m%d_%H%M%S")
-            );
+            std::fs::create_dir_all(&base_dir).map_err(|e| format!("Failed to create export directory: {}", e))?;
+            let filename = format!("srelens_ai_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S"));
             base_dir.join(filename)
         };
 
-        std::fs::write(&path, md_content)
-            .map_err(|e| format!("Failed to save conversation: {}", e))?;
+        std::fs::write(&path, md_content).map_err(|e| format!("Failed to save conversation: {}", e))?;
         Ok(path)
     }
 
@@ -674,18 +645,13 @@ pub fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
 
     // Never wrap box-drawing table rows
     let is_table = line.spans.iter().any(|s| {
-        s.content.contains('│')
-            || s.content.contains('┌')
-            || s.content.contains('└')
-            || s.content.contains('├')
+        s.content.contains('│') || s.content.contains('┌') || s.content.contains('└') || s.content.contains('├')
     });
     if is_table {
         return vec![line];
     }
 
-    let total_width: usize = line
-        .spans
-        .iter()
+    let total_width: usize = line.spans.iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
     if total_width <= max_width {
@@ -777,10 +743,7 @@ pub fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
 }
 
 fn highlight_line_selection<'a>(line: &Line<'a>, c_start: usize, c_end: usize) -> Line<'a> {
-    let sel_style = Style::default()
-        .bg(Theme::CYAN)
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
+    let sel_style = Style::default().bg(Theme::CYAN).fg(Color::Black).add_modifier(Modifier::BOLD);
     let mut new_spans = Vec::new();
     let mut current_col = 0;
 
@@ -823,23 +786,11 @@ pub fn render_assistant_view(
     let prov = settings.default_provider;
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
-    let token_hint = state
-        .messages
-        .iter()
-        .rev()
-        .find_map(|m| m.token_usage.as_ref())
-        .map(|u| format!("⚡ {} tokens, ", format_number(u.total_tokens)))
-        .unwrap_or_default();
-    let tools_hint = if state.expand_tools {
-        "<Ctrl+t> Fold Tools"
-    } else {
-        "<Ctrl+t> Tools"
-    };
-    let copy_hint = if state.selection.is_some() {
-        "<c> Copy Selection"
-    } else {
-        "<c> Copy"
-    };
+    let token_hint = state.messages.iter().rev().find_map(|m| m.token_usage.as_ref()).map(|u| {
+        format!("⚡ {} tokens, ", format_number(u.total_tokens))
+    }).unwrap_or_default();
+    let tools_hint = if state.expand_tools { "<Ctrl+t> Fold Tools" } else { "<Ctrl+t> Tools" };
+    let copy_hint = if state.selection.is_some() { "<c> Copy Selection" } else { "<c> Copy" };
     let cluster_tag = if !state.context_name.is_empty() {
         format!(" @{} ", state.context_name)
     } else {
@@ -877,7 +828,7 @@ pub fn render_assistant_view(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),                   // Messages history
+            Constraint::Min(5),    // Messages history
             Constraint::Length(1), // Blank separator between chat history and input window
             Constraint::Length(input_box_height), // Dynamic input prompt
         ])
@@ -890,27 +841,14 @@ pub fn render_assistant_view(
 
     for msg in &state.messages {
         let (role_label, role_style) = match msg.role.as_str() {
-            "user" => (
-                "You",
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            "assistant" => (
-                "SRElens",
-                Style::default()
-                    .fg(Theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            _ => (
-                "System",
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            "user" => ("You", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            "assistant" => ("SRElens", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+            _ => ("System", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
         };
 
-        let mut header_spans = vec![Span::styled(role_label, role_style)];
+        let mut header_spans = vec![
+            Span::styled(role_label, role_style),
+        ];
 
         if !msg.timestamp.is_empty() {
             header_spans.push(Span::raw(" "));
@@ -924,19 +862,11 @@ pub fn render_assistant_view(
         rendered_lines.push(Line::from(header_spans));
 
         // 1a. Render tool calls (if any)
-        let visible_tools: Vec<_> = msg
-            .tool_calls
-            .iter()
-            .filter(|tc| !is_internal_meta_tool(&tc.tool))
-            .collect();
+        let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| !is_internal_meta_tool(&tc.tool)).collect();
         if !visible_tools.is_empty() {
             let total_tools = visible_tools.len();
-            let any_running = visible_tools
-                .iter()
-                .any(|tc| matches!(tc.status, ToolCallStatus::Running));
-            let any_error = visible_tools
-                .iter()
-                .any(|tc| matches!(tc.status, ToolCallStatus::Error(_)));
+            let any_running = visible_tools.iter().any(|tc| matches!(tc.status, ToolCallStatus::Running));
+            let any_error = visible_tools.iter().any(|tc| matches!(tc.status, ToolCallStatus::Error(_)));
 
             let (overall_badge, overall_style) = if any_running {
                 ("[⠋ running]", Theme::status_warn())
@@ -949,11 +879,7 @@ pub fn render_assistant_view(
             // Group consecutive identical tool names (e.g. getObject × 4)
             let mut grouped_names: Vec<(String, usize)> = Vec::new();
             for tc in &visible_tools {
-                let clean = tc
-                    .tool
-                    .strip_prefix("srelens-k8s.")
-                    .or_else(|| tc.tool.strip_prefix("k8s_"))
-                    .unwrap_or(&tc.tool);
+                let clean = tc.tool.strip_prefix("srelens-k8s.").or_else(|| tc.tool.strip_prefix("k8s_")).unwrap_or(&tc.tool);
                 if let Some(last) = grouped_names.last_mut() {
                     if last.0 == clean {
                         last.1 += 1;
@@ -977,39 +903,17 @@ pub fn render_assistant_view(
             let chip_line = if !state.expand_tools {
                 // Collapsed mode: sleek 1-line chip
                 Line::from(vec![
-                    Span::styled(
-                        "  ▶ ⚙ ",
-                        Style::default()
-                            .fg(Theme::CYAN)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{} tools queried: ", total_tools),
-                        Style::default().fg(Theme::DIM),
-                    ),
+                    Span::styled("  ▶ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{} tools queried: ", total_tools), Style::default().fg(Theme::DIM)),
                     Span::styled(summary_str, Style::default().fg(Theme::ACCENT)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
-                    Span::styled(
-                        "  (click or <Ctrl+t> to expand)",
-                        Style::default().fg(Theme::DIM),
-                    ),
+                    Span::styled("  (click or <Ctrl+t> to expand)", Style::default().fg(Theme::DIM)),
                 ])
             } else {
                 // Expanded mode: header + compact 1-line chips per tool
                 Line::from(vec![
-                    Span::styled(
-                        "  ▼ ⚙ ",
-                        Style::default()
-                            .fg(Theme::CYAN)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(
-                            "{} tools queried (click or <Ctrl+t> to collapse):",
-                            total_tools
-                        ),
-                        Style::default().fg(Theme::DIM),
-                    ),
+                    Span::styled("  ▼ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{} tools queried (click or <Ctrl+t> to collapse):", total_tools), Style::default().fg(Theme::DIM)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
                 ])
             };
@@ -1029,11 +933,7 @@ pub fn render_assistant_view(
                         ToolCallStatus::Error(_err) => ("[✗ error]", Theme::status_error()),
                     };
 
-                    let clean_name = tc
-                        .tool
-                        .strip_prefix("srelens-k8s.")
-                        .or_else(|| tc.tool.strip_prefix("k8s_"))
-                        .unwrap_or(&tc.tool);
+                    let clean_name = tc.tool.strip_prefix("srelens-k8s.").or_else(|| tc.tool.strip_prefix("k8s_")).unwrap_or(&tc.tool);
                     let arg_preview = if tc.args_summary.len() > 65 {
                         format!("{}...", &tc.args_summary[..62])
                     } else {
@@ -1042,12 +942,7 @@ pub fn render_assistant_view(
 
                     let mut spans = vec![
                         Span::styled("    ⚙ ", Style::default().fg(Theme::CYAN)),
-                        Span::styled(
-                            clean_name.to_string(),
-                            Style::default()
-                                .fg(Theme::ACCENT)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(clean_name.to_string(), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
                     ];
                     if !arg_preview.is_empty() {
                         spans.push(Span::raw(" "));
@@ -1074,16 +969,13 @@ pub fn render_assistant_view(
 
         // 1c. Render token usage footer (if any)
         if let Some(usage) = &msg.token_usage {
-            let duration_str = usage
-                .duration_ms
-                .map(|ms| {
-                    if ms >= 1000 {
-                        format!("{:.1}s", ms as f64 / 1000.0)
-                    } else {
-                        format!("{}ms", ms)
-                    }
-                })
-                .unwrap_or_default();
+            let duration_str = usage.duration_ms.map(|ms| {
+                if ms >= 1000 {
+                    format!("{:.1}s", ms as f64 / 1000.0)
+                } else {
+                    format!("{}ms", ms)
+                }
+            }).unwrap_or_default();
 
             let cached_str = if usage.cached_tokens > 0 {
                 format!(" • {} cached", format_number(usage.cached_tokens))
@@ -1098,12 +990,7 @@ pub fn render_assistant_view(
             };
 
             let usage_line = Line::from(vec![
-                Span::styled(
-                    "  ⚡ ",
-                    Style::default()
-                        .fg(Theme::YELLOW)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("  ⚡ ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!(
                         "{} tokens ({} prompt, {} completion{}){}",
@@ -1113,9 +1000,7 @@ pub fn render_assistant_view(
                         cached_str,
                         duration_badge
                     ),
-                    Style::default()
-                        .fg(Theme::DIM)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
                 ),
             ]);
             let wrapped_usage = wrap_line(usage_line, content_width);
@@ -1128,7 +1013,10 @@ pub fn render_assistant_view(
     if state.is_busy {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spinner = frames[state.spinner_frame % frames.len()];
-        let elapsed_secs = state.busy_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let elapsed_secs = state
+            .busy_start
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
 
         let status_text = if state.busy_status.is_empty() {
             "Consulting AI provider & cluster state..."
@@ -1137,22 +1025,9 @@ pub fn render_assistant_view(
         };
 
         let busy_line = Line::from(vec![
-            Span::styled(
-                format!("  {} ", spinner),
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} ", status_text),
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("({}s elapsed)", elapsed_secs),
-                Style::default().fg(Theme::DIM),
-            ),
+            Span::styled(format!("  {} ", spinner), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} ", status_text), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("({}s elapsed)", elapsed_secs), Style::default().fg(Theme::DIM)),
         ]);
         let wrapped_busy = wrap_line(busy_line, content_width);
         rendered_lines.extend(wrapped_busy);
@@ -1176,11 +1051,7 @@ pub fn render_assistant_view(
         for (l_idx, line) in rendered_lines.iter_mut().enumerate() {
             if l_idx >= start.line && l_idx <= end.line {
                 let c_start = if l_idx == start.line { start.col } else { 0 };
-                let c_end = if l_idx == end.line {
-                    end.col
-                } else {
-                    usize::MAX
-                };
+                let c_end = if l_idx == end.line { end.col } else { usize::MAX };
                 if c_start < c_end {
                     *line = highlight_line_selection(line, c_start, c_end);
                 }
@@ -1203,25 +1074,15 @@ pub fn render_assistant_view(
 
     // 2. Input box
     let input_title = if !state.slash_suggestions.is_empty() {
-        " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) "
-            .to_string()
+        " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) ".to_string()
     } else if !state.auto_scroll && effective_scroll < max_scroll {
-        format!(
-            " Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ",
-            effective_scroll + 1,
-            total_lines
-        )
+        format!(" Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
     } else {
-        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) "
-            .to_string()
+        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if !state.slash_suggestions.is_empty() {
-            Theme::ACCENT
-        } else {
-            Theme::CYAN
-        }))
+        .border_style(Style::default().fg(if !state.slash_suggestions.is_empty() { Theme::ACCENT } else { Theme::CYAN }))
         .title(input_title);
     let visible_input_rows = input_box_height.saturating_sub(2);
     let scroll_y = (input_lines as u16).saturating_sub(visible_input_rows);
@@ -1268,10 +1129,7 @@ pub fn render_assistant_view(
                 };
 
                 let row_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Theme::CYAN)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Black).bg(Theme::CYAN).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Theme::FG)
                 };
@@ -1283,9 +1141,7 @@ pub fn render_assistant_view(
                         if is_selected {
                             row_style
                         } else {
-                            Style::default()
-                                .fg(Theme::CYAN)
-                                .add_modifier(Modifier::BOLD)
+                            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
                         },
                     ),
                 ];
@@ -1323,9 +1179,7 @@ pub fn render_assistant_view(
             .border_style(Style::default().fg(Theme::ACCENT))
             .title(Span::styled(
                 popup_title,
-                Style::default()
-                    .fg(Theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             ));
 
         let list_widget = List::new(items).block(popup_block);
@@ -1388,9 +1242,7 @@ pub fn format_message_content_with_width(
 
         // 3. Horizontal Rule: --- or *** or ___
         if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
-            && trimmed
-                .chars()
-                .all(|c| c == '-' || c == '*' || c == '_' || c.is_whitespace())
+            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c.is_whitespace())
             && trimmed.len() >= 3
         {
             out.push(Line::from(vec![
@@ -1410,15 +1262,11 @@ pub fn format_message_content_with_width(
             out.push(Line::from(""));
             let mut spans = vec![Span::styled(
                 "  ▌ ",
-                Style::default()
-                    .fg(Theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )];
             spans.extend(parse_inline_markdown_with_base_style(
                 heading_text,
-                Style::default()
-                    .fg(Theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             ));
             out.push(Line::from(spans));
             i += 1;
@@ -1428,15 +1276,11 @@ pub fn format_message_content_with_width(
             out.push(Line::from(""));
             let mut spans = vec![Span::styled(
                 "  ▌ ",
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
             )];
             spans.extend(parse_inline_markdown_with_base_style(
                 heading_text,
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
             ));
             out.push(Line::from(spans));
             i += 1;
@@ -1445,15 +1289,11 @@ pub fn format_message_content_with_width(
             let heading_text = trimmed[4..].trim();
             let mut spans = vec![Span::styled(
                 "  ● ",
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
             )];
             spans.extend(parse_inline_markdown_with_base_style(
                 heading_text,
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
             ));
             out.push(Line::from(spans));
             i += 1;
@@ -1482,34 +1322,23 @@ pub fn format_message_content_with_width(
             ];
             spans.extend(parse_inline_markdown_with_base_style(
                 quote_text,
-                Style::default()
-                    .fg(Theme::DIM)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
             ));
             out.push(Line::from(spans));
             i += 1;
             continue;
         }
 
-        // 6. Bullet lists: - , * , +
+        // 6. Bullet lists: - , * , + 
         let leading_spaces = line.len() - line.trim_start().len();
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
             let item_text = &trimmed[2..];
             let bullet_symbol = if leading_spaces >= 2 { "◦ " } else { "• " };
-            let bullet_color = if leading_spaces >= 2 {
-                Theme::YELLOW
-            } else {
-                Theme::CYAN
-            };
+            let bullet_color = if leading_spaces >= 2 { Theme::YELLOW } else { Theme::CYAN };
             let indent = " ".repeat(leading_spaces + 2);
             let mut spans = vec![
                 Span::raw(indent),
-                Span::styled(
-                    bullet_symbol,
-                    Style::default()
-                        .fg(bullet_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(bullet_symbol, Style::default().fg(bullet_color).add_modifier(Modifier::BOLD)),
             ];
             let normalized_item = ensure_spacing_after_periods(item_text);
             spans.extend(parse_inline_markdown(&normalized_item));
@@ -1518,7 +1347,7 @@ pub fn format_message_content_with_width(
             continue;
         }
 
-        // 7. Numbered lists: 1. , 2.
+        // 7. Numbered lists: 1. , 2. 
         if let Some(dot_pos) = trimmed.find(". ") {
             let prefix = &trimmed[..dot_pos];
             if !prefix.is_empty() && prefix.chars().all(|c| c.is_numeric()) {
@@ -1526,12 +1355,7 @@ pub fn format_message_content_with_width(
                 let indent = " ".repeat(leading_spaces + 2);
                 let mut spans = vec![
                     Span::raw(indent),
-                    Span::styled(
-                        format!("{}. ", prefix),
-                        Style::default()
-                            .fg(Theme::YELLOW)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(format!("{}. ", prefix), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
                 ];
                 let normalized_item = ensure_spacing_after_periods(item_text);
                 spans.extend(parse_inline_markdown(&normalized_item));
@@ -1562,41 +1386,30 @@ fn render_code_block(out: &mut Vec<Line<'static>>, lang: &str, code_lines: &[&st
 
     // Code lines with prefix "│ "
     for code_line in code_lines {
-        let mut spans = vec![Span::raw("  "), Span::styled("│ ", border_style)];
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled("│ ", border_style),
+        ];
 
         let trimmed_code = code_line.trim_start();
         if trimmed_code.starts_with('#') || trimmed_code.starts_with("//") {
             // Comment
             spans.push(Span::styled(
                 code_line.to_string(),
-                Style::default()
-                    .fg(Theme::DIM)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
             ));
         } else if trimmed_code.contains(':') && !trimmed_code.starts_with("http") {
             // YAML / Key-value
             if let Some(colon_idx) = code_line.find(':') {
                 let key = &code_line[..=colon_idx];
                 let val = &code_line[colon_idx + 1..];
-                spans.push(Span::styled(
-                    key.to_string(),
-                    Style::default().fg(Theme::CYAN),
-                ));
-                spans.push(Span::styled(
-                    val.to_string(),
-                    Style::default().fg(Theme::FG),
-                ));
+                spans.push(Span::styled(key.to_string(), Style::default().fg(Theme::CYAN)));
+                spans.push(Span::styled(val.to_string(), Style::default().fg(Theme::FG)));
             } else {
-                spans.push(Span::styled(
-                    code_line.to_string(),
-                    Style::default().fg(Theme::FG),
-                ));
+                spans.push(Span::styled(code_line.to_string(), Style::default().fg(Theme::FG)));
             }
         } else {
-            spans.push(Span::styled(
-                code_line.to_string(),
-                Style::default().fg(Theme::FG),
-            ));
+            spans.push(Span::styled(code_line.to_string(), Style::default().fg(Theme::FG)));
         }
         out.push(Line::from(spans));
     }
@@ -1618,9 +1431,7 @@ fn is_table_separator(line: &str) -> bool {
     if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
         return false;
     }
-    trimmed
-        .chars()
-        .all(|c| c == '|' || c == '-' || c == ':' || c.is_whitespace())
+    trimmed.chars().all(|c| c == '|' || c == '-' || c == ':' || c.is_whitespace())
 }
 
 fn parse_cells(line: &str) -> Vec<String> {
@@ -1745,20 +1556,14 @@ pub fn render_markdown_table(
     max_width: Option<usize>,
 ) {
     let raw_headers = parse_cells(header_line);
-    let headers: Vec<String> = raw_headers
-        .into_iter()
-        .map(|h| clean_cell_text(&h))
-        .collect();
+    let headers: Vec<String> = raw_headers.into_iter().map(|h| clean_cell_text(&h)).collect();
     if headers.is_empty() {
         return;
     }
 
     let mut rows: Vec<Vec<String>> = Vec::new();
     for r in row_lines {
-        let cells: Vec<String> = parse_cells(r)
-            .into_iter()
-            .map(|c| clean_cell_text(&c))
-            .collect();
+        let cells: Vec<String> = parse_cells(r).into_iter().map(|c| clean_cell_text(&c)).collect();
         if !cells.is_empty() {
             rows.push(cells);
         }
@@ -1773,8 +1578,7 @@ pub fn render_markdown_table(
     for r in &rows {
         for (c_idx, cell) in r.iter().enumerate() {
             if c_idx < col_widths.len() {
-                col_widths[c_idx] =
-                    col_widths[c_idx].max(unicode_width::UnicodeWidthStr::width(cell.as_str()));
+                col_widths[c_idx] = col_widths[c_idx].max(unicode_width::UnicodeWidthStr::width(cell.as_str()));
             }
         }
     }
@@ -1797,9 +1601,7 @@ pub fn render_markdown_table(
     }
 
     let border_style = Style::default().fg(Theme::BORDER);
-    let header_style = Style::default()
-        .fg(Theme::CYAN)
-        .add_modifier(Modifier::BOLD);
+    let header_style = Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD);
 
     // 1. Top border: ┌────────┬────────┐
     let mut top_spans = vec![Span::raw("  "), Span::styled("┌", border_style)];
@@ -1819,20 +1621,12 @@ pub fn render_markdown_table(
         .enumerate()
         .map(|(i, h)| wrap_cell_text(h, col_widths.get(i).copied().unwrap_or(10)))
         .collect();
-    let header_height = header_cells_lines
-        .iter()
-        .map(|lines| lines.len())
-        .max()
-        .unwrap_or(1);
+    let header_height = header_cells_lines.iter().map(|lines| lines.len()).max().unwrap_or(1);
 
     for sub_idx in 0..header_height {
         let mut hdr_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
         for (i, w) in col_widths.iter().enumerate() {
-            let title = header_cells_lines
-                .get(i)
-                .and_then(|lines| lines.get(sub_idx))
-                .map(String::as_str)
-                .unwrap_or("");
+            let title = header_cells_lines.get(i).and_then(|lines| lines.get(sub_idx)).map(String::as_str).unwrap_or("");
             let title_len = unicode_width::UnicodeWidthStr::width(title);
             let pad = w.saturating_sub(title_len);
             hdr_spans.push(Span::raw(" "));
@@ -1865,31 +1659,19 @@ pub fn render_markdown_table(
                 wrap_cell_text(cell_raw, w)
             })
             .collect();
-        let row_height = row_cells_lines
-            .iter()
-            .map(|lines| lines.len())
-            .max()
-            .unwrap_or(1);
+        let row_height = row_cells_lines.iter().map(|lines| lines.len()).max().unwrap_or(1);
 
         for sub_idx in 0..row_height {
             let mut row_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
             for (i, w) in col_widths.iter().enumerate() {
-                let val = row_cells_lines
-                    .get(i)
-                    .and_then(|lines| lines.get(sub_idx))
-                    .map(String::as_str)
-                    .unwrap_or("");
+                let val = row_cells_lines.get(i).and_then(|lines| lines.get(sub_idx)).map(String::as_str).unwrap_or("");
                 let val_len = unicode_width::UnicodeWidthStr::width(val);
                 let pad = w.saturating_sub(val_len);
                 row_spans.push(Span::raw(" "));
 
                 let cell_style = if val.chars().all(|c| c.is_numeric() || c == '.') {
                     Style::default().fg(Theme::YELLOW)
-                } else if val.ends_with("GiB")
-                    || val.ends_with("MiB")
-                    || val.ends_with("GB")
-                    || val.ends_with("MB")
-                {
+                } else if val.ends_with("GiB") || val.ends_with("MiB") || val.ends_with("GB") || val.ends_with("MB") {
                     Style::default().fg(Theme::GREEN)
                 } else if val.contains('/') || val.starts_with("data-") || val.starts_with("gpu-") {
                     Style::default().fg(Theme::CYAN)
@@ -2000,9 +1782,7 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             }
             spans.push(Span::styled(
                 code_buf,
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
             ));
             continue;
         }
@@ -2012,9 +1792,7 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             flush_buf(&mut text_buf, &mut spans, base);
             i += 3;
             let mut inner = String::new();
-            while i + 2 < chars.len()
-                && !(chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*')
-            {
+            while i + 2 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*') {
                 inner.push(chars[i]);
                 i += 1;
             }
@@ -2023,8 +1801,7 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             }
             spans.push(Span::styled(
                 inner,
-                base.add_modifier(Modifier::BOLD | Modifier::ITALIC)
-                    .fg(Theme::YELLOW),
+                base.add_modifier(Modifier::BOLD | Modifier::ITALIC).fg(Theme::YELLOW),
             ));
             continue;
         }
@@ -2060,7 +1837,10 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             if i < chars.len() && chars[i] == '*' {
                 i += 1; // skip closing *
             }
-            spans.push(Span::styled(inner, base.add_modifier(Modifier::ITALIC)));
+            spans.push(Span::styled(
+                inner,
+                base.add_modifier(Modifier::ITALIC),
+            ));
             continue;
         }
 
@@ -2069,18 +1849,14 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             if let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']') {
                 let bracket_end = i + 1 + close_bracket;
                 if bracket_end + 1 < chars.len() && chars[bracket_end + 1] == '(' {
-                    if let Some(close_paren) =
-                        chars[bracket_end + 2..].iter().position(|&c| c == ')')
-                    {
+                    if let Some(close_paren) = chars[bracket_end + 2..].iter().position(|&c| c == ')') {
                         let paren_end = bracket_end + 2 + close_paren;
                         flush_buf(&mut text_buf, &mut spans, base);
                         let label: String = chars[i + 1..bracket_end].iter().collect();
                         let url: String = chars[bracket_end + 2..paren_end].iter().collect();
                         spans.push(Span::styled(
                             label,
-                            Style::default()
-                                .fg(Theme::CYAN)
-                                .add_modifier(Modifier::UNDERLINED),
+                            Style::default().fg(Theme::CYAN).add_modifier(Modifier::UNDERLINED),
                         ));
                         spans.push(Span::styled(
                             format!(" ({})", url),
@@ -2185,20 +1961,8 @@ All nodes nominal.";
             .join("\n");
 
         for l in &lines {
-            let line_w: usize = l
-                .spans
-                .iter()
-                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            assert!(
-                line_w <= 90,
-                "line exceeded 90 chars: '{}' (width {})",
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>(),
-                line_w
-            );
+            let line_w: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+            assert!(line_w <= 90, "line exceeded 90 chars: '{}' (width {})", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), line_w);
         }
 
         assert!(text_dump.contains("trivago"));
@@ -2249,10 +2013,7 @@ Done.";
         let text_dump: String = spans.iter().map(|s| s.content.as_ref()).collect();
 
         // Ensure backticks and asterisks are stripped
-        assert_eq!(
-            text_dump,
-            "In the current context data-processing-prod-eu-dus1, 4 of 32 nodes advertise a GPU."
-        );
+        assert_eq!(text_dump, "In the current context data-processing-prod-eu-dus1, 4 of 32 nodes advertise a GPU.");
         assert!(!text_dump.contains('`'));
         assert!(!text_dump.contains('*'));
     }
@@ -2306,31 +2067,19 @@ Done.";
     fn test_ensure_spacing_after_periods() {
         let input = "deployed.HAMi is running. Next doing.ArgoCD owns it. GPUs.I have";
         let output = ensure_spacing_after_periods(input);
-        assert_eq!(
-            output,
-            "deployed. HAMi is running. Next doing. ArgoCD owns it. GPUs. I have"
-        );
+        assert_eq!(output, "deployed. HAMi is running. Next doing. ArgoCD owns it. GPUs. I have");
 
         // Code spans preserved
         let code_input = "Use `pod.Status` to inspect.";
-        assert_eq!(
-            ensure_spacing_after_periods(code_input),
-            "Use `pod.Status` to inspect."
-        );
+        assert_eq!(ensure_spacing_after_periods(code_input), "Use `pod.Status` to inspect.");
 
         // Domain names and versions preserved
         let domain_input = "Visit https://srelens.io or v1.31.7 with 10.240.0.1";
-        assert_eq!(
-            ensure_spacing_after_periods(domain_input),
-            "Visit https://srelens.io or v1.31.7 with 10.240.0.1"
-        );
+        assert_eq!(ensure_spacing_after_periods(domain_input), "Visit https://srelens.io or v1.31.7 with 10.240.0.1");
 
         // Abbreviations preserved
         let abbrev_input = "Made in the U.S.A. today.";
-        assert_eq!(
-            ensure_spacing_after_periods(abbrev_input),
-            "Made in the U.S.A. today."
-        );
+        assert_eq!(ensure_spacing_after_periods(abbrev_input), "Made in the U.S.A. today.");
     }
 
     #[test]
@@ -2424,7 +2173,10 @@ Done.";
         state.update_selection(1, 24); // end at "Line 1: Second line with"
         state.finish_selection(1, 24);
         let extracted = state.get_selected_text().unwrap();
-        assert_eq!(extracted, "of assistant reply.\nLine 1: Second line with");
+        assert_eq!(
+            extracted,
+            "of assistant reply.\nLine 1: Second line with"
+        );
 
         // 4. Clear selection
         state.clear_selection();
@@ -2443,17 +2195,12 @@ Done.";
         let wrapped = wrap_line(long, 50);
         assert!(wrapped.len() >= 3);
         for l in &wrapped {
-            let width: usize = l
-                .spans
-                .iter()
-                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
+            let width: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
             assert!(width <= 50, "wrapped line width {} exceeds 50", width);
         }
 
         // 3. Table rows are preserved intact
-        let table_row =
-            Line::from("│ data-processing-prod-gpu-t4-jt8ld │ gpu-t4 │ 2x T4 (15 GiB each) │");
+        let table_row = Line::from("│ data-processing-prod-gpu-t4-jt8ld │ gpu-t4 │ 2x T4 (15 GiB each) │");
         let wrapped_table = wrap_line(table_row, 30);
         assert_eq!(wrapped_table.len(), 1);
     }

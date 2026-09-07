@@ -70,8 +70,10 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     f.render_widget(block, area);
 
     if state.releases.is_empty() {
-        let empty_msg = Paragraph::new("No Helm releases found in current namespace.")
-            .style(Style::default().fg(Theme::DIM));
+        let empty_msg = Paragraph::new(
+            "No Helm releases found in current namespace.",
+        )
+        .style(Style::default().fg(Theme::DIM));
         f.render_widget(empty_msg, inner);
         return;
     }

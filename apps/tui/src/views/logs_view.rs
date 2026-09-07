@@ -25,12 +25,7 @@ pub struct LogsViewState {
 }
 
 impl LogsViewState {
-    pub fn new(
-        pod_name: String,
-        namespace: String,
-        container: Option<String>,
-        channel: String,
-    ) -> Self {
+    pub fn new(pod_name: String, namespace: String, container: Option<String>, channel: String) -> Self {
         Self {
             pod_name,
             namespace,
@@ -219,10 +214,9 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
     f.render_widget(block, area);
 
     if state.lines.is_empty() {
-        let msg = Paragraph::new(Line::from(vec![Span::styled(
-            "Waiting for logs...",
-            Style::default().fg(Theme::DIM),
-        )]));
+        let msg = Paragraph::new(Line::from(vec![
+            Span::styled("Waiting for logs...", Style::default().fg(Theme::DIM)),
+        ]));
         f.render_widget(msg, inner);
         return;
     }
@@ -243,30 +237,22 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
     let mut rendered_lines = Vec::new();
 
     for (i, line) in state.lines.iter().enumerate().take(end_idx).skip(start_idx) {
-        let line_num = Span::styled(format!("{:5} │ ", i + 1), Style::default().fg(Theme::DIM));
+        let line_num = Span::styled(
+            format!("{:5} │ ", i + 1),
+            Style::default().fg(Theme::DIM),
+        );
 
         let mut spans = vec![line_num];
 
         let has_match = !state.search_query.is_empty()
-            && line
-                .to_lowercase()
-                .contains(&state.search_query.to_lowercase());
+            && line.to_lowercase().contains(&state.search_query.to_lowercase());
 
         if has_match {
-            let highlighted = super::highlight_text_matches(
-                line,
-                &state.search_query,
-                Style::default().fg(Theme::FG),
-                match_style,
-            );
+            let highlighted = super::highlight_text_matches(line, &state.search_query, Style::default().fg(Theme::FG), match_style);
             spans.extend(highlighted);
         } else {
             let lower = line.to_lowercase();
-            let log_style = if lower.contains("error")
-                || lower.contains("fatal")
-                || lower.contains("exception")
-                || lower.contains("panic")
-            {
+            let log_style = if lower.contains("error") || lower.contains("fatal") || lower.contains("exception") || lower.contains("panic") {
                 Style::default().fg(Theme::RED)
             } else if lower.contains("warn") || lower.contains("warning") {
                 Style::default().fg(Theme::YELLOW)

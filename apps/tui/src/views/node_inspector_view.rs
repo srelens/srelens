@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::theme::Theme;
 use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
 pub struct NodeInspectorState {
@@ -155,12 +155,12 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),                // Header
-            Constraint::Length(4),                // Gauges
-            Constraint::Length(sparkline_height), // Live Sparklines
-            Constraint::Length(3),                // Conditions & Taints
-            Constraint::Min(6),                   // Pods table
-            Constraint::Length(1),                // Footer
+            Constraint::Length(4),                 // Header
+            Constraint::Length(4),                 // Gauges
+            Constraint::Length(sparkline_height),  // Live Sparklines
+            Constraint::Length(3),                 // Conditions & Taints
+            Constraint::Min(6),                    // Pods table
+            Constraint::Length(1),                 // Footer
         ])
         .split(area);
 
@@ -185,12 +185,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     render_footer_hints(f, chunks[5], d);
 }
 
-fn render_metrics_timeline_card(
-    f: &mut Frame,
-    area: Rect,
-    state: &NodeInspectorState,
-    d: &NodeInspectorDetails,
-) {
+fn render_metrics_timeline_card(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &NodeInspectorDetails) {
     if area.height < 3 || area.width < 20 {
         return;
     }
@@ -200,33 +195,18 @@ fn render_metrics_timeline_card(
         .split(area);
 
     // 1. CPU Sparkline
-    let cur_cpu = state
-        .cpu_history
-        .last()
-        .copied()
-        .unwrap_or(d.cpu_requests_millicores.max(0) as u64);
+    let cur_cpu = state.cpu_history.last().copied().unwrap_or(d.cpu_requests_millicores.max(0) as u64);
     let peak_cpu = state.cpu_history.iter().copied().max().unwrap_or(cur_cpu);
-    let cpu_title = format!(
-        " 📈 CPU Usage Trend [cur: {}m | peak: {}m | alloc: {}m] ",
-        cur_cpu, peak_cpu, d.cpu_allocatable_millicores
-    );
+    let cpu_title = format!(" 📈 CPU Usage Trend [cur: {}m | peak: {}m | alloc: {}m] ", cur_cpu, peak_cpu, d.cpu_allocatable_millicores);
     let cpu_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            cpu_title,
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(cpu_title, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
     let cpu_inner = cpu_block.inner(h_chunks[0]);
     f.render_widget(cpu_block, h_chunks[0]);
 
     if state.cpu_history.is_empty() {
-        let p = Paragraph::new(Line::from(Span::styled(
-            "⚡ Awaiting metrics-server samples...",
-            Style::default().fg(Theme::DIM),
-        )));
+        let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
         f.render_widget(p, cpu_inner);
     } else {
         let sparkline = ratatui::widgets::Sparkline::default()
@@ -237,33 +217,18 @@ fn render_metrics_timeline_card(
     }
 
     // 2. Memory Sparkline
-    let cur_mem = state
-        .mem_history
-        .last()
-        .copied()
-        .unwrap_or(d.mem_requests_mib.max(0) as u64);
+    let cur_mem = state.mem_history.last().copied().unwrap_or(d.mem_requests_mib.max(0) as u64);
     let peak_mem = state.mem_history.iter().copied().max().unwrap_or(cur_mem);
-    let mem_title = format!(
-        " 📈 Memory Usage Trend [cur: {}MiB | peak: {}MiB | alloc: {}MiB] ",
-        cur_mem, peak_mem, d.mem_allocatable_mib
-    );
+    let mem_title = format!(" 📈 Memory Usage Trend [cur: {}MiB | peak: {}MiB | alloc: {}MiB] ", cur_mem, peak_mem, d.mem_allocatable_mib);
     let mem_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            mem_title,
-            Style::default()
-                .fg(Color::Rgb(168, 85, 247))
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(mem_title, Style::default().fg(Color::Rgb(168, 85, 247)).add_modifier(Modifier::BOLD)));
     let mem_inner = mem_block.inner(h_chunks[1]);
     f.render_widget(mem_block, h_chunks[1]);
 
     if state.mem_history.is_empty() {
-        let p = Paragraph::new(Line::from(Span::styled(
-            "⚡ Awaiting metrics-server samples...",
-            Style::default().fg(Theme::DIM),
-        )));
+        let p = Paragraph::new(Line::from(Span::styled("⚡ Awaiting metrics-server samples...", Style::default().fg(Theme::DIM))));
         f.render_widget(p, mem_inner);
     } else {
         let sparkline = ratatui::widgets::Sparkline::default()
@@ -280,9 +245,7 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         .border_style(Style::default().fg(Theme::BORDER))
         .title(Span::styled(
             format!(" 🖥️  Node: {} ", d.name),
-            Style::default()
-                .fg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -293,12 +256,12 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::RED
     };
 
-    let mut row1_spans = vec![Span::styled(
-        format!("● {} ", d.status),
-        Style::default()
-            .fg(status_color)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut row1_spans = vec![
+        Span::styled(
+            format!("● {} ", d.status),
+            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+        ),
+    ];
 
     if d.unschedulable {
         row1_spans.push(Span::styled(
@@ -314,9 +277,7 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         let model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
         row1_spans.push(Span::styled(
             format!("[⚡ {}] ", model),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -324,10 +285,7 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     row1_spans.push(Span::styled(format!("{}  ", d.roles), Theme::header_val()));
 
     row1_spans.push(Span::styled("Type: ", Theme::header_label()));
-    row1_spans.push(Span::styled(
-        format!("{}  ", d.instance_type),
-        Theme::header_val(),
-    ));
+    row1_spans.push(Span::styled(format!("{}  ", d.instance_type), Theme::header_val()));
 
     if let Some(zone) = &d.zone {
         row1_spans.push(Span::styled("Zone: ", Theme::header_label()));
@@ -344,10 +302,7 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
 
     let mut row2_spans = vec![
         Span::styled("OS: ", Theme::header_label()),
-        Span::styled(
-            format!("{} ({})  ", d.os_image, d.architecture),
-            Theme::header_val(),
-        ),
+        Span::styled(format!("{} ({})  ", d.os_image, d.architecture), Theme::header_val()),
         Span::styled("Kernel: ", Theme::header_label()),
         Span::styled(format!("{}  ", d.kernel_version), Theme::header_val()),
         Span::styled("Runtime: ", Theme::header_label()),
@@ -389,8 +344,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     let cpu_alloc = d.cpu_allocatable_millicores as f64 / 1000.0;
     let cpu_req = d.cpu_requests_millicores as f64 / 1000.0;
     let cpu_pct = if d.cpu_allocatable_millicores > 0 {
-        ((d.cpu_requests_millicores as f64 / d.cpu_allocatable_millicores as f64) * 100.0).round()
-            as u16
+        ((d.cpu_requests_millicores as f64 / d.cpu_allocatable_millicores as f64) * 100.0).round() as u16
     } else {
         0
     };
@@ -402,17 +356,9 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::CYAN
     };
 
-    let cpu_title = format!(
-        " CPU: {:.1}/{:.1} Cores ({}%) ",
-        cpu_req, cpu_alloc, cpu_pct
-    );
+    let cpu_title = format!(" CPU: {:.1}/{:.1} Cores ({}%) ", cpu_req, cpu_alloc, cpu_pct);
     let cpu_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Theme::BORDER))
-                .title(cpu_title),
-        )
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Theme::BORDER)).title(cpu_title))
         .gauge_style(Style::default().fg(cpu_color))
         .percent(cpu_pct.min(100));
     f.render_widget(cpu_gauge, gauge_chunks[0]);
@@ -433,17 +379,9 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::ACCENT
     };
 
-    let mem_title = format!(
-        " Memory: {:.1}/{:.1} GiB ({}%) ",
-        mem_req_gib, mem_alloc_gib, mem_pct
-    );
+    let mem_title = format!(" Memory: {:.1}/{:.1} GiB ({}%) ", mem_req_gib, mem_alloc_gib, mem_pct);
     let mem_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Theme::BORDER))
-                .title(mem_title),
-        )
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Theme::BORDER)).title(mem_title))
         .gauge_style(Style::default().fg(mem_color))
         .percent(mem_pct.min(100));
     f.render_widget(mem_gauge, gauge_chunks[1]);
@@ -459,17 +397,9 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::GREEN
     };
 
-    let pods_title = format!(
-        " Pods: {}/{} ({}%) ",
-        d.pods_count, d.pods_allocatable, pods_pct
-    );
+    let pods_title = format!(" Pods: {}/{} ({}%) ", d.pods_count, d.pods_allocatable, pods_pct);
     let pods_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Theme::BORDER))
-                .title(pods_title),
-        )
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Theme::BORDER)).title(pods_title))
         .gauge_style(Style::default().fg(pods_color))
         .percent(pods_pct.min(100));
     f.render_widget(pods_gauge, gauge_chunks[2]);
@@ -478,36 +408,22 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     if has_gpu {
         let model_label = d.gpu_model.as_deref().unwrap_or("GPU");
 
-        let (gpu_title, gpu_pct) = if d.gpu_memory_requests_mib > 0
-            && d.gpu_memory_total_mib.unwrap_or(0) > 0
-        {
+        let (gpu_title, gpu_pct) = if d.gpu_memory_requests_mib > 0 && d.gpu_memory_total_mib.unwrap_or(0) > 0 {
             let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(15360);
             let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
             let total_vram_gib = total_vram_mib as f64 / 1024.0;
-            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib as f64) * 100.0).round()
-                as u64)
-                .min(999) as u16;
+            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib as f64) * 100.0).round() as u64).min(999) as u16;
             (
-                format!(
-                    " ⚡ {}: {:.1}/{:.1} GiB VRAM ({}%) ",
-                    model_label, req_vram_gib, total_vram_gib, pct
-                ),
+                format!(" ⚡ {}: {:.1}/{:.1} GiB VRAM ({}%) ", model_label, req_vram_gib, total_vram_gib, pct),
                 pct,
             )
         } else {
             let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
-            let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u64)
-                .min(999) as u16;
+            let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u64).min(999) as u16;
             let title = if d.gpu_allocatable_count > 1 {
-                format!(
-                    " ⚡ {}: {}/{} Slices ({}%) ",
-                    model_label, d.gpu_requests_count, gpu_alloc, pct
-                )
+                format!(" ⚡ {}: {}/{} Slices ({}%) ", model_label, d.gpu_requests_count, gpu_alloc, pct)
             } else {
-                format!(
-                    " ⚡ {}: {}/{} ({}%) ",
-                    model_label, d.gpu_requests_count, gpu_alloc, pct
-                )
+                format!(" ⚡ {}: {}/{} ({}%) ", model_label, d.gpu_requests_count, gpu_alloc, pct)
             };
             (title, pct)
         };
@@ -544,12 +460,7 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
     let mut spans = Vec::new();
 
     // Conditions
-    spans.push(Span::styled(
-        "Conditions: ",
-        Style::default()
-            .fg(Theme::CYAN)
-            .add_modifier(Modifier::BOLD),
-    ));
+    spans.push(Span::styled("Conditions: ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
     if d.conditions.is_empty() {
         spans.push(Span::styled("None", Style::default().fg(Theme::DIM)));
     } else {
@@ -564,22 +475,14 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
             } else {
                 Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)
             };
-            spans.push(Span::styled(
-                format!("{}:{}", cond.type_, cond.status),
-                style,
-            ));
+            spans.push(Span::styled(format!("{}:{}", cond.type_, cond.status), style));
         }
     }
 
     spans.push(Span::styled("  │  ", Style::default().fg(Theme::DIM)));
 
     // Taints
-    spans.push(Span::styled(
-        "Taints: ",
-        Style::default()
-            .fg(Theme::YELLOW)
-            .add_modifier(Modifier::BOLD),
-    ));
+    spans.push(Span::styled("Taints: ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)));
     if d.taints.is_empty() {
         spans.push(Span::styled("None", Style::default().fg(Theme::DIM)));
     } else {
@@ -600,23 +503,10 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
     f.render_widget(p, inner);
 }
 
-fn render_pods_table(
-    f: &mut Frame,
-    area: Rect,
-    state: &NodeInspectorState,
-    d: &NodeInspectorDetails,
-) {
-    let gpu_pod_count = d
-        .pods
-        .iter()
-        .filter(|p| p.gpu_requests > 0 || p.gpu_mem_requests_mib > 0)
-        .count();
+fn render_pods_table(f: &mut Frame, area: Rect, state: &NodeInspectorState, d: &NodeInspectorDetails) {
+    let gpu_pod_count = d.pods.iter().filter(|p| p.gpu_requests > 0 || p.gpu_mem_requests_mib > 0).count();
     let table_title = if gpu_pod_count > 0 {
-        format!(
-            " Scheduled Pods ({} Total | ⚡ {} GPU Workloads) ",
-            d.pods.len(),
-            gpu_pod_count
-        )
+        format!(" Scheduled Pods ({} Total | ⚡ {} GPU Workloads) ", d.pods.len(), gpu_pod_count)
     } else {
         format!(" Scheduled Pods ({} Total) ", d.pods.len())
     };
@@ -624,12 +514,7 @@ fn render_pods_table(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            table_title,
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(table_title, Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -661,66 +546,16 @@ fn render_pods_table(
     // Table Header
     let header_line = Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(
-            format!("{:<16}", "NAMESPACE"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<28}", "NAME"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<15}", "IP"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<10}", "STATUS"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<6}", "READY"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<5}", "REST"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<8}", "CPU REQ"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<9}", "MEM REQ"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<11}", "GPU REQ"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<5}", "AGE"),
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("{:<16}", "NAMESPACE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<28}", "NAME"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<15}", "IP"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<10}", "STATUS"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<6}", "READY"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<5}", "REST"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<8}", "CPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<9}", "MEM REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<11}", "GPU REQ"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<5}", "AGE"), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
     ]);
     lines.push(header_line);
 
@@ -735,24 +570,14 @@ fn render_pods_table(
 
         let marker = if is_selected { "▶ " } else { "  " };
         let marker_style = if is_selected {
-            Style::default()
-                .fg(Theme::CYAN)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Theme::CYAN).bg(row_bg).add_modifier(Modifier::BOLD)
         } else {
             Style::default().bg(row_bg)
         };
 
         let ns_str = truncate_str(&pod.namespace, 15);
         let name_str = truncate_str(&pod.name, 27);
-        let ip_str = truncate_str(
-            if pod.pod_ip.is_empty() {
-                "-"
-            } else {
-                &pod.pod_ip
-            },
-            14,
-        );
+        let ip_str = truncate_str(if pod.pod_ip.is_empty() { "-" } else { &pod.pod_ip }, 14);
 
         let status_color = match pod.phase.as_str() {
             "Running" => Theme::GREEN,
@@ -786,18 +611,12 @@ fn render_pods_table(
             };
             (
                 vram_str,
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .bg(row_bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::YELLOW).bg(row_bg).add_modifier(Modifier::BOLD),
             )
         } else if pod.gpu_requests > 0 {
             (
                 format!("⚡ {} GPU", pod.gpu_requests),
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .bg(row_bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Theme::YELLOW).bg(row_bg).add_modifier(Modifier::BOLD),
             )
         } else {
             ("-".to_string(), Style::default().fg(Theme::DIM).bg(row_bg))
@@ -805,60 +624,16 @@ fn render_pods_table(
 
         let row = Line::from(vec![
             Span::styled(marker, marker_style),
-            Span::styled(
-                format!("{:<16}", ns_str),
-                Style::default().fg(Theme::CYAN).bg(row_bg),
-            ),
-            Span::styled(
-                format!("{:<28}", name_str),
-                Style::default()
-                    .fg(if is_selected {
-                        Theme::ACCENT
-                    } else {
-                        Theme::FG
-                    })
-                    .bg(row_bg)
-                    .add_modifier(if is_selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-            Span::styled(
-                format!("{:<15}", ip_str),
-                Style::default().fg(Theme::DIM).bg(row_bg),
-            ),
-            Span::styled(
-                format!("{:<10}", pod.phase),
-                Style::default().fg(status_color).bg(row_bg),
-            ),
-            Span::styled(
-                format!("{:<6}", pod.ready_containers),
-                Style::default().fg(Theme::FG).bg(row_bg),
-            ),
-            Span::styled(
-                format!("{:<5}", pod.restarts),
-                Style::default()
-                    .fg(if pod.restarts > 0 {
-                        Theme::YELLOW
-                    } else {
-                        Theme::DIM
-                    })
-                    .bg(row_bg),
-            ),
-            Span::styled(
-                format!("{:<8}", cpu_str),
-                Style::default().fg(Theme::FG).bg(row_bg),
-            ),
-            Span::styled(
-                format!("{:<9}", mem_str),
-                Style::default().fg(Theme::FG).bg(row_bg),
-            ),
+            Span::styled(format!("{:<16}", ns_str), Style::default().fg(Theme::CYAN).bg(row_bg)),
+            Span::styled(format!("{:<28}", name_str), Style::default().fg(if is_selected { Theme::ACCENT } else { Theme::FG }).bg(row_bg).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() })),
+            Span::styled(format!("{:<15}", ip_str), Style::default().fg(Theme::DIM).bg(row_bg)),
+            Span::styled(format!("{:<10}", pod.phase), Style::default().fg(status_color).bg(row_bg)),
+            Span::styled(format!("{:<6}", pod.ready_containers), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<5}", pod.restarts), Style::default().fg(if pod.restarts > 0 { Theme::YELLOW } else { Theme::DIM }).bg(row_bg)),
+            Span::styled(format!("{:<8}", cpu_str), Style::default().fg(Theme::FG).bg(row_bg)),
+            Span::styled(format!("{:<9}", mem_str), Style::default().fg(Theme::FG).bg(row_bg)),
             Span::styled(format!("{:<11}", gpu_str), gpu_style),
-            Span::styled(
-                format!("{:<5}", pod.age),
-                Style::default().fg(Theme::DIM).bg(row_bg),
-            ),
+            Span::styled(format!("{:<5}", pod.age), Style::default().fg(Theme::DIM).bg(row_bg)),
         ]);
         lines.push(row);
     }
@@ -894,16 +669,8 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         if i > 0 {
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(
-            *k,
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(":{} ", label),
-            Style::default().fg(Theme::DIM),
-        ));
+        spans.push(Span::styled(*k, Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(format!(":{} ", label), Style::default().fg(Theme::DIM)));
     }
 
     let p = Paragraph::new(Line::from(spans));

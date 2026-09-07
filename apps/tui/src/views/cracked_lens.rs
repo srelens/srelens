@@ -21,10 +21,7 @@ pub fn render_cracked_lens(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::RED))
-        .title(Span::styled(
-            " Cluster Unreachable ",
-            Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(" Cluster Unreachable ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -32,28 +29,18 @@ pub fn render_cracked_lens(
     if inner.height < 10 || inner.width < 30 {
         let compact_msg = vec![
             Line::from(vec![
-                Span::styled(
-                    "✖ Cluster Unreachable ",
-                    Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("(timed out after {}s)", elapsed_secs),
-                    Style::default().fg(Theme::DIM),
-                ),
+                Span::styled("✖ Cluster Unreachable ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("(timed out after {}s)", elapsed_secs), Style::default().fg(Theme::DIM)),
             ]),
             Line::from(vec![
                 Span::styled("Context: ", Theme::header_label()),
                 Span::styled(context, Style::default().fg(Theme::YELLOW)),
             ]),
-            Line::from(vec![Span::styled(
-                "Press <r> to retry or <Ctrl+x> to switch context",
-                Style::default().fg(Theme::CYAN),
-            )]),
+            Line::from(vec![
+                Span::styled("Press <r> to retry or <Ctrl+x> to switch context", Style::default().fg(Theme::CYAN)),
+            ]),
         ];
-        f.render_widget(
-            Paragraph::new(compact_msg).alignment(Alignment::Center),
-            inner,
-        );
+        f.render_widget(Paragraph::new(compact_msg).alignment(Alignment::Center), inner);
         return;
     }
 
@@ -63,18 +50,14 @@ pub fn render_cracked_lens(
     let crack_style = Style::default()
         .fg(Color::Rgb(255, 215, 0))
         .add_modifier(Modifier::BOLD);
-    let glare_style = Style::default().fg(Theme::CYAN).add_modifier(Modifier::DIM);
+    let glare_style = Style::default()
+        .fg(Theme::CYAN)
+        .add_modifier(Modifier::DIM);
     let handle_style = Style::default().fg(Theme::DIM);
 
     let cracked_lens_lines = vec![
-        Line::from(Span::styled(
-            "             .--------------------.",
-            rim_style,
-        )),
-        Line::from(Span::styled(
-            "          .-'  .----------------.  `-.",
-            rim_style,
-        )),
+        Line::from(Span::styled("             .--------------------.", rim_style)),
+        Line::from(Span::styled("          .-'  .----------------.  `-.", rim_style)),
         Line::from(vec![
             Span::styled("        .'   .' ", rim_style),
             Span::styled("//", glare_style),
@@ -172,24 +155,13 @@ pub fn render_cracked_lens(
 
     let mut diag_lines = vec![
         Line::from(vec![
-            Span::styled(
-                "✖ CLUSTER UNREACHABLE ",
-                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("(no response after {}s)", elapsed_secs),
-                Style::default().fg(Theme::DIM),
-            ),
+            Span::styled("✖ CLUSTER UNREACHABLE ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("(no response after {}s)", elapsed_secs), Style::default().fg(Theme::DIM)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("Context:  ", Theme::header_label()),
-            Span::styled(
-                context,
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(context, Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
         ]),
     ];
 
@@ -207,46 +179,23 @@ pub fn render_cracked_lens(
     }
 
     diag_lines.push(Line::from(""));
-    diag_lines.push(Line::from(vec![Span::styled(
-        "Quick Actions:",
-        Style::default()
-            .fg(Theme::ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )]));
     diag_lines.push(Line::from(vec![
-        Span::styled(
-            "  [r]          ",
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("Quick Actions:", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+    ]));
+    diag_lines.push(Line::from(vec![
+        Span::styled("  [r]          ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled("Retry connection", Theme::header_label()),
     ]));
     diag_lines.push(Line::from(vec![
-        Span::styled(
-            "  [Ctrl+x]     ",
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("  [Ctrl+x]     ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled("Switch context (:ctx)", Theme::header_label()),
     ]));
     diag_lines.push(Line::from(vec![
-        Span::styled(
-            "  [:]          ",
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("  [:]          ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled("Open command bar", Theme::header_label()),
     ]));
     diag_lines.push(Line::from(vec![
-        Span::styled(
-            "  [?]          ",
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("  [?]          ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::styled("Open help menu", Theme::header_label()),
     ]));
 

@@ -4,6 +4,9 @@
 //! and runs the multi-turn agentic loop (`srelens_llm::agent_loop::run`), emitting streaming
 //! events back into Ratatui's event loop.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use srelens_agent::event::AgentEvent;
@@ -11,9 +14,6 @@ use srelens_kube::client_cache::ClientCache;
 use srelens_llm::types::{ToolDef, Turn};
 use srelens_llm::{LlmError, ToolCallResult, ToolInvoker};
 use srelens_mcp::McpServer;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use crate::event::AppEvent;
 
@@ -34,13 +34,7 @@ impl McpToolInvoker {
 
 fn provider_safe_name(id: &str) -> String {
     id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' })
         .collect()
 }
 
@@ -55,20 +49,9 @@ fn assign_alias(aliases: &mut HashMap<String, String>, id: &str) -> String {
 
 fn tool_def_from_json(v: &Value) -> ToolDef {
     ToolDef {
-        name: v
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        description: v
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        input_schema: v
-            .get("inputSchema")
-            .cloned()
-            .unwrap_or_else(|| json!({ "type": "object" })),
+        name: v.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+        description: v.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+        input_schema: v.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object" })),
         read_only: v
             .get("annotations")
             .and_then(|a| a.get("readOnlyHint"))
@@ -81,10 +64,9 @@ fn tool_def_from_json(v: &Value) -> ToolDef {
 impl ToolInvoker for McpToolInvoker {
     async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
-        let resp =
-            srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
-                .await
-                .ok_or_else(|| LlmError::Api("tools/list returned no response".into()))?;
+        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
+            .await
+            .ok_or_else(|| LlmError::Api("tools/list returned no response".into()))?;
         let tools = resp
             .get("result")
             .and_then(|r| r.get("tools"))
@@ -103,39 +85,22 @@ impl ToolInvoker for McpToolInvoker {
     }
 
     async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolCallResult, LlmError> {
-        let real_name = self
-            .aliases
-            .lock()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string());
+        let real_name = self.aliases.lock().unwrap().get(name).cloned().unwrap_or_else(|| name.to_string());
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": { "name": real_name, "arguments": args },
         });
-        let resp =
-            srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
-                .await
-                .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
+        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
+            .await
+            .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
         if let Some(err) = resp.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("tool call failed");
-            return Ok(ToolCallResult {
-                content: msg.to_string(),
-                is_error: true,
-                denied: false,
-            });
+            let msg = err.get("message").and_then(Value::as_str).unwrap_or("tool call failed");
+            return Ok(ToolCallResult { content: msg.to_string(), is_error: true, denied: false });
         }
         let result = resp.get("result");
-        let is_error = result
-            .and_then(|r| r.get("isError"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let is_error = result.and_then(|r| r.get("isError")).and_then(Value::as_bool).unwrap_or(false);
         let denied = result
             .and_then(|r| r.get("_meta"))
             .and_then(|m| m.get("srelens/denied"))
@@ -152,15 +117,14 @@ impl ToolInvoker for McpToolInvoker {
                     .join("\n")
             })
             .unwrap_or_default();
-        Ok(ToolCallResult {
-            content,
-            is_error,
-            denied,
-        })
+        Ok(ToolCallResult { content, is_error, denied })
     }
 }
 
-pub fn build_mcp_server(cache: Arc<ClientCache>, kubeconfig_paths: Vec<PathBuf>) -> Arc<McpServer> {
+pub fn build_mcp_server(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+) -> Arc<McpServer> {
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
     let server = McpServer::new(Arc::new(registry))
@@ -196,54 +160,56 @@ pub async fn run_native_agent_turn(
     };
 
     let ctx_tag = active_context.clone();
-    let mut on_event = move |ev: AgentEvent| match ev {
-        AgentEvent::TextDelta { text } => {
-            out_chars_clone.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
-            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", ctx_tag),
-                result: Ok(text),
-            });
-        }
-        AgentEvent::Thinking { text } => {
-            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                title: format!("ai_status:{}", ctx_tag),
-                result: Ok(text),
-            });
-        }
-        AgentEvent::ToolCallStart { id, tool, args } => {
-            let args_preview = if args.is_null() {
-                String::new()
-            } else if let Some(s) = args.as_str() {
-                s.to_string()
-            } else {
-                args.to_string()
-            };
-            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                title: format!("ai_status:{}", ctx_tag),
-                result: Ok(format!("Executing {}...", tool)),
-            });
-            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                title: format!("ai_tool_start:{}", ctx_tag),
-                result: Ok(format!("{}|{}|{}", id, tool, args_preview)),
-            });
-        }
-        AgentEvent::ToolResult { id, status } => {
-            let status_str = match status {
-                srelens_agent::event::ToolStatus::Ok => "ok",
-                srelens_agent::event::ToolStatus::Error => "error",
-                srelens_agent::event::ToolStatus::Denied => "denied",
-            };
-            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                title: format!("ai_tool_done:{}", ctx_tag),
-                result: Ok(format!("{}|{}", id, status_str)),
-            });
-        }
-        AgentEvent::TurnDone => {}
-        AgentEvent::Error { message } => {
-            let _ = event_tx_clone.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", ctx_tag),
-                result: Ok(format!("\n[Error: {}]", message)),
-            });
+    let mut on_event = move |ev: AgentEvent| {
+        match ev {
+            AgentEvent::TextDelta { text } => {
+                out_chars_clone.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
+                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                    title: format!("ai_chunk:{}", ctx_tag),
+                    result: Ok(text),
+                });
+            }
+            AgentEvent::Thinking { text } => {
+                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                    title: format!("ai_status:{}", ctx_tag),
+                    result: Ok(text),
+                });
+            }
+            AgentEvent::ToolCallStart { id, tool, args } => {
+                let args_preview = if args.is_null() {
+                    String::new()
+                } else if let Some(s) = args.as_str() {
+                    s.to_string()
+                } else {
+                    args.to_string()
+                };
+                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                    title: format!("ai_status:{}", ctx_tag),
+                    result: Ok(format!("Executing {}...", tool)),
+                });
+                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                    title: format!("ai_tool_start:{}", ctx_tag),
+                    result: Ok(format!("{}|{}|{}", id, tool, args_preview)),
+                });
+            }
+            AgentEvent::ToolResult { id, status } => {
+                let status_str = match status {
+                    srelens_agent::event::ToolStatus::Ok => "ok",
+                    srelens_agent::event::ToolStatus::Error => "error",
+                    srelens_agent::event::ToolStatus::Denied => "denied",
+                };
+                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                    title: format!("ai_tool_done:{}", ctx_tag),
+                    result: Ok(format!("{}|{}", id, status_str)),
+                });
+            }
+            AgentEvent::TurnDone => {}
+            AgentEvent::Error { message } => {
+                let _ = event_tx_clone.send(AppEvent::ActionResult {
+                    title: format!("ai_chunk:{}", ctx_tag),
+                    result: Ok(format!("\n[Error: {}]", message)),
+                });
+            }
         }
     };
 
@@ -274,10 +240,7 @@ pub async fn run_native_agent_turn(
     let prompt_est = (prompt.len() + 200) / 4;
     let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
     let total_est = prompt_est + comp_est;
-    let payload = format!(
-        "{}|{}|{}|{}|{}",
-        prompt_est, comp_est, 0, total_est, duration_ms
-    );
+    let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, duration_ms);
     let _ = event_tx.send(AppEvent::ActionResult {
         title: format!("ai_usage:{}", active_context),
         result: Ok(payload),
@@ -472,11 +435,9 @@ pub async fn run_boxed_cursor_turn(
     for (k, v) in &cmd_spec.env {
         cmd.env(k, v);
     }
-    let effective_key = api_key.filter(|k| !k.trim().is_empty()).or_else(|| {
-        std::env::var("CURSOR_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty())
-    });
+    let effective_key = api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::env::var("CURSOR_API_KEY").ok().filter(|k| !k.trim().is_empty()));
 
     if let Some(ref key) = effective_key {
         cmd.env("CURSOR_API_KEY", key);
@@ -485,11 +446,7 @@ pub async fn run_boxed_cursor_turn(
 
     // Insert --api-key and --model BEFORE the trailing "--" and positional prompt
     let mut final_args = Vec::new();
-    let dash_dash_idx = cmd_spec
-        .args
-        .iter()
-        .position(|a| a == "--")
-        .unwrap_or(cmd_spec.args.len());
+    let dash_dash_idx = cmd_spec.args.iter().position(|a| a == "--").unwrap_or(cmd_spec.args.len());
     for (i, arg) in cmd_spec.args.iter().enumerate() {
         if i == dash_dash_idx {
             if let Some(ref key) = effective_key {
@@ -544,16 +501,9 @@ pub async fn run_boxed_cursor_turn(
                     while let Ok(Some(line)) = reader.next_line().await {
                         let trimmed = line.trim();
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) =
-                                crate::app::extract_usage_metrics(&v)
-                            {
-                                let dur_val = dur_t.unwrap_or_else(|| {
-                                    start_time_copy.elapsed().as_millis() as u64
-                                });
-                                let payload = format!(
-                                    "{}|{}|{}|{}|{}",
-                                    prompt_t, comp_t, cached_t, total_t, dur_val
-                                );
+                            if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) = crate::app::extract_usage_metrics(&v) {
+                                let dur_val = dur_t.unwrap_or_else(|| start_time_copy.elapsed().as_millis() as u64);
+                                let payload = format!("{}|{}|{}|{}|{}", prompt_t, comp_t, cached_t, total_t, dur_val);
                                 let _ = event_tx_clone.send(AppEvent::ActionResult {
                                     title: format!("ai_usage:{}", active_ctx_clone),
                                     result: Ok(payload),
@@ -565,36 +515,23 @@ pub async fn run_boxed_cursor_turn(
                                 if t == "thinking" {
                                     let _ = event_tx_clone.send(AppEvent::ActionResult {
                                         title: format!("ai_status:{}", active_ctx_clone),
-                                        result: Ok(
-                                            "Thinking & analyzing cluster query...".to_string()
-                                        ),
+                                        result: Ok("Thinking & analyzing cluster query...".to_string()),
                                     });
                                 } else if t == "tool_call" {
-                                    let subtype =
-                                        v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                                    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
                                     if subtype == "started" {
-                                        if let Some((id, tool, args)) =
-                                            crate::app::extract_tool_call_start_info(&v)
-                                        {
+                                        if let Some((id, tool, args)) = crate::app::extract_tool_call_start_info(&v) {
                                             let _ = event_tx_clone.send(AppEvent::ActionResult {
                                                 title: format!("ai_status:{}", active_ctx_clone),
-                                                result: Ok(format!(
-                                                    "Executing {} query on cluster...",
-                                                    tool
-                                                )),
+                                                result: Ok(format!("Executing {} query on cluster...", tool)),
                                             });
                                             let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                                title: format!(
-                                                    "ai_tool_start:{}",
-                                                    active_ctx_clone
-                                                ),
+                                                title: format!("ai_tool_start:{}", active_ctx_clone),
                                                 result: Ok(format!("{}|{}|{}", id, tool, args)),
                                             });
                                         }
                                     } else if subtype == "completed" {
-                                        if let Some((id, is_err)) =
-                                            crate::app::extract_tool_call_completed_info(&v)
-                                        {
+                                        if let Some((id, is_err)) = crate::app::extract_tool_call_completed_info(&v) {
                                             let status_str = if is_err { "error" } else { "ok" };
                                             let _ = event_tx_clone.send(AppEvent::ActionResult {
                                                 title: format!("ai_tool_done:{}", active_ctx_clone),
@@ -652,10 +589,7 @@ pub async fn run_boxed_cursor_turn(
                         } else if !stderr_lines.is_empty() {
                             stderr_lines.join(" ")
                         } else {
-                            format!(
-                                "Cursor Agent exited with status: {} without generating output.",
-                                status
-                            )
+                            format!("Cursor Agent exited with status: {} without generating output.", status)
                         };
 
                         if err_detail.contains("resource_exhausted")
@@ -693,10 +627,7 @@ pub async fn run_boxed_cursor_turn(
                 let prompt_est = (prompt_with_context.len() + 500) / 4;
                 let comp_est = (total_output_chars / 4).max(1);
                 let total_est = prompt_est + comp_est;
-                let payload = format!(
-                    "{}|{}|{}|{}|{}",
-                    prompt_est, comp_est, 0, total_est, dur_val
-                );
+                let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, dur_val);
                 let _ = event_tx.send(AppEvent::ActionResult {
                     title: format!("ai_usage:{}", active_ctx),
                     result: Ok(payload),
@@ -737,9 +668,7 @@ mod tests {
         // Check provider-safe naming
         for t in &tools {
             assert!(
-                t.name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                t.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
                 "tool name '{}' must be provider safe",
                 t.name
             );

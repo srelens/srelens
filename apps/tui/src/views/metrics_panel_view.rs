@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::theme::Theme;
 use srelens_kube::metrics::MetricSample;
+use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricsTimeRange {
@@ -56,12 +56,7 @@ pub struct MetricsPanelState {
 }
 
 impl MetricsPanelState {
-    pub fn new(
-        target_kind: String,
-        target_name: String,
-        namespace: Option<String>,
-        samples: Vec<MetricSample>,
-    ) -> Self {
+    pub fn new(target_kind: String, target_name: String, namespace: Option<String>, samples: Vec<MetricSample>) -> Self {
         Self {
             target_kind,
             target_name,
@@ -81,7 +76,11 @@ impl MetricsPanelState {
 }
 
 /// Renders the interactive Metrics Panel modal overlay with real-time Sparklines.
-pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPanelState) {
+pub fn render_metrics_panel_modal(
+    f: &mut Frame,
+    area: Rect,
+    state: &MetricsPanelState,
+) {
     let samples = &state.samples;
     let modal_w = 84.min(area.width.saturating_sub(4));
     let modal_h = 24.min(area.height.saturating_sub(4));
@@ -145,7 +144,9 @@ pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPane
         MetricsTimeRange::OneHour,
     ];
 
-    let mut range_spans = vec![Span::styled("Time Range: ", Theme::header_label())];
+    let mut range_spans = vec![
+        Span::styled("Time Range: ", Theme::header_label()),
+    ];
 
     for (idx, r) in ranges.iter().enumerate() {
         let is_selected = *r == state.range;
@@ -157,10 +158,7 @@ pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPane
         } else {
             Style::default().fg(Theme::DIM)
         };
-        range_spans.push(Span::styled(
-            format!(" [{}: {}] ", idx + 1, r.label()),
-            style,
-        ));
+        range_spans.push(Span::styled(format!(" [{}: {}] ", idx + 1, r.label()), style));
         range_spans.push(Span::raw(" "));
     }
 
@@ -175,12 +173,7 @@ pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPane
         let empty_msg = Paragraph::new(vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled(
-                    "⚡ Collecting metrics-server data... ",
-                    Style::default()
-                        .fg(Theme::CYAN)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("⚡ Collecting metrics-server data... ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled("(Metrics poll every ~4s)", Style::default().fg(Theme::DIM)),
             ]),
         ])
@@ -232,12 +225,7 @@ pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPane
     let cpu_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            cpu_title,
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(cpu_title, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
 
     let cpu_inner = cpu_block.inner(body_chunks[1]);
     f.render_widget(cpu_block, body_chunks[1]);
@@ -256,12 +244,7 @@ pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPane
     let mem_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            mem_title,
-            Style::default()
-                .fg(Color::Rgb(168, 85, 247))
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(mem_title, Style::default().fg(Color::Rgb(168, 85, 247)).add_modifier(Modifier::BOLD)));
 
     let mem_inner = mem_block.inner(body_chunks[2]);
     f.render_widget(mem_block, body_chunks[2]);
@@ -281,10 +264,7 @@ pub fn render_metrics_panel_modal(f: &mut Frame, area: Rect, state: &MetricsPane
         Span::styled("<Esc>", Theme::header_label()),
         Span::raw(" Close"),
     ]);
-    f.render_widget(
-        Paragraph::new(footer_hints).alignment(Alignment::Center),
-        body_chunks[3],
-    );
+    f.render_widget(Paragraph::new(footer_hints).alignment(Alignment::Center), body_chunks[3]);
 }
 
 #[cfg(test)]

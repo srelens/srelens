@@ -24,8 +24,7 @@ pub struct ReasonTally {
 /// **The count is the number of event objects, NOT the sum of their `count` fields**,
 /// strictly adhering to the SRElens GUI §8 specification.
 pub fn tally_event_reasons(items: &[Value]) -> Vec<ReasonTally> {
-    let mut map: std::collections::HashMap<String, (usize, String)> =
-        std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
 
     for item in items {
@@ -96,9 +95,7 @@ pub fn render_reason_rail_widget(
         .title(Span::styled(
             title,
             if is_focused {
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
             } else {
                 Theme::title()
             },
@@ -126,12 +123,7 @@ pub fn render_reason_rail_widget(
     };
 
     let mut lines = Vec::new();
-    for (i, tally) in tallies
-        .iter()
-        .enumerate()
-        .skip(scroll_offset)
-        .take(visible_height)
-    {
+    for (i, tally) in tallies.iter().enumerate().skip(scroll_offset).take(visible_height) {
         let is_selected = is_focused && i == selected_idx;
         let is_active = active_filter == Some(tally.reason.as_str());
 
@@ -151,9 +143,7 @@ pub fn render_reason_rail_widget(
                 .fg(Theme::CYAN)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else if is_selected {
-            Style::default()
-                .fg(Theme::SEL_FG)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
         } else if is_warning {
             Style::default().fg(Theme::YELLOW)
         } else {
@@ -161,34 +151,21 @@ pub fn render_reason_rail_widget(
         };
 
         let mut spans = vec![
-            Span::styled(
-                cursor,
-                Style::default().fg(if is_selected { Theme::CYAN } else { Theme::DIM }),
-            ),
-            Span::styled(
-                dot_symbol,
-                Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(cursor, Style::default().fg(if is_selected { Theme::CYAN } else { Theme::DIM })),
+            Span::styled(dot_symbol, Style::default().fg(dot_color).add_modifier(Modifier::BOLD)),
             Span::styled(tally.reason.clone(), reason_style),
         ];
 
         let count_str = format!(" ({})", tally.count);
         let count_style = if is_selected {
-            Style::default()
-                .fg(Theme::SEL_FG)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::DIM)
         };
         spans.push(Span::styled(count_str, count_style));
 
         if is_active {
-            spans.push(Span::styled(
-                " ✔",
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(" ✔", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
         }
 
         let line = if is_selected {

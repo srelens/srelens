@@ -216,8 +216,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "workloads",
         aliases: &["wl", "workload"],
-        description:
-            "Unified Workloads view (Deployments, StatefulSets, DaemonSets, Pods, CronJobs)",
+        description: "Unified Workloads view (Deployments, StatefulSets, DaemonSets, Pods, CronJobs)",
         target: CommandTarget::Resource(ResourceKind::Workloads),
     },
     CommandDef {
@@ -578,10 +577,7 @@ pub fn command_suggestions(query: &str) -> Vec<(DynamicCommandDef, usize)> {
     command_suggestions_with_crds(query, &[])
 }
 
-pub fn command_suggestions_with_crds(
-    query: &str,
-    crds: &[CrdMeta],
-) -> Vec<(DynamicCommandDef, usize)> {
+pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(DynamicCommandDef, usize)> {
     let q = query.trim().trim_start_matches(':').to_lowercase();
     let mut matches = Vec::new();
 
@@ -628,11 +624,7 @@ pub fn command_suggestions_with_crds(
             || norm_singular.starts_with(&q)
         {
             matches.push((crd_def, 105));
-        } else if crd_def
-            .aliases
-            .iter()
-            .any(|a| a.to_lowercase().starts_with(&q))
-        {
+        } else if crd_def.aliases.iter().any(|a| a.to_lowercase().starts_with(&q)) {
             matches.push((crd_def, 95));
         } else if crd.plural.to_lowercase().contains(&q)
             || crd.kind.to_lowercase().contains(&q)

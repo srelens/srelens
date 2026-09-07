@@ -73,9 +73,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                 Span::styled(
                                     format!("{}{}{:<20}", prefix, cmd.name, alias_str),
                                     if is_selected {
-                                        Style::default()
-                                            .fg(Theme::CYAN)
-                                            .add_modifier(Modifier::BOLD)
+                                        Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
                                     } else {
                                         Style::default().fg(Theme::FG)
                                     },
@@ -163,10 +161,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                 spans.push(Span::raw(" | "));
                 spans.push(Span::styled("Filter: ", Theme::header_label()));
                 spans.push(Span::styled(
-                    format!(
-                        "\"{}\" [{}/{}]",
-                        props.filter_input, props.matched_count, props.total_count
-                    ),
+                    format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count),
                     Style::default().fg(Theme::YELLOW),
                 ));
             }
