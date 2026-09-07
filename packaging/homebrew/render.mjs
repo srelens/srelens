@@ -25,12 +25,17 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = process.env.GITHUB_REPOSITORY || "srelens/srelens";
 
-/** The four archives the formula offers, keyed by the placeholder they replace. */
+/** The four archives the formula offers.
+ *
+ * Linux takes the STATIC musl builds: the glibc ones are produced on
+ * ubuntu-22.04 and ubuntu-24.04-arm and so carry a glibc floor of 2.35 and
+ * 2.39, while Homebrew on Linux supports much older distributions. Keep
+ * this list and the formula's URLs in step. */
 const TARGETS = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
-  "aarch64-unknown-linux-gnu",
-  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-musl",
 ];
 
 function die(message) {
@@ -82,7 +87,12 @@ function checksumFor(file) {
   die(`${sumsUrl} does not list ${file}`);
 }
 
-let formula = readFileSync(join(HERE, "srelens-tui.rb"), "utf8");
+// Normalised to LF on read. A checkout on Windows can give the template CRLF,
+// and every marker below is written with LF — a mismatch made the render fail
+// with "could not find the checksum line", which reads like a broken template
+// rather than a line ending. The formula is written out with LF either way,
+// which is what the tap should carry.
+let formula = readFileSync(join(HERE, "srelens-tui.rb"), "utf8").split(String.fromCharCode(13)).join("");
 
 // Substitute per target, so a placeholder left behind is a bug that shows up
 // here rather than as an install failure.

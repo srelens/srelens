@@ -13,6 +13,12 @@ a repository of its own.
 | `srelens-tui.rb` | The formula, as a template. Version `0.0.0` and zeroed checksums. |
 | `render.mjs` | Fills those in from a published release's `SHA256SUMS`. |
 
+Linux installs take the **static musl** archives, not the glibc ones. The
+glibc builds are produced on ubuntu-22.04 and ubuntu-24.04-arm, so they
+carry a glibc floor of 2.35 and 2.39; Homebrew on Linux supports far older
+distributions than that, and a dynamically linked binary would fail before
+`main` with a `GLIBC_2.3x` symbol error that tells the user nothing.
+
 A formula, not a cask: this is a command-line binary. The desktop `.dmg` wants
 `brew install --cask` and is tracked separately in #225.
 

@@ -31,17 +31,26 @@ class SrelensTui < Formula
     end
   end
 
-  # Homebrew runs on Linux too, and the release builds both architectures for
-  # it. The glibc archives are the right ones here: Homebrew on Linux targets
-  # glibc systems, and the musl builds exist for hosts (Alpine, older glibc)
-  # that Homebrew does not support anyway.
+  # Homebrew runs on Linux too, and takes the STATIC musl archives there.
+  #
+  # Not the glibc ones, which is what this said first and was wrong about.
+  # Those are built on ubuntu-22.04 and ubuntu-24.04-arm, so they carry a
+  # glibc floor of 2.35 and 2.39 — and Homebrew on Linux deliberately
+  # supports far older distributions than that, going as far as building
+  # its own glibc when the host's is too old. A dynamically linked binary
+  # would then fail before `main` with a GLIBC_2.3x symbol error, which
+  # tells the user nothing about what to do.
+  #
+  # The static builds have no such floor. Their known costs — musl's
+  # slower allocator, its narrower resolver — do not matter for a terminal
+  # client that spends its time waiting on an API server.
   on_linux do
     on_arm do
-      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-aarch64-unknown-linux-musl.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
-      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-x86_64-unknown-linux-musl.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
