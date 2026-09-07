@@ -607,6 +607,45 @@ pub fn plan(
     })))
 }
 
+/// Who owns the binary at `path`, decided AFTER following links, and the
+/// resolved path it was decided from.
+///
+/// The resolution is the whole point. Homebrew installs into
+/// `<prefix>/Cellar/<formula>/<version>/bin` and links that into
+/// `<prefix>/bin`, so the path someone invokes is a symlink — and on Intel
+/// macOS that prefix is `/usr/local`, which is also where the install guide
+/// tells people to put a copy by hand. Matching on the path as given would
+/// either miss every brew install there or refuse every manual one; the two
+/// are indistinguishable until the link is followed.
+///
+/// The resolved path comes back so this is testable without a real
+/// `/opt/homebrew` to point at: a test can assert the link was followed
+/// even where it cannot arrange for the result to match a package root.
+pub fn resolve_owner(path: &Path) -> (PathBuf, Option<&'static str>) {
+    // The LINK'S OWN LOCATION is checked first, because it can carry ownership
+    // that its target does not. A distribution package may install
+    // `/usr/bin/srelens-tui` pointing into `/usr/lib/srelens/`, and following
+    // the link throws away the `/usr/bin/` that said who owns it — leaving the
+    // updater to report a permissions problem, or to overwrite a packaged
+    // symlink when re-run with enough privilege.
+    if let Some(manager) = package_manager_for(path) {
+        return (path.to_path_buf(), Some(manager));
+    }
+
+    // Then the target, which is where Homebrew's ownership lives: it links
+    // `<prefix>/bin/x` to `<prefix>/Cellar/x/<version>/bin/x`, and on Intel
+    // macOS that prefix is `/usr/local` — the same place the install guide
+    // tells people to put a copy by hand. Those two are indistinguishable
+    // until the link is followed.
+    //
+    // A path that cannot be resolved — it does not exist yet, a permission
+    // stops the walk — is used as given rather than treated as an error.
+    // Failing to look is not evidence of ownership either way.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let manager = package_manager_for(&resolved);
+    (resolved, manager)
+}
+
 /// Download, verify, and install the binary a [`Plan`] names.
 ///
 /// Verification happens before anything is written, so a mismatched download
@@ -615,10 +654,11 @@ pub fn apply(
     plan: &Plan,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
 ) -> Result<(), UpdateError> {
-    if let Some(manager) = package_manager_for(&plan.target) {
+    let (real, owner) = resolve_owner(&plan.target);
+    if let Some(manager) = owner {
         return Err(UpdateError::PackageManaged {
             manager,
-            path: plan.target.clone(),
+            path: real,
         });
     }
     let dir = plan.target.parent().unwrap_or_else(|| Path::new("."));
@@ -1111,6 +1151,67 @@ mod tests {
         );
 
         set(0o755);
+    }
+
+    /// Ownership carried by the LINK'S OWN location survives.
+    ///
+    /// A distribution may install `/usr/bin/x` pointing into `/usr/lib/…`,
+    /// where following the link first throws away the `/usr/bin/` that said
+    /// who owns it — the opposite of the Homebrew case, where ownership lives
+    /// in the target. That is why both are checked.
+    ///
+    /// NOT gated to Unix: it is string matching over a literal path and needs
+    /// no filesystem. The first version of this lived inside the Unix-only
+    /// test below, so it never compiled on the machine it was written on and
+    /// broke CI on the one platform that runs it.
+    #[test]
+    fn ownership_from_the_links_own_location_survives() {
+        use super::resolve_owner;
+        use std::path::Path;
+
+        let packaged = Path::new("/usr/bin/srelens-tui");
+        let (from, owner) = resolve_owner(packaged);
+        assert_eq!(owner, Some("your distribution's package manager"));
+        assert_eq!(from, packaged, "the deciding path is the one that matched");
+    }
+
+    /// Ownership is decided after following links, not before.
+    ///
+    /// Asserting on literal Cellar paths does not test this: those match
+    /// with or without the resolution. Building brew's actual shape — a
+    /// `bin/` link into a `Cellar/` tree — and checking WHICH path the
+    /// decision was made from is what fails if the resolution is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn ownership_is_decided_after_following_the_link() {
+        use super::resolve_owner;
+
+        let _guard = file_test_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cellar = dir.path().join("Cellar/srelens-tui/1.2.3/bin");
+        std::fs::create_dir_all(&cellar).expect("cellar");
+        let installed = cellar.join("srelens-tui");
+        std::fs::write(&installed, b"the real binary").expect("write");
+
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let linked = bin.join("srelens-tui");
+        std::os::unix::fs::symlink(&installed, &linked).expect("symlink");
+
+        let (resolved, _) = resolve_owner(&linked);
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&installed).expect("canonicalize"),
+            "the decision must be made from the link's target"
+        );
+        assert_ne!(resolved, linked, "not from the link itself");
+
+        // A path that does not resolve is used as given rather than
+        // becoming an error.
+        let missing = dir.path().join("not-here");
+        let (resolved, owner) = resolve_owner(&missing);
+        assert_eq!(resolved, missing);
+        assert_eq!(owner, None);
     }
 
     /// A sticky bit only makes a world-writable directory safe when its

@@ -1,6 +1,11 @@
 target
-node_modules
-apps/desktop/node_modules
+# Every node_modules, at any depth. A bare `node_modules` matches the root one
+# only, so a developer's `packages/ui-next/node_modules` was copied in on top
+# of the install the image had just done -- and its workspace links are
+# absolute host paths, which dangle inside the container. The build then could
+# not resolve `@srelens/ui-kit/gallery`, on a machine that had run pnpm
+# install and never in CI.
+**/node_modules
 apps/desktop/dist
 apps/desktop/src-tauri/target
 .git
