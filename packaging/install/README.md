@@ -110,3 +110,10 @@ draw on, and exhausting it would fail this job on unrelated pull requests.
 CI runs this and `shellcheck -s sh` on every pull request, under `dash` rather
 than bash — the script promises POSIX `sh`, and bash would quietly accept
 bashisms that Debian and Alpine users would not.
+
+It runs the suite twice: once on the runner, and once as root in a container.
+Six cases skip without root, and they are the six that matter most — every
+rule about who owns the destination needs a second account and a second group
+to mean anything. On an unprivileged runner alone, the ownership walk, the ACL
+refusal and the group-membership lookup all report `skip`, and the job goes
+green having proven none of them.
