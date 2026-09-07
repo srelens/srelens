@@ -149,7 +149,7 @@ pub struct TopologyGraphIn {
 
 /// Which column a node stands in. The screen lays these out left to right;
 /// the order is fixed here so the two sides cannot disagree about it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Lane {
     Route,
@@ -312,7 +312,7 @@ pub struct Unlisted {
     pub reason: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TopologyGraphOut {
     pub nodes: Vec<TopologyNode>,
     pub edges: Vec<TopologyEdge>,
@@ -2126,7 +2126,7 @@ pub fn topology_probe_capability(cache: Arc<ClientCache>) -> Capability {
 
 /// Build the graph from the API, then fold in whatever the optional sources
 /// give; `probe` is the exec-per-pod connection read.
-async fn build_topology(
+pub async fn build_topology(
     cache: Arc<ClientCache>,
     input: TopologyGraphIn,
     probe: bool,

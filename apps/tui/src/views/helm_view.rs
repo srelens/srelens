@@ -16,14 +16,33 @@ pub struct HelmReleaseItem {
     pub revision: i64,
     pub status: String,
     pub chart: String,
+    pub chart_version: String,
     #[serde(rename = "appVersion")]
     pub app_version: String,
     pub updated: String,
 }
 
+impl From<srelens_kube::helm::HelmReleaseSummary> for HelmReleaseItem {
+    fn from(s: srelens_kube::helm::HelmReleaseSummary) -> Self {
+        Self {
+            name: s.name,
+            namespace: s.namespace,
+            revision: s.revision,
+            status: s.status,
+            chart: s.chart,
+            chart_version: s.chart_version,
+            app_version: s.app_version,
+            updated: s.updated,
+        }
+    }
+}
+
 pub struct HelmViewState {
     pub releases: Vec<HelmReleaseItem>,
     pub selected_idx: usize,
+    pub is_loading: bool,
+    pub error: Option<String>,
+    pub filter_query: String,
 }
 
 impl HelmViewState {
@@ -31,18 +50,48 @@ impl HelmViewState {
         Self {
             releases: Vec::new(),
             selected_idx: 0,
+            is_loading: true,
+            error: None,
+            filter_query: String::new(),
         }
     }
 
     pub fn set_releases(&mut self, releases: Vec<HelmReleaseItem>) {
         self.releases = releases;
-        if self.selected_idx >= self.releases.len() {
-            self.selected_idx = self.releases.len().saturating_sub(1);
+        self.is_loading = false;
+        self.error = None;
+        let count = self.filtered_indices().len();
+        if self.selected_idx >= count {
+            self.selected_idx = count.saturating_sub(1);
         }
     }
 
+    pub fn set_error(&mut self, err: String) {
+        self.error = Some(err);
+        self.is_loading = false;
+    }
+
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter_query.is_empty() {
+            return (0..self.releases.len()).collect();
+        }
+        let q = self.filter_query.to_lowercase();
+        self.releases
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                r.name.to_lowercase().contains(&q)
+                    || r.namespace.to_lowercase().contains(&q)
+                    || r.chart.to_lowercase().contains(&q)
+                    || r.status.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     pub fn select_next(&mut self) {
-        if !self.releases.is_empty() && self.selected_idx + 1 < self.releases.len() {
+        let indices = self.filtered_indices();
+        if !indices.is_empty() && self.selected_idx + 1 < indices.len() {
             self.selected_idx += 1;
         }
     }
@@ -54,26 +103,58 @@ impl HelmViewState {
     }
 
     pub fn selected_release(&self) -> Option<&HelmReleaseItem> {
-        self.releases.get(self.selected_idx)
+        let indices = self.filtered_indices();
+        let idx = *indices.get(self.selected_idx)?;
+        self.releases.get(idx)
     }
 }
 
 pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
-    let title = format!(" Helm 3 Releases [{}] (<v> Values <y> Manifest <d> History <ctrl-d> Uninstall <Esc> Back) ", state.releases.len());
+    let filtered = state.filtered_indices();
+    let count_text = if state.filter_query.is_empty() {
+        format!("{}", state.releases.len())
+    } else {
+        format!("{}/{}", filtered.len(), state.releases.len())
+    };
+
+    let title = format!(
+        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
+        count_text
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(title, Theme::title()));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    if state.is_loading {
+        let loading_msg = Paragraph::new("⟳ Loading Helm releases from cluster...")
+            .style(Style::default().fg(Theme::cyan()));
+        f.render_widget(loading_msg, inner);
+        return;
+    }
+
+    if let Some(ref err) = state.error {
+        let error_msg = Paragraph::new(format!("⚠ Failed to load Helm releases: {}", err))
+            .style(Style::default().fg(Theme::red()));
+        f.render_widget(error_msg, inner);
+        return;
+    }
+
     if state.releases.is_empty() {
-        let empty_msg = Paragraph::new(
-            "No Helm releases found in current namespace.",
-        )
-        .style(Style::default().fg(Theme::DIM));
+        let empty_msg = Paragraph::new("No Helm releases found in current namespace.")
+            .style(Style::default().fg(Theme::dim()));
+        f.render_widget(empty_msg, inner);
+        return;
+    }
+
+    if filtered.is_empty() {
+        let empty_msg = Paragraph::new(format!("No releases matching filter '{}'", state.filter_query))
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;
     }
@@ -90,12 +171,12 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     .height(1)
     .bottom_margin(1);
 
-    let rows: Vec<Row> = state
-        .releases
+    let rows: Vec<Row> = filtered
         .iter()
         .enumerate()
-        .map(|(i, rel)| {
-            let is_selected = i == state.selected_idx;
+        .map(|(display_idx, &real_idx)| {
+            let rel = &state.releases[real_idx];
+            let is_selected = display_idx == state.selected_idx;
             let status_style = if rel.status == "deployed" {
                 Theme::status_ok()
             } else if rel.status.contains("fail") {
@@ -110,12 +191,18 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
                 Style::default()
             };
 
+            let chart_display = if rel.chart_version.is_empty() {
+                rel.chart.clone()
+            } else {
+                format!("{}-{}", rel.chart, rel.chart_version)
+            };
+
             Row::new(vec![
                 Cell::from(rel.namespace.as_str()),
                 Cell::from(rel.name.as_str()),
                 Cell::from(rel.revision.to_string()),
                 Cell::from(rel.status.as_str()).style(status_style),
-                Cell::from(rel.chart.as_str()),
+                Cell::from(chart_display),
                 Cell::from(rel.app_version.as_str()),
                 Cell::from(rel.updated.as_str()),
             ])
@@ -125,10 +212,10 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
 
     let widths = [
         Constraint::Length(18),
-        Constraint::Min(25),
+        Constraint::Min(24),
         Constraint::Length(10),
         Constraint::Length(14),
-        Constraint::Length(25),
+        Constraint::Length(26),
         Constraint::Length(15),
         Constraint::Length(25),
     ];

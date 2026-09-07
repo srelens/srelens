@@ -26,12 +26,14 @@ pub struct StatusBarProps<'a> {
     pub toast: Option<(&'a str, Style)>,
     pub custom_hints: Option<&'a [(&'a str, &'a str)]>,
     pub suggestions: Option<(&'a [(crate::commands::DynamicCommandDef, usize)], usize)>,
+    pub close_pf_button: Option<(&'a str, Style)>,
+    pub close_pf_rect: Option<&'a std::cell::RefCell<Option<Rect>>>,
 }
 
 pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Theme::BORDER));
+        .border_style(Style::default().fg(Theme::border()));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -39,17 +41,25 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
     match props.mode {
         InputMode::Command => {
             // Render command bar with autocomplete popup
+            let prompt_prefix = Theme::prompt_glyph();
+            let prompt_str = if prompt_prefix == ":" {
+                ":".to_string()
+            } else {
+                format!("{}:", prompt_prefix)
+            };
             let cmd_text = Line::from(vec![
-                Span::styled(":", Theme::prompt()),
-                Span::styled(props.command_input, Style::default().fg(Theme::FG)),
-                Span::styled("█", Style::default().fg(Theme::CYAN)), // Cursor
+                Span::styled(prompt_str, Theme::prompt()),
+                Span::styled(props.command_input, Style::default().fg(Theme::fg())),
+                Span::styled("█", Style::default().fg(Theme::cyan())), // Cursor
             ]);
             f.render_widget(Paragraph::new(cmd_text), inner);
 
             // Render autocomplete suggestions if typing
             if let Some((suggs, selected_idx)) = props.suggestions {
                 if !suggs.is_empty() {
-                    let popup_height = (suggs.len() as u16 + 2).min(8);
+                    let max_visible = 6usize;
+                    let visible_count = suggs.len().min(max_visible);
+                    let popup_height = (visible_count as u16 + 2).min(8);
                     let popup_area = Rect {
                         x: area.x + 2,
                         y: area.y.saturating_sub(popup_height),
@@ -58,11 +68,21 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                     };
                     f.render_widget(Clear, popup_area);
 
-                    let items: Vec<ListItem> = suggs
+                    // Compute window offset to keep selected_idx visible
+                    let scroll_offset = if selected_idx >= max_visible {
+                        selected_idx + 1 - max_visible
+                    } else {
+                        0
+                    };
+
+                    let visible_slice = &suggs[scroll_offset..(scroll_offset + visible_count).min(suggs.len())];
+
+                    let items: Vec<ListItem> = visible_slice
                         .iter()
                         .enumerate()
-                        .map(|(i, (cmd, _score))| {
-                            let is_selected = i == selected_idx;
+                        .map(|(rel_i, (cmd, _score))| {
+                            let abs_i = scroll_offset + rel_i;
+                            let is_selected = abs_i == selected_idx;
                             let prefix = if is_selected { "▶ " } else { "  " };
                             let alias_str = if !cmd.aliases.is_empty() {
                                 format!(" ({})", cmd.aliases.join(", "))
@@ -73,14 +93,14 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                 Span::styled(
                                     format!("{}{}{:<20}", prefix, cmd.name, alias_str),
                                     if is_selected {
-                                        Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                                        Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
                                     } else {
-                                        Style::default().fg(Theme::FG)
+                                        Style::default().fg(Theme::fg())
                                     },
                                 ),
                                 Span::styled(
                                     format!("  {}", cmd.description),
-                                    Style::default().fg(Theme::DIM),
+                                    Style::default().fg(Theme::dim()),
                                 ),
                             ]);
                             ListItem::new(line).style(if is_selected {
@@ -91,37 +111,53 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                         })
                         .collect();
 
+                    let title = if suggs.len() > max_visible {
+                        format!(" Commands [{}/{}] (Tab: complete, Enter: run) ", selected_idx + 1, suggs.len())
+                    } else {
+                        " Commands (Tab to complete, Enter to run) ".to_string()
+                    };
+
                     let list = List::new(items).block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Theme::ACCENT))
-                            .title(" Commands (Tab to complete, Enter to run) "),
+                            .border_type(Theme::border_type())
+                            .border_style(Style::default().fg(Theme::accent()))
+                            .title(title),
                     );
                     f.render_widget(list, popup_area);
                 }
             }
         }
         InputMode::Filter => {
-            let (label, stats, hint) = if props.is_text_search {
+            let prompt_prefix = Theme::prompt_glyph();
+            let base_label = if props.is_text_search {
+                "Search: /"
+            } else {
+                "Filter (regex): /"
+            };
+            let label = if prompt_prefix != ":" {
+                format!("{}{}", prompt_prefix, base_label)
+            } else {
+                base_label.to_string()
+            };
+            let (stats, hint) = if props.is_text_search {
                 (
-                    "Search: /",
                     format!("[{} matches]", props.matched_count),
                     "  (Enter to finish, n/N next/prev, Esc to clear)",
                 )
             } else {
                 (
-                    "Filter (regex): /",
                     format!("[{}/{}]", props.matched_count, props.total_count),
                     "  (Enter to apply, Esc to clear)",
                 )
             };
             let filter_text = Line::from(vec![
                 Span::styled(label, Theme::prompt()),
-                Span::styled(props.filter_input, Style::default().fg(Theme::FG)),
-                Span::styled("█", Style::default().fg(Theme::YELLOW)), // Cursor
+                Span::styled(props.filter_input, Style::default().fg(Theme::fg())),
+                Span::styled("█", Style::default().fg(Theme::yellow())), // Cursor
                 Span::raw("  "),
-                Span::styled(stats, Style::default().fg(Theme::DIM)),
-                Span::styled(hint, Style::default().fg(Theme::DIM)),
+                Span::styled(stats, Style::default().fg(Theme::dim())),
+                Span::styled(hint, Style::default().fg(Theme::dim())),
             ]);
             f.render_widget(Paragraph::new(filter_text), inner);
         }
@@ -147,9 +183,9 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
 
             // Render notification toast without hiding keystroke palette
             if let Some((msg, style)) = props.toast {
-                spans.push(Span::styled("➜ ", style));
+                spans.push(Span::styled(format!("{} ", Theme::bullet_glyph()), style));
                 spans.push(Span::styled(format!("{} ", msg), style));
-                spans.push(Span::styled("│ ", Style::default().fg(Theme::BORDER)));
+                spans.push(Span::styled("│ ", Style::default().fg(Theme::border())));
             }
 
             for (key, desc) in hints {
@@ -162,11 +198,46 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                 spans.push(Span::styled("Filter: ", Theme::header_label()));
                 spans.push(Span::styled(
                     format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count),
-                    Style::default().fg(Theme::YELLOW),
+                    Style::default().fg(Theme::yellow()),
                 ));
             }
 
-            f.render_widget(Paragraph::new(Line::from(spans)), inner);
+            if let Some((btn_label, btn_style)) = props.close_pf_button {
+                let btn_text = format!(" [ {} ] ", btn_label);
+                let btn_width = (btn_text.len() as u16).min(inner.width);
+                let btn_x = inner.x + inner.width.saturating_sub(btn_width);
+                let btn_area = Rect {
+                    x: btn_x,
+                    y: inner.y,
+                    width: btn_width,
+                    height: inner.height.min(1),
+                };
+                if let Some(rect_cell) = props.close_pf_rect {
+                    *rect_cell.borrow_mut() = Some(btn_area);
+                }
+
+                let hints_area = Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width.saturating_sub(btn_width),
+                    height: inner.height,
+                };
+                f.render_widget(Paragraph::new(Line::from(spans)), hints_area);
+                f.render_widget(Paragraph::new(Line::from(vec![
+                    Span::styled(btn_text, btn_style),
+                ])), btn_area);
+            } else {
+                if let Some(rect_cell) = props.close_pf_rect {
+                    *rect_cell.borrow_mut() = None;
+                }
+                f.render_widget(Paragraph::new(Line::from(spans)), inner);
+            }
+        }
+    }
+
+    if props.mode != &InputMode::Normal {
+        if let Some(rect_cell) = props.close_pf_rect {
+            *rect_cell.borrow_mut() = None;
         }
     }
 }

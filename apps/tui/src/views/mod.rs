@@ -3,6 +3,7 @@ pub mod cracked_lens;
 pub mod describe_view;
 pub mod exec_view;
 pub mod helm_view;
+pub mod helm_detail_view;
 pub mod logs_view;
 pub mod metrics_panel_view;
 pub mod overview_view;
@@ -13,6 +14,9 @@ pub mod settings_view;
 pub mod toolbox_view;
 pub mod tree_view;
 pub mod node_inspector_view;
+pub mod topology_view;
+pub mod gpu_view;
+pub mod top_view;
 pub mod yaml_view;
 
 /// Strip everything from cluster-controlled text that would desynchronise
@@ -112,7 +116,8 @@ pub use assistant_view::{render_assistant_view, AssistantViewState};
 pub use cracked_lens::render_cracked_lens;
 pub use describe_view::{render_describe_view, DescribeViewState};
 pub use exec_view::ExecRunner;
-pub use helm_view::{render_helm_view, HelmViewState};
+pub use helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+pub use helm_detail_view::{render_helm_detail_view, HelmDetailTab, HelmDetailViewState, ValuesDiffMode};
 pub use logs_view::{render_logs_view, LogsViewState};
 pub use metrics_panel_view::{render_metrics_panel_modal, MetricsPanelState, MetricsTimeRange};
 pub use overview_view::{render_overview_view, OverviewViewState};

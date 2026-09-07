@@ -15,6 +15,7 @@ use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::contexts::ContextDto;
 use srelens_kube::{k8s_openapi, kube};
+use srelens_streams::forward::ForwardManager;
 use srelens_streams::logs::LogStreamManager;
 use srelens_streams::watch::WatchManager;
 
@@ -38,12 +39,16 @@ pub enum ActiveView {
     Logs(LogsViewState),
     PortForwards(PortForwardViewState),
     Helm(HelmViewState),
+    HelmDetail(HelmDetailViewState),
     Overview(OverviewViewState),
     Toolbox(ToolboxViewState),
     Assistant,
     Settings(SettingsViewState),
     Tree(tree_view::TreeViewState),
     NodeInspector(node_inspector_view::NodeInspectorState),
+    Topology(topology_view::TopologyViewState),
+    GpuInfo(gpu_view::GpuViewState),
+    Top(top_view::TopViewState),
 }
 
 pub struct App {
@@ -64,6 +69,7 @@ pub struct App {
     pub client_cache: Arc<ClientCache>,
     pub watch_manager: Arc<WatchManager>,
     pub logs_manager: Arc<LogStreamManager>,
+    pub forward_manager: Arc<ForwardManager>,
     pub event_tx: UnboundedSender<AppEvent>,
     pub current_watch_channel: Option<String>,
     pub active_watch_channels: HashSet<String>,
@@ -75,6 +81,7 @@ pub struct App {
     pub is_running: bool,
     pub requires_terminal_suspend: Option<SuspendAction>,
     pub context_chip_rects: std::cell::RefCell<Vec<(ratatui::layout::Rect, String)>>,
+    pub close_pf_button_rect: std::cell::RefCell<Option<ratatui::layout::Rect>>,
     // Dynamic Cluster Metrics & Information
     pub cluster_version: String,
     pub cluster_name: String,
@@ -152,6 +159,7 @@ impl App {
         let client_cache = ClientCache::new_many(kubeconfig_paths.clone());
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(ForwardManager::new(client_cache.clone()));
 
         // Resolve contexts
         let resolved = srelens_kube::context_resolve::resolve_contexts(&kubeconfig_paths);
@@ -224,6 +232,7 @@ impl App {
             client_cache,
             watch_manager,
             logs_manager,
+            forward_manager,
             event_tx,
             current_watch_channel: None,
             active_watch_channels: HashSet::new(),
@@ -235,6 +244,7 @@ impl App {
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
+            close_pf_button_rect: std::cell::RefCell::new(None),
             cluster_version: "Connecting...".to_string(),
             cluster_name,
             server_url,
@@ -258,6 +268,10 @@ impl App {
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
             app.assistant_state.caveman_level = Some(lvl);
+        }
+
+        if let Some(theme_name) = &app.ai_settings.theme {
+            Theme::set_theme_by_name(theme_name);
         }
 
         app.refresh_cluster_info();
@@ -298,6 +312,8 @@ impl App {
         // Periodically refresh pod metrics (CPU/MEM) every ~4 seconds (40 ticks at 100ms)
         let need_pod_metrics = if let ActiveView::Table(table) = &self.active_view {
             table.kind == ResourceKind::Pods || table.kind == ResourceKind::Workloads
+        } else if matches!(self.active_view, ActiveView::Top(_)) {
+            true
         } else if let Some(Modal::MetricsTimeline(ref panel)) = self.modal {
             panel.target_kind == "Pod"
         } else {
@@ -313,7 +329,7 @@ impl App {
         // Periodically refresh node metrics every ~4 seconds
         let need_node_metrics = if let ActiveView::Table(table) = &self.active_view {
             table.kind == ResourceKind::Nodes
-        } else if matches!(self.active_view, ActiveView::NodeInspector(_)) {
+        } else if matches!(self.active_view, ActiveView::NodeInspector(_) | ActiveView::Top(_)) {
             true
         } else if let Some(Modal::MetricsTimeline(ref panel)) = self.modal {
             panel.target_kind == "Node"
@@ -325,6 +341,10 @@ impl App {
             if self.node_metrics_tick_counter % 40 == 1 {
                 self.refresh_node_metrics();
             }
+        }
+
+        if matches!(self.active_view, ActiveView::PortForwards(_)) {
+            self.sync_port_forwards();
         }
     }
 
@@ -446,6 +466,7 @@ impl App {
                 }
             }
         }
+        self.refresh_top_view_data();
     }
 
     pub fn rebuild_workloads_table(&mut self) {
@@ -729,6 +750,8 @@ impl App {
                 }
             }
         }
+
+        self.refresh_top_view_data();
     }
 
     pub fn refresh_cluster_info(&self) {
@@ -1243,6 +1266,64 @@ impl App {
     }
 
     pub async fn restart_active_watch(&mut self) {
+        if matches!(self.active_view, ActiveView::Top(_)) {
+            let ctx = self.active_context.clone();
+            let ns = self.active_namespace.clone();
+
+            // Ensure "nodes" watch is running so node allocatable CPU & Memory are populated
+            let node_ch = format!("watch:{}:{}:nodes", ctx, "");
+            if !self.watch_manager.has_channel(&node_ch) {
+                if self.active_watch_pool.len() >= 20 {
+                    let evicted = self.active_watch_pool.remove(0);
+                    self.watch_manager.stop(&evicted);
+                    self.active_watch_channels.remove(&evicted);
+                }
+                let sink = TuiSink::arc(self.event_tx.clone());
+                let paths = self.kubeconfig_paths.clone();
+                self.active_watch_channels.insert(node_ch.clone());
+                self.active_watch_pool.push(node_ch.clone());
+                let _ = self.watch_manager.start(sink, ctx.clone(), "".to_string(), "nodes".to_string(), node_ch, paths).await;
+            } else if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &node_ch) {
+                let c = self.active_watch_pool.remove(pos);
+                self.active_watch_pool.push(c);
+            }
+
+            // Ensure "pods" watch is running so pod requests & limits are populated
+            let pod_ch = format!("watch:{}:{}:pods", ctx, ns);
+            if !self.watch_manager.has_channel(&pod_ch) {
+                if self.active_watch_pool.len() >= 20 {
+                    let evicted = self.active_watch_pool.remove(0);
+                    self.watch_manager.stop(&evicted);
+                    self.active_watch_channels.remove(&evicted);
+                }
+                let sink = TuiSink::arc(self.event_tx.clone());
+                let paths = self.kubeconfig_paths.clone();
+                self.active_watch_channels.insert(pod_ch.clone());
+                self.active_watch_pool.push(pod_ch.clone());
+                let _ = self.watch_manager.start(sink, ctx.clone(), ns.clone(), "pods".to_string(), pod_ch, paths).await;
+            } else if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &pod_ch) {
+                let c = self.active_watch_pool.remove(pos);
+                self.active_watch_pool.push(c);
+            }
+
+            self.refresh_pod_metrics();
+            self.refresh_node_metrics();
+            self.refresh_top_view_data();
+            return;
+        }
+
+        if matches!(self.active_view, ActiveView::Helm(_)) {
+            self.refresh_helm_releases();
+            return;
+        }
+
+        if let ActiveView::HelmDetail(detail) = &self.active_view {
+            let name = detail.release_name.clone();
+            let ns = detail.namespace.clone();
+            self.reload_helm_detail(&name, &ns);
+            return;
+        }
+
         if let ActiveView::Table(table) = &mut self.active_view {
             if table.kind == ResourceKind::Workloads {
                 let ctx = self.active_context.clone();
@@ -1365,6 +1446,49 @@ impl App {
                         _ => {}
                     }
                 }
+                Modal::InputConfirm {
+                    title,
+                    message,
+                    action_name,
+                    required_input,
+                    mut current_input,
+                    is_destructive,
+                } => {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if current_input.trim().eq_ignore_ascii_case(&required_input) {
+                                self.modal = None;
+                                self.execute_modal_confirm(action_name).await;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            self.modal = None;
+                        }
+                        KeyCode::Backspace => {
+                            current_input.pop();
+                            self.modal = Some(Modal::InputConfirm {
+                                title,
+                                message,
+                                action_name,
+                                required_input,
+                                current_input,
+                                is_destructive,
+                            });
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                            current_input.push(c);
+                            self.modal = Some(Modal::InputConfirm {
+                                title,
+                                message,
+                                action_name,
+                                required_input,
+                                current_input,
+                                is_destructive,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
                 Modal::Scale { workload_name, mut input, current_replicas } => {
                     match key.code {
                         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -1387,21 +1511,22 @@ impl App {
                         _ => {}
                     }
                 }
-                Modal::PortForward { pod_name, namespace, container_port, mut local_port_input } => {
+                Modal::PortForward { pod_name, namespace, container_port, mut local_port_input, kind } => {
                     match key.code {
                         KeyCode::Char(c) if c.is_ascii_digit() => {
                             local_port_input.push(c);
-                            self.modal = Some(Modal::PortForward { pod_name, namespace, container_port, local_port_input });
+                            self.modal = Some(Modal::PortForward { pod_name, namespace, container_port, local_port_input, kind });
                         }
                         KeyCode::Backspace => {
                             local_port_input.pop();
-                            self.modal = Some(Modal::PortForward { pod_name, namespace, container_port, local_port_input });
+                            self.modal = Some(Modal::PortForward { pod_name, namespace, container_port, local_port_input, kind });
                         }
                         KeyCode::Enter => {
                             self.modal = None;
                             if let Ok(local_port) = local_port_input.parse::<u16>() {
                                 self.execute_start_port_forward(
                                     pod_name,
+                                    kind,
                                     namespace,
                                     local_port,
                                     container_port,
@@ -1728,11 +1853,15 @@ impl App {
                 }
                 Modal::MetricsTimeline(mut state) => {
                     match key.code {
-                        KeyCode::Esc => {
+                        KeyCode::Esc | KeyCode::Char('q') => {
                             self.modal = None;
                         }
-                        KeyCode::Tab => {
+                        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                             state.cycle_time_range();
+                            self.modal = Some(Modal::MetricsTimeline(state));
+                        }
+                        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                            state.cycle_time_range_prev();
                             self.modal = Some(Modal::MetricsTimeline(state));
                         }
                         KeyCode::Char('1') => {
@@ -1803,6 +1932,44 @@ impl App {
                         }
                     }
                 }
+                Modal::ThemePicker { mut selected_idx, initial_theme_idx } => {
+                    let total = Theme::all_themes().len();
+                    match key.code {
+                        KeyCode::Esc => {
+                            Theme::set_theme_by_index(initial_theme_idx);
+                            self.modal = None;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if selected_idx > 0 {
+                                selected_idx -= 1;
+                            } else {
+                                selected_idx = total.saturating_sub(1);
+                            }
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if selected_idx + 1 < total {
+                                selected_idx += 1;
+                            } else {
+                                selected_idx = 0;
+                            }
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::Enter => {
+                            Theme::set_theme_by_index(selected_idx);
+                            let palette = Theme::active_palette();
+                            self.ai_settings.theme = Some(palette.name.to_string());
+                            let _ = self.ai_settings.save();
+                            self.set_toast(format!("Theme set to {}", palette.display_name), Theme::status_ok());
+                            self.modal = None;
+                        }
+                        _ => {
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                    }
+                }
             }
             return;
         }
@@ -1816,11 +1983,47 @@ impl App {
                     self.command_suggestion_idx = 0;
                 }
                 KeyCode::Enter => {
-                    let cmd_str = self.command_buffer.clone();
+                    let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
+                    if trimmed.is_empty() {
+                        self.input_mode = InputMode::Normal;
+                        self.command_buffer.clear();
+                        self.command_suggestion_idx = 0;
+                        return;
+                    }
+
+                    // Special contextual colon commands handled directly by execute_colon_command
+                    if trimmed == "save-ai" || trimmed == "export-ai"
+                        || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
+                        || trimmed == "clear-ai"
+                        || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
+                        || trimmed == "tree" || trimmed == "lineage" || trimmed == "related"
+                        || trimmed == "actions" || trimmed == "act"
+                        || trimmed == "metrics" || trimmed == "metric"
+                        || trimmed == "reasons" || trimmed == "reason"
+                    {
+                        let cmd = self.command_buffer.clone();
+                        self.input_mode = InputMode::Normal;
+                        self.command_buffer.clear();
+                        self.command_suggestion_idx = 0;
+                        self.execute_colon_command(&cmd).await;
+                        return;
+                    }
+
+                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let target = if !suggestions.is_empty() && self.command_suggestion_idx < suggestions.len() {
+                        Some(suggestions[self.command_suggestion_idx].0.target.clone())
+                    } else {
+                        None
+                    };
+                    let fallback_cmd = self.command_buffer.clone();
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
-                    self.execute_colon_command(&cmd_str).await;
+                    if let Some(target) = target {
+                        self.execute_command_target(target).await;
+                    } else {
+                        self.execute_colon_command(&fallback_cmd).await;
+                    }
                 }
                 KeyCode::Tab => {
                     let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
@@ -1835,42 +2038,20 @@ impl App {
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
                         let idx = (self.command_suggestion_idx + len - 1) % len;
-                        self.command_buffer = suggestions[idx].0.name.clone();
                         self.command_suggestion_idx = idx;
                     }
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N') if key.code == KeyCode::Down || key.modifiers.contains(KeyModifiers::CONTROL) => {
                     let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
                     if !suggestions.is_empty() {
-                        let idx = self.command_suggestion_idx % suggestions.len();
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = (idx + 1) % suggestions.len();
+                        self.command_suggestion_idx = (self.command_suggestion_idx + 1) % suggestions.len();
                     }
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) => {
                     let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
-                        let idx = (self.command_suggestion_idx + len - 1) % len;
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = idx;
-                    }
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    if !suggestions.is_empty() {
-                        let idx = self.command_suggestion_idx % suggestions.len();
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = (idx + 1) % suggestions.len();
-                    }
-                }
-                KeyCode::Char('p') | KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    if !suggestions.is_empty() {
-                        let len = suggestions.len();
-                        let idx = (self.command_suggestion_idx + len - 1) % len;
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = idx;
+                        self.command_suggestion_idx = (self.command_suggestion_idx + len - 1) % len;
                     }
                 }
                 _ if is_word_delete_key(&key) => {
@@ -1982,6 +2163,9 @@ impl App {
                     ActiveView::Describe(desc) => self.filter_buffer = desc.search_query.clone(),
                     ActiveView::Yaml(yaml) => self.filter_buffer = yaml.search_query.clone(),
                     ActiveView::Logs(logs) => self.filter_buffer = logs.search_query.clone(),
+                    ActiveView::Top(top) => self.filter_buffer = top.filter.clone(),
+                    ActiveView::Helm(helm) => self.filter_buffer = helm.filter_query.clone(),
+                    ActiveView::HelmDetail(detail) => self.filter_buffer = detail.filter_query.clone(),
                     _ => {}
                 }
             }
@@ -2086,6 +2270,8 @@ impl App {
                     }
                     self.active_view = prev_view;
                     self.restart_active_watch().await;
+                } else if matches!(self.active_view, ActiveView::Top(_)) {
+                    self.switch_view_to_kind(ResourceKind::Pods).await;
                 }
             }
             // Toggle AI Assistant Drawer (or Reason Rail on wide Events table, or cycle segment on Workloads)
@@ -2113,6 +2299,22 @@ impl App {
                             return;
                         }
                     }
+                }
+                if let ActiveView::GpuInfo(ref mut gpu) = self.active_view {
+                    gpu.toggle_pane();
+                    return;
+                }
+                if let ActiveView::Topology(ref mut topo) = self.active_view {
+                    topo.select_next_lane();
+                    return;
+                }
+                if let ActiveView::Top(ref mut top) = self.active_view {
+                    top.toggle_tab();
+                    return;
+                }
+                if let ActiveView::HelmDetail(ref mut detail) = self.active_view {
+                    detail.next_tab();
+                    return;
                 }
                 if let Some(seg_name) = cycled_segment {
                     self.set_toast(format!("Segment: {}", seg_name), Theme::status_ok());
@@ -2262,14 +2464,30 @@ impl App {
                         }
                     }
                     KeyCode::Char('f') | KeyCode::Char('F') => {
-                        // Port forward (f, Shift+f, or Ctrl+f)
+                        // Port forward (f, Shift+f)
                         if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
                             self.set_toast(format!("Port forward is only available for Pods (selected is {})", row_kind), Theme::status_warn());
                             return;
                         }
-                        if let Some(pod_name) = sel_name {
-                            let ns = sel_ns.unwrap_or_else(|| self.active_namespace.clone());
-                            let detected_port = table.selected_item().and_then(|item| {
+
+                        let target_kind = if table_kind == ResourceKind::Services { "Service" } else { "Pod" }.to_string();
+                        let ns = sel_ns.clone().unwrap_or_else(|| self.active_namespace.clone());
+
+                        if key.code == KeyCode::Char('F') {
+                            let has_active = if let Some(target_name) = &sel_name {
+                                table.active_port_forwards.contains_key(&(ns.clone(), target_name.clone()))
+                                    || table.active_port_forwards.contains_key(&(String::new(), target_name.clone()))
+                            } else {
+                                false
+                            };
+                            if has_active {
+                                self.close_selected_port_forward().await;
+                                return;
+                            }
+                        }
+
+                        if let Some(target_name) = sel_name {
+                            let mut detected_port = table.selected_item().and_then(|item| {
                                 item.pointer("/spec/containers/0/ports/0/containerPort")
                                     .and_then(|v| v.as_u64())
                                     .map(|p| p as u16)
@@ -2278,12 +2496,46 @@ impl App {
                                             .and_then(|v| v.as_u64())
                                             .map(|p| p as u16)
                                     })
-                            }).unwrap_or(8080);
+                            });
+
+                            if detected_port.is_none() {
+                                if let Ok(client) = self.client_cache.get(&self.active_context).await {
+                                    if target_kind == "Service" {
+                                        let api: kube::Api<k8s_openapi::api::core::v1::Service> = kube::Api::namespaced(client, &ns);
+                                        if let Ok(svc) = api.get(&target_name).await {
+                                            if let Some(spec) = svc.spec {
+                                                if let Some(ports) = spec.ports {
+                                                    if let Some(p) = ports.first() {
+                                                        detected_port = Some(p.port as u16);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &ns);
+                                        if let Ok(pod) = api.get(&target_name).await {
+                                            if let Some(spec) = pod.spec {
+                                                for container in spec.containers {
+                                                    if let Some(ports) = container.ports {
+                                                        if let Some(p) = ports.first() {
+                                                            detected_port = Some(p.container_port as u16);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let target_port = detected_port.unwrap_or(8080);
                             self.modal = Some(Modal::PortForward {
-                                pod_name,
+                                pod_name: target_name,
                                 namespace: ns,
-                                container_port: detected_port,
-                                local_port_input: detected_port.to_string(),
+                                container_port: target_port,
+                                local_port_input: target_port.to_string(),
+                                kind: target_kind,
                             });
                         }
                     }
@@ -2333,7 +2585,59 @@ impl App {
                         }
                     }
                     KeyCode::Char('l') => {
-                        // Logs
+                        // 1. Multi-pod logs from marked items
+                        if table.marked_indices.len() > 1 {
+                            let mut marked_pods: Vec<String> = Vec::new();
+                            let mut common_ns: Option<String> = None;
+                            for &idx in &table.marked_indices {
+                                if let Some(item) = table.raw_items.get(idx) {
+                                    let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let is_pod = table_kind == ResourceKind::Pods || kind.eq_ignore_ascii_case("Pod");
+                                    if is_pod {
+                                        if let Some(pname) = item.get("name").and_then(|v| v.as_str()) {
+                                            marked_pods.push(pname.to_string());
+                                            if common_ns.is_none() {
+                                                common_ns = item.get("namespace").and_then(|v| v.as_str()).map(String::from);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if marked_pods.len() > 1 {
+                                let label = format!("{} pods", marked_pods.len());
+                                self.open_multi_pod_logs_view(label, common_ns, marked_pods).await;
+                                return;
+                            }
+                        }
+
+                        // 2. Workload multi-pod logs (Deployment, StatefulSet, DaemonSet, Job)
+                        let is_workload = matches!(
+                            table_kind,
+                            ResourceKind::Deployments | ResourceKind::StatefulSets | ResourceKind::DaemonSets | ResourceKind::Jobs
+                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet" | "Job"));
+
+                        if is_workload {
+                            if let Some(wname) = sel_name {
+                                let ns = sel_ns.clone()
+                                    .or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+                                    .unwrap_or_else(|| "default".to_string());
+                                let target_kind = if table_kind == ResourceKind::Workloads {
+                                    row_kind.clone()
+                                } else {
+                                    table_kind.k8s_kind().unwrap_or("Deployment").to_string()
+                                };
+                                let pods = self.get_workload_pods(&target_kind, &wname, &ns).await;
+                                if !pods.is_empty() {
+                                    self.open_multi_pod_logs_view(wname, Some(ns), pods).await;
+                                    return;
+                                } else {
+                                    self.set_toast(format!("No running pods found for {}/{}", target_kind, wname), Theme::status_warn());
+                                    return;
+                                }
+                            }
+                        }
+
+                        // 3. Single pod logs
                         let (pod_name, target_ns) = if table_kind == ResourceKind::Events {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
@@ -2350,7 +2654,7 @@ impl App {
                             if row_kind == "Pod" {
                                 (sel_name.clone(), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
                             } else {
-                                self.set_toast(format!("Logs only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                                self.set_toast(format!("Logs only available for Pods or Workloads (selected is {})", row_kind), Theme::status_warn());
                                 (None, None)
                             }
                         } else {
@@ -2759,6 +3063,11 @@ impl App {
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => helm.select_next(),
                     KeyCode::Char('k') | KeyCode::Up => helm.select_prev(),
+                    KeyCode::Enter => {
+                        if let Some(rel) = sel_rel {
+                            self.open_helm_detail(rel.name, rel.namespace, HelmDetailTab::Overview);
+                        }
+                    }
                     KeyCode::Char('c') => {
                         if let Some(rel) = sel_rel {
                             let link = crate::deep_link::DeepLink::Resource {
@@ -2792,15 +3101,43 @@ impl App {
                         }
                     }
                     KeyCode::Char('v') => {
-                        // Inspect Helm values
                         if let Some(rel) = sel_rel {
-                            self.open_yaml_view(rel.name, "HelmValues".to_string(), Some(rel.namespace)).await;
+                            self.open_helm_detail(rel.name, rel.namespace, HelmDetailTab::ValuesDiff);
                         }
                     }
                     KeyCode::Char('y') => {
-                        // Inspect Helm manifest
                         if let Some(rel) = sel_rel {
-                            self.open_yaml_view(rel.name, "HelmManifest".to_string(), Some(rel.namespace)).await;
+                            self.open_helm_detail(rel.name, rel.namespace, HelmDetailTab::Manifest);
+                        }
+                    }
+                    KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(rel) = sel_rel {
+                            self.open_helm_detail(rel.name, rel.namespace, HelmDetailTab::Revisions);
+                        }
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(rel) = sel_rel {
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Uninstall Helm Release [{}]", rel.name),
+                                message: format!("Uninstall release '{}' from namespace '{}'?", rel.name, rel.namespace),
+                                action_name: format!("helm-uninstall:{}:{}", rel.name, rel.namespace),
+                                is_destructive: true,
+                            });
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if let Some(rel) = sel_rel {
+                            if rel.revision > 1 {
+                                let target_rev = rel.revision - 1;
+                                self.modal = Some(Modal::Confirm {
+                                    title: format!("Rollback Helm Release [{}]", rel.name),
+                                    message: format!("Rollback '{}' in namespace '{}' to previous revision {}?", rel.name, rel.namespace, target_rev),
+                                    action_name: format!("helm-rollback:{}:{}:{}", rel.name, rel.namespace, target_rev),
+                                    is_destructive: true,
+                                });
+                            } else {
+                                self.set_toast(format!("Release '{}' is at revision 1 (no previous revision)", rel.name), Theme::status_warn());
+                            }
                         }
                     }
                     _ => {}
@@ -3361,32 +3698,450 @@ impl App {
                         self.set_toast(format!("Node debug command: {}", cmd_str), Theme::status_ok());
                     }
                     KeyCode::Char('c') => {
-                        // Toggle Cordon / Uncordon
                         let target_unsched = !is_unsched;
-                        let n_name = node_name.clone();
-                        let ctx = self.active_context.clone();
-                        let cache = self.client_cache.clone();
-                        let event_tx = self.event_tx.clone();
-                        tokio::spawn(async move {
-                            if let Ok(client) = cache.get(&ctx).await {
-                                let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
-                                let patch = serde_json::json!({ "spec": { "unschedulable": target_unsched } });
-                                let res = api.patch(&n_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await;
-                                let msg = if target_unsched {
-                                    format!("Cordoned node '{}'", n_name)
-                                } else {
-                                    format!("Uncordoned node '{}'", n_name)
-                                };
-                                let _ = event_tx.send(crate::event::AppEvent::ActionResult {
-                                    title: format!("cordon_node:{}", n_name),
-                                    result: res.map(|_| msg).map_err(|e| e.to_string()),
+                        let action_type = if target_unsched { "cordon" } else { "uncordon" };
+                        let action_title = if target_unsched {
+                            format!("Cordon Node [{}]", node_name)
+                        } else {
+                            format!("Uncordon Node [{}]", node_name)
+                        };
+                        let action_desc = if target_unsched {
+                            format!(
+                                "Mark node '{}' as unschedulable (cordon)? New pods will not be scheduled onto this node.",
+                                node_name
+                            )
+                        } else {
+                            format!(
+                                "Mark node '{}' as schedulable (uncordon)? New workloads can resume scheduling.",
+                                node_name
+                            )
+                        };
+                        self.modal = Some(Modal::InputConfirm {
+                            title: action_title,
+                            message: action_desc,
+                            action_name: format!("{}:{}", action_type, node_name),
+                            required_input: "confirm".to_string(),
+                            current_input: String::new(),
+                            is_destructive: target_unsched,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            ActiveView::Topology(topo) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::Workloads).await;
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => topo.select_prev_lane(),
+                    KeyCode::Right => topo.select_next_lane(),
+                    KeyCode::Up | KeyCode::Char('k') => topo.select_prev_node(),
+                    KeyCode::Down | KeyCode::Char('j') => topo.select_next_node(),
+                    KeyCode::Tab => topo.select_next_lane(),
+                    KeyCode::BackTab => topo.select_prev_lane(),
+                    KeyCode::Char('g') | KeyCode::Home => topo.select_first_node(),
+                    KeyCode::Char('G') | KeyCode::End => topo.select_last_node(),
+                    KeyCode::Char('r') => {
+                        self.reload_topology_view();
+                    }
+                    KeyCode::Enter => {
+                        if let Some(node) = topo.selected_node() {
+                            let name = node.name.clone();
+                            let kind = node.kind.clone();
+                            let ns = node.namespace.clone();
+                            let is_workload = matches!(
+                                kind.to_lowercase().as_str(),
+                                "deployment" | "statefulset" | "daemonset" | "job" | "cronjob"
+                            );
+                            if is_workload {
+                                self.nav_stack.push(ActiveView::Topology(topo.clone()));
+                                if !ns.is_empty() && ns != self.active_namespace {
+                                    self.switch_namespace(ns.clone()).await;
+                                }
+                                self.switch_view_to_kind(ResourceKind::Pods).await;
+                                if let ActiveView::Table(t) = &mut self.active_view {
+                                    t.apply_filter(&name);
+                                }
+                                self.filter_buffer = name.clone();
+                                self.set_toast(format!("Jumped to Pods for {}", name), Theme::status_ok());
+                            } else if !kind.eq_ignore_ascii_case("External") {
+                                self.open_describe_view(name, kind, if ns.is_empty() { None } else { Some(ns.clone()) }).await;
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(node) = topo.selected_node() {
+                            let name = node.name.clone();
+                            let kind = node.kind.clone();
+                            let ns = node.namespace.clone();
+                            if !kind.eq_ignore_ascii_case("External") {
+                                self.open_describe_view(name, kind, if ns.is_empty() { None } else { Some(ns) }).await;
+                            }
+                        }
+                    }
+                    KeyCode::Char('y') => {
+                        if let Some(node) = topo.selected_node() {
+                            let name = node.name.clone();
+                            let kind = node.kind.clone();
+                            let ns = node.namespace.clone();
+                            if !kind.eq_ignore_ascii_case("External") {
+                                self.open_yaml_view(name, kind, if ns.is_empty() { None } else { Some(ns) }).await;
+                            }
+                        }
+                    }
+                    KeyCode::Char('l') => {
+                        if let Some(node) = topo.selected_node() {
+                            let name = node.name.clone();
+                            let kind = node.kind.clone();
+                            let ns = node.namespace.clone();
+                            let is_workload = matches!(
+                                kind.to_lowercase().as_str(),
+                                "deployment" | "statefulset" | "daemonset" | "job" | "cronjob" | "pod"
+                            );
+                            if is_workload {
+                                self.prompt_pod_logs(name, if ns.is_empty() { None } else { Some(ns) }).await;
+                            } else {
+                                self.set_toast(format!("Logs only available for workloads/pods (selected {})", kind), Theme::status_warn());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ActiveView::GpuInfo(gpu) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::Nodes).await;
+                        }
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                        gpu.toggle_pane();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        match gpu.focused_pane {
+                            gpu_view::GpuPane::Nodes => gpu.select_prev_node(),
+                            gpu_view::GpuPane::Pods => gpu.select_prev_pod(),
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        match gpu.focused_pane {
+                            gpu_view::GpuPane::Nodes => gpu.select_next_node(),
+                            gpu_view::GpuPane::Pods => gpu.select_next_pod(),
+                        }
+                    }
+                    KeyCode::Char('g') | KeyCode::Home => {
+                        match gpu.focused_pane {
+                            gpu_view::GpuPane::Nodes => gpu.select_first_node(),
+                            gpu_view::GpuPane::Pods => gpu.select_first_pod(),
+                        }
+                    }
+                    KeyCode::Char('G') | KeyCode::End => {
+                        match gpu.focused_pane {
+                            gpu_view::GpuPane::Nodes => gpu.select_last_node(),
+                            gpu_view::GpuPane::Pods => gpu.select_last_pod(),
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        self.reload_gpu_info_view();
+                    }
+                    KeyCode::Enter => {
+                        if gpu.focused_pane == gpu_view::GpuPane::Pods {
+                            if let Some(pod) = gpu.selected_pod() {
+                                let p_name = pod.name.clone();
+                                let p_ns = pod.namespace.clone();
+                                self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                            }
+                        } else if let Some(node) = gpu.selected_node() {
+                            let n_name = node.name.clone();
+                            self.open_node_inspector(n_name);
+                        }
+                    }
+                    KeyCode::Char('l') => {
+                        if let Some(pod) = gpu.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+                            self.prompt_pod_logs(p_name, Some(p_ns)).await;
+                        } else {
+                            self.set_toast("Select a pod to stream logs".to_string(), Theme::status_warn());
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if gpu.focused_pane == gpu_view::GpuPane::Pods {
+                            if let Some(pod) = gpu.selected_pod() {
+                                let p_name = pod.name.clone();
+                                let p_ns = pod.namespace.clone();
+                                self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                            }
+                        } else if let Some(node) = gpu.selected_node() {
+                            let n_name = node.name.clone();
+                            self.open_describe_view(n_name, "Node".to_string(), None).await;
+                        }
+                    }
+                    KeyCode::Char('y') => {
+                        if gpu.focused_pane == gpu_view::GpuPane::Pods {
+                            if let Some(pod) = gpu.selected_pod() {
+                                let p_name = pod.name.clone();
+                                let p_ns = pod.namespace.clone();
+                                self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                            }
+                        } else if let Some(node) = gpu.selected_node() {
+                            let n_name = node.name.clone();
+                            self.open_yaml_view(n_name, "Node".to_string(), None).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ActiveView::Top(top) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::Pods).await;
+                        }
+                    }
+                    KeyCode::Tab | KeyCode::BackTab => {
+                        top.toggle_tab();
+                    }
+                    KeyCode::Char('1') => {
+                        top.set_tab(top_view::TopTab::Pods);
+                    }
+                    KeyCode::Char('2') => {
+                        top.set_tab(top_view::TopTab::Nodes);
+                    }
+                    KeyCode::Char('c') => {
+                        top.set_sort_by(top_view::TopSortBy::Cpu);
+                    }
+                    KeyCode::Char('m') => {
+                        top.set_sort_by(top_view::TopSortBy::Memory);
+                    }
+                    KeyCode::Char('S') => {
+                        top.toggle_sort_direction();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        top.select_prev();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        top.select_next();
+                    }
+                    KeyCode::PageUp => {
+                        top.scroll_page_up(10);
+                    }
+                    KeyCode::PageDown => {
+                        top.scroll_page_down(10);
+                    }
+                    KeyCode::Char('g') | KeyCode::Home => {
+                        top.select_first();
+                    }
+                    KeyCode::Char('G') | KeyCode::End => {
+                        top.select_last();
+                    }
+                    KeyCode::Char('/') => {
+                        self.input_mode = InputMode::Filter;
+                        self.filter_buffer = top.filter.clone();
+                    }
+                    KeyCode::Char('r') => {
+                        self.refresh_pod_metrics();
+                        self.refresh_node_metrics();
+                        self.refresh_top_view_data();
+                        self.set_toast("Refreshed metrics".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Enter | KeyCode::Char('d') => {
+                        match top.active_tab {
+                            top_view::TopTab::Pods => {
+                                if let Some(pod) = top.selected_pod() {
+                                    let p_name = pod.name.clone();
+                                    let p_ns = pod.namespace.clone();
+                                    self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                                }
+                            }
+                            top_view::TopTab::Nodes => {
+                                if let Some(node) = top.selected_node() {
+                                    let n_name = node.name.clone();
+                                    self.open_describe_view(n_name, "Node".to_string(), None).await;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('l') => {
+                        if top.active_tab == top_view::TopTab::Pods {
+                            if let Some(pod) = top.selected_pod() {
+                                let p_name = pod.name.clone();
+                                let p_ns = pod.namespace.clone();
+                                self.prompt_pod_logs(p_name, Some(p_ns)).await;
+                            }
+                        } else {
+                            self.set_toast("Logs only available for Pods".to_string(), Theme::status_warn());
+                        }
+                    }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        if top.active_tab == top_view::TopTab::Pods {
+                            if let Some(pod) = top.selected_pod() {
+                                let p_name = pod.name.clone();
+                                let p_ns = pod.namespace.clone();
+
+                                if key.code == KeyCode::Char('F') && !self.active_forwards_for("Pod", &p_ns, &p_name).is_empty() {
+                                    self.close_selected_port_forward().await;
+                                    return;
+                                }
+
+                                let mut detected_port = None;
+                                if let Ok(client) = self.client_cache.get(&self.active_context).await {
+                                    let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &p_ns);
+                                    if let Ok(p) = api.get(&p_name).await {
+                                        if let Some(spec) = p.spec {
+                                            for container in spec.containers {
+                                                if let Some(ports) = container.ports {
+                                                    if let Some(port) = ports.first() {
+                                                        detected_port = Some(port.container_port as u16);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let target_port = detected_port.unwrap_or(8080);
+                                self.modal = Some(Modal::PortForward {
+                                    pod_name: p_name,
+                                    namespace: p_ns,
+                                    container_port: target_port,
+                                    local_port_input: target_port.to_string(),
+                                    kind: "Pod".to_string(),
                                 });
                             }
+                        } else {
+                            self.set_toast("Port forward only available for Pods".to_string(), Theme::status_warn());
+                        }
+                    }
+                    KeyCode::Char('y') => {
+                        match top.active_tab {
+                            top_view::TopTab::Pods => {
+                                if let Some(pod) = top.selected_pod() {
+                                    let p_name = pod.name.clone();
+                                    let p_ns = pod.namespace.clone();
+                                    self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                                }
+                            }
+                            top_view::TopTab::Nodes => {
+                                if let Some(node) = top.selected_node() {
+                                    let n_name = node.name.clone();
+                                    self.open_yaml_view(n_name, "Node".to_string(), None).await;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ActiveView::HelmDetail(detail) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::HelmReleases).await;
+                        }
+                    }
+                    KeyCode::Tab => detail.next_tab(),
+                    KeyCode::BackTab => detail.prev_tab(),
+                    KeyCode::Right | KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        detail.next_tab();
+                    }
+                    KeyCode::Left | KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        detail.prev_tab();
+                    }
+                    KeyCode::Char('1') => detail.set_tab(HelmDetailTab::Overview),
+                    KeyCode::Char('2') => detail.set_tab(HelmDetailTab::ValuesDiff),
+                    KeyCode::Char('3') => detail.set_tab(HelmDetailTab::Revisions),
+                    KeyCode::Char('4') => detail.set_tab(HelmDetailTab::Manifest),
+                    KeyCode::Char('5') => detail.set_tab(HelmDetailTab::Notes),
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if detail.active_tab == HelmDetailTab::Revisions {
+                            detail.select_prev_revision();
+                        } else {
+                            detail.scroll_up(1);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if detail.active_tab == HelmDetailTab::Revisions {
+                            detail.select_next_revision();
+                        } else {
+                            detail.scroll_down(1);
+                        }
+                    }
+                    KeyCode::PageUp => detail.scroll_up(15),
+                    KeyCode::PageDown => detail.scroll_down(15),
+                    KeyCode::Char('g') => detail.scroll_to_top(),
+                    KeyCode::Char('m') => {
+                        if detail.active_tab == HelmDetailTab::ValuesDiff {
+                            detail.toggle_diff_mode();
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        let rev_opt = if detail.active_tab == HelmDetailTab::Revisions {
+                            detail.selected_revision().map(|r| r.revision)
+                        } else if let Some(d) = &detail.detail {
+                            if d.revision > 1 {
+                                Some(d.revision - 1)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(rev) = rev_opt {
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Rollback Helm Release [{}]", detail.release_name),
+                                message: format!(
+                                    "Rollback '{}' in namespace '{}' to revision {}?",
+                                    detail.release_name, detail.namespace, rev
+                                ),
+                                action_name: format!(
+                                    "helm-rollback:{}:{}:{}",
+                                    detail.release_name, detail.namespace, rev
+                                ),
+                                is_destructive: true,
+                            });
+                        } else {
+                            self.set_toast("No previous revision available to rollback to".to_string(), Theme::status_warn());
+                        }
+                    }
+                    KeyCode::Char('c') => {
+                        let link = crate::deep_link::DeepLink::Resource {
+                            context: self.active_context.clone(),
+                            namespace: Some(detail.namespace.clone()),
+                            kind: "HelmRelease".to_string(),
+                            name: detail.release_name.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
                         });
-                        self.set_toast(
-                            if target_unsched { format!("Cordoning node '{}'...", node_name) } else { format!("Uncordoning node '{}'...", node_name) },
-                            Theme::status_warn(),
-                        );
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
+                    KeyCode::Char('y') => {
+                        let text_to_copy: Option<String> = match detail.active_tab {
+                            HelmDetailTab::Manifest => detail.detail.as_ref().map(|d| d.manifest.clone()),
+                            HelmDetailTab::ValuesDiff => detail.detail.as_ref().map(|d| d.values_yaml.clone()),
+                            HelmDetailTab::Notes => detail.detail.as_ref().map(|d| d.notes.clone()),
+                            _ => None,
+                        };
+                        if let Some(txt) = text_to_copy {
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&txt);
+                            });
+                            self.set_toast("Copied tab content to clipboard".to_string(), Theme::status_ok());
+                        }
                     }
                     _ => {}
                 }
@@ -3482,6 +4237,25 @@ impl App {
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        // 0. Check if clicking on Close Port Forward button in status bar
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            let clicked_close_pf = {
+                if let Some(rect) = *self.close_pf_button_rect.borrow() {
+                    mouse.column >= rect.x
+                        && mouse.column < rect.x + rect.width
+                        && mouse.row >= rect.y
+                        && mouse.row < rect.y + rect.height
+                } else {
+                    false
+                }
+            };
+
+            if clicked_close_pf {
+                self.close_selected_port_forward().await;
+                return;
+            }
+        }
+
         // 1. Check if clicking on header context chips
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             let clicked_ctx = self.context_chip_rects.borrow().iter().find_map(|(rect, name)| {
@@ -3501,6 +4275,31 @@ impl App {
                     self.switch_context(target).await;
                 }
                 return;
+            }
+        }
+
+        // Check if clicking inside MetricsTimeline modal range buttons
+        if let Some(Modal::MetricsTimeline(ref mut panel)) = self.modal {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let clicked_range = {
+                    if let Ok(lock) = panel.range_button_rects.lock() {
+                        lock.iter().find_map(|(rect, r)| {
+                            if mouse.column >= rect.x && mouse.column < rect.x + rect.width
+                                && mouse.row >= rect.y && mouse.row < rect.y + rect.height
+                            {
+                                Some(*r)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                };
+                if let Some(r) = clicked_range {
+                    panel.range = r;
+                    return;
+                }
             }
         }
 
@@ -3648,6 +4447,19 @@ impl App {
             }
         }
 
+        // Top view scrolling
+        if let ActiveView::Top(top) = &mut self.active_view {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    top.select_next();
+                }
+                MouseEventKind::ScrollUp => {
+                    top.select_prev();
+                }
+                _ => {}
+            }
+        }
+
         // Logs view scrolling
         if let ActiveView::Logs(logs) = &mut self.active_view {
             match mouse.kind {
@@ -3671,6 +4483,54 @@ impl App {
                     desc.scroll_up(3);
                 }
                 _ => {}
+            }
+        }
+
+        // GPU View mouse selection, hover & scrolling
+        if let ActiveView::GpuInfo(gpu) = &mut self.active_view {
+            let left_vp = gpu.last_left_pane_rect.get();
+            if mouse.column >= left_vp.x && mouse.column < left_vp.x + left_vp.width
+                && mouse.row >= left_vp.y && mouse.row < left_vp.y + left_vp.height
+            {
+                let data_start_y = left_vp.y + 3;
+                if mouse.row >= data_start_y {
+                    let screen_row = (mouse.row - data_start_y) as usize;
+                    let target_idx = gpu.last_nodes_start_idx.get() + screen_row;
+                    if let Some(ci) = &gpu.cluster_info {
+                        if target_idx < ci.nodes.len() {
+                            gpu.selected_node_idx = target_idx;
+                            gpu.selected_pod_idx = 0;
+                            gpu.focused_pane = gpu_view::GpuPane::Nodes;
+                        }
+                    }
+                }
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => gpu.select_next_node(),
+                    MouseEventKind::ScrollUp => gpu.select_prev_node(),
+                    _ => {}
+                }
+            }
+
+            let pods_vp = gpu.last_pods_pane_rect.get();
+            if mouse.column >= pods_vp.x && mouse.column < pods_vp.x + pods_vp.width
+                && mouse.row >= pods_vp.y && mouse.row < pods_vp.y + pods_vp.height
+            {
+                let data_start_y = pods_vp.y + 2;
+                if mouse.row >= data_start_y {
+                    let screen_row = (mouse.row - data_start_y) as usize;
+                    let target_idx = gpu.last_pods_start_idx.get() + screen_row;
+                    if let Some(node) = gpu.selected_node() {
+                        if target_idx < node.pods.len() {
+                            gpu.selected_pod_idx = target_idx;
+                            gpu.focused_pane = gpu_view::GpuPane::Pods;
+                        }
+                    }
+                }
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => gpu.select_next_pod(),
+                    MouseEventKind::ScrollUp => gpu.select_prev_pod(),
+                    _ => {}
+                }
             }
         }
 
@@ -3735,6 +4595,20 @@ impl App {
             ActiveView::Logs(logs) => {
                 logs.set_search_query(&filter);
             }
+            ActiveView::Top(top) => {
+                top.filter = filter;
+                top.clamp_selection();
+            }
+            ActiveView::Helm(helm) => {
+                helm.filter_query = filter;
+                let count = helm.filtered_indices().len();
+                if helm.selected_idx >= count {
+                    helm.selected_idx = count.saturating_sub(1);
+                }
+            }
+            ActiveView::HelmDetail(detail) => {
+                detail.filter_query = filter;
+            }
             _ => {}
         }
     }
@@ -3754,6 +4628,16 @@ impl App {
             }
             ActiveView::Logs(logs) => {
                 logs.clear_search();
+            }
+            ActiveView::Top(top) => {
+                top.filter.clear();
+                top.clamp_selection();
+            }
+            ActiveView::Helm(helm) => {
+                helm.filter_query.clear();
+            }
+            ActiveView::HelmDetail(detail) => {
+                detail.filter_query.clear();
             }
             _ => {}
         }
@@ -3941,6 +4825,22 @@ impl App {
             CommandTarget::Quit => {
                 self.is_running = false;
             }
+            CommandTarget::ThemePicker => {
+                let current_idx = Theme::active_index();
+                self.modal = Some(Modal::ThemePicker {
+                    selected_idx: current_idx,
+                    initial_theme_idx: current_idx,
+                });
+            }
+            CommandTarget::SetTheme(theme_name) => {
+                if let Some(p) = Theme::set_theme_by_name(&theme_name) {
+                    self.ai_settings.theme = Some(p.name.to_string());
+                    let _ = self.ai_settings.save();
+                    self.set_toast(format!("Theme switched to {}", p.display_name), Theme::status_ok());
+                } else {
+                    self.set_toast(format!("Unknown theme '{}'. Try :themes to pick.", theme_name), Theme::status_warn());
+                }
+            }
             CommandTarget::OpenUrl(_) => {}
         }
     }
@@ -3998,6 +4898,13 @@ impl App {
                     if ns != &self.active_namespace {
                         self.switch_namespace(ns.clone()).await;
                     }
+                }
+
+                if kind.eq_ignore_ascii_case("helmrelease") || kind.eq_ignore_ascii_case("helm") {
+                    let ns = namespace.clone().unwrap_or_else(|| self.active_namespace.clone());
+                    self.open_helm_detail(name.clone(), ns, HelmDetailTab::Overview);
+                    self.set_toast(format!("Navigated to Helm release '{}'", name), Theme::status_ok());
+                    return Ok(());
                 }
 
                 // Resolve kind
@@ -4118,7 +5025,10 @@ impl App {
     pub async fn switch_view_to_kind(&mut self, kind: ResourceKind) {
         let new_view = match kind {
             ResourceKind::PortForwards => ActiveView::PortForwards(PortForwardViewState::new()),
-            ResourceKind::HelmReleases => ActiveView::Helm(HelmViewState::new()),
+            ResourceKind::HelmReleases => {
+                self.refresh_helm_releases();
+                ActiveView::Helm(HelmViewState::new())
+            }
             ResourceKind::Overview => {
                 let mut initial_data = self.cluster_overview_data.clone().unwrap_or_default();
                 initial_data.context_name = self.active_context.clone();
@@ -4138,6 +5048,72 @@ impl App {
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
+            ResourceKind::Topology => {
+                let namespaces = if self.active_namespace.is_empty() {
+                    vec![]
+                } else {
+                    vec![self.active_namespace.clone()]
+                };
+                let topo_state = topology_view::TopologyViewState::new(namespaces.clone());
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let ns_list = namespaces.clone();
+
+                tokio::spawn(async move {
+                    let input = srelens_kube::topology::TopologyGraphIn {
+                        context: ctx.clone(),
+                        namespaces: ns_list.clone(),
+                        prometheus: vec![],
+                    };
+                    let res = match srelens_kube::topology::build_topology(cache, input, false).await {
+                        Ok(graph) => Ok(graph),
+                        Err(e) => Err(format!("Failed to build topology: {}", e)),
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::TopologyResult {
+                        context: ctx,
+                        namespaces: ns_list,
+                        result: res,
+                    });
+                });
+
+                ActiveView::Topology(topo_state)
+            }
+            ResourceKind::GpuInfo => {
+                let gpu_state = gpu_view::GpuViewState::new();
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+
+                tokio::spawn(async move {
+                    let res = match cache.get(&ctx).await {
+                        Ok(client) => srelens_kube::gpu_info::fetch_gpu_info(client).await,
+                        Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::GpuInfoResult {
+                        context: ctx,
+                        result: res,
+                    });
+                });
+
+                ActiveView::GpuInfo(gpu_state)
+            }
+            ResourceKind::TopPods => {
+                self.refresh_pod_metrics();
+                self.refresh_node_metrics();
+                let mut top_state = top_view::TopViewState::new(top_view::TopTab::Pods);
+                let (pods, nodes) = self.build_top_rows();
+                top_state.set_data(pods, nodes);
+                ActiveView::Top(top_state)
+            }
+            ResourceKind::TopNodes => {
+                self.refresh_pod_metrics();
+                self.refresh_node_metrics();
+                let mut top_state = top_view::TopViewState::new(top_view::TopTab::Nodes);
+                let (pods, nodes) = self.build_top_rows();
+                top_state.set_data(pods, nodes);
+                ActiveView::Top(top_state)
+            }
             _ => {
                 let mut table = ResourceTableState::new(kind.clone());
                 if let Some(watch_kind) = table.kind.watch_kind() {
@@ -4156,6 +5132,9 @@ impl App {
         self.nav_stack.push(old_view);
         self.filter_buffer.clear();
         self.restart_active_watch().await;
+        if matches!(self.active_view, ActiveView::PortForwards(_)) {
+            self.sync_port_forwards();
+        }
     }
 
     pub async fn get_pod_containers(&self, pod_name: &str, namespace: Option<&str>) -> Vec<String> {
@@ -4296,6 +5275,286 @@ impl App {
 
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Logs(logs_state));
         self.nav_stack.push(old_view);
+    }
+
+    pub async fn open_multi_pod_logs_view(
+        &mut self,
+        target_name: String,
+        namespace: Option<String>,
+        pod_names: Vec<String>,
+    ) {
+        if let Some(prev_ch) = self.active_log_channel.take() {
+            self.logs_manager.stop(&prev_ch);
+        }
+
+        let channel = format!("logs:multi:{}:{}", target_name, uuid::Uuid::new_v4());
+        self.active_log_channel = Some(channel.clone());
+
+        let target_ns = namespace
+            .or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+            .unwrap_or_else(|| "default".to_string());
+
+        let mut logs_state = LogsViewState::new_multi_pod(
+            target_name.clone(),
+            target_ns.clone(),
+            pod_names.clone(),
+            channel.clone(),
+        );
+        logs_state.push_line(format!(
+            "Streaming logs for {} ({} pods in {})...",
+            target_name,
+            pod_names.len(),
+            target_ns
+        ));
+
+        let sink = TuiSink::arc(self.event_tx.clone());
+        let ctx = self.active_context.clone();
+        let targets = pod_names
+            .iter()
+            .map(|p| srelens_streams::logs::LogTarget {
+                pod: p.clone(),
+                container: None,
+                label: p.clone(),
+            })
+            .collect();
+
+        let _ = self.logs_manager.start(
+            sink,
+            ctx,
+            target_ns,
+            targets,
+            channel,
+            Some(logs_state.timestamps),
+            None,
+            Some(200),
+        ).await;
+
+        let old_view = std::mem::replace(&mut self.active_view, ActiveView::Logs(logs_state));
+        self.nav_stack.push(old_view);
+    }
+
+    pub async fn get_workload_pods(&self, workload_kind: &str, workload_name: &str, namespace: &str) -> Vec<String> {
+        let mut matching_pods = Vec::new();
+
+        // 1. Check in-memory resource_cache
+        for ((_, ns, kind), items) in &self.resource_cache {
+            if kind.eq_ignore_ascii_case("pods") && (ns == namespace || ns.is_empty()) {
+                for item in items {
+                    let pod_name = item.get("name").and_then(|v| v.as_str())
+                        .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()));
+                    if let Some(pname) = pod_name {
+                        let owner_match = item.pointer("/metadata/ownerReferences")
+                            .and_then(|v| v.as_array())
+                            .map(|owners| {
+                                owners.iter().any(|o| {
+                                    let oname = o.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let okind = o.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    if okind.eq_ignore_ascii_case(workload_kind) && oname == workload_name {
+                                        return true;
+                                    }
+                                    if workload_kind.eq_ignore_ascii_case("Deployment")
+                                        && okind.eq_ignore_ascii_case("ReplicaSet")
+                                        && oname.starts_with(workload_name)
+                                    {
+                                        return true;
+                                    }
+                                    false
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        let prefix_match = pname.starts_with(workload_name);
+                        if owner_match || prefix_match {
+                            if !matching_pods.contains(&pname.to_string()) {
+                                matching_pods.push(pname.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !matching_pods.is_empty() {
+            return matching_pods;
+        }
+
+        // 2. Query Kubernetes API
+        let ctx = self.active_context.clone();
+        if let Ok(client) = self.client_cache.get(&ctx).await {
+            let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, namespace);
+            if let Ok(pod_list) = api.list(&kube::api::ListParams::default()).await {
+                for pod in pod_list {
+                    let pname = pod.metadata.name.unwrap_or_default();
+                    let owner_match = pod.metadata.owner_references.as_deref().unwrap_or(&[]).iter().any(|o| {
+                        if o.kind.eq_ignore_ascii_case(workload_kind) && o.name == workload_name {
+                            return true;
+                        }
+                        if workload_kind.eq_ignore_ascii_case("Deployment")
+                            && o.kind.eq_ignore_ascii_case("ReplicaSet")
+                            && o.name.starts_with(workload_name)
+                        {
+                            return true;
+                        }
+                        false
+                    });
+                    if owner_match || pname.starts_with(workload_name) {
+                        if !matching_pods.contains(&pname) {
+                            matching_pods.push(pname);
+                        }
+                    }
+                }
+            }
+        }
+
+        matching_pods
+    }
+
+    fn find_cached_node_allocatable(&self, node_name: &str) -> (i64, i64) {
+        for ((_, _, kind), items) in &self.resource_cache {
+            if kind.eq_ignore_ascii_case("nodes") {
+                for item in items {
+                    let name = item.get("name").and_then(|v| v.as_str())
+                        .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    if name == node_name {
+                        let alloc_cpu = item.get("allocatableCpuMillicores").and_then(|v| v.as_i64())
+                            .or_else(|| item.pointer("/status/allocatable/cpu").and_then(|v| v.as_str()).map(srelens_kube::metrics::cpu_millicores))
+                            .unwrap_or(0);
+                        let alloc_mem = item.get("allocatableMemoryMiB").and_then(|v| v.as_i64())
+                            .or_else(|| item.pointer("/status/allocatable/memory").and_then(|v| v.as_str()).map(srelens_kube::metrics::mem_mib))
+                            .unwrap_or(0);
+                        return (alloc_cpu, alloc_mem);
+                    }
+                }
+            }
+        }
+        (0, 0)
+    }
+
+    pub fn build_top_rows(&self) -> (Vec<crate::views::top_view::TopPodRow>, Vec<crate::views::top_view::TopNodeRow>) {
+        let mut pod_rows = Vec::new();
+
+        for ((_, ns, kind), items) in &self.resource_cache {
+            if kind.eq_ignore_ascii_case("pods") {
+                for item in items {
+                    let name = item.get("name").and_then(|v| v.as_str())
+                        .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()))
+                        .unwrap_or("").to_string();
+                    if name.is_empty() { continue; }
+                    let namespace = item.get("namespace").and_then(|v| v.as_str())
+                        .or_else(|| item.pointer("/metadata/namespace").and_then(|v| v.as_str()))
+                        .unwrap_or(ns).to_string();
+
+                    if !self.active_namespace.is_empty() && namespace != self.active_namespace {
+                        continue;
+                    }
+                    if pod_rows.iter().any(|r: &crate::views::top_view::TopPodRow| r.name == name && r.namespace == namespace) {
+                        continue;
+                    }
+
+                    let (req_cpu, lim_cpu, req_mem, lim_mem) = crate::views::top_view::TopViewState::extract_pod_resources(item);
+
+                    let (cur_cpu, cur_mem) = self.pod_metrics_history.get(&name)
+                        .and_then(|h| h.back())
+                        .map(|s| (s.cpu_millicores as i64, s.memory_mib as i64))
+                        .unwrap_or((0, 0));
+
+                    pod_rows.push(crate::views::top_view::TopPodRow {
+                        namespace,
+                        name,
+                        cpu_millicores: cur_cpu,
+                        cpu_req_millicores: req_cpu,
+                        cpu_lim_millicores: lim_cpu,
+                        mem_mib: cur_mem,
+                        mem_req_mib: req_mem,
+                        mem_lim_mib: lim_mem,
+                    });
+                }
+            }
+        }
+
+        for (pname, history) in &self.pod_metrics_history {
+            if !pod_rows.iter().any(|r| &r.name == pname) {
+                if let Some(latest) = history.back() {
+                    pod_rows.push(crate::views::top_view::TopPodRow {
+                        namespace: self.active_namespace.clone(),
+                        name: pname.clone(),
+                        cpu_millicores: latest.cpu_millicores as i64,
+                        cpu_req_millicores: 0,
+                        cpu_lim_millicores: 0,
+                        mem_mib: latest.memory_mib as i64,
+                        mem_req_mib: 0,
+                        mem_lim_mib: 0,
+                    });
+                }
+            }
+        }
+
+        let mut node_rows = Vec::new();
+        for ((_, _, kind), items) in &self.resource_cache {
+            if kind.eq_ignore_ascii_case("nodes") {
+                for item in items {
+                    let name = item.get("name").and_then(|v| v.as_str())
+                        .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()))
+                        .unwrap_or("").to_string();
+                    if name.is_empty() { continue; }
+                    if node_rows.iter().any(|r: &crate::views::top_view::TopNodeRow| r.name == name) {
+                        continue;
+                    }
+                    let status = item.get("status").and_then(|v| v.as_str())
+                        .unwrap_or("Ready").to_string();
+
+                    let alloc_cpu = item.get("allocatableCpuMillicores").and_then(|v| v.as_i64())
+                        .or_else(|| item.pointer("/status/allocatable/cpu").and_then(|v| v.as_str()).map(srelens_kube::metrics::cpu_millicores))
+                        .unwrap_or(0);
+
+                    let alloc_mem = item.get("allocatableMemoryMiB").and_then(|v| v.as_i64())
+                        .or_else(|| item.pointer("/status/allocatable/memory").and_then(|v| v.as_str()).map(srelens_kube::metrics::mem_mib))
+                        .unwrap_or(0);
+
+                    let (cur_cpu, cur_mem) = self.node_metrics_history.get(&name)
+                        .and_then(|h| h.back())
+                        .map(|s| (s.cpu_millicores as i64, s.memory_mib as i64))
+                        .unwrap_or((0, 0));
+
+                    node_rows.push(crate::views::top_view::TopNodeRow {
+                        name,
+                        status,
+                        cpu_millicores: cur_cpu,
+                        cpu_alloc_millicores: alloc_cpu,
+                        mem_mib: cur_mem,
+                        mem_alloc_mib: alloc_mem,
+                    });
+                }
+            }
+        }
+
+        for (nname, history) in &self.node_metrics_history {
+            if !node_rows.iter().any(|r| &r.name == nname) {
+                if let Some(latest) = history.back() {
+                    let (alloc_cpu, alloc_mem) = self.find_cached_node_allocatable(nname);
+                    node_rows.push(crate::views::top_view::TopNodeRow {
+                        name: nname.clone(),
+                        status: "Ready".to_string(),
+                        cpu_millicores: latest.cpu_millicores as i64,
+                        cpu_alloc_millicores: alloc_cpu,
+                        mem_mib: latest.memory_mib as i64,
+                        mem_alloc_mib: alloc_mem,
+                    });
+                }
+            }
+        }
+
+        (pod_rows, node_rows)
+    }
+
+    pub fn refresh_top_view_data(&mut self) {
+        if matches!(self.active_view, ActiveView::Top(_)) {
+            let (pods, nodes) = self.build_top_rows();
+            if let ActiveView::Top(ref mut top) = self.active_view {
+                top.set_data(pods, nodes);
+            }
+        }
     }
 
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
@@ -4626,85 +5885,330 @@ impl App {
         }
     }
 
+    pub fn reload_topology_view(&mut self) {
+        if let ActiveView::Topology(topo) = &mut self.active_view {
+            topo.is_loading = true;
+            topo.error = None;
+            let namespaces = topo.namespaces.clone();
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+            let ns_list = namespaces.clone();
+
+            tokio::spawn(async move {
+                let input = srelens_kube::topology::TopologyGraphIn {
+                    context: ctx.clone(),
+                    namespaces: ns_list.clone(),
+                    prometheus: vec![],
+                };
+                let res = match srelens_kube::topology::build_topology(cache, input, false).await {
+                    Ok(graph) => Ok(graph),
+                    Err(e) => Err(format!("Failed to build topology: {}", e)),
+                };
+                let _ = event_tx.send(crate::event::AppEvent::TopologyResult {
+                    context: ctx,
+                    namespaces: ns_list,
+                    result: res,
+                });
+            });
+        }
+    }
+
+    pub fn handle_topology_result(
+        &mut self,
+        context: &str,
+        _namespaces: Vec<String>,
+        result: Result<srelens_kube::topology::TopologyGraphOut, String>,
+    ) {
+        if let ActiveView::Topology(topo) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(graph) => topo.set_graph(graph),
+                    Err(err) => topo.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn reload_gpu_info_view(&mut self) {
+        if let ActiveView::GpuInfo(gpu) = &mut self.active_view {
+            gpu.is_loading = true;
+            gpu.error = None;
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+
+            tokio::spawn(async move {
+                let res = match cache.get(&ctx).await {
+                    Ok(client) => srelens_kube::gpu_info::fetch_gpu_info(client).await,
+                    Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                };
+                let _ = event_tx.send(crate::event::AppEvent::GpuInfoResult {
+                    context: ctx,
+                    result: res,
+                });
+            });
+        }
+    }
+
+    pub fn handle_gpu_info_result(
+        &mut self,
+        context: &str,
+        result: Result<srelens_kube::gpu_info::GpuClusterInfo, String>,
+    ) {
+        if let ActiveView::GpuInfo(gpu) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(info) => gpu.set_info(info),
+                    Err(err) => gpu.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn refresh_helm_releases(&mut self) {
+        if let ActiveView::Helm(helm) = &mut self.active_view {
+            helm.is_loading = true;
+            helm.error = None;
+        }
+        let ctx = self.active_context.clone();
+        let ns = if self.active_namespace.is_empty() {
+            None
+        } else {
+            Some(self.active_namespace.clone())
+        };
+        let ns_str = self.active_namespace.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let res = srelens_kube::helm::fetch_helm_releases(&cache, &ctx, ns.as_deref()).await;
+            let _ = event_tx.send(crate::event::AppEvent::HelmReleasesResult {
+                context: ctx,
+                namespace: ns_str,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_helm_releases_result(
+        &mut self,
+        context: &str,
+        _namespace: &str,
+        result: Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
+    ) {
+        if let ActiveView::Helm(helm) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(summaries) => {
+                        let items: Vec<HelmReleaseItem> = summaries.into_iter().map(Into::into).collect();
+                        helm.set_releases(items);
+                    }
+                    Err(err) => {
+                        helm.set_error(err);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn open_helm_detail(&mut self, name: String, namespace: String, initial_tab: HelmDetailTab) {
+        let mut detail_state = HelmDetailViewState::new(name.clone(), namespace.clone());
+        detail_state.set_tab(initial_tab);
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.clone();
+        let ns_c = namespace.clone();
+
+        tokio::spawn(async move {
+            let res = srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None).await;
+            let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
+                context: ctx,
+                namespace: ns_c,
+                name: name_c,
+                revision: None,
+                result: res,
+            });
+        });
+
+        let old_view = std::mem::replace(&mut self.active_view, ActiveView::HelmDetail(detail_state));
+        self.nav_stack.push(old_view);
+    }
+
+    pub fn reload_helm_detail(&mut self, name: &str, namespace: &str) {
+        if let ActiveView::HelmDetail(detail) = &mut self.active_view {
+            detail.is_loading = true;
+            detail.error = None;
+        }
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            let res = srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None).await;
+            let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
+                context: ctx,
+                namespace: ns_c,
+                name: name_c,
+                revision: None,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_helm_detail_result(
+        &mut self,
+        context: &str,
+        namespace: &str,
+        name: &str,
+        revision: Option<i64>,
+        result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
+    ) {
+        if let ActiveView::HelmDetail(detail) = &mut self.active_view {
+            if self.active_context == context && detail.namespace == namespace && detail.release_name == name {
+                match result {
+                    Ok(rel_detail) => {
+                        if let Some(rev) = revision {
+                            if let Some(curr) = &detail.detail {
+                                if curr.revision.saturating_sub(1) == rev {
+                                    detail.set_previous_detail(rel_detail);
+                                    return;
+                                }
+                            }
+                        }
+                        let curr_rev = rel_detail.revision;
+                        detail.set_detail(rel_detail);
+
+                        if curr_rev > 1 && detail.previous_detail.is_none() {
+                            let prev_rev = curr_rev - 1;
+                            let ctx = self.active_context.clone();
+                            let cache = self.client_cache.clone();
+                            let event_tx = self.event_tx.clone();
+                            let name_c = name.to_string();
+                            let ns_c = namespace.to_string();
+                            tokio::spawn(async move {
+                                let res = srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, Some(prev_rev)).await;
+                                let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
+                                    context: ctx,
+                                    namespace: ns_c,
+                                    name: name_c,
+                                    revision: Some(prev_rev),
+                                    result: res,
+                                });
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        if revision.is_none() {
+                            detail.set_error(err);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn open_action_palette(&mut self, kind: String, name: String, namespace: Option<String>) {
         use crate::ui::dialogs::{QuickActionId, QuickActionItem};
 
         let kind_lower = kind.to_lowercase();
         let actions = match kind_lower.as_str() {
-            "pod" | "pods" => vec![
-                QuickActionItem {
-                    id: QuickActionId::AskAi,
-                    key_hint: "ai".to_string(),
-                    title: "🤖 Ask AI Assistant about this Pod".to_string(),
-                    description: "Inspect pod status, errors, exit codes & recent events".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::PlaybookCrashLoop,
-                    key_hint: "/crashloop".to_string(),
-                    title: "⚡ AI Triage CrashLoopBackOff".to_string(),
-                    description: "Fetch previous container logs, termination exit codes & recent events".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::PlaybookPending,
-                    key_hint: "/pending".to_string(),
-                    title: "⚡ AI Diagnose Pending / Unschedulable".to_string(),
-                    description: "Analyze scheduling taints, node affinities, and PVC constraints".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::PlaybookOom,
-                    key_hint: "/oom".to_string(),
-                    title: "⚡ AI Diagnose OOMKilled".to_string(),
-                    description: "Inspect memory limits, usage peaks, and OOM terminations".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::RelationshipTree,
-                    key_hint: "t".to_string(),
-                    title: "🌳 Resource Relationship Tree".to_string(),
-                    description: "Trace owner Deployment/ReplicaSet, Service, ConfigMaps & PVCs".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::ViewLogs,
-                    key_hint: "l".to_string(),
-                    title: "📋 View Live Logs".to_string(),
-                    description: "Stream logs from pod containers with tailing".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::OpenShell,
-                    key_hint: "s".to_string(),
-                    title: "🐚 Open Shell".to_string(),
-                    description: "Attach interactive terminal session inside container".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::PortForward,
-                    key_hint: "f".to_string(),
-                    title: "🔌 Port Forward".to_string(),
-                    description: "Forward local port to pod container".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::Describe,
-                    key_hint: "d".to_string(),
-                    title: "📄 Describe Pod".to_string(),
-                    description: "Formatted Kubernetes describe output & events".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::ViewYaml,
-                    key_hint: "y".to_string(),
-                    title: "📝 View YAML".to_string(),
-                    description: "Inspect live Kubernetes YAML manifest".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::EditYaml,
-                    key_hint: "e".to_string(),
-                    title: "✏️  Edit YAML".to_string(),
-                    description: "Open in external editor with server-side apply".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::Delete,
-                    key_hint: "del".to_string(),
-                    title: "🗑️  Delete Pod".to_string(),
-                    description: "Gracefully delete pod from the cluster".to_string(),
-                },
-            ],
+            "pod" | "pods" => {
+                let mut acts = vec![
+                    QuickActionItem {
+                        id: QuickActionId::AskAi,
+                        key_hint: "ai".to_string(),
+                        title: "🤖 Ask AI Assistant about this Pod".to_string(),
+                        description: "Inspect pod status, errors, exit codes & recent events".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::PlaybookCrashLoop,
+                        key_hint: "/crashloop".to_string(),
+                        title: "⚡ AI Triage CrashLoopBackOff".to_string(),
+                        description: "Fetch previous container logs, termination exit codes & recent events".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::PlaybookPending,
+                        key_hint: "/pending".to_string(),
+                        title: "⚡ AI Diagnose Pending / Unschedulable".to_string(),
+                        description: "Analyze scheduling taints, node affinities, and PVC constraints".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::PlaybookOom,
+                        key_hint: "/oom".to_string(),
+                        title: "⚡ AI Diagnose OOMKilled".to_string(),
+                        description: "Inspect memory limits, usage peaks, and OOM terminations".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::RelationshipTree,
+                        key_hint: "t".to_string(),
+                        title: "🌳 Resource Relationship Tree".to_string(),
+                        description: "Trace owner Deployment/ReplicaSet, Service, ConfigMaps & PVCs".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::ViewLogs,
+                        key_hint: "l".to_string(),
+                        title: "📋 View Live Logs".to_string(),
+                        description: "Stream logs from pod containers with tailing".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::OpenShell,
+                        key_hint: "s".to_string(),
+                        title: "🐚 Open Shell".to_string(),
+                        description: "Attach interactive terminal session inside container".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::PortForward,
+                        key_hint: "f".to_string(),
+                        title: "🔌 Port Forward".to_string(),
+                        description: "Forward local port to pod container".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::Describe,
+                        key_hint: "d".to_string(),
+                        title: "📄 Describe Pod".to_string(),
+                        description: "Formatted Kubernetes describe output & events".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::ViewYaml,
+                        key_hint: "y".to_string(),
+                        title: "📝 View YAML".to_string(),
+                        description: "Inspect live Kubernetes YAML manifest".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::EditYaml,
+                        key_hint: "e".to_string(),
+                        title: "✏️  Edit YAML".to_string(),
+                        description: "Open in external editor with server-side apply".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::Delete,
+                        key_hint: "del".to_string(),
+                        title: "🗑️  Delete Pod".to_string(),
+                        description: "Gracefully delete pod from the cluster".to_string(),
+                    },
+                ];
+
+                let has_active_pf = !self.active_forwards_for("Pod", namespace.as_deref().unwrap_or(""), &name).is_empty();
+                if has_active_pf {
+                    if let Some(pos) = acts.iter().position(|a| a.id == QuickActionId::PortForward) {
+                        acts.insert(
+                            pos + 1,
+                            QuickActionItem {
+                                id: QuickActionId::StopPortForward,
+                                key_hint: "F".to_string(),
+                                title: "⏹ Close Active Port Forward".to_string(),
+                                description: "Terminate running port forward tunnel for this pod".to_string(),
+                            },
+                        );
+                    }
+                }
+
+                acts
+            },
             "deployment" | "deployments" | "statefulset" | "statefulsets" | "daemonset" | "daemonsets" => vec![
                 QuickActionItem {
                     id: QuickActionId::AskAi,
@@ -4773,50 +6277,69 @@ impl App {
                     description: "Delete workload resource from the cluster".to_string(),
                 },
             ],
-            "service" | "services" => vec![
-                QuickActionItem {
-                    id: QuickActionId::RelationshipTree,
-                    key_hint: "t".to_string(),
-                    title: "🌳 Resource Relationship Tree".to_string(),
-                    description: "View Service -> Ingress -> Endpoints -> Pods".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::PlaybookEndpoints,
-                    key_hint: "/endpoints".to_string(),
-                    title: "⚡ AI Triage Missing Endpoints".to_string(),
-                    description: "Check selector matching, readiness probes, and backend pods".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::JumpToPods,
-                    key_hint: "pods".to_string(),
-                    title: "🎯 Jump to Backend Pods".to_string(),
-                    description: "Navigate to pods matching this service's selector".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::PortForward,
-                    key_hint: "f".to_string(),
-                    title: "🔌 Port Forward".to_string(),
-                    description: "Forward local port to service".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::Describe,
-                    key_hint: "d".to_string(),
-                    title: "📄 Describe Service".to_string(),
-                    description: "Inspect service ports, endpoints & selectors".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::ViewYaml,
-                    key_hint: "y".to_string(),
-                    title: "📝 View YAML".to_string(),
-                    description: "Inspect live Kubernetes YAML manifest".to_string(),
-                },
-                QuickActionItem {
-                    id: QuickActionId::Delete,
-                    key_hint: "del".to_string(),
-                    title: "🗑️  Delete Service".to_string(),
-                    description: "Delete service from the cluster".to_string(),
-                },
-            ],
+            "service" | "services" => {
+                let mut acts = vec![
+                    QuickActionItem {
+                        id: QuickActionId::RelationshipTree,
+                        key_hint: "t".to_string(),
+                        title: "🌳 Resource Relationship Tree".to_string(),
+                        description: "View Service -> Ingress -> Endpoints -> Pods".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::PlaybookEndpoints,
+                        key_hint: "/endpoints".to_string(),
+                        title: "⚡ AI Triage Missing Endpoints".to_string(),
+                        description: "Check selector matching, readiness probes, and backend pods".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::JumpToPods,
+                        key_hint: "pods".to_string(),
+                        title: "🎯 Jump to Backend Pods".to_string(),
+                        description: "Navigate to pods matching this service's selector".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::PortForward,
+                        key_hint: "f".to_string(),
+                        title: "🔌 Port Forward".to_string(),
+                        description: "Forward local port to service".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::Describe,
+                        key_hint: "d".to_string(),
+                        title: "📄 Describe Service".to_string(),
+                        description: "Inspect service ports, endpoints & selectors".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::ViewYaml,
+                        key_hint: "y".to_string(),
+                        title: "📝 View YAML".to_string(),
+                        description: "Inspect live Kubernetes YAML manifest".to_string(),
+                    },
+                    QuickActionItem {
+                        id: QuickActionId::Delete,
+                        key_hint: "del".to_string(),
+                        title: "🗑️  Delete Service".to_string(),
+                        description: "Delete service from the cluster".to_string(),
+                    },
+                ];
+
+                let has_active_pf = !self.active_forwards_for("Service", namespace.as_deref().unwrap_or(""), &name).is_empty();
+                if has_active_pf {
+                    if let Some(pos) = acts.iter().position(|a| a.id == QuickActionId::PortForward) {
+                        acts.insert(
+                            pos + 1,
+                            QuickActionItem {
+                                id: QuickActionId::StopPortForward,
+                                key_hint: "F".to_string(),
+                                title: "⏹ Close Active Port Forward".to_string(),
+                                description: "Terminate running port forward tunnel for this service".to_string(),
+                            },
+                        );
+                    }
+                }
+
+                acts
+            },
             "ingress" | "ingresses" => vec![
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
@@ -5017,12 +6540,58 @@ impl App {
                     }
                     QuickActionId::PortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
+                        let mut detected_port = None;
+                        let target_kind = if resource_kind.eq_ignore_ascii_case("service") { "Service" } else { "Pod" }.to_string();
+                        if let Ok(client) = self.client_cache.get(&self.active_context).await {
+                            if target_kind == "Service" {
+                                let api: kube::Api<k8s_openapi::api::core::v1::Service> = kube::Api::namespaced(client, &ns);
+                                if let Ok(svc) = api.get(&resource_name).await {
+                                    if let Some(spec) = svc.spec {
+                                        if let Some(ports) = spec.ports {
+                                            if let Some(p) = ports.first() {
+                                                detected_port = Some(p.port as u16);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &ns);
+                                if let Ok(pod) = api.get(&resource_name).await {
+                                    if let Some(spec) = pod.spec {
+                                        for container in spec.containers {
+                                            if let Some(ports) = container.ports {
+                                                if let Some(p) = ports.first() {
+                                                    detected_port = Some(p.container_port as u16);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let target_port = detected_port.unwrap_or(8080);
                         self.modal = Some(Modal::PortForward {
                             pod_name: resource_name,
                             namespace: ns,
-                            container_port: 8080,
-                            local_port_input: "8080".to_string(),
+                            container_port: target_port,
+                            local_port_input: target_port.to_string(),
+                            kind: target_kind,
                         });
+                    }
+                    QuickActionId::StopPortForward => {
+                        let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
+                        let forwards = self.active_forwards_for(&resource_kind, &ns, &resource_name);
+                        let count = forwards.len();
+                        for f in forwards {
+                            self.forward_manager.stop(f.id);
+                        }
+                        self.sync_port_forwards();
+                        if count > 0 {
+                            self.set_toast(format!("✓ Closed {} active port forward(s) for {}", count, resource_name), Theme::status_ok());
+                        } else {
+                            self.set_toast("No active port forward to close".to_string(), Theme::status_warn());
+                        }
                     }
                     QuickActionId::Describe => {
                         self.open_describe_view(resource_name, resource_kind, namespace).await;
@@ -5206,7 +6775,133 @@ impl App {
                 self.set_toast("Rollout restart triggered".to_string(), Theme::status_ok());
             }
         } else if action_name.starts_with("stop-pf:") {
-            self.set_toast("Port forward stopped".to_string(), Theme::status_ok());
+            let id_str = action_name.strip_prefix("stop-pf:").unwrap_or("");
+            if let Ok(id) = id_str.parse::<u64>() {
+                self.forward_manager.stop(id);
+                self.sync_port_forwards();
+                self.set_toast(format!("Stopped port forward #{}", id), Theme::status_ok());
+            } else {
+                self.set_toast("Port forward stopped".to_string(), Theme::status_ok());
+            }
+        } else if action_name.starts_with("cordon:") {
+            let node_name = action_name.strip_prefix("cordon:").unwrap_or("").to_string();
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+            let n_name = node_name.clone();
+
+            tokio::spawn(async move {
+                if let Ok(client) = cache.get(&ctx).await {
+                    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
+                    let patch = serde_json::json!({ "spec": { "unschedulable": true } });
+                    let res = api.patch(&n_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await;
+                    let msg = format!("✓ Cordoned node '{}'", n_name);
+                    let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                        title: format!("cordon_node:{}", n_name),
+                        result: res.map(|_| msg).map_err(|e| e.to_string()),
+                    });
+                }
+            });
+            self.set_toast(format!("Cordoning node '{}'...", node_name), Theme::status_warn());
+        } else if action_name.starts_with("uncordon:") {
+            let node_name = action_name.strip_prefix("uncordon:").unwrap_or("").to_string();
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+            let n_name = node_name.clone();
+
+            tokio::spawn(async move {
+                if let Ok(client) = cache.get(&ctx).await {
+                    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
+                    let patch = serde_json::json!({ "spec": { "unschedulable": false } });
+                    let res = api.patch(&n_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await;
+                    let msg = format!("✓ Uncordoned node '{}'", n_name);
+                    let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                        title: format!("cordon_node:{}", n_name),
+                        result: res.map(|_| msg).map_err(|e| e.to_string()),
+                    });
+                }
+            });
+            self.set_toast(format!("Uncordoning node '{}'...", node_name), Theme::status_warn());
+        } else if action_name.starts_with("helm-rollback:") {
+            let parts: Vec<&str> = action_name.splitn(4, ':').collect();
+            if parts.len() == 4 {
+                let name = parts[1].to_string();
+                let ns = parts[2].to_string();
+                let rev_str = parts[3];
+                let rev: Option<i64> = rev_str.parse().ok();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let name_c = name.clone();
+                let ns_c = ns.clone();
+                let rev_val = rev_str.to_string();
+
+                tokio::spawn(async move {
+                    let args = srelens_kube::helm_cli::rollback_args(&name_c, rev.unwrap_or(1), Some(&ns_c));
+                    let res = srelens_kube::helm_cli::run_helm(&cache, &ctx, &args).await;
+                    let title = format!("helm_rollback:{}:{}", ns_c, name_c);
+                    match res {
+                        Ok(output) => {
+                            let msg = if output.trim().is_empty() {
+                                format!("✓ Rolled back '{}' to revision {}", name_c, rev_val)
+                            } else {
+                                format!("✓ Rolled back '{}' to revision {}: {}", name_c, rev_val, output.trim())
+                            };
+                            let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                                title,
+                                result: Ok(msg),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                                title,
+                                result: Err(format!("Rollback failed: {}", e)),
+                            });
+                        }
+                    }
+                });
+                self.set_toast(format!("Rolling back '{}' to revision {}...", name, rev_str), Theme::status_warn());
+            }
+        } else if action_name.starts_with("helm-uninstall:") {
+            let parts: Vec<&str> = action_name.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                let name = parts[1].to_string();
+                let ns = parts[2].to_string();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let name_c = name.clone();
+                let ns_c = ns.clone();
+
+                tokio::spawn(async move {
+                    let args = srelens_kube::helm_cli::uninstall_args(&name_c, Some(&ns_c));
+                    let res = srelens_kube::helm_cli::run_helm(&cache, &ctx, &args).await;
+                    let title = format!("helm_uninstall:{}:{}", ns_c, name_c);
+                    match res {
+                        Ok(output) => {
+                            let msg = if output.trim().is_empty() {
+                                format!("✓ Uninstalled release '{}'", name_c)
+                            } else {
+                                format!("✓ Uninstalled release '{}': {}", name_c, output.trim())
+                            };
+                            let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                                title,
+                                result: Ok(msg),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                                title,
+                                result: Err(format!("Uninstall failed: {}", e)),
+                            });
+                        }
+                    }
+                });
+                self.set_toast(format!("Uninstalling release '{}'...", name), Theme::status_warn());
+            }
         }
     }
 
@@ -5251,11 +6946,173 @@ impl App {
         }
     }
 
-    pub async fn execute_start_port_forward(&mut self, pod: String, _ns: String, local_port: u16, target_port: u16) {
-        self.set_toast(format!("Port forward started on 127.0.0.1:{} -> {}:{}", local_port, pod, target_port), Theme::status_ok());
+    pub async fn execute_start_port_forward(
+        &mut self,
+        target_name: String,
+        target_kind: String,
+        ns: String,
+        local_port: u16,
+        target_port: u16,
+    ) {
+        let sink = TuiSink::arc(self.event_tx.clone());
+        let ctx = self.active_context.clone();
+        match self.forward_manager.start(
+            sink,
+            ctx,
+            ns.clone(),
+            target_kind.clone(),
+            target_name.clone(),
+            target_port,
+            Some(local_port),
+        ).await {
+            Ok(info) => {
+                self.set_toast(
+                    format!("Port forward active: 127.0.0.1:{} -> {} {}:{}", info.local_port, target_kind, target_name, target_port),
+                    Theme::status_ok(),
+                );
+                self.sync_port_forwards();
+            }
+            Err(err) => {
+                self.set_toast(
+                    format!("Failed to port forward: {}", err),
+                    Theme::status_error(),
+                );
+            }
+        }
+    }
+
+    pub fn active_forwards_for(&self, kind: &str, namespace: &str, name: &str) -> Vec<srelens_streams::forward::ForwardEntry> {
+        self.forward_manager
+            .list()
+            .into_iter()
+            .filter(|f| {
+                !f.ended
+                    && f.context == self.active_context
+                    && (f.namespace.is_empty() || namespace.is_empty() || f.namespace == namespace)
+                    && f.kind.eq_ignore_ascii_case(kind)
+                    && f.name == name
+            })
+            .collect()
+    }
+
+    pub async fn close_selected_port_forward(&mut self) {
+        let selected_info = match &self.active_view {
+            ActiveView::Table(table) => {
+                if let Some(item) = table.selected_item() {
+                    let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" }.to_string();
+                    Some((kind, ns, name))
+                } else {
+                    None
+                }
+            }
+            ActiveView::Top(top) => {
+                if top.active_tab == top_view::TopTab::Pods {
+                    let pods = top.filtered_pods();
+                    if let Some(pod) = pods.get(top.selected_idx) {
+                        Some(("Pod".to_string(), pod.namespace.clone(), pod.name.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((kind, ns, name)) = selected_info {
+            let forwards = self.active_forwards_for(&kind, &ns, &name);
+            if forwards.is_empty() {
+                self.set_toast(format!("No active port forward for {}/{}", kind, name), Theme::status_warn());
+                return;
+            }
+
+            let count = forwards.len();
+            let first_loc = forwards[0].local_port;
+            let first_rem = forwards[0].remote_port;
+
+            for f in forwards {
+                self.forward_manager.stop(f.id);
+            }
+            self.sync_port_forwards();
+
+            if count == 1 {
+                self.set_toast(
+                    format!("✓ Closed port forward: 127.0.0.1:{} -> {}:{}", first_loc, name, first_rem),
+                    Theme::status_ok(),
+                );
+            } else {
+                self.set_toast(
+                    format!("✓ Closed {} active port forwards for {}/{}", count, kind, name),
+                    Theme::status_ok(),
+                );
+            }
+        }
+    }
+
+    pub fn sync_port_forwards(&mut self) {
+        let entries = self.forward_manager.list();
+        let mut active_map: std::collections::HashMap<(String, String), Vec<(u16, u16, String)>> = std::collections::HashMap::new();
+        for f in &entries {
+            if !f.ended && f.context == self.active_context {
+                active_map
+                    .entry((f.namespace.clone(), f.name.clone()))
+                    .or_default()
+                    .push((f.local_port, f.remote_port, f.id.to_string()));
+            }
+        }
+
+        if let ActiveView::Table(ref mut table) = self.active_view {
+            table.active_port_forwards = active_map.clone();
+        }
+        if let ActiveView::Top(ref mut top) = self.active_view {
+            top.active_port_forwards = active_map;
+        }
+
+        let view_entries: Vec<crate::views::port_forward_view::PortForwardEntry> = entries
+            .into_iter()
+            .map(|f| {
+                let status = if let Some(err) = &f.error {
+                    format!("Error: {}", err)
+                } else if f.ended {
+                    "Stopped".to_string()
+                } else {
+                    "Active".to_string()
+                };
+                crate::views::port_forward_view::PortForwardEntry {
+                    id: f.id.to_string(),
+                    context: f.context,
+                    namespace: f.namespace,
+                    target_type: f.kind,
+                    target_name: f.name,
+                    local_port: f.local_port,
+                    container_port: f.remote_port,
+                    active_connections: 0,
+                    bytes_rx: f.bytes,
+                    bytes_tx: 0,
+                    status,
+                }
+            })
+            .collect();
+
+        if let ActiveView::PortForwards(ref mut state) = self.active_view {
+            state.set_forwards(view_entries);
+        }
     }
 
     pub fn handle_stream_event(&mut self, channel: String, payload: serde_json::Value) {
+        if channel.starts_with("forward:") {
+            self.sync_port_forwards();
+            if channel.starts_with("forward:closed:") {
+                if let Some(err_str) = payload.as_str() {
+                    self.set_toast(format!("Port forward closed: {}", err_str), Theme::status_error());
+                }
+            }
+            return;
+        }
+
         if let Some(items) = payload.as_array() {
             if !items.is_empty() {
                 self.is_connected = true;
@@ -5277,6 +7134,9 @@ impl App {
                     };
                     if is_wl_table && matches!(kind.as_str(), "deployments" | "statefulsets" | "daemonsets" | "pods" | "cronjobs") {
                         self.rebuild_workloads_table();
+                    }
+                    if matches!(self.active_view, ActiveView::Top(_)) && matches!(kind.as_str(), "nodes" | "pods") {
+                        self.refresh_top_view_data();
                     }
                 }
             }
@@ -5331,10 +7191,11 @@ impl App {
 
         if let ActiveView::Logs(logs) = &mut self.active_view {
             if logs.channel == channel {
+                let source = payload.get("source").and_then(|v| v.as_str()).map(String::from);
                 if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
-                    logs.push_line(line.to_string());
+                    logs.push_entry(source, line.to_string());
                 } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
-                    logs.push_line(format!("--- log status: {} ---", status));
+                    logs.push_entry(source, format!("--- log status: {} ---", status));
                 }
             }
         }
@@ -5360,12 +7221,25 @@ impl App {
             ActiveView::Logs(_) => "Logs",
             ActiveView::PortForwards(_) => "Port Forwards",
             ActiveView::Helm(_) => "Helm Releases",
+            ActiveView::HelmDetail(detail) => match detail.active_tab {
+                HelmDetailTab::Overview => "Helm: Overview",
+                HelmDetailTab::ValuesDiff => "Helm: Values Diff",
+                HelmDetailTab::Revisions => "Helm: Revisions History",
+                HelmDetailTab::Manifest => "Helm: Rendered Manifest",
+                HelmDetailTab::Notes => "Helm: Release Notes",
+            },
             ActiveView::Overview(_) => "Overview",
             ActiveView::Toolbox(_) => "Toolbox",
             ActiveView::Assistant => "AI Assistant",
             ActiveView::Settings(_) => "AI Settings",
             ActiveView::Tree(_) => "Resource Relationship Tree",
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
+            ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
+            ActiveView::GpuInfo(_) => "GPU Info & VRAM Allocation",
+            ActiveView::Top(top) => match top.active_tab {
+                top_view::TopTab::Pods => "Top Pods Hotspots",
+                top_view::TopTab::Nodes => "Top Nodes Hotspots",
+            },
         };
 
         let active_pods_count = if let ActiveView::Table(t) = &self.active_view {
@@ -5433,12 +7307,16 @@ impl App {
             ActiveView::Logs(logs) => render_logs_view(f, chunks[1], logs),
             ActiveView::PortForwards(pf) => render_port_forward_view(f, chunks[1], pf),
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
+            ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
             ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
+            ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
+            ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
+            ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
         }
 
         // 3. Render Status Bar
@@ -5447,6 +7325,8 @@ impl App {
             ActiveView::Describe(desc) => (desc.search_matches.len(), desc.lines.len(), true),
             ActiveView::Yaml(yaml) => (yaml.search_matches.len(), yaml.lines.len(), true),
             ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
+            ActiveView::Helm(helm) => (helm.filtered_indices().len(), helm.releases.len(), false),
+            ActiveView::Top(top) => (top.visible_count(), if top.active_tab == top_view::TopTab::Pods { top.pods.len() } else { top.nodes.len() }, false),
             _ => (0, 0, false),
         };
 
@@ -5459,7 +7339,107 @@ impl App {
         };
         let suggestions_prop = suggestions.as_ref().map(|s| (s.as_slice(), self.command_suggestion_idx));
 
+        let selected_active_forwards: Vec<srelens_streams::forward::ForwardEntry> = match &self.active_view {
+            ActiveView::Table(table) => {
+                if let Some(item) = table.selected_item() {
+                    let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
+                    let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
+                    let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" };
+                    if !name.is_empty() {
+                        self.active_forwards_for(kind, ns, name)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            ActiveView::Top(top) => {
+                if top.active_tab == top_view::TopTab::Pods {
+                    let pods = top.filtered_pods();
+                    if let Some(pod) = pods.get(top.selected_idx) {
+                        self.active_forwards_for("Pod", &pod.namespace, &pod.name)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+
+        let has_selected_pf = !selected_active_forwards.is_empty();
+        let close_pf_button_data = if has_selected_pf {
+            let label = if selected_active_forwards.len() == 1 {
+                format!("✕ Close PF: {}", selected_active_forwards[0].local_port)
+            } else {
+                format!("✕ Close All PF ({})", selected_active_forwards.len())
+            };
+            let style = Style::default()
+                .bg(Theme::red())
+                .fg(ratatui::style::Color::White)
+                .add_modifier(Modifier::BOLD);
+            Some((label, style))
+        } else {
+            None
+        };
+
         let custom_hints: Option<&[(&str, &str)]> = match &self.active_view {
+            ActiveView::Top(_) => if has_selected_pf {
+                Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "Pods/Nodes"),
+                    ("<c>", "Sort CPU"),
+                    ("<m>", "Sort MEM"),
+                    ("<f>", "New PF"),
+                    ("<F>", "Close PF"),
+                    ("<l>", "Logs"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..])
+            } else {
+                Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "Pods/Nodes"),
+                    ("<c>", "Sort CPU"),
+                    ("<m>", "Sort MEM"),
+                    ("<S>", "Rev"),
+                    ("<l>", "Logs"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..])
+            },
+            ActiveView::GpuInfo(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<↑/↓>", "Select"),
+                ("<Tab>", "Pane"),
+                ("<Enter>", "Inspect"),
+                ("<l>", "Logs"),
+                ("<d>", "Describe"),
+                ("<y>", "YAML"),
+                ("<r>", "Refresh"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Topology(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<←/→>", "Lane"),
+                ("<↑/↓>", "Node"),
+                ("<Enter>", "Inspect"),
+                ("<d>", "Describe"),
+                ("<y>", "YAML"),
+                ("<l>", "Logs"),
+                ("<r>", "Refresh"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::NodeInspector(ni) => {
                 let cordon_act = if ni.details.as_ref().map(|d| d.unschedulable).unwrap_or(false) {
                     "Uncordon"
@@ -5538,19 +7518,36 @@ impl App {
                             ("<^d>", "Delete"),
                             ("<?>", "Help"),
                         ][..]),
-                        ResourceKind::Pods => Some(&[
-                            ("<:>", "Cmd"),
-                            ("</>", "Filter"),
-                            ("<l>", "Logs"),
-                            ("<s>", "Shell"),
-                            ("<m>", "Metrics"),
-                            ("<f>/<F>", "PortForward"),
-                            ("<d>", "Describe"),
-                            ("<y>", "YAML"),
-                            ("<e>", "Edit"),
-                            ("<^d>", "Delete"),
-                            ("<?>", "Help"),
-                        ][..]),
+                        ResourceKind::Pods => if has_selected_pf {
+                            Some(&[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<l>", "Logs"),
+                                ("<s>", "Shell"),
+                                ("<m>", "Metrics"),
+                                ("<f>", "New PF"),
+                                ("<F>", "Close PF"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..])
+                        } else {
+                            Some(&[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<l>", "Logs"),
+                                ("<s>", "Shell"),
+                                ("<m>", "Metrics"),
+                                ("<f>/<F>", "PortForward"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..])
+                        },
                 ResourceKind::Deployments | ResourceKind::DaemonSets | ResourceKind::StatefulSets => Some(&[
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
@@ -5563,17 +7560,32 @@ impl App {
                     ("<^d>", "Delete"),
                     ("<?>", "Help"),
                 ][..]),
-                ResourceKind::Services => Some(&[
-                    ("<:>", "Cmd"),
-                    ("</>", "Filter"),
-                    ("<Enter>", "Endpoints"),
-                    ("<f>/<F>", "PortForward"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<e>", "Edit"),
-                    ("<^d>", "Delete"),
-                    ("<?>", "Help"),
-                ][..]),
+                ResourceKind::Services => if has_selected_pf {
+                    Some(&[
+                        ("<:>", "Cmd"),
+                        ("</>", "Filter"),
+                        ("<Enter>", "Endpoints"),
+                        ("<f>", "New PF"),
+                        ("<F>", "Close PF"),
+                        ("<d>", "Describe"),
+                        ("<y>", "YAML"),
+                        ("<e>", "Edit"),
+                        ("<^d>", "Delete"),
+                        ("<?>", "Help"),
+                    ][..])
+                } else {
+                    Some(&[
+                        ("<:>", "Cmd"),
+                        ("</>", "Filter"),
+                        ("<Enter>", "Endpoints"),
+                        ("<f>/<F>", "PortForward"),
+                        ("<d>", "Describe"),
+                        ("<y>", "YAML"),
+                        ("<e>", "Edit"),
+                        ("<^d>", "Delete"),
+                        ("<?>", "Help"),
+                    ][..])
+                },
                 ResourceKind::Ingresses => Some(&[
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
@@ -5647,12 +7659,66 @@ impl App {
             ][..]),
             ActiveView::Helm(_) => Some(&[
                 ("<:>", "Cmd"),
-                ("<c>", "CopyURL"),
+                ("</>", "Filter"),
+                ("<Enter>", "Inspect"),
                 ("<v>", "Values"),
                 ("<y>", "Manifest"),
+                ("<d>", "History"),
+                ("<r>", "Rollback"),
+                ("<^d>", "Uninstall"),
+                ("<c>", "CopyURL"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
+            ActiveView::HelmDetail(detail) => match detail.active_tab {
+                HelmDetailTab::Overview => Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "NextTab"),
+                    ("<1..5>", "Tab"),
+                    ("<j/k>", "Scroll"),
+                    ("<c>", "CopyURL"),
+                    ("<r>", "Rollback"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..]),
+                HelmDetailTab::ValuesDiff => Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "NextTab"),
+                    ("<1..5>", "Tab"),
+                    ("<m>", "ToggleDiffMode"),
+                    ("<j/k>", "Scroll"),
+                    ("<y>", "Copy"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..]),
+                HelmDetailTab::Revisions => Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "NextTab"),
+                    ("<1..5>", "Tab"),
+                    ("<j/k>", "SelectRev"),
+                    ("<r>", "Rollback"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..]),
+                HelmDetailTab::Manifest => Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "NextTab"),
+                    ("<1..5>", "Tab"),
+                    ("<j/k>", "Scroll"),
+                    ("<y>", "Copy"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..]),
+                HelmDetailTab::Notes => Some(&[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "NextTab"),
+                    ("<1..5>", "Tab"),
+                    ("<j/k>", "Scroll"),
+                    ("<y>", "Copy"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..]),
+            },
             ActiveView::Toolbox(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<c>", "CopyPath"),
@@ -5675,6 +7741,8 @@ impl App {
                 toast: toast_prop,
                 custom_hints,
                 suggestions: suggestions_prop,
+                close_pf_button: close_pf_button_data.as_ref().map(|(l, s)| (l.as_str(), *s)),
+                close_pf_rect: Some(&self.close_pf_button_rect),
             },
         );
 
