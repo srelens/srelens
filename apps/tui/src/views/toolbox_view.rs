@@ -161,3 +161,56 @@ pub fn render_toolbox_view(f: &mut Frame, area: Rect, state: &ToolboxViewState) 
     let table = Table::new(rows, widths).header(headers);
     f.render_widget(table, inner);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn test_toolbox_view_state_and_render() {
+        let mut state = ToolboxViewState::new();
+        assert!(!state.tools.is_empty());
+
+        // Test navigation
+        state.select_next();
+        state.select_prev();
+        assert_eq!(state.selected_idx, 0);
+
+        // Test mock tools to cover all status branches
+        state.tools = vec![
+            ToolStatusItem {
+                name: "kubectl".to_string(),
+                installed: true,
+                version: Some("v1.30.0".to_string()),
+                path: Some("/usr/local/bin/kubectl".to_string()),
+                required: true,
+            },
+            ToolStatusItem {
+                name: "required-tool".to_string(),
+                installed: false,
+                version: None,
+                path: None,
+                required: true,
+            },
+            ToolStatusItem {
+                name: "optional-tool".to_string(),
+                installed: false,
+                version: None,
+                path: None,
+                required: false,
+            },
+        ];
+
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_toolbox_view(f, f.area(), &state)).unwrap();
+
+        // Nonexistent tool detection to test failure branches
+        let missing = detect_tool("definitely-nonexistent-bin-987", &["also-nonexistent"], false, &["--version"]);
+        assert!(!missing.installed);
+        assert!(missing.path.is_none());
+        assert!(missing.version.is_none());
+    }
+}

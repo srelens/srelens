@@ -68,6 +68,18 @@ pub struct PodSummary {
     /// Pod IP address from `status.podIP`.
     #[serde(rename = "podIp", default)]
     pub pod_ip: String,
+    /// CPU requested in millicores across all containers
+    #[serde(rename = "cpuReqMillicores", default)]
+    pub cpu_req_millicores: i64,
+    /// CPU limit in millicores across all containers
+    #[serde(rename = "cpuLimMillicores", default)]
+    pub cpu_lim_millicores: i64,
+    /// Memory requested in MiB across all containers
+    #[serde(rename = "memReqMiB", default)]
+    pub mem_req_mib: i64,
+    /// Memory limit in MiB across all containers
+    #[serde(rename = "memLimMiB", default)]
+    pub mem_lim_mib: i64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -165,6 +177,30 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         .and_then(|s| s.pod_ip.clone())
         .unwrap_or_default();
 
+    let (mut req_cpu, mut lim_cpu, mut req_mem, mut lim_mem) = (0i64, 0i64, 0i64, 0i64);
+    if let Some(spec) = pod.spec.as_ref() {
+        for c in &spec.containers {
+            if let Some(resources) = &c.resources {
+                if let Some(reqs) = &resources.requests {
+                    if let Some(q) = reqs.get("cpu") {
+                        req_cpu += crate::metrics::cpu_millicores(&q.0);
+                    }
+                    if let Some(q) = reqs.get("memory") {
+                        req_mem += crate::metrics::mem_mib(&q.0);
+                    }
+                }
+                if let Some(lims) = &resources.limits {
+                    if let Some(q) = lims.get("cpu") {
+                        lim_cpu += crate::metrics::cpu_millicores(&q.0);
+                    }
+                    if let Some(q) = lims.get("memory") {
+                        lim_mem += crate::metrics::mem_mib(&q.0);
+                    }
+                }
+            }
+        }
+    }
+
     PodSummary {
         name,
         namespace,
@@ -178,6 +214,10 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         image,
         waiting_reason,
         pod_ip,
+        cpu_req_millicores: req_cpu,
+        cpu_lim_millicores: lim_cpu,
+        mem_req_mib: req_mem,
+        mem_lim_mib: lim_mem,
     }
 }
 
