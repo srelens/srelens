@@ -68,7 +68,8 @@ mounts `/tmp` noexec and `mktemp` puts the working tree there, so running the
 binary to check it would report every good download as broken. The script
 probes whether it can execute anything there at all, and moves the check to
 after the install when it cannot -- where a binary that does not run is
-removed again rather than left on your `PATH`.
+removed again -- and the copy it replaced is put back, since that check is
+the first time the new one could be run at all.
 
 **The working directory gets the same walk.** `mktemp -d` makes the directory
 itself 0700 and yours, but places it under `TMPDIR` when that is set -- and
@@ -108,7 +109,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Forty-seven cases: argument handling, the macOS and unknown-architecture refusals,
+Fifty-two cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

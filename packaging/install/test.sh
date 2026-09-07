@@ -188,10 +188,10 @@ fi
 # ETXTBSY or leave the staging file behind.
 out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
 check "installing over an existing copy succeeds" "Installed:" "$out" "$rc" 0
-if [ -z "$(find "$dest" -name '.srelens-tui.install.*' 2>/dev/null)" ]; then
-    ok "no staging file is left behind"
+if [ -z "$(find "$dest" -name '.srelens-tui.install.*' -o -name '.srelens-tui.backup.*' 2>/dev/null)" ]; then
+    ok "no staging or backup file is left behind"
 else
-    no "a staging file was left in $dest"
+    no "a staging or backup file was left in $dest"
 fi
 
 echo "through a pipe"
@@ -531,6 +531,47 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
         out="$(TMPDIR="$noexec" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
         check "a noexec working directory still installs" "Installed:" "$out" "$rc" 0
         check "and says why the check moved" "mounted noexec" "$out" "$rc" 0
+
+        # With the pre-install check skipped, an incompatible binary reaches
+        # the destination before anything has run it. Failing then must not
+        # leave the caller with nothing where a working copy stood.
+        bad="$work/bad"
+        mkdir -p "$bad"
+        printf 'this is not a binary\n' > "$bad/srelens-tui"
+        printf 'nothing here either\n' > "$bad/LICENSE"
+        badarchive="srelens-tui-$version-x86_64-unknown-linux-musl.tar.gz"
+        (cd "$bad" && tar -czf "$work/fixtures/$badarchive.bad" .)
+        badsum="$(sha256sum "$work/fixtures/$badarchive.bad" | cut -d" " -f1)"
+        printf '%s  %s\n' "$badsum" "$badarchive" > "$work/fixtures/BADSUMS.txt"
+        cat > "$work/fake/curl" <<EOF
+#!/bin/sh
+out=""; url=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    http*) url="\$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "\$url" in
+  *api.github.com*) echo '{"tag_name": "srelens-v$version"}' ;;
+  *SHA256SUMS*)     cp "$work/fixtures/BADSUMS.txt" "\$out" ;;
+  *.tar.gz)         cp "$work/fixtures/$badarchive.bad" "\$out" ;;
+  *) exit 1 ;;
+esac
+EOF
+        chmod +x "$work/fake/curl"
+
+        out="$(TMPDIR="$noexec" PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "a binary that will not run is rejected after install" "does not run" "$out" "$rc" 1
+        check "and the previous copy is put back" "put back" "$out" "$rc" 1
+        if [ -x "$dest/srelens-tui" ] && "$dest/srelens-tui" --version >/dev/null 2>&1; then
+            ok "the working copy survived a failed update"
+        else
+            no "the working copy was lost"
+        fi
+        rm -f "$work/fake/curl"
+
         umount "$noexec" 2>/dev/null || true
     else
         echo "  skip  cannot mount a noexec filesystem here (needs CAP_SYS_ADMIN)"
@@ -538,6 +579,34 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
 else
     echo "  skip  not root, or no mount: cannot test a noexec working directory"
 fi
+
+# TMPDIR can be a symlink, and every download, extraction and copy reopens
+# $tmp by name. Approving the resolved path but working through the link
+# would leave it repointable the moment after it passed, so the resolved
+# path is what gets kept -- which means resolution has to see through it.
+real_tmp="$work/tmp-target"
+mkdir -p "$real_tmp"
+chmod 0777 "$real_tmp"
+link_tmp="$work/tmp-link"
+ln -sfn "$real_tmp" "$link_tmp"
+dest="$work/via-link"
+mkdir -p "$dest"
+out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "a TMPDIR symlink is resolved before it is judged" "writable by anyone" "$out" "$rc" 1
+
+# A lookup that fails is not a group with nobody in it.
+mkdir -p "$work/fake"
+cat > "$work/fake/getent" <<EOF
+#!/bin/sh
+exit 2
+EOF
+chmod +x "$work/fake/getent"
+dest="$work/getent-down"
+mkdir -p "$dest"
+chmod 0775 "$dest"
+out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "a group lookup that fails is not treated as empty" "cannot look up the group" "$out" "$rc" 1
+rm -f "$work/fake/getent"
 
 echo "unpacking"
 

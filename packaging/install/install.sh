@@ -86,6 +86,13 @@ main() {
     # install. A parent someone else owns can rename the tree after the
     # checksum passes and put their own binary where the verified one was,
     # to be run at the version check below.
+    #
+    # Canonicalised BEFORE the walk and kept, not resolved for inspection
+    # and then discarded: every download, extraction and copy below reopens
+    # $tmp by name, so approving one path and working through another would
+    # leave a symlink in TMPDIR repointable the moment after it passed.
+    tmp="$(cd "$tmp" 2>/dev/null && pwd -P)" ||
+        die "cannot resolve the working directory"
     assert_safe_dir "$tmp"
 
     archive="$BIN-$version-$target.tar.gz"
@@ -134,10 +141,20 @@ main() {
     # Not inside `say`. A failure in a command substitution there is
     # swallowed: the install printed `Installed` and exited 0 while the
     # binary was never in place.
-    installed_version="$("$install_dir/$BIN" --version 2>/dev/null)" || {
+    if installed_version="$("$install_dir/$BIN" --version 2>/dev/null)"; then
+        # It runs. The copy that was there before is no longer needed.
+        [ -z "$INSTALL_BACKUP" ] || rm -f "$INSTALL_BACKUP"
+    else
+        # It does not. Put back whatever was there rather than leaving the
+        # caller with nothing -- on a noexec working directory this is the
+        # first time the binary could be run at all, so an incompatible
+        # release reaches here having already replaced a copy that worked.
         rm -f "$install_dir/$BIN"
-        die "installed $install_dir/$BIN but it does not run; removed it again"
-    }
+        if [ -n "$INSTALL_BACKUP" ] && mv -f "$INSTALL_BACKUP" "$install_dir/$BIN"; then
+            die "the installed $BIN does not run on this machine; the copy that was there before has been put back"
+        fi
+        die "the installed $BIN does not run on this machine; removed it again"
+    fi
     say "Installed: $install_dir/$BIN"
     say "  $installed_version"
     warn_if_not_on_path "$install_dir"
@@ -426,7 +443,14 @@ assert_component() {
             die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
         fi
         if command -v getent >/dev/null 2>&1; then
-            entry="$(getent group "$group" 2>/dev/null)" || entry=""
+            # A lookup that FAILS is not a group with nobody in it. An NSS
+            # or LDAP hiccup would otherwise produce an empty entry, whose
+            # empty member list and empty GID then skip both checks below
+            # and accept the directory.
+            entry="$(getent group "$group" 2>/dev/null)" ||
+                die "cannot look up the group $group, so who can write to $path is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+            [ -n "$entry" ] ||
+                die "the group $group does not resolve, so who can write to $path is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
             members="$(printf %s "$entry" | cut -d: -f4)"
             if [ -n "$members" ] && [ "$members" != "$owner" ]; then
                 die "$path is writable by the group $group, which has members besides $owner ($members). Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
@@ -487,8 +511,21 @@ install_binary() {
         die "cannot write to $dir"
     }
     chmod 0755 "$staged"
+
+    # Keep whatever is being replaced until the new one has been shown to
+    # run. Alongside it, so the rename below stays on one filesystem.
+    INSTALL_BACKUP=""
+    if [ -e "$dest" ]; then
+        INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" || INSTALL_BACKUP=""
+        if [ -n "$INSTALL_BACKUP" ] && ! mv -f "$dest" "$INSTALL_BACKUP"; then
+            rm -f "$INSTALL_BACKUP"
+            INSTALL_BACKUP=""
+        fi
+    fi
+
     mv -f "$staged" "$dest" || {
         rm -f "$staged"
+        [ -z "$INSTALL_BACKUP" ] || mv -f "$INSTALL_BACKUP" "$dest" 2>/dev/null || true
         die "cannot replace $dest"
     }
 }
