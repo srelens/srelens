@@ -166,6 +166,12 @@ describe("FilterBar", () => {
     expect(screen.getByRole("button", { name: "Use regular expression" }).getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("keeps the regex toggle immediately left of the rightmost clear control", () => {
+    setup({ value: "^web", regex: true, onRegexChange: vi.fn() });
+    const toggle = screen.getByRole("button", { name: "Use regular expression" });
+    expect(toggle.nextElementSibling).toBe(clear());
+  });
+
   it("names an invalid regular expression without hiding the current text", () => {
     setup({ value: "^web-(", regex: true, onRegexChange: vi.fn(), invalid: true });
     expect(field().getAttribute("aria-invalid")).toBe("true");

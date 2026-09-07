@@ -117,25 +117,6 @@ export function FilterBar({
           title={invalid ? "Invalid regular expression" : undefined}
           className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
         />
-        {value !== "" && (
-          <button
-            type="button"
-            className="icon-btn shrink-0"
-            aria-label="Clear filter"
-            title="Clear filter"
-            disabled={disabled}
-            onClick={() => {
-              onValueChange("");
-              // The button is about to vanish with the value that summoned it,
-              // and focus would land on the body.
-              fieldRef.current?.focus();
-            }}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
         {onRegexChange && (
           <button
             type="button"
@@ -157,6 +138,25 @@ export function FilterBar({
             }
           >
             .*
+          </button>
+        )}
+        {value !== "" && (
+          <button
+            type="button"
+            className="icon-btn shrink-0"
+            aria-label="Clear filter"
+            title="Clear filter"
+            disabled={disabled}
+            onClick={() => {
+              onValueChange("");
+              // The button is about to vanish with the value that summoned it,
+              // and focus would land on the body.
+              fieldRef.current?.focus();
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
           </button>
         )}
         {invalid && (
