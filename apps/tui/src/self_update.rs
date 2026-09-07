@@ -342,29 +342,58 @@ pub struct Plan {
     pub target: PathBuf,
 }
 
-/// Resolve the latest release and decide whether it is worth downloading.
+/// What checking for an update found.
 ///
-/// `Ok(None)` means already current — a normal outcome, not a failure.
+/// `UpToDate` and `AheadOfStable` are deliberately not the same answer. The
+/// endpoint consulted describes the STABLE channel, so a dev build that sorts
+/// above the newest stable release has not been told it is the latest of
+/// anything — only that no newer stable applies to it. Collapsing the two would
+/// have `update` report a pre-release as "the latest release" while newer
+/// pre-releases exist, which is the difference AGENTS.md is about: say what you
+/// know, not what you guess.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Check {
+    /// Running exactly the latest stable release.
+    UpToDate { latest: String },
+    /// Running something that sorts above it — a dev or locally built binary.
+    AheadOfStable { latest: String },
+    /// A newer stable release is available.
+    Available(Box<Plan>),
+}
+
+/// Resolve the latest stable release and decide whether it is worth
+/// downloading. Not finding an update is a normal outcome, not a failure.
 pub fn plan(
     current: &str,
     target: PathBuf,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
-) -> Result<Option<Plan>, UpdateError> {
+) -> Result<Check, UpdateError> {
     let triple = current_triple()?;
     let body = fetch(LATEST_RELEASE_URL)?;
     let latest = parse_latest_version(&body)?;
     if !is_newer(current, &latest) {
-        return Ok(None);
+        // An unparseable current version lands here too, and is reported as
+        // up to date rather than ahead: claiming to be ahead of a release we
+        // could not compare against would be the same overclaim in reverse.
+        let ahead = matches!(
+            (semver::Version::parse(current), semver::Version::parse(&latest)),
+            (Ok(current), Ok(latest)) if current > latest
+        );
+        return Ok(if ahead {
+            Check::AheadOfStable { latest }
+        } else {
+            Check::UpToDate { latest }
+        });
     }
     let asset = asset_name(&latest, triple);
-    Ok(Some(Plan {
+    Ok(Check::Available(Box::new(Plan {
         current: current.to_string(),
         archive_url: asset_url(&latest, &asset),
         sums_url: asset_url(&latest, &sums_name(&latest)),
         asset,
         latest,
         target,
-    }))
+    })))
 }
 
 /// Download, verify, and install the binary a [`Plan`] names.

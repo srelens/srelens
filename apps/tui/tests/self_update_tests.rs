@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use srelens_tui::self_update::{
     apply, asset_name, asset_url, checksum_for, extract_binary, is_newer, package_manager_for,
-    parse_latest_version, plan, replace_running_binary, sums_name, triple_for, verify_sha256, Plan,
-    UpdateError, LATEST_RELEASE_URL,
+    parse_latest_version, plan, replace_running_binary, sums_name, triple_for, verify_sha256,
+    Check, Plan, UpdateError, LATEST_RELEASE_URL,
 };
 
 // ---------------------------------------------------------------------------
@@ -362,21 +362,56 @@ fn being_up_to_date_is_a_quiet_success_not_an_error() {
     };
     assert_eq!(
         plan("1.0.0", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
-        None
+        Check::UpToDate {
+            latest: "1.0.0".into()
+        }
     );
-    // A build ahead of the latest release (a local one) is also "nothing to do".
+}
+
+/// Only the STABLE endpoint is consulted, so a dev build sorting above the
+/// newest stable has not been told it is the latest of anything. Reporting it
+/// as up to date would be a claim about pre-releases nobody checked.
+#[test]
+fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v0.8.0")) };
+    // Exactly the shape the dev channel produces: 0.8.1-152 sorts above 0.8.0.
     assert_eq!(
-        plan("1.1.0", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
-        None
+        plan("0.8.1-152", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
+        Check::AheadOfStable {
+            latest: "0.8.0".into()
+        }
+    );
+
+    // A pre-release of the version that IS the latest stable sorts BELOW it,
+    // so that one is a real update rather than being ahead.
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v0.8.0")) };
+    assert!(matches!(
+        plan("0.8.0-7", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
+        Check::Available(_)
+    ));
+}
+
+/// A version that cannot be parsed is reported as up to date, never as ahead:
+/// claiming to be ahead of a release we could not compare against is the same
+/// overclaim in the other direction.
+#[test]
+fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v1.0.0")) };
+    assert_eq!(
+        plan("nightly", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap(),
+        Check::UpToDate {
+            latest: "1.0.0".into()
+        }
     );
 }
 
 #[test]
 fn a_newer_release_plans_urls_under_its_own_tag() {
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> { Ok(release_json("srelens-v2.0.0")) };
-    let plan = plan("1.0.0", PathBuf::from("/tmp/srelens-tui"), &fetch)
-        .unwrap()
-        .expect("an update is available");
+    let plan = match plan("1.0.0", PathBuf::from("/tmp/srelens-tui"), &fetch).unwrap() {
+        Check::Available(plan) => *plan,
+        other => panic!("expected an update, got {other:?}"),
+    };
 
     assert_eq!(plan.current, "1.0.0");
     assert_eq!(plan.latest, "2.0.0");

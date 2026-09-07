@@ -554,7 +554,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Written as a plain synchronous function: it runs before the terminal is
 /// touched and exits, so there is nothing to interleave with.
 fn run_update(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
-    use srelens_tui::self_update::{self, UpdateError};
+    // `#[tokio::main]` means this function is called ON a runtime worker
+    // thread. `reqwest::blocking` drives its own runtime on a private thread
+    // and parks the caller on a channel until it answers; doing that from a
+    // worker ties up a thread the runtime owns, and reqwest documents using it
+    // from inside a runtime as unsupported. It does not in fact panic here —
+    // the command was run end to end against the real API before this was
+    // written — but there is no reason to depend on that. Nothing in the update
+    // path is async, so it runs on a thread of its own and the question does
+    // not arise.
+    // `String` rather than `Box<dyn Error>`: the boxed trait object is not
+    // `Send`, so it cannot come back across a thread boundary.
+    std::thread::spawn(move || update_off_the_runtime(check_only))
+        .join()
+        .map_err(|_| "the update thread panicked")??;
+    Ok(())
+}
+
+fn update_off_the_runtime(check_only: bool) -> Result<(), String> {
+    use srelens_tui::self_update::{self, Check, UpdateError};
 
     // reqwest is built with `rustls-no-provider`, which does NOT pick a
     // provider on its own: building a client without one panics inside
@@ -604,9 +622,18 @@ fn run_update(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     // the quotes and the variant name are noise, and the message is the part
     // that tells the user what to do.
     let plan = match self_update::plan(current, exe.clone(), &fetch) {
-        Ok(Some(plan)) => plan,
-        Ok(None) => {
+        Ok(Check::Available(plan)) => *plan,
+        Ok(Check::UpToDate { .. }) => {
             println!("srelens-tui {current} is the latest release.");
+            return Ok(());
+        }
+        Ok(Check::AheadOfStable { latest }) => {
+            // Only the stable channel was consulted, so all that is known is
+            // that nothing stable is newer. Saying "you are on the latest"
+            // would be a claim about pre-releases that were never checked.
+            println!(
+                "srelens-tui {current} is ahead of the latest stable release ({latest}); there is no stable update to install."
+            );
             return Ok(());
         }
         Err(error) => fail(error),
