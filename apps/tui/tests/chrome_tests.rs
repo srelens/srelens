@@ -2137,12 +2137,16 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Release Overview") && text.contains("Deployment") && text.contains("Service"), "{text}");
 
-    // Values Diff tab (both modes)
+    // Values Diff tab
     detail_state.set_tab(HelmDetailTab::ValuesDiff);
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Values Diff") && text.contains("replicaCount"), "{text}");
 
-    detail_state.toggle_diff_mode();
+    detail_state.toggle_diff_mode(); // CustomVsComputed -> CustomVsDefault
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("User Values vs Chart Defaults"), "{text}");
+
+    detail_state.toggle_diff_mode(); // CustomVsDefault -> RevisionVsPrevious
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Current Revision vs Previous Revision Values"), "{text}");
 

@@ -1879,7 +1879,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     }
     app.handle_key_event(common::ch('m')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.values_diff_mode, srelens_tui::views::ValuesDiffMode::RevisionVsPrevious);
+        assert_eq!(d.values_diff_mode, srelens_tui::views::ValuesDiffMode::CustomVsDefault);
     }
     app.handle_key_event(common::ch('3')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {

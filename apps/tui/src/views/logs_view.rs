@@ -201,7 +201,7 @@ impl LogsViewState {
                 .iter()
                 .map(|e| {
                     if let Some(src) = &e.source {
-                        format!("[{}] {}", src, e.line)
+                        format!("[{}] {}", sanitize_log_line(src), e.line)
                     } else {
                         e.line.clone()
                     }
@@ -347,8 +347,9 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
 
             if let Some(src) = &entry.source {
                 let color = source_color(src);
+                let clean_src = sanitize_log_line(src);
                 spans.push(Span::styled(
-                    format!("[{}] ", src),
+                    format!("[{}] ", clean_src),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ));
             }

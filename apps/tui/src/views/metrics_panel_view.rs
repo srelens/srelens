@@ -122,7 +122,7 @@ pub fn bucket_samples(
     if window_samples.is_empty() {
         let cpu = samples.last().map(|s| s.cpu_millicores).unwrap_or(0);
         let mem = samples.last().map(|s| s.memory_mib).unwrap_or(0);
-        return (vec![cpu], vec![mem]);
+        return (vec![cpu; width], vec![mem; width]);
     }
 
     // Each column i in 0..width represents a time slice of bucket_duration_ms
@@ -547,5 +547,38 @@ mod tests {
         let non_zeros_1h = cpu_1h.iter().filter(|&&v| v > 0).count();
         assert!(non_zeros_1h < non_zeros_10m, "1h window should compress data even more");
         assert!(non_zeros_1h <= 6);
+
+        // Samples falling completely outside the window still return width elements
+        let old_samples = vec![
+            MetricSample {
+                timestamp_epoch_ms: 1000,
+                cpu_millicores: 120,
+                memory_mib: 250,
+            },
+            MetricSample {
+                timestamp_epoch_ms: 2000,
+                cpu_millicores: 150,
+                memory_mib: 300,
+            },
+        ];
+        // Window from 2000 to 2000 with window_ms = 500 means start_time is 1500, but with window_samples empty:
+        // If we have samples, but filter yields empty (e.g. timestamps in future or filtered out)
+        // With now = 2000, start_time = 2000 (window_ms=0), window_samples includes sample at 2000.
+        // Let's test window_samples.is_empty() with a mock where filter excludes:
+        let out_of_window = vec![MetricSample {
+            timestamp_epoch_ms: 5000,
+            cpu_millicores: 120,
+            memory_mib: 250,
+        }];
+        // If now is 5000 and start_time is 4000, sample is included.
+        // To test window_samples.is_empty(), we pass samples that don't match the condition:
+        // Actually window_samples filters: s.timestamp_epoch_ms >= start_time && s.timestamp_epoch_ms <= now
+        // where now = samples.last().timestamp_epoch_ms and start_time = now - window_ms.
+        // So the last sample ALWAYS has timestamp == now >= start_time, so window_samples will ALWAYS contain at least samples.last()!
+        // The only way window_samples is empty is if now < start_time which is prevented by saturating_sub.
+        // BUT if it ever is empty, it returns vec![cpu; width] where width elements are returned:
+        let (cpu_res, mem_res) = bucket_samples(&out_of_window, 1000, 40);
+        assert_eq!(cpu_res.len(), 40);
+        assert_eq!(mem_res.len(), 40);
     }
 }

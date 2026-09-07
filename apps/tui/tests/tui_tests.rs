@@ -6513,9 +6513,14 @@ mod tests {
         let svc_count = counts.iter().find(|(k, _)| k == "Service").map(|(_, c)| *c);
         assert_eq!(dep_count, Some(1));
         assert_eq!(svc_count, Some(2));
-
-        // Verify values diff: Custom vs Default
+        // Verify values diff: Custom vs Computed (default mode)
         detail_state.set_tab(HelmDetailTab::ValuesDiff);
+        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::CustomVsComputed);
+        let diff_lines = detail_state.compute_values_diff();
+        assert!(!diff_lines.is_empty());
+
+        // Toggle to CustomVsDefault
+        detail_state.toggle_diff_mode();
         assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::CustomVsDefault);
         let diff_lines = detail_state.compute_values_diff();
         assert!(!diff_lines.is_empty());
@@ -6626,10 +6631,10 @@ mod tests {
             assert_eq!(detail.active_tab, HelmDetailTab::ValuesDiff);
         }
 
-        // Toggle diff mode with 'm'
+        // Toggle diff mode with 'm' (CustomVsComputed -> CustomVsDefault)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
         if let ActiveView::HelmDetail(ref detail) = app.active_view {
-            assert_eq!(detail.values_diff_mode, ValuesDiffMode::RevisionVsPrevious);
+            assert_eq!(detail.values_diff_mode, ValuesDiffMode::CustomVsDefault);
         }
 
         // Jump to Revisions tab with '3'

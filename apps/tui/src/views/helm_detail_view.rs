@@ -43,6 +43,7 @@ impl HelmDetailTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValuesDiffMode {
+    CustomVsComputed,
     CustomVsDefault,
     RevisionVsPrevious,
 }
@@ -88,7 +89,7 @@ impl HelmDetailViewState {
             previous_detail: None,
             selected_revision_idx: 0,
             scroll_offset: 0,
-            values_diff_mode: ValuesDiffMode::CustomVsDefault,
+            values_diff_mode: ValuesDiffMode::CustomVsComputed,
             filter_query: String::new(),
         }
     }
@@ -127,8 +128,9 @@ impl HelmDetailViewState {
 
     pub fn toggle_diff_mode(&mut self) {
         self.values_diff_mode = match self.values_diff_mode {
+            ValuesDiffMode::CustomVsComputed => ValuesDiffMode::CustomVsDefault,
             ValuesDiffMode::CustomVsDefault => ValuesDiffMode::RevisionVsPrevious,
-            ValuesDiffMode::RevisionVsPrevious => ValuesDiffMode::CustomVsDefault,
+            ValuesDiffMode::RevisionVsPrevious => ValuesDiffMode::CustomVsComputed,
         };
         self.scroll_offset = 0;
     }
@@ -166,6 +168,11 @@ impl HelmDetailViewState {
 
     pub fn compute_values_diff(&self) -> Vec<DiffLine> {
         let (left, right) = match self.values_diff_mode {
+            ValuesDiffMode::CustomVsComputed => {
+                let custom_values = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
+                let computed_values = self.detail.as_ref().map(|d| d.computed_values_yaml.as_str()).unwrap_or("");
+                (custom_values, computed_values)
+            }
             ValuesDiffMode::CustomVsDefault => {
                 let default_values = self.detail.as_ref().map(|d| d.chart_values_yaml.as_str()).unwrap_or("");
                 let custom_values = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
@@ -420,7 +427,8 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
 
 fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
     let mode_desc = match state.values_diff_mode {
-        ValuesDiffMode::CustomVsDefault => "[Mode: Custom Overrides (helm get values) vs Chart Defaults]",
+        ValuesDiffMode::CustomVsComputed => "[Mode: User Values (helm get values) vs Computed Values (helm get values --all)]",
+        ValuesDiffMode::CustomVsDefault => "[Mode: User Values vs Chart Defaults]",
         ValuesDiffMode::RevisionVsPrevious => "[Mode: Current Revision vs Previous Revision Values]",
     };
 
