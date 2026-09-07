@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { loadHiddenColumns, saveHiddenColumns } from "@srelens/core";
+import { loadHiddenColumnsEntry, saveHiddenColumns } from "@srelens/core";
 import type { Column } from "./Table";
 import type { ColumnOption } from "./ColumnPicker";
 
@@ -28,12 +28,25 @@ function columnLabel<T>(column: Column<T>): string {
 
 export function useColumnVisibility<T>(viewKey: string, columns: Column<T>[]): ColumnVisibility<T> {
   const pinnedKey = columns[0]?.key;
-  const [hidden, setHidden] = useState<Set<string>>(() => new Set(loadHiddenColumns(viewKey)));
+  // A column marked `defaultHidden` starts off — but only until the reader has
+  // made a choice for this view. The stored record holds hidden keys, so an
+  // absent entry and "the reader turned this column on" would otherwise be the
+  // same thing and the column would come back hidden next launch; a stored
+  // entry, empty included, is a choice and outranks the defaults. Compared as
+  // a joined string so a fresh `columns` array each render is not a new
+  // dependency. (#426)
+  const defaultHidden = columns
+    .filter((column) => column.defaultHidden)
+    .map((column) => column.key)
+    .join(",");
+  const [hidden, setHidden] = useState<Set<string>>(
+    () => new Set(loadHiddenColumnsEntry(viewKey) ?? (defaultHidden ? defaultHidden.split(",") : [])),
+  );
 
   // Reload when the view changes (e.g. switching resource kind in one browser).
   useEffect(() => {
-    setHidden(new Set(loadHiddenColumns(viewKey)));
-  }, [viewKey]);
+    setHidden(new Set(loadHiddenColumnsEntry(viewKey) ?? (defaultHidden ? defaultHidden.split(",") : [])));
+  }, [viewKey, defaultHidden]);
 
   // Only labelled, non-identifier columns can be hidden. The pinned first column
   // and headerless columns (e.g. a row-actions cell) are always shown.

@@ -6,8 +6,10 @@ import React from "react";
 // and a stub window so we can assert tab-close vs. window-close behavior.
 const tauri = vi.hoisted(() => {
   const handlers = new Map<string, (e: { payload: unknown }) => void>();
-  const windowClose = vi.fn();
-  const windowDestroy = vi.fn();
+  // Promise-returning, like the real commands: the close path chains a
+  // `.catch()` onto destroy(), which a bare vi.fn() would make explode.
+  const windowClose = vi.fn(() => Promise.resolve());
+  const windowDestroy = vi.fn(() => Promise.resolve());
   return {
     handlers,
     windowClose,
@@ -157,6 +159,7 @@ vi.mock("./components/EditResourceTab", () => ({
 }));
 
 import { App } from "./App";
+import { HANDOFF_KEY } from "./design";
 
 const context = (name: string) => ({
   name,
@@ -350,6 +353,30 @@ describe("App", () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
+  it("still closes when destroy() is refused, rather than wedging the window (#425)", async () => {
+    // `core:window:allow-destroy` was never granted, so the destroy that
+    // re-issues the cancelled close was rejected by the ACL and nothing closed
+    // the window: the macOS red traffic light did nothing, and only Cmd+Q —
+    // which quits without reaching this handler — could shut the app down.
+    // The grant is the fix; this is the belt, because any rejection here has
+    // the same cost, and losing a flush is cheaper than losing the quit.
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    tauri.windowDestroy.mockClear().mockRejectedValueOnce(new Error("window.destroy not allowed"));
+    tauri.windowClose.mockClear();
+    render(<App />);
+
+    expect(tauri.closeRequestedHandler).toBeTypeOf("function");
+    await tauri.closeRequestedHandler!({ preventDefault: vi.fn() });
+    expect(tauri.windowClose).toHaveBeenCalled();
+
+    // close() re-emits this event, so the second pass has to let it through —
+    // cancelling the close it just asked for is how a fallback becomes a loop.
+    const second = vi.fn();
+    await tauri.closeRequestedHandler!({ preventDefault: second });
+    expect(second).not.toHaveBeenCalled();
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
   it("`?` opens the shortcut cheat sheet", () => {
     render(<App />);
     fireEvent.keyDown(window, { key: "?", shiftKey: true });
@@ -418,5 +445,27 @@ describe("App", () => {
 
     expect(tauri.windowClose).toHaveBeenCalledTimes(1);
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  it("reopens the view the new design handed over, once the contexts are known", async () => {
+    // A design switch reloads the document, so the handoff rides in
+    // sessionStorage — and is consumed exactly once, here. Routed only after
+    // `contexts` resolves, mirroring the deep-link gate: a cold-start handoff
+    // judged against an empty list would be rejected as unknown.
+    sessionStorage.setItem(HANDOFF_KEY, JSON.stringify({ context: "prod", kind: "pods" }));
+    render(<App />);
+    // ResourceBrowser renders `{context}:{kind}` first; the rest is the
+    // mock's own buttons.
+    expect((await screen.findByTestId("browser")).textContent).toContain("prod:pods");
+  });
+
+  it("opens nothing for a handoff naming an unknown context, and still clears it", async () => {
+    // Keeping an unreadable handoff would reopen a view on every later launch;
+    // dropping it silently on an unknown name would hide that it was dropped.
+    sessionStorage.setItem(HANDOFF_KEY, JSON.stringify({ context: "ghost", kind: "pods" }));
+    render(<App />);
+    await waitFor(() => expect(sessionStorage.getItem(HANDOFF_KEY)).toBeNull());
+    expect(screen.queryByTestId("browser")).toBeNull();
+    expect(screen.queryByTestId("overview")).toBeNull();
   });
 });

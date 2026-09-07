@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::APIGroupList;
+use kube::api::{Api, ListParams};
 use kube::config::{Config, KubeConfigOptions, Kubeconfig};
 use kube::Client;
 use schemars::JsonSchema;
@@ -504,6 +507,192 @@ pub fn test_cluster_connection_capability() -> Capability {
     )
 }
 
+// --- the cluster facts: provider, region, metrics server ---------------------
+//
+// Deliberately a capability of its own rather than more work on
+// `k8s.clusterInfo`: the reachability probe runs for every cluster in the rail
+// on every launch, and making it heavier to serve one screen is the wrong
+// trade. Reversible if the extra round trip ever costs more than the weight.
+
+/// The API group metrics-server serves.
+const METRICS_GROUP: &str = "metrics.k8s.io";
+
+/// The well-known node label carrying a cluster's cloud region.
+const REGION_LABEL: &str = "topology.kubernetes.io/region";
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClusterFactsIn {
+    /// The kubeconfig context to read the facts from.
+    pub context: String,
+}
+
+/// Whether the cluster serves `metrics.k8s.io`.
+///
+/// `Absent` is an answer, and an important one: it means every meter on the
+/// overview has no numerator, and the screen says so once. `Unknown` means
+/// discovery could not be asked at all — a different thing, which must never
+/// be drawn as an absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricsServerState {
+    Present,
+    Absent,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsServerFact {
+    pub state: MetricsServerState,
+    /// The group's preferred version (e.g. "v1beta1"). Empty unless present.
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterFactsOut {
+    pub context: String,
+    /// The cloud the nodes' `spec.providerID` names. **Empty when the nodes
+    /// name none** — a cluster that has told us nothing has not told us it has
+    /// no provider, and the consumer omits the row rather than printing a word
+    /// like "unknown", which would look like an answer.
+    pub provider: String,
+    /// `topology.kubernetes.io/region`. Empty when no node carries it, for the
+    /// same reason as `provider`.
+    pub region: String,
+    pub metrics_server: MetricsServerFact,
+}
+
+/// The cloud a `spec.providerID` names, from its URL scheme.
+///
+/// An unrecognised scheme is reported verbatim: it is exactly what the cluster
+/// said, and a raw `openstack` is more use to a reader than a guess. A value
+/// with no scheme at all names nothing, and reports nothing.
+fn provider_from_provider_id(provider_id: &str) -> String {
+    let Some((scheme, _)) = provider_id.split_once("://") else {
+        return String::new();
+    };
+    match scheme.trim().to_ascii_lowercase().as_str() {
+        "" => String::new(),
+        "gce" => "GKE".to_string(),
+        "aws" => "EKS".to_string(),
+        "azure" => "AKS".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The one value the nodes agree on, or nothing.
+///
+/// A node that reports no value abstains rather than vetoes; nodes that report
+/// different values leave the cluster with no single answer, and nothing is the
+/// honest result — naming one of them would be reporting whichever node the
+/// apiserver happened to list first as the cluster's truth. Being a fold over
+/// every node rather than a `find`, the answer cannot depend on list order.
+fn agreed(values: impl Iterator<Item = String>) -> String {
+    let mut answer: Option<String> = None;
+    for value in values.filter(|value| !value.is_empty()) {
+        match &answer {
+            None => answer = Some(value),
+            Some(seen) if *seen == value => {}
+            Some(_) => return String::new(),
+        }
+    }
+    answer.unwrap_or_default()
+}
+
+/// The provider and region the nodes agree on, each possibly empty.
+fn facts_from_nodes(nodes: &[Node]) -> (String, String) {
+    let provider = agreed(nodes.iter().map(|node| {
+        node.spec
+            .as_ref()
+            .and_then(|spec| spec.provider_id.as_deref())
+            .map(provider_from_provider_id)
+            .unwrap_or_default()
+    }));
+    let region = agreed(nodes.iter().map(|node| {
+        node.metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(REGION_LABEL))
+            .map(|region| region.trim().to_string())
+            .unwrap_or_default()
+    }));
+    (provider, region)
+}
+
+/// Read metrics-server's availability out of a discovery listing that answered.
+fn metrics_server_from_groups(groups: &APIGroupList) -> MetricsServerFact {
+    match groups.groups.iter().find(|group| group.name == METRICS_GROUP) {
+        Some(group) => MetricsServerFact {
+            state: MetricsServerState::Present,
+            version: group
+                .preferred_version
+                .as_ref()
+                .or_else(|| group.versions.first())
+                .map(|version| version.version.clone())
+                .unwrap_or_default(),
+        },
+        None => MetricsServerFact {
+            state: MetricsServerState::Absent,
+            version: String::new(),
+        },
+    }
+}
+
+/// Read the facts for one context: the nodes carry provider and region,
+/// discovery carries metrics-server.
+///
+/// A cluster that cannot be reached is an error, not empty facts — empty facts
+/// mean "it answered and had nothing to say", and the caller must be able to
+/// tell those apart. Discovery failing on its own is not fatal: the nodes have
+/// already answered, so only metrics-server falls back to `Unknown`.
+async fn read_cluster_facts(cache: &ClientCache, context: &str) -> Result<ClusterFactsOut, String> {
+    let client = cache.get(context).await?;
+
+    let api: Api<Node> = Api::all(client.clone());
+    let nodes = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+        .await
+        .map_err(|_| "list nodes timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let (provider, region) = facts_from_nodes(&nodes.items);
+
+    let metrics_server =
+        match tokio::time::timeout(request_timeout(), client.list_api_groups()).await {
+            Ok(Ok(groups)) => metrics_server_from_groups(&groups),
+            // Discovery refused, failed or timed out: we could not ask, which
+            // is not the same as the group not being there.
+            _ => MetricsServerFact {
+                state: MetricsServerState::Unknown,
+                version: String::new(),
+            },
+        };
+
+    Ok(ClusterFactsOut {
+        context: context.to_string(),
+        provider,
+        region,
+        metrics_server,
+    })
+}
+
+/// Build the `k8s.clusterFacts` capability — the overview rail's control-plane
+/// facts, separate from the reachability probe.
+pub fn cluster_facts_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<ClusterFactsIn, ClusterFactsOut, _, _>(
+        "k8s.clusterFacts",
+        "report a cluster's provider, region and metrics-server availability",
+        Annotations::READ_ONLY,
+        move |input: ClusterFactsIn| {
+            let cache = cache.clone();
+            async move {
+                read_cluster_facts(&cache, &input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +781,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    use k8s_openapi::api::core::v1::NodeSpec;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroup, GroupVersionForDiscovery};
     use serde_json::json;
     use srelens_capability::Registry;
     use std::path::PathBuf;
@@ -876,5 +1067,174 @@ mod tests {
         assert_eq!(out["reachable"], false);
         assert!(out["error"].is_string());
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // --- the cluster facts: provider, region, metrics server -----------------
+
+    fn node_with(provider_id: Option<&str>, region: Option<&str>) -> Node {
+        let labels = region.map(|r| {
+            let mut labels = std::collections::BTreeMap::new();
+            labels.insert("topology.kubernetes.io/region".to_string(), r.to_string());
+            labels
+        });
+        Node {
+            metadata: kube::core::ObjectMeta {
+                name: Some("n".into()),
+                labels,
+                ..Default::default()
+            },
+            spec: Some(NodeSpec {
+                provider_id: provider_id.map(String::from),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn api_group_list(groups: &[(&str, &str)]) -> APIGroupList {
+        APIGroupList {
+            groups: groups
+                .iter()
+                .map(|(name, version)| APIGroup {
+                    name: (*name).to_string(),
+                    preferred_version: Some(GroupVersionForDiscovery {
+                        group_version: format!("{name}/{version}"),
+                        version: (*version).to_string(),
+                    }),
+                    versions: vec![GroupVersionForDiscovery {
+                        group_version: format!("{name}/{version}"),
+                        version: (*version).to_string(),
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn each_known_provider_scheme_names_its_platform() {
+        assert_eq!(provider_from_provider_id("gce://acme-prod/europe-west4-a/gke-node-1"), "GKE");
+        assert_eq!(provider_from_provider_id("aws:///eu-west-1a/i-0abc1234"), "EKS");
+        assert_eq!(provider_from_provider_id("azure:///subscriptions/s/vm-1"), "AKS");
+        assert_eq!(
+            provider_from_provider_id("kind://docker/srelens-demo/srelens-demo-worker"),
+            "kind"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_scheme_reports_the_scheme_itself_not_a_guess() {
+        assert_eq!(provider_from_provider_id("openstack:///d9c1-4a/instance"), "openstack");
+        assert_eq!(provider_from_provider_id("hcloud://12345"), "hcloud");
+    }
+
+    #[test]
+    fn a_provider_id_that_names_no_scheme_reports_nothing() {
+        assert_eq!(provider_from_provider_id("i-0abc1234"), "");
+        assert_eq!(provider_from_provider_id(""), "");
+    }
+
+    #[test]
+    fn a_node_with_no_provider_id_reports_nothing_rather_than_unknown() {
+        let (provider, _) = facts_from_nodes(&[node_with(None, Some("europe-west4"))]);
+        assert_eq!(provider, "");
+    }
+
+    #[test]
+    fn the_region_label_on_a_node_is_the_clusters_region() {
+        let (_, region) = facts_from_nodes(&[node_with(Some("gce://p/z/n"), Some("europe-west4"))]);
+        assert_eq!(region, "europe-west4");
+    }
+
+    #[test]
+    fn no_region_label_reports_nothing_rather_than_unknown() {
+        let (_, region) = facts_from_nodes(&[node_with(Some("kind://docker/c/n"), None)]);
+        assert_eq!(region, "");
+    }
+
+    #[test]
+    fn a_fact_the_nodes_disagree_on_reports_nothing() {
+        // Half in europe-west4 and half in us-east-1 is not a cluster with a
+        // region; naming either would be picking one node's answer as the
+        // cluster's.
+        let nodes = [
+            node_with(Some("gce://p/z/n1"), Some("europe-west4")),
+            node_with(Some("aws:///us-east-1a/i-1"), Some("us-east-1")),
+        ];
+        assert_eq!(facts_from_nodes(&nodes), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn the_answer_does_not_depend_on_which_node_answers_first() {
+        // Two nodes that disagree, plus one carrying nothing. A first-wins
+        // `find` over the nodes would report europe-west4 for one ordering and
+        // us-east-1 for the other, publishing list order as the cluster's
+        // truth; the fold reports the same nothing either way. `find` reads
+        // more simply than a fold and will look like a tidy-up one day, so
+        // this is the test that has to say no.
+        let bare = node_with(None, None);
+        let west = node_with(Some("gce://p/z/a"), Some("europe-west4"));
+        let east = node_with(Some("aws:///us-east-1a/i-1"), Some("us-east-1"));
+        let forwards = facts_from_nodes(&[bare.clone(), west.clone(), east.clone()]);
+        let backwards = facts_from_nodes(&[east, west, bare]);
+        assert_eq!(forwards, backwards, "the answer must not follow list order");
+        assert_eq!(forwards, (String::new(), String::new()));
+    }
+
+    #[test]
+    fn a_node_carrying_nothing_abstains_rather_than_blanking_the_cluster() {
+        // A control-plane node with no `providerID` and no region label is a
+        // real shape; it must not veto the workers that carry both.
+        let nodes = [
+            node_with(None, None),
+            node_with(Some("gce://p/z/a"), Some("europe-west4")),
+            node_with(Some("gce://p/z/b"), Some("europe-west4")),
+        ];
+        assert_eq!(
+            facts_from_nodes(&nodes),
+            ("GKE".to_string(), "europe-west4".to_string())
+        );
+    }
+
+    #[test]
+    fn metrics_server_present_reports_the_api_groups_version() {
+        let list = api_group_list(&[("apps", "v1"), ("metrics.k8s.io", "v1beta1")]);
+        let fact = metrics_server_from_groups(&list);
+        assert_eq!(fact.state, MetricsServerState::Present);
+        assert_eq!(fact.version, "v1beta1");
+    }
+
+    #[test]
+    fn metrics_server_absent_is_an_answer_not_a_silence() {
+        // Discovery answered and the group is not there: every meter on the
+        // overview has no numerator, and the screen must be able to say so.
+        let fact = metrics_server_from_groups(&api_group_list(&[("apps", "v1")]));
+        assert_eq!(fact.state, MetricsServerState::Absent);
+        assert_eq!(fact.version, "");
+    }
+
+    #[test]
+    fn cluster_facts_capability_has_expected_id_and_annotations() {
+        let cap = cluster_facts_capability(ClientCache::new(PathBuf::from("/nonexistent")));
+        assert_eq!(cap.id, "k8s.clusterFacts");
+        assert!(cap.annotations.read_only);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cluster_that_cannot_be_reached_fails_rather_than_reporting_empty_facts() {
+        // Empty facts would be indistinguishable from a cluster that answered
+        // and had nothing to say. "We could not ask" is its own outcome.
+        let path = write_temp_kubeconfig(
+            "facts-unreachable",
+            "apiVersion: v1\nkind: Config\nclusters:\n  - name: a\n    cluster: { server: https://127.0.0.1:1 }\ncontexts:\n  - name: ctx-a\n    context: { cluster: a }\n",
+        );
+        let mut reg = Registry::new();
+        reg.register(cluster_facts_capability(ClientCache::new(path.clone())));
+        let result = reg
+            .invoke("k8s.clusterFacts", json!({ "context": "does-not-exist" }))
+            .await;
+        let _ = std::fs::remove_file(&path);
+        let err = result.expect_err("an unreachable cluster must not read as facts");
+        assert!(!format!("{err:?}").is_empty());
     }
 }

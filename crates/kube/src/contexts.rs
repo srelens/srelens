@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::client_cache::ClientCache;
-use crate::context_resolve::{resolve_context, resolve_contexts};
+use crate::context_resolve::{resolve_context, resolve_contexts, ResolvedContext};
 use crate::local_cluster::classify;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -46,6 +46,31 @@ pub struct ContextDto {
     /// The detected local provider (e.g. `"kind"`, `"vind"`), when `isLocal`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The kubeconfig this context was declared in. Taken from
+    /// `ResolvedContext.source` directly — the same field `stable_id` reads —
+    /// rather than parsed back out of an identity string, which is fragile
+    /// regardless of that string's current format. (`stable_id` itself is
+    /// always `{file}#{name}`, unconditionally; it's `name` — this DTO's
+    /// presentation field, above — that gains a collision-only prefix (#265),
+    /// so don't reach for that distinction here either.)
+    #[serde(rename = "sourceFile")]
+    pub source_file: String,
+    /// The credential MECHANISM, never the credential and never the account.
+    /// One of `client certificate`, `token`, `basic`, `impersonation`, `none`,
+    /// `exec plugin · <command's basename>` (or bare `exec plugin`), or a
+    /// legacy auth-provider's own name (`gcp`, `azure`, `oidc`, …) — or bare
+    /// `auth provider` when that name is not shaped like an identifier. See
+    /// `context_resolve::auth_kind_of` for the exact mapping and
+    /// `context_resolve::identifier` for the shape gate.
+    ///
+    /// Deliberately excluded: exec ARGUMENTS, the exec command's directory,
+    /// and every value in an auth-provider's config map INCLUDING `email`.
+    /// The account used to be appended and no longer is — `k8s.listContexts`
+    /// is read-only and so not consent-gated, which makes every field here
+    /// readable by any connected agent, and the account was decoration on a
+    /// string whose job is naming a mechanism.
+    #[serde(rename = "authKind")]
+    pub auth_kind: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -129,31 +154,38 @@ pub fn list_contexts_capability(
                         "no kubeconfig contexts could be read".to_string(),
                     ));
                 }
-                let contexts = resolved.into_iter().map(|rc| {
-                    // Classify on the raw in-file name (the disambiguating prefix
-                    // is a file stem, not a signal of local/remote).
-                    let class = classify(
-                        &rc.original_name,
-                        &rc.cluster,
-                        &rc.server,
-                        rc.exec_command.as_deref(),
-                        rc.auth_provider.as_deref(),
-                    );
-                    ContextDto {
-                        is_current: rc.is_current,
-                        stable_id: rc.stable_id(),
-                        name: rc.display_name,
-                        cluster: rc.cluster,
-                        server: rc.server,
-                        namespace: rc.namespace,
-                        is_local: class.is_local,
-                        provider: class.provider.map(|provider| provider.as_str().to_string()),
-                    }
-                }).collect();
+                let contexts = resolved.into_iter().map(build_context_dto).collect();
                 Ok(ListContextsOut { contexts })
             }
         },
     )
+}
+
+/// Build the DTO for one resolved context. Shared by the capability above and
+/// by `dto_for` in tests, so the fixture exercises the exact same mapping
+/// rather than a hand-rolled duplicate of it.
+fn build_context_dto(rc: ResolvedContext) -> ContextDto {
+    // Classify on the raw in-file name (the disambiguating prefix is a file
+    // stem, not a signal of local/remote).
+    let class = classify(
+        &rc.original_name,
+        &rc.cluster,
+        &rc.server,
+        rc.exec_command.as_deref(),
+        rc.auth_provider.as_deref(),
+    );
+    ContextDto {
+        is_current: rc.is_current,
+        stable_id: rc.stable_id(),
+        source_file: rc.source.display().to_string(),
+        name: rc.display_name,
+        cluster: rc.cluster,
+        server: rc.server,
+        namespace: rc.namespace,
+        is_local: class.is_local,
+        provider: class.provider.map(|provider| provider.as_str().to_string()),
+        auth_kind: rc.auth_kind,
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -335,6 +367,140 @@ mod tests {
     use super::*;
     use srelens_capability::Registry;
     use serde_json::json;
+
+    /// Build the DTO for a context declared in `file`, carrying `auth_kind`
+    /// through from the resolved context — enough to exercise
+    /// `build_context_dto`'s file/id/auth handling.
+    ///
+    /// **`auth_kind` is a parameter, not a placeholder.** It used to be a fixed
+    /// `"none"` on the reasoning that the MAPPING is pinned in
+    /// `context_resolve.rs`. The mapping is; the JOIN was not — replacing
+    /// `auth_kind: rc.auth_kind` with a literal `"none"` in
+    /// `build_context_dto` passed the whole crate, which on screen is the
+    /// `Auth` column reading `none` for every cluster on every platform with
+    /// nothing noticing. Every caller now names the value it expects out the
+    /// other end.
+    fn dto_for(name: &str, file: &str, auth_kind: &str) -> ContextDto {
+        build_context_dto(ResolvedContext {
+            display_name: name.to_string(),
+            original_name: name.to_string(),
+            source: PathBuf::from(file),
+            cluster: String::new(),
+            server: String::new(),
+            user: String::new(),
+            namespace: String::new(),
+            is_current: false,
+            exec_command: None,
+            auth_provider: None,
+            auth_kind: auth_kind.to_string(),
+        })
+    }
+
+    #[test]
+    fn context_dto_names_the_file_it_was_declared_in() {
+        let dto = dto_for("prod-eu", "/home/dana/.kube/config", "exec plugin · gcloud");
+        assert_eq!(dto.source_file, "/home/dana/.kube/config");
+    }
+
+    #[test]
+    fn a_unique_context_name_still_carries_its_file() {
+        // `display_name` (the DTO's `name`) gains a `stem/` prefix only on a
+        // cross-file collision (#265); a unique name carries none. `stable_id`
+        // itself is unconditionally `{source}#{original_name}` — it always
+        // embeds the path, collision or not — so it can't be what
+        // distinguishes this case. The point stands regardless: `source_file`
+        // must come from `ResolvedContext.source` directly, the same place
+        // `stable_id` takes it, not by parsing either string back apart.
+        let dto = dto_for("only-one", "/home/dana/.kube/edge.yaml", "token");
+        assert_eq!(dto.name, "only-one", "unique name carries no collision prefix");
+        assert_eq!(dto.source_file, "/home/dana/.kube/edge.yaml");
+    }
+
+    #[test]
+    fn context_dto_carries_the_resolved_credential_kind() {
+        // The JOIN, not the mapping. `auth_kind_of` and every string it can
+        // produce are pinned in `context_resolve.rs`; this pins that
+        // `build_context_dto` hands the resolved value over untouched, which
+        // is the one step between the mapping and the wire. A literal in
+        // `build_context_dto` (`auth_kind: "none".to_string()`) used to pass
+        // the whole crate — a dead `Auth` column nothing noticed.
+        let dto = dto_for("prod-eu", "/home/dana/.kube/config", "exec plugin · gcloud");
+        assert_eq!(dto.auth_kind, "exec plugin · gcloud");
+        assert_ne!(dto.auth_kind, "none", "the placeholder is not an answer");
+    }
+
+    /// **The field NAMES the UI reads, pinned against the JSON rather than
+    /// against the struct.**
+    ///
+    /// Every camelCase name here comes from a `#[serde(rename = …)]`, and a
+    /// rename is invisible to every other test in this crate: renaming
+    /// `authKind` to `auth_kind`, or `sourceFile` to `source_file`, passed the
+    /// whole crate while emptying the column that reads it in
+    /// `packages/ui-next`. `stableId` and `isCurrent` were unpinned the same
+    /// way. Asserting the serialized keys as a SET closes all of them at once
+    /// and fails on a new field arriving unnamed, too.
+    #[test]
+    fn the_wire_names_every_field_the_ui_reads_by() {
+        let dto = dto_for("prod-eu", "/home/dana/.kube/config", "exec plugin · gcloud");
+        let json = serde_json::to_value(&dto).expect("ContextDto serializes");
+        let object = json.as_object().expect("a JSON object");
+
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "authKind",
+                "cluster",
+                "isCurrent",
+                "isLocal",
+                "name",
+                "namespace",
+                "server",
+                "sourceFile",
+                "stableId",
+            ],
+            "the serialized field names are the UI's contract"
+        );
+
+        // And the values arrive under those names rather than merely the names
+        // existing: a rename plus a re-add elsewhere would satisfy the set.
+        assert_eq!(json["authKind"], "exec plugin · gcloud");
+        assert_eq!(json["sourceFile"], "/home/dana/.kube/config");
+        assert_eq!(json["stableId"], "/home/dana/.kube/config#prod-eu");
+        assert_eq!(json["isCurrent"], false);
+        assert_eq!(json["isLocal"], false);
+        assert_eq!(json["name"], "prod-eu");
+    }
+
+    /// `provider` is the one optional field — `skip_serializing_if` means it is
+    /// ABSENT rather than `null` for a remote cluster, and present under that
+    /// exact name for a local one. Pinned separately so the set above stays a
+    /// set of the fields that are always there.
+    #[test]
+    fn a_local_cluster_names_its_provider_and_a_remote_one_omits_the_key() {
+        let remote = dto_for("prod-eu", "/home/dana/.kube/config", "token");
+        let json = serde_json::to_value(&remote).expect("serializes");
+        assert!(!json.as_object().unwrap().contains_key("provider"));
+
+        let local = build_context_dto(ResolvedContext {
+            display_name: "kind-lab".to_string(),
+            original_name: "kind-lab".to_string(),
+            source: PathBuf::from("/home/dana/.kube/config"),
+            cluster: "kind-kind-lab".to_string(),
+            server: "https://127.0.0.1:6443".to_string(),
+            user: "kind-lab".to_string(),
+            namespace: String::new(),
+            is_current: false,
+            exec_command: None,
+            auth_provider: None,
+            auth_kind: "client certificate".to_string(),
+        });
+        let json = serde_json::to_value(&local).expect("serializes");
+        assert_eq!(json["isLocal"], true);
+        assert_eq!(json["provider"], "kind");
+        assert_eq!(json["authKind"], "client certificate");
+    }
 
     #[test]
     fn capability_has_expected_id_and_annotations() {

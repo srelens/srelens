@@ -1,6 +1,26 @@
 //! Per-user execution environments: each user's capability calls run against
 //! a registry + client cache built ONLY from their own uploaded kubeconfigs,
 //! materialized as 0600 files under `<data>/runtime/users/<id>/`.
+//!
+//! # Why the paths here are not a traversal risk
+//!
+//! Every path in this module is rooted at `data_dir` and extended only by
+//! literals (`runtime`, `users`, `helm`) and by **integers**: the user's own
+//! `i64` id ([`user_runtime_dir`]) and a kubeconfig row's `i64` id
+//! (`KubeconfigMeta::id`, `stores.rs`). `i64::to_string` can render only
+//! `-?[0-9]+`, so a component built from one cannot contain a path separator,
+//! a `..`, a NUL, or anything else that would leave the directory it is joined
+//! onto. No name, label, or other caller-supplied string is ever a component.
+//!
+//! CodeQL's `rust/path-injection` flags these five joins anyway, and it is
+//! right to follow the taint: the ids do originate in an authenticated HTTP
+//! session. It simply cannot see that the type makes the value inert. **The
+//! type IS the mitigation**, so keep it that way — if a component ever needs
+//! to come from a `String` (a user-chosen kubeconfig name, say), it needs its
+//! own validation and this paragraph stops being true.
+//!
+//! The alerts are dismissed as false positives rather than suppressed in code;
+//! this note exists so the next scan is not re-litigated from scratch.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -46,6 +66,10 @@ pub struct UserEnvs {
     build_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// This user's private runtime root.
+///
+/// `user_id` is an `i64` and that is load-bearing, not incidental — see the
+/// traversal note at the top of this module before widening it to a string.
 fn user_runtime_dir(data_dir: &Path, user_id: i64) -> PathBuf {
     data_dir
         .join("runtime")
@@ -142,6 +166,9 @@ impl UserEnvs {
                 .get_kubeconfig_yaml(user_id, meta.id, key)
                 .await?
                 .ok_or_else(|| format!("kubeconfig {} disappeared", meta.id))?;
+            // Named from the row's `i64` id, never from `meta.name` — the
+            // filename has to stay inert, and the name is the user's own
+            // string. See the traversal note at the top of this module.
             let path = dir.join(format!("kc-{}.yaml", meta.id));
             write_private_file(&path, yaml.as_bytes())?;
             paths.push(path);
@@ -255,6 +282,8 @@ mod tests {
     use crate::db::Db;
     use serde_json::json;
     use srelens_capability::Capability;
+    use srelens_streams::exec::ExecOpts;
+    use srelens_streams::test_util::TestSink;
 
     fn factory() -> RegistryFactory {
         Arc::new(|_cache, paths: Vec<PathBuf>| {
@@ -479,6 +508,139 @@ mod tests {
         // Teardown was skipped: the env is still cached as the same Arc.
         let env_again = envs.env_for(&db, &k, user.id).await.unwrap();
         assert!(Arc::ptr_eq(&env, &env_again));
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// A user's live exec session, so a teardown test has something real to
+    /// close rather than passing against an empty manager by accident.
+    async fn start_test_exec_session(env: &UserEnv) {
+        env.streams
+            .exec
+            .start(
+                Arc::new(TestSink::default()),
+                "nope".into(),
+                "ns".into(),
+                "pod-a".into(),
+                "exec-0-abcd".into(),
+                ExecOpts::default(),
+            )
+            .await
+            .expect("exec session allocates an id even against an empty client cache");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn last_connection_dropping_closes_the_users_exec_sessions() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+        start_test_exec_session(&env).await;
+
+        // A Weak that fails to upgrade proves the last strong ref to the
+        // user's stream bundle was dropped, which is what runs
+        // `UserStreams::drop` -> `exec.shutdown_all()` and actually ends the
+        // pod exec sessions (not just the materialized kubeconfig files).
+        let streams_weak = Arc::downgrade(&env.streams);
+        drop(env);
+
+        assert_eq!(hub.user_connection_count(user.id), 0);
+        teardown_streams_if_disconnected(hub.clone(), envs.clone(), user.id, Duration::ZERO).await;
+
+        assert!(
+            streams_weak.upgrade().is_none(),
+            "last connection gone must close the user's exec sessions"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_live_connection_keeps_the_users_exec_sessions() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+
+        // Two tabs: register both, then only one drops.
+        let (_tab_a, _rx_a) = hub.register(user.id);
+        let (_tab_b, _rx_b) = hub.register(user.id);
+
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+        start_test_exec_session(&env).await;
+        let streams_weak = Arc::downgrade(&env.streams);
+        drop(env);
+
+        // One tab's disconnect handler runs; the other tab is still live, so
+        // this must NOT be treated as the user's last connection.
+        assert_eq!(hub.user_connection_count(user.id), 2);
+        teardown_streams_if_disconnected(hub.clone(), envs.clone(), user.id, Duration::ZERO).await;
+
+        assert!(
+            streams_weak.upgrade().is_some(),
+            "a second live connection must keep the user's exec sessions"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_users_disconnect_does_not_touch_anothers_exec_sessions() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let alice = db.upsert_user("i", "alice", "", "", 1).await.unwrap();
+        let bob = db.upsert_user("i", "bob", "", "", 1).await.unwrap();
+        db.put_kubeconfig(alice.id, "a", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+        db.put_kubeconfig(bob.id, "b", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+
+        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+
+        // Bob is still connected; Alice is not.
+        let (_bob_conn, _rx) = hub.register(bob.id);
+
+        let alice_env = envs.env_for(&db, &k, alice.id).await.unwrap();
+        start_test_exec_session(&alice_env).await;
+        let alice_weak = Arc::downgrade(&alice_env.streams);
+        drop(alice_env);
+
+        let bob_env = envs.env_for(&db, &k, bob.id).await.unwrap();
+        start_test_exec_session(&bob_env).await;
+        let bob_weak = Arc::downgrade(&bob_env.streams);
+
+        // Only Alice's disconnect handler runs.
+        assert_eq!(hub.user_connection_count(alice.id), 0);
+        teardown_streams_if_disconnected(hub.clone(), envs.clone(), alice.id, Duration::ZERO).await;
+
+        assert!(
+            alice_weak.upgrade().is_none(),
+            "alice's last connection gone must close her exec sessions"
+        );
+        assert!(
+            bob_weak.upgrade().is_some(),
+            "alice's disconnect must not touch bob's exec sessions"
+        );
+        let bob_env_again = envs.env_for(&db, &k, bob.id).await.unwrap();
+        assert!(Arc::ptr_eq(&bob_env, &bob_env_again));
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }

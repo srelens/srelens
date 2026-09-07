@@ -27,6 +27,15 @@ export function ageSeconds(age: string): number {
  * Drop-in `getSortValue` for any summary row carrying a compact `age` —
  * one shared function rather than an arrow per column definition.
  */
-export function ageSortValue(row: { age?: string }): number {
+export function ageSortValue(row: { created?: string | null; age?: string }): number {
+  // `created` is the real thing, so it sorts on a real duration — no parsing,
+  // no unit table, and correct between two rows the compact string renders
+  // identically (two Secrets 3m10s and 3m50s old are both "3m"). Rows whose
+  // kind does not carry a timestamp yet fall back to reading the string, which
+  // is what #236 added this function for.
+  if (row.created) {
+    const then = new Date(row.created).getTime();
+    if (!Number.isNaN(then)) return Math.max(0, Math.floor((Date.now() - then) / 1000));
+  }
   return ageSeconds(row.age ?? "");
 }

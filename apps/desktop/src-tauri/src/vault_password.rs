@@ -54,7 +54,7 @@ fn status_core(vault: &Vault, dir: &Path, biometric_available: bool) -> VaultSta
         // shows setup. A legacy vault stays readable underneath (its machine
         // key resolved silently), so setup migrates it losslessly.
         "setup-required"
-    } else if vault.current_key().is_some() {
+    } else if vault.is_unlocked() {
         "unlocked"
     } else {
         "locked"
@@ -354,6 +354,27 @@ fn change_password_core(
     Ok((new_key, transition))
 }
 
+/// Lock the workspace: discard the derived key held in memory. Nothing on
+/// disk changes — the sealed bytes stay exactly as they were and the same
+/// master password re-opens them; this forgets a key, it does not change one.
+/// Afterwards `vault_status` reports `"locked"` and every read is empty and
+/// every write refused until the next unlock.
+#[tauri::command]
+pub async fn vault_lock(vault: tauri::State<'_, Arc<Vault>>) -> Result<(), String> {
+    lock_core(&vault)
+}
+
+/// The lock behind the #28 seam — no AppHandle needed, since locking touches
+/// neither the vault dir nor the OS keychain nor the biometric plugin: the key
+/// lives in memory, and that memory is all a lock reaches.
+///
+/// Locking an ALREADY-LOCKED vault is deliberately not an error: a second
+/// press of `Lock now`, or a shortcut firing after a biometric timeout, must
+/// leave the reader with a locked vault and no failure to interpret.
+fn lock_core(vault: &Vault) -> Result<(), String> {
+    vault.discard_key()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +642,268 @@ mod tests {
         let new_pw = test_pw("cl-new");
         change_password_core(&locked, &dir, &recovery, &old_pw, &new_pw).unwrap();
         assert!(locked.current_key().is_some(), "unlocked inline by the change");
+    }
+
+    // ---- Lock (`Lock now` in Settings) --------------------------------
+
+    /// The passphrase the lock fixtures set up with, spelled out because the
+    /// lock tests re-open the vault with it by name.
+    const LOCK_PASSPHRASE: &str = "correct horse";
+
+    /// A vault that has been through setup AND holds a secret: unlocked, with
+    /// real sealed bytes on disk for a lock to leave alone.
+    fn a_set_up_unlocked_vault() -> (Vault, std::path::PathBuf) {
+        let dir = temp_dir("lock");
+        let vault = fresh_vault(&dir);
+        setup_password_core(&vault, &dir, &MemRecovery::default(), LOCK_PASSPHRASE, false).unwrap();
+        vault.update(|s| s.mcp_token = Some(test_pw("lock-token"))).unwrap();
+        (vault, dir)
+    }
+
+    /// The same vault reopened: password-locked, the state every launch after
+    /// setup starts in — and the state a lock must leave behind.
+    fn a_set_up_locked_vault() -> (Vault, std::path::PathBuf) {
+        let (unlocked, dir) = a_set_up_unlocked_vault();
+        drop(unlocked);
+        (fresh_vault(&dir), dir)
+    }
+
+    /// The sealed secrets on disk: the bytes a lock must not rewrite.
+    fn sealed_bytes(dir: &std::path::Path) -> Vec<u8> {
+        std::fs::read(dir.join("secrets.enc")).expect("setup sealed the vault")
+    }
+
+    /// Names the unlock seam the way `lock_core` names the lock seam.
+    fn unlock_core(vault: &Vault, dir: &std::path::Path, password: &str) -> Result<(), String> {
+        vault::unlock_with_master_password(vault, dir, password)
+    }
+
+    #[test]
+    fn locking_forgets_the_key_and_leaves_the_vault_intact() {
+        let (vault, dir) = a_set_up_unlocked_vault();
+        assert!(vault.is_unlocked());
+        lock_core(&vault).expect("an unlocked vault can be locked");
+        assert!(!vault.is_unlocked(), "locking must discard the key");
+        // The sealed bytes are untouched: the same passphrase still opens it.
+        assert!(unlock_core(&vault, &dir, "correct horse").is_ok());
+    }
+
+    #[test]
+    fn locking_an_already_locked_vault_is_not_an_error() {
+        let (vault, _dir) = a_set_up_locked_vault();
+        assert!(lock_core(&vault).is_ok());
+        assert!(!vault.is_unlocked());
+    }
+
+    #[test]
+    fn locking_never_rekeys() {
+        let (vault, dir) = a_set_up_unlocked_vault();
+        let before = sealed_bytes(&dir);
+        // `.unwrap()`, not a bare call. This test asserts an ABSENCE of change,
+        // so a `lock_core` that returned `Err` and did nothing at all would
+        // pass it — and this is the sole guard of the sealed bytes' identity.
+        // (It also clears the `unused_must_use` warning the bare call raised.)
+        lock_core(&vault).expect("an unlocked vault can be locked");
+        assert!(!vault.is_unlocked(), "and the key really was discarded");
+        assert_eq!(sealed_bytes(&dir), before, "locking must not rewrite the vault");
+    }
+
+    #[test]
+    fn a_locked_vault_reads_as_locked_and_refuses_writes() {
+        // What the gate and Settings see afterwards must match a fresh launch:
+        // mode "locked", the password label, and writes that fail loudly
+        // rather than minting a replacement key over the sealed secrets.
+        let (vault, dir) = a_set_up_unlocked_vault();
+        lock_core(&vault).unwrap();
+        let s = status_core(&vault, &dir, false);
+        assert_eq!(s.mode, "locked");
+        assert_eq!(s.key_source, "password-locked");
+        assert!(vault.update(|s| s.mcp_token = None).is_err(), "locked writes fail loudly");
+        assert_eq!(vault.load().mcp_token, None, "and reads are empty while locked");
+    }
+
+    // ---- Lock vs. an in-flight vault write (`Cmd+Shift+L` mid-change) ----
+
+    /// A password change that has read the old key but not yet installed the
+    /// new one is the window this pins. `discard_key` used to take only
+    /// `key`/`key_source`, never the vault's process-local mutex, so a lock
+    /// firing inside `rekey_from_current`'s critical section cleared a key the
+    /// re-key was about to write straight back: `vault_lock` resolved, §25's
+    /// cover went up, and a moment later the vault was UNLOCKED behind it.
+    ///
+    /// The window is held open with the vault's own INTER-PROCESS lock
+    /// (`secrets.enc.lock`) — taken here exactly as the standalone
+    /// `--mcp-http` CLI takes it, so no test-only seam is added to production
+    /// code. `rekey_from_current` blocks on that file lock AFTER reading
+    /// `old_key` and BEFORE writing `Some(new_key)`, which is the interleaving
+    /// the finding describes.
+    ///
+    /// **The window is observed, not timed.** `rekey_from_current` holds the
+    /// process mutex ACROSS its wait for that file lock, so "the re-key is
+    /// inside its transaction" is a durable state rather than a moment — and a
+    /// non-blocking `try_lock` reads it without touching the critical section
+    /// (`Vault::key_critical_section_is_held`, `#[cfg(test)]` and read-only).
+    /// This thread polls until the mutex is held and only then spawns the
+    /// lock, so on every run the discard is issued against a re-key that has
+    /// already taken the mutex and read `old_key`.
+    ///
+    /// Both 200ms sleeps this used to open with are gone, and the first was
+    /// not merely imprecise. If the re-key had not been scheduled inside its
+    /// 200ms, the discard took the mutex outright, `rekey_from_current`
+    /// refused a locked vault, and `expect("the re-key itself completes")`
+    /// PANICKED — a flake, not the vacuous pass the old comment claimed.
+    ///
+    /// What is left to timing is only the 300ms, and only in the safe
+    /// direction: it bounds how long a BROKEN discard — one not taking the
+    /// mutex first — is given to land, and an unserialised discard needs one
+    /// `stat` and two uncontended write locks. A serialised one cannot land
+    /// inside any timeout, however loaded the machine, because the mutex it
+    /// needs is held by a thread parked on a file lock this thread has not
+    /// released yet.
+    #[test]
+    fn locking_during_a_password_change_leaves_the_vault_locked() {
+        let (vault, dir) = a_set_up_unlocked_vault();
+        let vault = Arc::new(vault);
+
+        // Held before the re-key starts, released only once the discard is
+        // provably queued behind it: this is what keeps the re-key parked
+        // mid-transaction.
+        let held = std::fs::File::create(dir.join("secrets.enc.lock")).unwrap();
+        held.lock().unwrap();
+
+        let (_meta, new_key) = vault::build_meta(&test_pw("race-new")).unwrap();
+        let rekeying = {
+            let vault = Arc::clone(&vault);
+            std::thread::spawn(move || vault.rekey_from_current(new_key, "password"))
+        };
+        // Wait for the state, not for a duration: the re-key takes the process
+        // mutex, reads `old_key`, and then blocks on the file lock still
+        // holding it. The deadline is only so a regression that never gets
+        // there fails loudly instead of hanging the suite.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !vault.key_critical_section_is_held() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the re-key never reached its critical section",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let discarding = {
+            let vault = Arc::clone(&vault);
+            std::thread::spawn(move || {
+                let _ = locked_tx.send(vault.discard_key());
+            })
+        };
+        // The lock is now racing a re-key that is already inside its
+        // transaction — which is the whole point of the test, and is why this
+        // must not land yet. Unserialised it lands in microseconds and the
+        // re-key writes the key straight back over it; that is the defect.
+        assert!(
+            locked_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "the lock discarded the key while a re-key held the vault",
+        );
+
+        drop(held);
+        rekeying.join().unwrap().expect("the re-key itself completes");
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the lock lands once the re-key releases the vault")
+            .expect("locking a set-up vault is never an error");
+        discarding.join().unwrap();
+
+        assert!(
+            !vault.is_unlocked(),
+            "a lock that resolved must not be undone by the re-key it raced",
+        );
+        assert_eq!(vault.key_source(), "password-locked", "and it reads as locked");
+    }
+
+    /// The same property stated as serialisation rather than as an outcome: a
+    /// lock must WAIT for a vault write already inside the process-local
+    /// critical section. `update` holds that mutex across its `mutate`
+    /// closure, so the closure is a real, production critical section to
+    /// observe from — no hook into the vault, and no need for the discard to
+    /// arrive at any particular moment on its own.
+    ///
+    /// **The interleaving is imposed, not hoped for.** The discard thread is
+    /// spawned first but is parked on `entered` until the write signals it
+    /// from INSIDE the closure, so `discard_key` is provably called against a
+    /// held guard on every run. Which order the two threads happen to start in
+    /// therefore cannot decide anything: whoever gets the CPU first, the
+    /// discard is not permitted to call anything until the write is in.
+    ///
+    /// That was not true before, and the test was flaky in the one direction
+    /// that also blinded it. The discard could take the mutex outright, seal
+    /// the vault and return `Ok` — and then `update` refused a locked vault
+    /// and the `unwrap` below panicked. So the runs where the race went the
+    /// wrong way did not merely fail; they were runs where the test never got
+    /// to observe the serialisation it is named for.
+    ///
+    /// What is left to timing is only the 300ms, and only in the safe
+    /// direction: it bounds how long a BROKEN `discard_key` — one not taking
+    /// the mutex first — is given to land, and an unserialised discard takes
+    /// two uncontended write locks and needs microseconds. A serialised one
+    /// cannot land inside any timeout, however loaded the machine, because it
+    /// is blocked on a mutex this thread holds.
+    #[test]
+    fn a_lock_waits_for_a_vault_write_already_in_flight() {
+        let (vault, _dir) = a_set_up_unlocked_vault();
+        let vault = Arc::new(vault);
+        // Two channels, in opposite directions. `entered` releases the discard
+        // thread from inside the write's critical section; `locked` carries the
+        // discard's result back out.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let discarding = {
+            let vault = Arc::clone(&vault);
+            std::thread::spawn(move || {
+                // Nothing before this line touches the vault, so this thread
+                // cannot win a race it is not yet allowed to enter.
+                entered_rx.recv().expect("the write announces its critical section");
+                let _ = locked_tx.send(vault.discard_key());
+            })
+        };
+
+        vault
+            .update(|s| {
+                s.mcp_token = Some(test_pw("race-token"));
+                // Inside `update`'s critical section, and only now: the guard
+                // is held for the whole of this closure, so whatever the
+                // discard does next is racing a write that is already in.
+                // Unbounded, so this never blocks on a thread that has not
+                // reached its `recv` yet.
+                entered_tx.send(()).expect("the lock thread is waiting to be let go");
+                // An unserialised discard lands here in microseconds; a
+                // serialised one cannot land at all until this closure returns
+                // and the guard drops.
+                assert!(
+                    locked_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+                    "the lock discarded the key while a vault write held the lock",
+                );
+            })
+            .unwrap();
+
+        // And it is not lost — only deferred.
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the lock lands once the write releases the vault")
+            .expect("locking a set-up vault is never an error");
+        discarding.join().unwrap();
+        assert!(!vault.is_unlocked(), "and the key really was discarded");
+    }
+
+    #[test]
+    fn locking_a_vault_with_no_master_password_is_refused() {
+        // Pre-setup (machine-key era): there is no passphrase to unlock with,
+        // so discarding the key would strand this process until a restart —
+        // setup itself refuses a locked vault. Nothing is discarded.
+        let dir = temp_dir("lock-presetup");
+        let vault = fresh_vault(&dir);
+        assert!(vault.is_unlocked(), "a fresh machine-key vault resolves a key");
+        let e = lock_core(&vault).unwrap_err();
+        assert!(e.contains("no master password"), "got: {e}");
+        assert!(vault.is_unlocked(), "the key is still there");
     }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toKubectl } from "./kubectlMapper";
+import { kindToForwardTarget, toKubectl } from "./kubectlMapper";
 
 describe("kubectlMapper", () => {
   describe("read-only commands", () => {
@@ -220,6 +220,116 @@ describe("kubectlMapper", () => {
       expect(
         toKubectl({ action: "get", kind: "Pod", namespace: "default", name: "web-0", context: "prod" }),
       ).toBe("kubectl get pods web-0 -n default --context prod");
+    });
+  });
+
+  describe("port-forward", () => {
+    it("maps a Service to svc/<name>", () => {
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Service",
+          namespace: "prod",
+          name: "checkout-api",
+          context: "prod",
+          localPort: 8080,
+          remotePort: 80,
+        }),
+      ).toBe("kubectl --context prod -n prod port-forward svc/checkout-api 8080:80");
+    });
+
+    it("writes a random local port the way kubectl does, as :<remote>", () => {
+      // `kubectl port-forward svc/x :8443` is kubectl's own spelling for "any
+      // free local port" — the same thing omitting `localPort` asks the
+      // backend for. Rendering `undefined:8443` would be a command that
+      // cannot be pasted.
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Service",
+          name: "checkout-api",
+          context: "prod",
+          namespace: "checkout",
+          remotePort: 8443,
+        }),
+      ).toBe("kubectl --context prod -n checkout port-forward svc/checkout-api :8443");
+    });
+
+    it("maps a Pod to pod/<name>", () => {
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Pod",
+          namespace: "prod",
+          name: "checkout-api-5c8b7f2d9-mk3wl",
+          context: "prod",
+          // Deliberately different: equal ports make the assertion pass whether
+          // the pair is rendered local:remote or remote:local, so a swap would
+          // go unnoticed here and the test would prove only half of what it
+          // is named for.
+          localPort: 15432,
+          remotePort: 5432,
+        }),
+      ).toBe("kubectl --context prod -n prod port-forward pod/checkout-api-5c8b7f2d9-mk3wl 15432:5432");
+    });
+
+    it("single-quotes a context carrying command substitution, same as every other action", () => {
+      // Not just "has a space" — a fixture like that would also pass under
+      // naive double-quoting and prove nothing about which quoting tier ran.
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Pod",
+          namespace: "prod",
+          name: "web-0",
+          context: "$(touch /tmp/pwn)",
+          localPort: 8080,
+          remotePort: 80,
+        }),
+      ).toBe("kubectl --context '$(touch /tmp/pwn)' -n prod port-forward pod/web-0 8080:80");
+    });
+
+    it("keeps distinct local and remote ports in local:remote order", () => {
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Service",
+          namespace: "prod",
+          name: "checkout-api",
+          context: "prod",
+          localPort: 9999,
+          remotePort: 443,
+        }),
+      ).toBe("kubectl --context prod -n prod port-forward svc/checkout-api 9999:443");
+    });
+  });
+
+  describe("kindToForwardTarget", () => {
+    // Exported because the UI names a forward with it too — the forwards
+    // table's Target cell and the New forward dialog's options — and three
+    // consumers of one rule beats three copies that can drift apart.
+    it("gives kubectl's own short forms for the two kinds a forward can have", () => {
+      expect(kindToForwardTarget("Service")).toBe("svc");
+      expect(kindToForwardTarget("Pod")).toBe("pod");
+      // Not the API plurals `kindToResource` would hand back.
+      expect(kindToForwardTarget("Service")).not.toBe("services");
+    });
+
+    it("lowercases anything else rather than guessing a short form", () => {
+      expect(kindToForwardTarget("StatefulSet")).toBe("statefulset");
+    });
+
+    it("is the same mapping the command itself carries", () => {
+      const command = toKubectl({
+        action: "port-forward",
+        kind: "Service",
+        name: "checkout-api",
+        context: "prod",
+        namespace: "prod",
+        localPort: 8080,
+        remotePort: 80,
+      });
+      expect(command).toContain(`port-forward ${kindToForwardTarget("Service")}/checkout-api`);
     });
   });
 });

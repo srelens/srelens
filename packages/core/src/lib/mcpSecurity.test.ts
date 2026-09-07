@@ -6,9 +6,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...
 import {
   auditTail,
   getMcpTokenStorage,
+  pendingConfirms,
   promptIssues,
   respondToConfirm,
   rotateMcpToken,
+  vaultLock,
 } from "./mcpSecurity";
 
 describe("mcpSecurity", () => {
@@ -26,14 +28,42 @@ describe("mcpSecurity", () => {
     expect(invoke).toHaveBeenCalledWith("mcp_confirm_respond", { id: "abc", approved: true });
   });
 
+  /**
+   * What a listener that subscribed late is handed: the requests still waiting,
+   * as the backend holds them. Passed through untouched — a rejection here is
+   * the caller's to report, the same line `auditTail` draws.
+   */
+  it("returns the confirmations still waiting, and rejects when they cannot be read", async () => {
+    const waiting = [{ id: "a", tool: "k8s_scale", args: { name: "api" } }];
+    invoke.mockResolvedValue(waiting);
+    await expect(pendingConfirms()).resolves.toEqual(waiting);
+    expect(invoke).toHaveBeenCalledWith("mcp_confirm_pending");
+    invoke.mockRejectedValue(new Error("no such command"));
+    await expect(pendingConfirms()).rejects.toThrow("no such command");
+  });
+
   it("returns the rotated token", async () => {
     invoke.mockResolvedValue("f".repeat(64));
     await expect(rotateMcpToken()).resolves.toHaveLength(64);
   });
 
-  it("returns an empty list when the audit log is unreadable", async () => {
+  it("returns the entries the backend sent, newest first", async () => {
+    invoke.mockResolvedValue([{ ts: 2, tool: "b" }, { ts: 1, tool: "a" }]);
+    await expect(auditTail(10)).resolves.toEqual([{ ts: 2, tool: "b" }, { ts: 1, tool: "a" }]);
+    expect(invoke).toHaveBeenCalledWith("mcp_audit_tail", { limit: 10 });
+  });
+
+  /**
+   * A trail that could not be read must not arrive as a trail with nothing in
+   * it. This wrapper used to catch and return `[]`, which made "no agent has
+   * called anything" and "srelens cannot read what the agent called"
+   * indistinguishable to every caller — on the web build, where every `invoke`
+   * rejects, the audit pane stated the first as fact for the second. The
+   * refusal propagates, and each caller draws the difference.
+   */
+  it("rejects when the audit log cannot be read, rather than reporting an empty trail", async () => {
     invoke.mockRejectedValueOnce(new Error("nope"));
-    await expect(auditTail(10)).resolves.toEqual([]);
+    await expect(auditTail(10)).rejects.toThrow(/nope/);
   });
 
   it("reports which backend holds the token", async () => {
@@ -45,5 +75,19 @@ describe("mcpSecurity", () => {
   it("promptIssues returns [] rather than throwing when the command fails", async () => {
     invoke.mockRejectedValue(new Error("nope"));
     await expect(promptIssues()).resolves.toEqual([]);
+  });
+
+  it("locks the vault by name, with an empty payload", async () => {
+    invoke.mockResolvedValue(undefined);
+    await vaultLock();
+    expect(invoke).toHaveBeenCalledWith("vault_lock", {});
+  });
+
+  it("surfaces a refused lock instead of resolving quietly", async () => {
+    // The reader must be told the workspace is still open — a swallowed
+    // failure would leave the Settings pane claiming a lock that never
+    // happened.
+    invoke.mockRejectedValueOnce(new Error("no master password is set"));
+    await expect(vaultLock()).rejects.toThrow("no master password");
   });
 });

@@ -10,6 +10,14 @@ export interface ToolStatus {
   version?: string | null;
   /** "managed" (srelens installed it) or "system". */
   source?: string | null;
+  /**
+   * The size in bytes of the file at `path`, following symlinks.
+   *
+   * Absent when the tool is not installed, and absent again when it is but the
+   * path cannot be stat'd — a dangling symlink, a permission error. Never `0`:
+   * a zero is a measurement, and neither of those was measured.
+   */
+  sizeBytes?: number | null;
 }
 
 export type RequirementKind = "kubectl" | "krew-plugin" | "external";

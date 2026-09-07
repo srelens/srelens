@@ -5,16 +5,17 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (84)
+## Tools (93)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (46)
+### Kubernetes — read-only (53)
 
 | Tool | Summary |
 | --- | --- |
 | `k8s.bindingsForServiceAccount` | list the RoleBindings and ClusterRoleBindings that reference a ServiceAccount |
 | `k8s.canI` | check whether the current user can perform actions (SelfSubjectAccessReview, batched) |
+| `k8s.clusterFacts` | report a cluster's provider, region and metrics-server availability |
 | `k8s.clusterInfo` | connect to a kube context and report server version and reachability |
 | `k8s.diffManifest` | diff a manifest against the cluster via server dry-run apply (per document) |
 | `k8s.getManifest` | fetch a resource's manifest as YAML (any supported kind) |
@@ -51,20 +52,28 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.listStorageClasses` | list StorageClasses of a connected kube context (cluster-scoped) |
 | `k8s.nodeMetrics` | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
+| `k8s.podCount` | running vs total pod counts for a cluster, counted without listing pod bodies |
 | `k8s.podLogs` | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large) |
 | `k8s.podMetrics` | pod CPU/memory usage (requires metrics-server) |
+| `k8s.podOverview` | pod totals, per-node counts and the pods that are not running, without listing pod bodies |
 | `k8s.podsForPvc` | list pods in a namespace that mount a given PersistentVolumeClaim |
 | `k8s.podsForSelector` | list pods matching a label selector (a workload's managed pods) |
 | `k8s.podsForServiceAccount` | list pods in a namespace running as a given ServiceAccount |
+| `k8s.prometheusDiscover` | find a Prometheus-compatible query API running in the cluster |
+| `k8s.prometheusQuery` | run a PromQL instant query against an in-cluster Prometheus |
+| `k8s.queryPodEndpoint` | Query an HTTP endpoint (such as /metrics, /healthz, or custom app endpoints) inside any running pod via an on-demand API port-forward tunnel. Automatically resolves pod by selector or name, auto-detects metric/service ports, and supports line filtering. |
 | `k8s.synthesizeClusterKubeconfig` | synthesize a one-context kubeconfig from Add-cluster form fields |
 | `k8s.testClusterConnection` | probe a kubeconfig context's server reachability (no exec plugins run) |
+| `k8s.topologyGraph` | graph the ingresses, services, workloads and dependencies of one or more namespaces |
 | `k8s.validateManifest` | validate a resource manifest against the API server (dry-run, strict) |
 
-### Kubernetes — sensitive read (1)
+### Kubernetes — sensitive read (3)
 
 | Tool | Summary |
 | --- | --- |
 | `k8s.getSecret` | read a Secret's values (sensitive; returns base64-encoded data) |
+| `k8s.podConnections` | read the established TCP connections of pods, from their own /proc/net/tcp |
+| `k8s.topologyProbe` | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
 ### Kubernetes — needs confirmation (7)
 

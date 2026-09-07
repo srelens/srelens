@@ -1,5 +1,5 @@
-//! Kubernetes integration for the srelens core: kubeconfig discovery, the
-//! cluster model, and kube-related capabilities.
+pub use k8s_openapi;
+pub use kube;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
@@ -8,7 +8,7 @@ use kube::{Api, Client, Resource};
 
 /// Format a duration (seconds) as a compact srelens age string (5s, 3m,
 /// 2h, 4d, 1y).
-pub(crate) fn format_age(secs: i64) -> String {
+pub fn format_age(secs: i64) -> String {
     let s = secs.max(0);
     if s < 60 {
         format!("{s}s")
@@ -24,12 +24,41 @@ pub(crate) fn format_age(secs: i64) -> String {
 }
 
 /// Compact age of a resource from its `creationTimestamp` ("-" if unset).
-pub(crate) fn humanize_age(creation: Option<&Time>) -> String {
+pub fn humanize_age(creation: Option<&Time>) -> String {
     match creation {
         Some(t) => format_age(Timestamp::now().duration_since(t.0).as_secs()),
         None => "-".to_string(),
     }
 }
+
+/// A resource's `creationTimestamp` as RFC 3339, for a caller that must
+/// compute the age itself rather than read one someone else already rendered.
+///
+/// `humanize_age` above resolves `now` at the moment it is called, so what it
+/// returns is a SNAPSHOT. A summary is built once per watch event and then
+/// cached, so an object nothing is changing keeps the age string it was born
+/// with — a Secret created while its list is open reads `0s` for as long as the
+/// list stays open (#405). Sending the timestamp instead lets the frontend
+/// re-derive the age against a clock that ticks, which is the only place that
+/// can be done: the backend cannot re-render a string for an object no event
+/// is arriving for.
+///
+/// `None` for an object with no timestamp, so a caller renders nothing rather
+/// than a wrong number.
+pub(crate) fn creation_rfc3339(creation: Option<&Time>) -> Option<String> {
+    creation.map(|t| t.0.to_string())
+}
+
+/// Return the raw ISO 8601 timestamp string from a `creationTimestamp`
+/// (empty string if unset). The TUI uses this to dynamically recompute
+/// the human-readable age at render time so it never goes stale.
+pub fn creation_timestamp_iso(creation: Option<&Time>) -> String {
+    match creation {
+        Some(t) => t.0.to_string(),
+        None => String::new(),
+    }
+}
+
 
 /// Abbreviate PV/PVC access modes ("ReadWriteOnce" → "RWO"), comma-joined.
 pub(crate) fn abbreviate_access_modes(modes: Option<&Vec<String>>) -> String {
@@ -106,6 +135,7 @@ pub mod cronjobs;
 pub mod daemonsets;
 pub mod deployments;
 pub mod endpointslices;
+pub mod endpoint_query;
 pub mod events;
 pub mod exec;
 pub mod forward;
@@ -123,6 +153,11 @@ pub mod networkpolicies;
 pub mod nodes;
 pub mod oidc_detect;
 pub mod persistentvolumes;
+pub mod pod_count;
+pub mod connections;
+pub mod pod_overview;
+pub mod prometheus;
+pub mod topology;
 pub mod pvcs;
 pub mod resourcequotas;
 pub mod rolebindings;
@@ -137,3 +172,6 @@ pub mod statefulsets;
 pub mod storageclasses;
 pub mod watch;
 pub mod workloads;
+pub mod lineage;
+pub mod node_inspector;
+pub mod gpu_info;

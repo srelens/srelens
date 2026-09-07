@@ -1,11 +1,16 @@
 name: CI
 
-# Run the test suites on every push/PR to dev or main so nothing lands red.
+# Run the test suites on every push/PR to a shared branch so nothing lands red.
+#
+# `feat/ui-next` is one of those: the new-design migration merges there rather
+# than into dev until it lands, and a branch missing from this list gets no CI
+# at all — not a red check, no checks, which GitHub reports as mergeable. PR
+# #326 was opened against it and sat green with zero checks having run. (#318)
 on:
   push:
-    branches: [dev, main]
+    branches: [dev, main, feat/ui-next]
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, feat/ui-next]
 
 # Pull requests share a per-ref group and cancel each other: a superseded run
 # tests a commit nobody will merge, so killing it saves minutes and loses
@@ -30,9 +35,11 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No `version:` — `pnpm/action-setup` reads `packageManager` from
+      # package.json. One source of truth: a second one here is how local
+      # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
+      # overrides from the lockfile on every local install.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 9
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -76,9 +83,11 @@ jobs:
             libgtk-3-dev \
             libssl-dev \
             build-essential
+      # No `version:` — `pnpm/action-setup` reads `packageManager` from
+      # package.json. One source of truth: a second one here is how local
+      # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
+      # overrides from the lockfile on every local install.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 9
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -95,7 +104,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       # Same reason: pinned, so the tool comes from an input rather than the tag.
-      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -126,8 +135,11 @@ jobs:
           cargo llvm-cov --no-report -p srelens-desktop --test e2e -- --ignored --nocapture --test-threads=1
           cargo llvm-cov --no-report -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test-threads=1
       - name: Enforce the coverage floor
-        # Only the process entries stay excluded (lib.rs/main.rs and the
-        # server's bin — they execute solely inside a running app/server).
+        # Only the process entries stay excluded (the desktop app's lib.rs and
+        # main.rs, the server's bin, and the TUI's main.rs — they execute solely
+        # inside a running app, server or terminal). Everything else in
+        # apps/tui counts: its views render through ratatui's TestBackend and
+        # its App runs without a cluster, so there is no excuse there.
         # The command shims that used to sit here are unit-tested through
         # tauri::test's MockRuntime and count like everything else. The floor
         # is a ratchet — 55 at first green, 84 when the kind suites started
@@ -135,7 +147,7 @@ jobs:
         # #28's acceptance number) — never lower it.
         run: >-
           cargo llvm-cov report --summary-only --fail-under-lines 85
-          --ignore-filename-regex 'apps/desktop/src-tauri/src/(lib|main)\.rs|crates/server/src/bin/'
+          --ignore-filename-regex 'apps/desktop/src-tauri/src/(lib|main)\.rs|crates/server/src/bin/|apps/tui/src/main[.]rs'
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the
@@ -165,9 +177,11 @@ jobs:
             build-essential \
             webkit2gtk-driver \
             xvfb
+      # No `version:` — `pnpm/action-setup` reads `packageManager` from
+      # package.json. One source of truth: a second one here is how local
+      # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
+      # overrides from the lockfile on every local install.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with:
-          version: 9
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -205,3 +219,29 @@ jobs:
           name: smoke-failure-artifacts
           path: ${{ runner.temp }}/smoke-artifacts
           if-no-files-found: ignore
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      # Until now nothing but the release workflow ever built this file, and
+      # two dev releases shipped no container image before anyone noticed. Two
+      # separate breaks were waiting in it, one per stage: a pnpm version the
+      # lockfile had outgrown, and a workspace member the backend stage never
+      # copied. Building only the frontend stage here would have caught one of
+      # them.
+      #
+      # So the whole image, which makes this the slowest job in CI on any
+      # change to crates/. That is the price of the image being built at all
+      # before a release depends on it. The layer cache carries the Rust stage
+      # across runs that do not touch it.
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          cache-from: type=gha,scope=docker-ci
+          cache-to: type=gha,mode=max,scope=docker-ci

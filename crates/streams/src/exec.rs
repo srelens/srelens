@@ -44,14 +44,23 @@ impl ExecManager {
     }
 
     /// Open an interactive shell into a pod. Returns the session id; stdout
-    /// streams on `exec:out:<id>` and an `exec:exit:<id>` event fires (with an
-    /// optional error string) when the session ends.
+    /// streams on `exec:out:<channel>` and an `exec:exit:<channel>` event
+    /// fires (with an optional error string) when the session ends.
+    ///
+    /// `channel` is the CALLER'S subscription token, not the session id this
+    /// returns, and that is the whole point: the task spawned below can emit
+    /// its exit event in the same tick — an unresolvable context, an RBAC
+    /// refusal — so a frontend that could only subscribe once it had the id
+    /// would lose the only exit event there will ever be, leaving the session's
+    /// row attached and a node session's privileged debug pod on the node. Same
+    /// shape as `TerminalManager::start`.
     pub async fn start(
         &self,
         sink: Arc<dyn EventSink>,
         context: String,
         namespace: String,
         pod: String,
+        channel: String,
         opts: ExecOpts,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -59,8 +68,8 @@ impl ExecManager {
         let (resize_tx, resize_rx) = mpsc::channel::<(u16, u16)>(8);
         let initial_size = opts.cols.zip(opts.rows);
         let cache = self.cache.clone();
-        let out_channel = format!("exec:out:{id}");
-        let exit_channel = format!("exec:exit:{id}");
+        let out_channel = format!("exec:out:{channel}");
+        let exit_channel = format!("exec:exit:{channel}");
         let out_sink = sink.clone();
 
         let handle = tokio::spawn(async move {
@@ -150,7 +159,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_session_emits_exit_with_error() {
         // Empty cache: exec_shell cannot resolve the context, so the session
-        // task must end by emitting exec:exit:<id> with an error string.
+        // task must end by emitting exec:exit:<channel> with an error string —
+        // on the CALLER'S channel, which the frontend was already subscribed
+        // to before this call, not on the session id it has yet to receive.
         let manager = ExecManager::new(ClientCache::new_many(vec![]));
         let sink = Arc::new(TestSink::default());
         let id = manager
@@ -159,16 +170,24 @@ mod tests {
                 "nope".into(),
                 "ns".into(),
                 "pod-a".into(),
+                "exec-0-abcd".into(),
                 ExecOpts::default(),
             )
             .await
             .expect("start allocates a session id");
 
-        let exit_channel = format!("exec:exit:{id}");
+        let exit_channel = "exec:exit:exec-0-abcd".to_string();
         for _ in 0..100 {
             let exits = sink.payloads_for(&exit_channel);
             if let Some(payload) = exits.first() {
                 assert!(payload.is_string(), "exit carries an error: {payload}");
+                // And on no other channel: an id-derived one is a channel the
+                // caller could not have been listening on yet.
+                assert!(
+                    sink.payloads_for(&format!("exec:exit:{id}")).is_empty(),
+                    "channels: {:?}",
+                    sink.channels()
+                );
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -186,6 +205,7 @@ mod tests {
                 "nope".into(),
                 "ns".into(),
                 "pod-a".into(),
+                "exec-1-abcd".into(),
                 ExecOpts::default(),
             )
             .await

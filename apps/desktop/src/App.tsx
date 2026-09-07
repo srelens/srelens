@@ -18,6 +18,7 @@ import { AssistantTab } from "./components/AssistantTab";
 import { CommandPalette } from "./components/CommandPalette";
 import { ShortcutCheatSheet } from "./components/ShortcutCheatSheet";
 import { isTypingTarget, matchesShortcut } from "@srelens/core";
+import { takeHandoff } from "./design";
 import { McpConfirmDialog } from "./components/McpConfirmDialog";
 import { VaultGate } from "./components/VaultGate";
 import { Toaster } from "./components/ui/sonner";
@@ -264,6 +265,19 @@ export function App() {
     };
   }, []);
 
+  // A design switch reloads the document, and the new design leaves a note
+  // about where it was. Consumed once the contexts are known — same gate as
+  // the deep links below, for the same reason — and consumed exactly once:
+  // takeHandoff clears as it reads, so a later launch starts at home.
+  useEffect(() => {
+    if (!contexts) return;
+    const handoff = takeHandoff();
+    if (!handoff) return;
+    if (contexts.some((c) => c.name === handoff.context)) {
+      openView(handoff.context, handoff.kind);
+    }
+  }, [contexts]);
+
   // Routed only once the contexts are known: a link that arrives during a cold
   // start would otherwise be judged against an empty context list and
   // rejected as pointing at a cluster that "doesn't exist".
@@ -459,18 +473,34 @@ export function App() {
     if (typeof win?.onCloseRequested !== "function") return;
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    // Set once we have taken over a close, so the close() below — which
+    // re-emits this event — is let through instead of cancelled a second time.
+    let closing = false;
     void win
       .onCloseRequested(async (event) => {
+        if (closing) return;
         event.preventDefault();
-        flushSaveOpenTabs();
-        // Bounded: a stuck or slow write must never leave the user unable to
-        // quit, so the close proceeds either way.
-        await Promise.race([
-          flushSettingsWrites(),
-          new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
-        ]);
-        // destroy(), not close() — close() re-emits this event and would loop.
-        await win.destroy();
+        closing = true;
+        try {
+          flushSaveOpenTabs();
+          // Bounded: a stuck or slow write must never leave the user unable to
+          // quit, so the close proceeds either way.
+          await Promise.race([
+            flushSettingsWrites(),
+            new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
+          ]);
+        } finally {
+          // Whatever the drain did, the close it cancelled has to be re-issued:
+          // a best-effort flush must never cost the user the ability to quit.
+          // Anything thrown above escaped here and left the window stuck open
+          // with the red light dead — which is exactly what an ungranted
+          // `core:window:allow-destroy` did to every close but Cmd+Q. (#425)
+          //
+          // destroy(), not close() — close() re-emits this event, so it is the
+          // last resort rather than the path, and the guard above stops it
+          // looping.
+          await win.destroy().catch(() => win.close());
+        }
       })
       .then((fn) => {
         if (disposed) fn();

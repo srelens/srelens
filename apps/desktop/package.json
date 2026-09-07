@@ -23,6 +23,7 @@
     "@lezer/highlight": "^1.2.3",
     "@peculiar/x509": "^2.0.0",
     "@srelens/core": "workspace:*",
+    "@srelens/ui-kit": "workspace:*",
     "@srelens/ui-next": "workspace:*",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.3.1",

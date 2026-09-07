@@ -24,13 +24,42 @@ export interface FriendlyError {
   raw: string;
 }
 
-/** `CapabilityError`'s Display prefix; internal noise the user shouldn't see. */
-const HANDLER_PREFIX = /^\s*handler error:\s*/i;
+/** The system a caller actually contacted when it received the error. */
+export type ErrorDomain = "cluster" | "http" | "local";
+
+export interface DescribeErrorOptions {
+  /** Cluster calls remain the default so existing callers keep their guidance. */
+  domain?: ErrorDomain;
+}
+
+/**
+ * The two wrappers that get printed in front of a message on the way here,
+ * neither of which is news to anyone:
+ *
+ * - `handler error:` is `CapabilityError`'s Display prefix.
+ * - `Error:` is what `String()` puts in front of an `Error`'s message, and
+ *   `{ error: String(e) }` is how every lib wrapper — `podCount`,
+ *   `getManifest`, `clusters` — reports a rejection. The two stack, so what
+ *   actually arrived at the cluster overview's Fleet rows was
+ *   `Error: handler error: ApiError: …`; with the pattern anchored and applied
+ *   once, that leading `Error: ` was enough to stop the handler prefix
+ *   matching at all, and the whole string went to the reader verbatim.
+ *
+ * Both need their colon, so a message that merely opens with the word — an
+ * apiserver's `ApiError: …`, a manifest's `Errors were found …` — is left
+ * whole. Nothing further is stripped: the rest is what the cluster said.
+ */
+const NOISE_PREFIX = /^\s*(?:handler error|Error):\s*/i;
 
 /** Normalize any thrown value to a clean message, stripping internal prefixes. */
 export function cleanErrorMessage(input: unknown): string {
-  const raw = input instanceof Error ? input.message : String(input ?? "");
-  return raw.replace(HANDLER_PREFIX, "").trim();
+  let raw = input instanceof Error ? input.message : String(input ?? "");
+  // Until it stops changing, rather than once: the wrappers nest, and a single
+  // pass leaves whichever one was outermost standing in front of the message.
+  for (let stripped = raw.replace(NOISE_PREFIX, ""); stripped !== raw; stripped = raw.replace(NOISE_PREFIX, "")) {
+    raw = stripped;
+  }
+  return raw.trim();
 }
 
 /**
@@ -86,7 +115,10 @@ export function isExecAuthError(input: unknown): boolean {
 }
 
 /** Classify a raw error into a friendly, actionable message. */
-export function describeError(input: unknown): FriendlyError {
+export function describeError(
+  input: unknown,
+  { domain = "cluster" }: DescribeErrorOptions = {},
+): FriendlyError {
   const raw = cleanErrorMessage(input);
   const lower = raw.toLowerCase();
 
@@ -112,6 +144,22 @@ export function describeError(input: unknown): FriendlyError {
   }
 
   if (/timed out|timeout|deadline exceeded/.test(lower)) {
+    if (domain === "http") {
+      return {
+        title: "Request timed out",
+        detail:
+          "The request didn't finish in time. Check your network connection and try again.",
+        raw,
+      };
+    }
+    if (domain === "local") {
+      return {
+        title: "Operation timed out",
+        detail:
+          "The local operation didn't finish in time. Try again; if it keeps happening, check that the file or device is still available.",
+        raw,
+      };
+    }
     // The remedy is platform-specific: the Settings slider only exists on the
     // desktop, so pointing a web user at it would be an impossible
     // instruction. The server honours SRELENS_TIMEOUT_SECS instead.
@@ -124,11 +172,17 @@ export function describeError(input: unknown): FriendlyError {
       raw,
     };
   }
-  if (/connection refused|failed to connect|connect error|no route to host|network is unreachable|unreachable/.test(lower)) {
+  // `client error (connect)` is hyper's own Display for a connector that never
+  // got a socket, and it is what the backend actually returns for a cluster
+  // that is simply down — `ServiceError: client error (Connect)`, with the
+  // refused/unreachable/handshake distinction already discarded by the time it
+  // reaches us. It was falling through to "Something went wrong", which is how
+  // the most ordinary failure there is came to be the least explained one.
+  if (/connection refused|failed to connect|connect error|\(connect\)|no route to host|network is unreachable|unreachable/.test(lower)) {
     return {
       title: "Can't reach the cluster",
       detail:
-        "The connection to the API server was refused. Make sure the cluster is running and the server address in your kubeconfig context is correct.",
+        "The connection to the API server could not be made. Make sure the cluster is running and the server address in your kubeconfig context is correct.",
       raw,
     };
   }
@@ -166,6 +220,16 @@ export function describeError(input: unknown): FriendlyError {
     };
   }
   if (/certificate|x509|\btls\b|self.signed|unknown authority/.test(lower)) {
+    if (domain !== "cluster") {
+      return {
+        title: "Couldn't verify the connection",
+        detail:
+          domain === "http"
+            ? "The server's TLS certificate couldn't be verified. It may be self-signed or expired, or this machine may not trust its issuer."
+            : "A TLS certificate couldn't be verified. It may be self-signed or expired, or this machine may not trust its issuer.",
+        raw,
+      };
+    }
     return {
       title: "Couldn't verify the cluster",
       detail:

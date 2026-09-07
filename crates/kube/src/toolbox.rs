@@ -417,7 +417,13 @@ pub fn krew_bin_dir() -> PathBuf {
 const MANAGED_TOOLS: [&str; 3] = ["kubectl", "krew", "helm"];
 
 /// One managed tool's inventory entry for the Toolbox "Tools" section.
+///
+/// `camelCase` because every other DTO the frontend reads is camelCase, and
+/// `size_bytes` is the first field here with two words in it — the existing
+/// five are single words, so the rename changes nothing about them and only
+/// stops this one arriving as `size_bytes` in TypeScript.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolStatusDto {
     pub name: String,
     pub installed: bool,
@@ -425,6 +431,11 @@ pub struct ToolStatusDto {
     pub version: Option<String>,
     /// `managed` (srelens installed it under a managed dir) or `system`.
     pub source: Option<String>,
+    /// The size in bytes of the file at `path`. `None` when the tool isn't
+    /// installed (no path to size) and also `None` when it is but the path
+    /// can't be stat'd (dangling symlink, permission error) — a missing
+    /// reading is never reported as `0`.
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -468,6 +479,21 @@ fn tool_source(path: &Path, managed_dirs: &[PathBuf]) -> &'static str {
     }
 }
 
+/// The size in bytes of the file at `path`, or `None` if it can't be read.
+///
+/// Uses `fs::metadata`, which follows symlinks, deliberately: entries under
+/// `~/.srelens/bin` and `/usr/local/bin` are frequently symlinks (a Homebrew
+/// shim, a version-pinned install), and a link's own length is a handful of
+/// bytes — a number that looks like a real answer and is wrong. We want the
+/// size of the binary the tool actually runs, so we follow the link.
+/// `symlink_metadata` (which reports the link itself) would be wrong here.
+///
+/// `None` on any error (missing file, dangling symlink, permission denied) —
+/// never `unwrap_or(0)`: a size that wasn't read is not a size of zero.
+fn tool_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
 /// Read-only capability: inventory the managed CLI toolchain (kubectl, krew,
 /// helm) — whether each is installed, where, its version, and whether srelens
 /// manages it. The resolution environment is injected so it's deterministic
@@ -504,6 +530,7 @@ pub fn status_capability(
                                 installed: true,
                                 version: version_of(name, path),
                                 source: Some(tool_source(path, &managed_dirs).to_string()),
+                                size_bytes: tool_size(path),
                                 path: Some(found.path),
                             }
                         }
@@ -513,6 +540,7 @@ pub fn status_capability(
                             path: None,
                             version: None,
                             source: None,
+                            size_bytes: None,
                         },
                     })
                     .collect();
@@ -1140,10 +1168,58 @@ users:
         assert_eq!(kubectl["source"], "managed");
         assert_eq!(kubectl["version"], "v1.30.2");
         assert!(kubectl["path"].as_str().unwrap().ends_with("/kubectl"));
-        // krew + helm absent.
+        // `b"#!/bin/sh\n"` is 10 bytes on disk.
+        assert_eq!(kubectl["sizeBytes"], 10);
+        // krew + helm absent: no reading, not a zero.
         assert_eq!(tools[1]["installed"], false);
         assert_eq!(tools[1]["version"], serde_json::Value::Null);
+        assert_eq!(tools[1]["sizeBytes"], serde_json::Value::Null);
         assert_eq!(tools[2]["installed"], false);
+        assert_eq!(tools[2]["sizeBytes"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn status_follows_a_symlink_to_report_the_targets_size_not_the_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join(".srelens/bin");
+        std::fs::create_dir_all(&managed).unwrap();
+        // `~/.srelens/bin` entries are typically symlinks to a real download;
+        // the link itself is only a handful of bytes.
+        let target = dir.path().join("kubectl-v1.30.2");
+        std::fs::write(&target, vec![0u8; 5000]).unwrap();
+        std::os::unix::fs::symlink(&target, managed.join("kubectl")).unwrap();
+
+        let cap = status_capability(
+            SearchPaths { app_path: managed.to_string_lossy().into_owned(), system_path: String::new() },
+            vec![managed.clone()],
+            |p| p.is_file(),
+            |_name, _p| None,
+        );
+        let mut reg = Registry::new();
+        reg.register(cap);
+        let out = reg.invoke("toolbox.status", json!({})).await.unwrap();
+        let tools = out["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["sizeBytes"], 5000);
+    }
+
+    #[tokio::test]
+    async fn status_reports_no_size_when_a_located_path_cannot_be_stat_d() {
+        // A fake resolver that claims a path exists (mirroring a dangling
+        // symlink or permission error under a real filesystem) while nothing
+        // is actually there for `fs::metadata` to read.
+        let cap = status_capability(
+            SearchPaths { app_path: "/does/not/exist".to_string(), system_path: String::new() },
+            vec![],
+            |_p| true,
+            |_name, _p| None,
+        );
+        let mut reg = Registry::new();
+        reg.register(cap);
+        let out = reg.invoke("toolbox.status", json!({})).await.unwrap();
+        let tools = out["tools"].as_array().unwrap();
+        // Located and reported installed, but no size was actually read.
+        assert_eq!(tools[0]["installed"], true);
+        assert_eq!(tools[0]["sizeBytes"], serde_json::Value::Null);
     }
 
     #[tokio::test]

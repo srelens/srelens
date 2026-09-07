@@ -3,6 +3,8 @@ import { parseCurrentContext } from "./addCluster";
 import { parseDeepLink } from "./deepLink";
 import { describeForbidden } from "./errors";
 import { isTableSeparator } from "./assistantMarkdown";
+import { certificateBlocks } from "./k8sSecret";
+import { tokenize } from "./logTerms";
 
 /**
  * Regressions for nine `js/polynomial-redos` findings (#43-#51).
@@ -56,6 +58,32 @@ describe("parsers stay linear on hostile input", () => {
   it("describes a forbidden error that never completes its pattern (#49)", () => {
     const raw = `cannot a resource "!"${'cannot a resource "!"a'.repeat(3000)}`;
     withinBudget("describeForbidden", () => describeForbidden(raw));
+  });
+
+  /**
+   * Three more of the same class, found on PR #380. Measured on the real
+   * patterns before changing them, on this machine:
+   *
+   *   certificate blocks  quadratic  1386ms at 328KB (12k BEGIN, no END)
+   *   token quote run     quadratic  709ms at 20k quotes, 2.7s at 40k, 11.1s at 80k
+   *
+   * The token figure is PER PATTERN and `tokenize` applied three of them to
+   * every token, so one 40KB run of quotes in one log line cost ~8 seconds of
+   * the UI thread.
+   */
+  it("scans a PEM with many BEGIN markers and no END (#380)", () => {
+    // A Secret's `tls.crt` as the cluster hands it over. Each BEGIN was a
+    // fresh start position for a lazy `[\s\S]*?` that then rescanned to the
+    // end of the string looking for an END that is not there.
+    const pem = "-----BEGIN CERTIFICATE-----\n".repeat(12_000);
+    withinBudget("certificateBlocks", () => certificateBlocks(pem));
+  });
+
+  it("tokenizes a log line whose token is nothing but quotes (#380)", () => {
+    // Log lines are STREAMED from the cluster: this is the least controlled
+    // input in the app, and the only one of these that arrives continuously.
+    const line = `${'"'.repeat(40_000)}x`;
+    withinBudget("tokenize", () => tokenize(line));
   });
 });
 
@@ -136,6 +164,26 @@ describe("the parsers still do their jobs", () => {
         'cannot patch resource "deployments" in the namespace "prod" at the cluster scope',
       ),
     ).toBe("You don't have permission to patch deployments in prod.");
+  });
+
+  it("finds every certificate block, and nothing when a block never closes", () => {
+    const one = "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----";
+    expect(certificateBlocks("")).toEqual([]);
+    expect(certificateBlocks("not a certificate at all")).toEqual([]);
+    expect(certificateBlocks(one)).toEqual([one]);
+    expect(certificateBlocks(`lead\n${one}\ntail`)).toEqual([one]);
+    expect(certificateBlocks(`${one}\n${one}`)).toEqual([one, one]);
+    // A BEGIN with no END is not a block, and neither is what follows it: the
+    // regex behaved the same way, and this is the input that made it slow.
+    expect(certificateBlocks("-----BEGIN CERTIFICATE-----\nAAA\n")).toEqual([]);
+    expect(certificateBlocks(`${one}\n-----BEGIN CERTIFICATE-----\n`)).toEqual([one]);
+    // An END before any BEGIN is not a block either.
+    expect(certificateBlocks(`-----END CERTIFICATE-----\n${one}`)).toEqual([one]);
+    // A nested BEGIN is swallowed by the block that opened first — the same
+    // answer the single lazy pattern gave, since it matched from the earliest
+    // start position it could.
+    const nested = "-----BEGIN CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----";
+    expect(certificateBlocks(nested)).toEqual([nested]);
   });
 
   it("recognises table separators and rejects other rows", () => {

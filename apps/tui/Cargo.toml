@@ -1,0 +1,59 @@
+[package]
+name = "srelens-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "srelens Kubernetes terminal user interface and CLI"
+
+[lib]
+name = "srelens_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "srelens-tui"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+unicode-width = "0.2"
+similar = "2"
+dirs = "6"
+# `update` (#446): fetch the release, verify its checksum, unpack it. Blocking
+# reqwest because the command is a short synchronous script, not part of the
+# event loop; `rustls-no-provider` matches the rest of the workspace, and the
+# provider is installed by `srelens_kube::connect`.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+semver = "1"
+# Named explicitly because reqwest is built with `rustls-no-provider`, which
+# does NOT resolve one on its own: the first client panics without an installed
+# provider. `ring` to match kube-rs, so the binary links one provider, not two.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+srelens-capability = { path = "../../crates/capability" }
+srelens-kube = { path = "../../crates/kube" }
+srelens-streams = { path = "../../crates/streams" }
+srelens-registry = { path = "../../crates/registry" }
+srelens-agent = { path = "../../crates/agent" }
+srelens-llm = { path = "../../crates/llm" }
+srelens-mcp = { path = "../../crates/mcp" }
+async-trait = "0.1"
+log = "0.4"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+regex = "1"
+libc = "0.2"
+shlex = "1"
+
+[dev-dependencies]
+tempfile = "3"

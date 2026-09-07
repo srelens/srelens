@@ -16,7 +16,14 @@ thiserror = "1"
 tokio = { version = "1", features = ["fs", "time", "net", "io-util", "process"] }
 # `ring` is explicit: kube 4 split the rustls crypto provider out of
 # `rustls-tls`, and without it rustls panics when it builds a TLS config.
-kube = { version = "4", default-features = false, features = ["client", "config", "rustls-tls", "ring", "runtime", "ws"] }
+# `gzip` asks every cluster for compressed responses (tower-http decodes them
+# transparently): on a 113-node cluster a metadata-only pod list carrying
+# managedFields runs ~55MB uncompressed vs ~3MB gzipped, and it was the
+# reason `k8s.podCount` missed its 3s Fleet budget. Measured on a real
+# cluster: request wall time dropped from ~5.2s to ~1.3s; on a local kind
+# cluster over loopback the payload is small enough that gzip is a wash
+# either way. Without this feature, kube-rs never sends `Accept-Encoding`.
+kube = { version = "4", default-features = false, features = ["client", "config", "rustls-tls", "ring", "runtime", "ws", "gzip"] }
 k8s-openapi = { version = "0.28", features = ["v1_34"] }
 futures = "0.3"
 base64 = "0.22"

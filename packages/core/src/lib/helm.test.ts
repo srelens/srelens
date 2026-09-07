@@ -13,7 +13,7 @@ vi.mock("../transport/transport", async (importOriginal) => {
   };
 });
 
-import { helmUpgrade, helmRollback, helmVersion, helmSearchRepo, diffTextLines, startHelmOp } from "./helm";
+import { helmUpgrade, helmRollback, helmVersion, helmSearchRepo, diffTextLines, startHelmOp, getHelmRelease } from "./helm";
 
 beforeEach(() => {
   invokeCommandMock.mockReset();
@@ -67,6 +67,28 @@ describe("helm write wrappers", () => {
     const invoke = vi.fn().mockRejectedValue(new Error("helm not found on PATH"));
     const r = await helmSearchRepo("ctx", "nginx", invoke);
     expect(r.error).toContain("helm not found");
+  });
+});
+
+describe("getHelmRelease", () => {
+  it("omits the revision key entirely when none is given", async () => {
+    const invoke = vi.fn().mockResolvedValue({ name: "web" });
+    await getHelmRelease("ctx", "apps", "web", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.getHelmRelease", { context: "ctx", namespace: "apps", name: "web" });
+    const payload = invoke.mock.calls[0][1] as Record<string, unknown>;
+    expect("revision" in payload).toBe(false);
+  });
+
+  it("passes a given revision through to the payload", async () => {
+    const invoke = vi.fn().mockResolvedValue({ name: "web" });
+    await getHelmRelease("ctx", "apps", "web", invoke, 118);
+    expect(invoke).toHaveBeenCalledWith("k8s.getHelmRelease", { context: "ctx", namespace: "apps", name: "web", revision: 118 });
+  });
+
+  it("surfaces errors", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("release not found"));
+    const r = await getHelmRelease("ctx", "apps", "web", invoke);
+    expect(r.error).toContain("release not found");
   });
 });
 

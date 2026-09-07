@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import type { ButtonHTMLAttributes, ComponentType, Ref } from "react";
 import { cx } from "./cx";
 
 /**
@@ -12,8 +12,13 @@ export type IconComponent = ComponentType<{
   "aria-hidden"?: boolean | "true" | "false";
 }>;
 
-export interface IconButtonProps {
+export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "type"> {
   icon: IconComponent;
+  /**
+   * The element itself, for a wrapper that needs to position against it or
+   * drive it — Radix's `asChild` hands one down. (#320)
+   */
+  ref?: Ref<HTMLButtonElement>;
   /** Accessible name + default tooltip (e.g. "Logs", "Delete"). */
   label: string;
   onClick?: () => void;
@@ -43,16 +48,24 @@ export function IconButton({
   disabled,
   title,
   className,
+  style,
+  ...rest
 }: IconButtonProps) {
   return (
     <button
+      // Spread first, so nothing a wrapper hands down can overwrite what this
+      // component promises — `type` above all. Radix's `asChild` clones this
+      // element and passes handlers, aria attributes and a ref through, and a
+      // component that swallows them renders correctly and never works: a
+      // Tooltip around one of these opened for nobody. (#320)
+      {...rest}
       type="button"
       className={cx("icon-btn", className)}
       aria-label={label}
       title={title ?? label}
       onClick={onClick}
       disabled={disabled}
-      style={danger ? { color: "var(--sev)" } : undefined}
+      style={danger ? { color: "var(--sev)", ...style } : style}
     >
       <Icon size={14} aria-hidden="true" />
     </button>

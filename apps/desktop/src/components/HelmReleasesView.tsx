@@ -6,10 +6,12 @@ import {
   helmVersion,
   helmRepoUpdate,
   helmRepoAdd,
+  ageFromTimestamp,
+  absoluteTimestamp,
   type HelmReleaseSummary,
   type HelmReleaseDetail,
 } from "@srelens/core";
-import { ageFromTimestamp, absoluteTimestamp, Section, KV } from "./ResourceOverview";
+import { Section, KV } from "./ResourceOverview";
 import type { TabViewState } from "@srelens/core";
 import {
   Table,

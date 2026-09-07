@@ -26,7 +26,7 @@
 //! on panic, so the cluster is left usable and the suite is re-runnable
 //! back-to-back with no manual cleanup.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,6 +42,10 @@ use srelens_kube::client_cache::ClientCache;
 
 const NS: &str = "srelens-e2e";
 const DEPLOY: &str = "e2e-web";
+/// The one fixture that actually listens on a port: busybox's httpd serving a
+/// two-line /metrics, for `k8s.queryPodEndpoint`. Separate from {DEPLOY} so
+/// the log and relation cases keep their exact pod counts and output.
+const HTTP_DEPLOY: &str = "e2e-http";
 const SVC: &str = "e2e-web";
 const HEADLESS_SVC: &str = "e2e-headless";
 const CM: &str = "e2e-config";
@@ -259,6 +263,31 @@ spec:
       - name: app
         image: busybox:1.36
         command: ["sh", "-c", "while true; do echo hello; sleep 5; done"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {HTTP_DEPLOY}
+  namespace: {NS}
+  labels:
+    app: {HTTP_DEPLOY}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {HTTP_DEPLOY}
+  template:
+    metadata:
+      labels:
+        app: {HTTP_DEPLOY}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /www && echo ok > /www/index.html && {{ echo '# HELP e2e_up 1 when the fixture serves'; echo 'e2e_up 1'; }} > /www/metrics && exec httpd -f -p 8080 -h /www"]
+        ports:
+        - name: http
+          containerPort: 8080
 ---
 apiVersion: v1
 kind: Service
@@ -741,6 +770,115 @@ async fn run_suite() {
         "expected our fixture pods: {out}"
     );
 
+    // === k8s.podCount / k8s.podOverview (#339) ===============================
+    // Both count/group pods cluster-wide WITHOUT listing pod bodies (see
+    // crates/kube/src/pod_count.rs and pod_overview.rs). Cross-checked here
+    // against a real cluster-wide k8s.listPods (namespace "") rather than
+    // trusting the counts on their own.
+    println!("=== pod count / overview ===");
+    let all_pods_out = h
+        .reg
+        .invoke("k8s.listPods", json!({ "context": ctx, "namespace": "" }))
+        .await
+        .unwrap();
+    h.mark("k8s.listPods");
+    let all_pods = all_pods_out["pods"].as_array().unwrap();
+
+    // podCount's own definition of its denominator (every phase except
+    // Succeeded) and numerator (Running only) — matched here, not
+    // re-derived, so the test fails if either capability's counting ever
+    // drifts from what a plain list of the same pods shows.
+    let plain_still_running = all_pods.iter().filter(|p| p["phase"] != "Succeeded").count() as i64;
+    let plain_running = all_pods.iter().filter(|p| p["phase"] == "Running").count() as i64;
+
+    let pod_count_out = h.ok("k8s.podCount", json!({ "context": ctx })).await;
+    assert_eq!(
+        pod_count_out["total"].as_i64().unwrap(),
+        plain_still_running,
+        "podCount total must match a plain cluster-wide pod list, minus Succeeded pods: {pod_count_out}"
+    );
+    assert_eq!(
+        pod_count_out["running"].as_i64().unwrap(),
+        plain_running,
+        "podCount running must match the Running pods in a plain cluster-wide list: {pod_count_out}"
+    );
+    assert!(
+        pod_count_out["total"].as_i64().unwrap() >= 5,
+        "expected at least our fixture pods counted: {pod_count_out}"
+    );
+
+    // podOverview's own "short of ready" rule (mirrors the READY-column check
+    // in crates/kube/src/pod_overview.rs), applied to the same ready count
+    // k8s.listPods reports, so "unsettled" can be checked against the plain
+    // list rather than trusted blind.
+    fn ready_cell_is_short(ready: &str) -> bool {
+        let Some((r, t)) = ready.split_once('/') else {
+            return true;
+        };
+        match (r.trim().parse::<i64>(), t.trim().parse::<i64>()) {
+            (Ok(r), Ok(t)) => r < t,
+            _ => true,
+        }
+    }
+
+    let pod_overview_out = h.ok("k8s.podOverview", json!({ "context": ctx })).await;
+    assert_eq!(
+        pod_overview_out["total"].as_i64().unwrap(),
+        all_pods.len() as i64,
+        "podOverview total must match a plain cluster-wide pod list: {pod_overview_out}"
+    );
+    assert!(
+        !pod_overview_out["truncated"].as_bool().unwrap(),
+        "the e2e namespace is far below the 200-pod unsettled cap: {pod_overview_out}"
+    );
+
+    // Every pod podOverview counted must be accounted for in exactly one
+    // node's group (or none, if unscheduled) — the property the module
+    // exists to answer without ever listing a pod body to do it.
+    let mut expected_by_node: BTreeMap<String, i64> = BTreeMap::new();
+    for p in all_pods {
+        let node = p["node"].as_str().unwrap_or_default();
+        if !node.is_empty() {
+            *expected_by_node.entry(node.to_string()).or_insert(0) += 1;
+        }
+    }
+    let actual_by_node: BTreeMap<String, i64> = pod_overview_out["byNode"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| (n["node"].as_str().unwrap().to_string(), n["pods"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        actual_by_node, expected_by_node,
+        "podOverview's per-node groups must account for every scheduled pod in a plain list: {pod_overview_out}"
+    );
+
+    let expected_unsettled: HashSet<(String, String)> = all_pods
+        .iter()
+        .filter(|p| p["phase"] != "Running" || ready_cell_is_short(p["ready"].as_str().unwrap_or_default()))
+        .map(|p| {
+            (
+                p["namespace"].as_str().unwrap_or_default().to_string(),
+                p["name"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let actual_unsettled: HashSet<(String, String)> = pod_overview_out["unsettled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["namespace"].as_str().unwrap_or_default().to_string(),
+                p["name"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual_unsettled, expected_unsettled,
+        "podOverview's unsettled set must match pods that are not simply Running in a plain list: {pod_overview_out}"
+    );
+
     // #17: attach an ephemeral debug container to a fixture pod. It can't be
     // removed once added, but the whole namespace is torn down after the suite.
     let debug_pod = out["pods"].as_array().unwrap()[0]["name"].as_str().unwrap().to_string();
@@ -1162,7 +1300,10 @@ async fn run_suite() {
     let out = h
         .ok(
             "k8s.openApiSchema",
-            json!({ "context": ctx, "api_version": "apps/v1", "kind": "Deployment" }),
+            // `apiVersion`, the spelling `core`'s wrapper sends. This case
+            // used to send `api_version` — the struct's own field name — and
+            // so passed while every real call failed to deserialize.
+            json!({ "context": ctx, "apiVersion": "apps/v1", "kind": "Deployment" }),
         )
         .await;
     assert!(out["key"]
@@ -1224,6 +1365,130 @@ async fn run_suite() {
         .iter()
         .any(|p| p["name"] == PVC_POD));
 
+    // --- topologyGraph: the three joins, against objects the fixtures made ---
+    // The unit tests in `crates/kube/src/topology.rs` prove the join rules on
+    // hand-built objects. What only a cluster can prove is that the fields
+    // those rules read are the fields a real API server fills in — the
+    // Service selector, the Deployment template labels the controller copies
+    // onto its pods, and the ownerReference the Deployment controller writes
+    // on the ReplicaSet it makes.
+    // The full input, spelled out: several namespaces at once is the
+    // capability's shape, and the two optional sources are named as absent
+    // rather than left to a default that may not exist.
+    let out = h
+        .ok(
+            "k8s.topologyGraph",
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }),
+        )
+        .await;
+    let nodes = out["nodes"].as_array().unwrap();
+    let edges = out["edges"].as_array().unwrap();
+    let node_id = |kind: &str, name: &str| format!("{kind}/{NS}/{name}");
+    let deploy_id = node_id("Deployment", DEPLOY);
+    let svc_id = node_id("Service", SVC);
+
+    assert!(
+        nodes.iter().any(|n| n["id"] == json!(deploy_id)),
+        "the fixture Deployment must be a node: {out}"
+    );
+    assert!(
+        nodes.iter().any(|n| n["id"] == json!(svc_id)),
+        "the fixture Service must be a node: {out}"
+    );
+    // Service -> workload, which is the selector subset test against labels a
+    // real controller wrote.
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["from"] == json!(svc_id) && e["to"] == json!(deploy_id) && e["kind"] == json!("routes")),
+        "the Service must route to the Deployment it selects: {out}"
+    );
+    // Deployment -> ReplicaSet, from the ownerReference. The ReplicaSet's name
+    // is generated, so this asserts the SHAPE of the edge rather than an id
+    // the test cannot know.
+    assert!(
+        edges.iter().any(|e| {
+            e["from"] == json!(deploy_id)
+                && e["kind"] == json!("owns")
+                && e["to"].as_str().is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
+        }),
+        "the Deployment must own a ReplicaSet: {out}"
+    );
+    // Both fixture replicas are up by now, so the node reads healthy — the one
+    // assertion here that would catch ready/desired being read off the wrong
+    // field, which no hand-built object can.
+    let deploy = nodes.iter().find(|n| n["id"] == json!(deploy_id)).unwrap();
+    assert_eq!(deploy["desired"], json!(2), "{out}");
+    assert_eq!(deploy["health"], json!("ok"), "{out}");
+
+    // The probe is the same graph read with one exec per pod, and a
+    // capability of its own so the consent layer can gate it. On the fixture
+    // pods (busybox) it reads, and it always answers with its report.
+    let out = h
+        .ok("k8s.topologyProbe", json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }))
+        .await;
+    assert!(out["probe"].is_object(), "the probe must report on itself: {out}");
+    assert!(
+        out["nodes"].as_array().unwrap().iter().any(|n| n["id"] == json!(deploy_id)),
+        "{out}"
+    );
+
+    // --- the topology's optional sources ---------------------------------------
+    // The e2e cluster runs no metrics backend, and that is the ordinary case
+    // the capability is written for: discovery answers an empty list, not an
+    // error. Nothing the fixtures made looks like a query API, so it must not
+    // be listed either.
+    let out = h.ok("k8s.prometheusDiscover", json!({ "context": ctx })).await;
+    let candidates = out["candidates"].as_array().unwrap();
+    assert!(
+        candidates.iter().all(|c| c["namespace"] != json!(NS)),
+        "nothing in the fixture namespace serves PromQL: {out}"
+    );
+    // A query at a Service that does not exist is refused by the API server's
+    // proxy, and the capability reports that as an error rather than as a
+    // graph with no traffic in it.
+    let msg = h
+        .err(
+            "k8s.prometheusQuery",
+            json!({
+                "context": ctx,
+                "namespace": NS,
+                "service": "no-such-prometheus",
+                "port": 9090,
+                "query": "up"
+            }),
+        )
+        .await;
+    assert!(!msg.is_empty());
+    // The socket table of a fixture pod, over exec. busybox has `cat`, so the
+    // pod reads; what it reports is whatever the pod has open, which the test
+    // cannot know — the assertion is that the pod is accounted for, in one
+    // list or the other, and never silently missing from both.
+    let out = h
+        .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
+        .await;
+    let pod = out["pods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY)))
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .expect("a running fixture pod");
+    let out = h
+        .ok(
+            "k8s.podConnections",
+            json!({ "context": ctx, "namespace": NS, "pods": [pod] }),
+        )
+        .await;
+    let read = out["connections"].as_array().unwrap();
+    let unread = out["unreadable"].as_array().unwrap();
+    assert_eq!(
+        read.iter().filter(|c| c["pod"] == json!(pod)).count()
+            + unread.iter().filter(|u| u["pod"] == json!(pod)).count(),
+        1,
+        "the pod must be reported exactly once: {out}"
+    );
+
     // === 4. Access =============================================================
     println!("=== access ===");
     let out = h
@@ -1280,6 +1545,117 @@ async fn run_suite() {
     // new cluster state: the fixtures create only a Deployment (no
     // directly-named pod), so any pod used here has to be discovered via
     // listPods the same way the logs check above does.
+    // === queryPodEndpoint: a real GET through an API-server port-forward ====
+    println!("=== queryPodEndpoint ===");
+    // The fixture pod can be Running a beat before httpd is listening, and a
+    // port-forward to a closed port comes back as a clean error — so poll the
+    // capability itself rather than the pod phase, never a blind sleep.
+    let dl = deadline(120);
+    let out = loop {
+        match h
+            .try_call(
+                "k8s.queryPodEndpoint",
+                json!({ "context": ctx, "namespace": NS, "selector": format!("app={HTTP_DEPLOY}") }),
+            )
+            .await
+        {
+            Ok(v) if v["statusCode"] == 200 => break v,
+            Ok(v) if Instant::now() > dl => {
+                panic!("queryPodEndpoint never got HTTP 200 from {HTTP_DEPLOY}: {v}")
+            }
+            Err(e) if Instant::now() > dl => {
+                panic!("queryPodEndpoint never reached {HTTP_DEPLOY}: {e}")
+            }
+            _ => poll_sleep().await,
+        }
+    };
+    h.mark("k8s.queryPodEndpoint");
+    // Nothing but a selector: the named `http` container port must be found
+    // on its own, the default path must be /metrics, and the body must reach
+    // the caller intact through the tunnel.
+    assert!(
+        out["pod"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!("{HTTP_DEPLOY}-")),
+        "the selector must resolve to a fixture pod: {out}"
+    );
+    assert_eq!(
+        out["port"],
+        json!(8080),
+        "the declared container port must be auto-detected: {out}"
+    );
+    assert_eq!(
+        out["path"], "/metrics",
+        "the default path is /metrics: {out}"
+    );
+    let lines = out["metrics"].as_array().unwrap();
+    assert!(
+        lines.iter().any(|l| l == "e2e_up 1"),
+        "the sample line must come back exactly as served: {out}"
+    );
+    assert_eq!(
+        out["totalLines"],
+        json!(lines.len()),
+        "with no filter and no cap, total and returned agree: {out}"
+    );
+    println!(
+        "queryPodEndpoint: {}",
+        out["summary"].as_str().unwrap_or_default()
+    );
+
+    // By pod name, explicit port, a path missing its slash, a filter and a cap:
+    // both served lines mention e2e_up, so total is 2 and the cap returns one.
+    let http_pod = out["pod"].as_str().unwrap().to_string();
+    let out = h
+        .ok(
+            "k8s.queryPodEndpoint",
+            json!({
+                "context": ctx, "namespace": NS, "pod": http_pod,
+                "port": 8080, "path": "metrics", "filter": "e2e_up", "maxLines": 1
+            }),
+        )
+        .await;
+    assert_eq!(out["statusCode"], json!(200), "{out}");
+    assert_eq!(
+        out["path"], "/metrics",
+        "a bare path gets its leading slash: {out}"
+    );
+    assert_eq!(
+        out["totalLines"],
+        json!(2),
+        "the filter is a substring match over every line: {out}"
+    );
+    assert_eq!(
+        out["returnedLines"],
+        json!(1),
+        "max_lines caps what comes back: {out}"
+    );
+    assert_eq!(
+        out["metrics"],
+        json!(["# HELP e2e_up 1 when the fixture serves"]),
+        "the cap keeps the first matching lines: {out}"
+    );
+
+    // A path the server does not have is a successful query with a 404 in
+    // it, not an error: the status code is the answer.
+    let out = h
+        .ok(
+            "k8s.queryPodEndpoint",
+            json!({ "context": ctx, "namespace": NS, "pod": http_pod, "path": "/nope" }),
+        )
+        .await;
+    assert_eq!(out["statusCode"], json!(404), "{out}");
+
+    // A selector nothing matches is a clean error, not an 8-second timeout.
+    let msg = h
+        .err(
+            "k8s.queryPodEndpoint",
+            json!({ "context": ctx, "namespace": NS, "selector": "app=nothing-has-this-label" }),
+        )
+        .await;
+    assert!(msg.contains("No running pods"), "{msg}");
+
     println!("=== mcp resources (#24) ===");
     mcp_resource_reads(&ctx, &pod_name).await;
     mcp_resource_subscription(&ctx, &pod_name).await;
@@ -1327,6 +1703,38 @@ async fn run_suite() {
         h.any("k8s.podMetrics", json!({ "context": ctx, "namespace": NS }))
             .await;
         println!("  metrics API absent — asserted clean degradation only");
+    }
+
+    // === k8s.clusterFacts (#339) ===============================================
+    // The overview rail's control-plane facts: provider, region and
+    // metrics-server availability. metrics_server's own probe is API-group
+    // discovery, a different path than k8s.nodeMetrics above, but the two
+    // must agree on whether metrics-server is there — checked against
+    // `metrics_available` rather than asserting only that a key exists.
+    println!("=== cluster facts ===");
+    let out = h.ok("k8s.clusterFacts", json!({ "context": ctx })).await;
+    assert_eq!(out["context"], ctx);
+    assert!(out["provider"].is_string(), "provider must be reported, possibly empty: {out}");
+    assert!(out["region"].is_string(), "region must be reported, possibly empty: {out}");
+    let state = out["metricsServer"]["state"].as_str().unwrap();
+    assert!(
+        ["present", "absent", "unknown"].contains(&state),
+        "unexpected metrics-server state: {out}"
+    );
+    if metrics_available {
+        assert_eq!(
+            state, "present",
+            "k8s.nodeMetrics served readings above, so clusterFacts must see metrics-server too: {out}"
+        );
+        assert!(
+            !out["metricsServer"]["version"].as_str().unwrap_or_default().is_empty(),
+            "a present metrics-server must report a version: {out}"
+        );
+    } else {
+        assert_ne!(
+            state, "present",
+            "k8s.nodeMetrics found nothing above, so clusterFacts should not claim metrics-server is present: {out}"
+        );
     }
 
     // === 7. Writes ==============================================================

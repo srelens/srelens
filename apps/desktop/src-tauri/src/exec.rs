@@ -13,8 +13,11 @@ use tauri::{AppHandle, Runtime, State};
 use crate::sink::TauriSink;
 
 /// Open an interactive shell into a pod. Returns the session id; stdout streams
-/// on `exec:out:<id>` and an `exec:exit:<id>` event fires (with an optional
-/// error string) when the session ends.
+/// on `exec:out:<channel>` and an `exec:exit:<channel>` event fires (with an
+/// optional error string) when the session ends, where `channel` is the
+/// caller-supplied subscription token — the WebView subscribes to it before
+/// this call, so an exec that dies in the same tick it spawns cannot outrun
+/// the listener.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_pod_exec<R: Runtime>(
@@ -24,6 +27,7 @@ pub async fn start_pod_exec<R: Runtime>(
     container: Option<String>,
     shell: Option<String>,
     command: Option<Vec<String>>,
+    channel: String,
     cols: Option<u16>,
     rows: Option<u16>,
     app: AppHandle<R>,
@@ -35,6 +39,7 @@ pub async fn start_pod_exec<R: Runtime>(
             context,
             namespace,
             pod,
+            channel,
             ExecOpts {
                 container,
                 shell,
@@ -98,6 +103,7 @@ mod tests {
             None,
             None,
             None,
+            "exec-0-abcd".into(),
             Some(80),
             Some(24),
             app.handle().clone(),

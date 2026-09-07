@@ -62,8 +62,10 @@ export async function appVersion(): Promise<string> {
 export function on(channel: string, handler: (payload: unknown) => void): () => void {
   let dispose = () => {};
   let disposed = false;
-  // Fire-and-forget: exec/port-forward subscribe by a server-assigned id and
-  // don't await the ack (parity with the desktop's synchronous `on`).
+  // Fire-and-forget: a port forward subscribes by a server-assigned id and
+  // doesn't await the ack (parity with the desktop's synchronous `on`). Exec
+  // no longer uses this — it supplies its own channel and awaits `subscribe`,
+  // because its exit event can be emitted in the same tick the session spawns.
   void wsClient.subscribeChannel(channel, handler).then((d) => {
     if (disposed) d();
     else dispose = d;

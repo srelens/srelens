@@ -22,6 +22,7 @@ dirs = "6"
 # a second provider (aws-lc-rs) causes a runtime "could not determine
 # CryptoProvider" panic. Mirrors apps/desktop/src-tauri/Cargo.toml.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
