@@ -24,6 +24,33 @@ function isRestorable(t: ViewTab): boolean {
   return !t.create && !t.edit;
 }
 
+function persistedWorkspace(
+  tabs: ViewTab[],
+  activeTabId: number | null,
+): PersistedWorkspace | null {
+  const persist = tabs.filter(isRestorable);
+  if (persist.length === 0) return null;
+  const active = persist.some((t) => t.id === activeTabId)
+    ? activeTabId
+    : persist[0].id;
+  return { tabs: persist, activeTabId: active };
+}
+
+/**
+ * Stable identity for exactly the state session restore would write.
+ *
+ * Editor tabs are removed before serialization, so their potentially
+ * sensitive YAML neither reaches this string nor changes it on a keystroke.
+ * React callers can use the key as an effect dependency without scheduling
+ * redundant settings-file writes for transient, in-memory editor state.
+ */
+export function openTabsPersistenceKey(
+  tabs: ViewTab[],
+  activeTabId: number | null,
+): string {
+  return JSON.stringify(persistedWorkspace(tabs, activeTabId));
+}
+
 /**
  * Restore the open tabs + active tab from a prior web session. Web-only.
  * Deep-link `focus` (a session-scoped nonce) is stripped so a reload doesn't
@@ -70,15 +97,12 @@ export function nextTabId(tabs: ViewTab[]): number {
 export function saveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void {
   if (!loadRestoreSession()) return;
   try {
-    const persist = tabs.filter(isRestorable);
-    if (persist.length === 0) {
+    const workspace = persistedWorkspace(tabs, activeTabId);
+    if (!workspace) {
       settingsStorage.removeItem(KEY);
       return;
     }
-    const active = persist.some((t) => t.id === activeTabId)
-      ? activeTabId
-      : persist[0].id;
-    settingsStorage.setItem(KEY, JSON.stringify({ tabs: persist, activeTabId: active }));
+    settingsStorage.setItem(KEY, JSON.stringify(workspace));
   } catch {
     // Storage full, disabled, or the settings write failed — best-effort.
   }

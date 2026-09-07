@@ -43,7 +43,7 @@ import {
 } from "./columns";
 import { customColumns } from "./custom";
 import { genericClusterColumns, genericColumns } from "./generic";
-import type { CrdRef } from "@srelens/core";
+import type { CrdRef, NodeTaint } from "@srelens/core";
 
 /** Every typed column set columns.tsx exports — the design mock titles every
  *  one of these "Name", never the kind, and none of them may ask for a
@@ -256,7 +256,7 @@ describe("node columns", () => {
     const cpu = nodeColumns.find((c) => c.key === "cpu")!;
     const memory = nodeColumns.find((c) => c.key === "memory")!;
     const node = {
-      name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d", taints: 0, unschedulable: false,
+      name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d", taints: 0, taintDetails: [], unschedulable: false,
       allocatableCpuMillicores: 4000, allocatableMemoryMiB: 8192, allocatablePods: 110, instanceType: "",
     };
     const withCpu = { ...node, cpu: 2410 };
@@ -278,7 +278,7 @@ describe("node columns", () => {
 describe("a node's pill and its unhealthy dot are one verdict", () => {
   const node = (over: Partial<NodeRow>): NodeRow => ({
     name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d",
-    taints: 0, unschedulable: false,
+    taints: 0, taintDetails: [], unschedulable: false,
     allocatableCpuMillicores: 4000, allocatableMemoryMiB: 8192, allocatablePods: 110, instanceType: "",
     ...over,
   });
@@ -304,7 +304,9 @@ describe("a node's pill and its unhealthy dot are one verdict", () => {
     // and both badges the mock draws are still there.
     expect(view.container.querySelector(".status")?.textContent).toBe("Ready");
     expect(view.container.textContent).toContain("SchedulingDisabled");
-    expect(view.container.textContent).toContain("Tainted (2)");
+    // "(2)" until #426 put the count on every tainted node's badge, singular
+    // included, and gave it an accessible name that spells the number out.
+    expect(view.container.textContent).toContain("Tainted \u00b7 2");
   });
 
   it("never pairs a healthy-toned pill with the dot, nor a danger-toned one without it", () => {
@@ -379,7 +381,7 @@ describe("flagged rows — the design's unhealthy dot, per kind", () => {
   // from its own pane. Both now read core's `nodeStatus`.
   it("flags a Node that is NotReady or cordoned, and neither when it is healthy and schedulable", () => {
     const base = {
-      name: "n1", roles: "worker", version: "1.30", age: "9d", taints: 0,
+      name: "n1", roles: "worker", version: "1.30", age: "9d", taints: 0, taintDetails: [],
       allocatableCpuMillicores: 4000, allocatableMemoryMiB: 8192, allocatablePods: 110, instanceType: "",
     };
     expect(nodeFlagged({ ...base, status: "Ready", unschedulable: false })).toBe(false);
@@ -453,7 +455,7 @@ describe("column alignment — a count or a measurement is end-aligned, everythi
     [daemonSetColumns, ["desired", "current", "ready", "upToDate", "available", "age"]],
     [jobColumns, ["completions", "duration", "age"]],
     [cronJobColumns, ["active", "age"]],
-    [nodeColumns, ["cpu", "memory", "age"]],
+    [nodeColumns, ["cpu", "memory", "taints", "age"]],
     [configMapColumns, ["keys", "age"]],
     [secretColumns, ["keys", "age"]],
     [resourceQuotaColumns, ["resources", "age"]],
@@ -515,5 +517,107 @@ describe("the generic and custom families follow the same two rules as the 23 ty
     expect(genericColumns.find((c) => c.key === "age")!.align).toBe("end");
     expect(genericClusterColumns.find((c) => c.key === "age")!.align).toBe("end");
     expect(customColumns(crd()).find((c) => c.key === "age")!.align).toBe("end");
+  });
+});
+
+/**
+ * #426 — the Nodes list answered "is this node tainted?" and not "how many?".
+ * One taint and five drew the identical pill, so the normal control-plane
+ * taint and a node with three pressure taints read the same.
+ */
+describe("a node's taint count", () => {
+  const taint = (key: string, effect: string, value = ""): NodeTaint => ({ key, value, effect });
+  const node = (over: Partial<NodeRow>): NodeRow => ({
+    name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d",
+    taints: 0, taintDetails: [], unschedulable: false,
+    allocatableCpuMillicores: 4000, allocatableMemoryMiB: 8192, allocatablePods: 110, instanceType: "",
+    ...over,
+  });
+  const statusColumn = nodeColumns.find((c) => c.key === "status")!;
+  const taintsColumn = nodeColumns.find((c) => c.key === "taints")!;
+  const status = (n: NodeRow) => render(statusColumn.render!(n) as ReactElement);
+
+  it("draws no badge at all for a node with none — unchanged", () => {
+    expect(status(node({})).container.textContent).not.toContain("Tainted");
+  });
+
+  it("counts the one taint a fresh control-plane node carries", () => {
+    const view = status(node({ taints: 1, taintDetails: [taint("node-role.kubernetes.io/control-plane", "NoSchedule")] }));
+    expect(view.container.textContent).toContain("Tainted · 1");
+  });
+
+  it("counts N, so three pressure taints cannot read as the normal one", () => {
+    const view = status(
+      node({
+        taints: 3,
+        taintDetails: [
+          taint("node.kubernetes.io/memory-pressure", "NoSchedule"),
+          taint("node.kubernetes.io/disk-pressure", "NoSchedule"),
+          taint("team", "NoExecute", "payments"),
+        ],
+      }),
+    );
+    expect(view.container.textContent).toContain("Tainted · 3");
+  });
+
+  it("names the count for a screen reader rather than leaving it as '· 3'", () => {
+    const view = status(node({ taints: 3, taintDetails: [taint("a", "NoSchedule"), taint("b", "NoSchedule"), taint("c", "NoExecute")] }));
+    expect(view.container.querySelector("[aria-label]")?.getAttribute("aria-label")).toBe("3 taints");
+  });
+
+  it("says '1 taint', not '1 taints'", () => {
+    const view = status(node({ taints: 1, taintDetails: [taint("a", "NoSchedule")] }));
+    expect(view.container.querySelector("[aria-label]")?.getAttribute("aria-label")).toBe("1 taint");
+  });
+
+  it("lists every taint on hover, NoExecute first, and stays reachable by keyboard", () => {
+    const view = status(
+      node({
+        taints: 2,
+        taintDetails: [taint("node-role.kubernetes.io/control-plane", "NoSchedule"), taint("team", "NoExecute", "payments")],
+      }),
+    );
+    const host = view.container.querySelector("[title]")!;
+    expect(host.getAttribute("title")).toBe(
+      "team=payments:NoExecute\nnode-role.kubernetes.io/control-plane=:NoSchedule",
+    );
+    expect(host.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("offers a Taints column that starts hidden, so the default view is unchanged", () => {
+    expect(taintsColumn.defaultHidden).toBe(true);
+    expect(taintsColumn.sortable).toBe(true);
+  });
+
+  it("renders the per-effect tally, and a real 0 / 0 / 0 for a node with none", () => {
+    expect(render(taintsColumn.render!(node({})) as ReactElement).container.textContent).toBe("0 / 0 / 0");
+    const busy = node({
+      taints: 3,
+      taintDetails: [taint("a", "NoSchedule"), taint("b", "NoSchedule"), taint("c", "NoExecute")],
+    });
+    expect(render(taintsColumn.render!(busy) as ReactElement).container.textContent).toBe("2 / 0 / 1");
+  });
+
+  it("explains the three numbers on a node that has none, and lists them on one that does", () => {
+    const empty = render(taintsColumn.render!(node({})) as ReactElement);
+    expect(empty.container.querySelector("[title]")?.getAttribute("title")).toBe(
+      "NoSchedule / PreferNoSchedule / NoExecute",
+    );
+    const one = render(
+      taintsColumn.render!(node({ taints: 1, taintDetails: [taint("dedicated", "NoSchedule")] })) as ReactElement,
+    );
+    expect(one.container.querySelector("[title]")?.getAttribute("title")).toBe("dedicated=:NoSchedule");
+  });
+
+  it("sorts on the count, bringing the most-constrained nodes to the top", () => {
+    const rows = [
+      node({ name: "one", taints: 1, taintDetails: [taint("a", "NoSchedule")] }),
+      node({ name: "none" }),
+      node({ name: "three", taints: 3, taintDetails: [taint("a", "NoSchedule"), taint("b", "NoSchedule"), taint("c", "NoExecute")] }),
+    ];
+    const sorted = [...rows].sort(
+      (a, b) => (taintsColumn.getSortValue!(b) as number) - (taintsColumn.getSortValue!(a) as number),
+    );
+    expect(sorted.map((n) => n.name)).toEqual(["three", "one", "none"]);
   });
 });

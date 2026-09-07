@@ -3,6 +3,7 @@ import { isTauri } from "@srelens/core";
 import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
 import { AgentAccess } from "./settings/AgentAccess";
+import { AgentPane } from "./settings/AgentPane";
 import { AppearancePane } from "./settings/AppearancePane";
 import { AuditPane } from "./settings/AuditPane";
 import { McpServer } from "./settings/McpServer";
@@ -86,7 +87,7 @@ type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortc
  * that cannot work is not drawn, and the reason is said once — in the rail,
  * where the missing entry would have been.
  *
- * **`Agent & MCP` keeps its entry on the web, and loses two of its three
+ * **`Agent & MCP` keeps its entry on the web, and loses two of its four
  * panes.** It is the section this screen OPENS ON, and `McpServer` and
  * `AuditPane` were mounted there unconditionally — but `getMcpToken()`,
  * `mcpHttpStatus()` and `auditTail()` are direct `invoke`s from
@@ -105,6 +106,15 @@ type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortc
  * connected agent may do without asking. A section with real content is not
  * removed for the panes it cannot fill; `desktopOnly` is for a section that
  * would be left empty.
+ *
+ * `AgentPane` stays for the same reason and by the same test, not by
+ * assumption: `llmGetSettings`, `llmSetKey`, `llmClearKey`, `llmKeyStatus`,
+ * `llmListModels` and `listAgents` (`packages/core/src/lib/llm.ts`,
+ * `packages/core/src/lib/chat.ts`) all go through `invokeCommand` — the
+ * transport that dispatches to a web implementation, not the bare
+ * `@tauri-apps/api/core` `invoke` that fails outright in a browser — so an
+ * operator's provider keys and agent CLI inventory are exactly as real on the
+ * web as they are on the desktop.
  */
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
   { id: "agent", label: "Agent & MCP" },
@@ -169,15 +179,28 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   function pane(id: SectionId): ReactNode {
     switch (id) {
       case "agent":
-        // §23's one section over three panes, in §23's order: what the agent
-        // may do, the server it is reached through, and what it has done. The
-        // last two are desktop-only — see {@link SECTIONS} for why, and why
-        // this section is still drawn on the web without them.
+        // §23's section, now over four panes: what the agent may do
+        // (`AgentAccess`), the LLM provider keys and CLI inventory it runs on
+        // (`AgentPane`), the server it is reached through, and what it has
+        // done. The last two are desktop-only — see {@link SECTIONS} for why,
+        // and why this section is still drawn on the web without them.
+        // `AgentPane` IS one of them, and the comment here used to say
+        // otherwise. The reasoning was that `llmGetSettings`, `llmSetKey` and
+        // the rest go through `invokeCommand`, "the transport that has a web
+        // half" — which is true and beside the point. A transport is not a
+        // handler: `webTransport` dutifully POSTs to
+        // `/api/command/llm_get_settings`, and `api_command.rs`'s match has no
+        // `llm_*` arm, so the server answers `404 unknown command`. The pane
+        // opened on four failed reads and no control that could work.
+        //
+        // `AgentAccess` genuinely does stay: it calls `gatedCapabilityIds` and
+        // `isTauri` and no backend command at all.
         return (
           <div className="flex flex-col gap-4">
             <AgentAccess />
             {desktop ? (
               <>
+                <AgentPane />
                 <McpServer />
                 <AuditPane />
               </>
@@ -190,9 +213,10 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
                 data-testid="no-agent-server"
                 className="text-[0.75rem] leading-relaxed text-muted"
               >
-                The MCP server and its audit trail live in the srelens desktop app. Starting the
-                loopback server and reading the audit log are both desktop commands, so there is
-                nothing here for them to act on.
+                The agent, the MCP server and its audit trail live in the srelens desktop app.
+                Provider keys, model lists, the agent CLIs, starting the loopback server and
+                reading the audit log are all desktop commands, so there is nothing here for them
+                to act on.
               </p>
             )}
           </div>

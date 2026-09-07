@@ -97,6 +97,7 @@ export function ReleaseNotes(_props: { route: string }) {
         <FailureState
           title="Could not check for updates"
           error={found.error}
+          domain="http"
           onRetry={found.reload}
         />
       ) : !update ? (
@@ -146,7 +147,12 @@ export function ReleaseNotes(_props: { route: string }) {
             // region the hand-written paragraph had, kept, because this arrives
             // while the reader is looking at the notes. The notes stay on screen
             // under it: a failed install has not taken them away.
-            <FailureAlert tone="sev" title="Could not install the update" error={install.cause} />
+            <FailureAlert
+              tone="sev"
+              title="Could not install the update"
+              error={install.cause}
+              domain="http"
+            />
           )}
         </div>
       )}

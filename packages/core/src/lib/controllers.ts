@@ -112,6 +112,11 @@ export interface ConfigMapSummary {
   name: string;
   namespace: string;
   keys: number;
+  /** `creationTimestamp` (RFC 3339), for deriving a LIVE age. Prefer this over
+   *  `age`, which the backend renders once per watch event and which therefore
+   *  freezes for an object nothing is changing (#405). Absent when the object
+   *  carries no timestamp. */
+  created?: string | null;
   age: string;
 }
 
@@ -121,6 +126,11 @@ export interface SecretSummary {
   namespace: string;
   type: string;
   keys: number;
+  /** `creationTimestamp` (RFC 3339), for deriving a LIVE age. Prefer this over
+   *  `age`, which the backend renders once per watch event and which therefore
+   *  freezes for an object nothing is changing (#405). Absent when the object
+   *  carries no timestamp. */
+  created?: string | null;
   age: string;
 }
 

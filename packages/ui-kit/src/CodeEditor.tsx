@@ -160,19 +160,26 @@ const highlightStyle = HighlightStyle.define([
 ]);
 
 /** Editor chrome, themed from CSS tokens (so light/dark just works). */
-function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
+function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush: boolean) {
   return EditorView.theme({
     "&": {
       color: "var(--ink)",
       backgroundColor: "var(--surface)",
       fontSize: "12px",
-      border: "1px solid var(--rule)",
-      borderRadius: "var(--radius-tile)",
+      // A framed editor sits inside a form or a dialog and needs an edge of
+      // its own. One that IS a region does not: the desktop layout is flush
+      // regions divided by hairlines (see `kit.css`, "panes"), and a border
+      // and radius inside one draw a floating card in a design that has none.
+      ...(flush
+        ? { border: "none", borderRadius: "0" }
+        : { border: "1px solid var(--rule)", borderRadius: "var(--radius-tile)" }),
       // `fill` makes the editor take its container's full height (scrolling
       // internally); otherwise it grows with content up to `maxHeight`.
       ...(fill ? { height: "100%" } : { maxHeight: `${maxHeight}px` }),
     },
-    "&.cm-focused": { outline: "none", borderColor: "var(--accent)" },
+    // A focus ring is an edge too; a flush editor fills its region and has
+    // nothing to ring, and the caret already says where typing goes.
+    "&.cm-focused": flush ? { outline: "none" } : { outline: "none", borderColor: "var(--accent)" },
     ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
@@ -238,6 +245,16 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
   });
 }
 
+/** One finding of a lint pass, as the caller sees it: where, how bad, what. */
+export interface EditorDiagnostic {
+  from: number;
+  to: number;
+  /** 1-based, for a list beside the editor to say "line 12". */
+  line: number;
+  severity: "error" | "warning" | "info" | "hint";
+  message: string;
+}
+
 export interface CodeEditorProps {
   value: string;
   onChange?: (value: string) => void;
@@ -269,6 +286,29 @@ export interface CodeEditorProps {
    * (#318)
    */
   completions?: CompletionSource;
+  /**
+   * Fill the region edge to edge: no border, no corner radius, no focus ring.
+   *
+   * For an editor that IS a pane rather than a control inside one. The
+   * desktop layout draws region boundaries with hairlines and gives them no
+   * gutters, so an editor set in from the edge with a rounded frame reads as
+   * a card floating in a design that has no cards.
+   */
+  flush?: boolean;
+  /**
+   * Where the cursor is, as an offset into the document — once on mount and
+   * whenever it moves or the document changes under it. What is valid THERE
+   * is the caller's to say (a schema sidebar, say); the editor only knows the
+   * position.
+   */
+  onCursorChange?: (pos: number) => void;
+  /**
+   * Every lint pass's findings — syntax first, then whatever `schemaValidate`
+   * answered — so a caller can list them beside the editor and not only in
+   * the gutter. An empty list is a pass that found nothing, which is worth
+   * knowing too.
+   */
+  onDiagnostics?: (diagnostics: EditorDiagnostic[]) => void;
 }
 
 /**
@@ -287,6 +327,9 @@ export function CodeEditor({
   fill = false,
   schemaValidate,
   completions,
+  flush = false,
+  onCursorChange,
+  onDiagnostics,
 }: CodeEditorProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -297,6 +340,10 @@ export function CodeEditor({
   validateRef.current = schemaValidate;
   const completionsRef = useRef(completions);
   completionsRef.current = completions;
+  const onCursorRef = useRef(onCursorChange);
+  onCursorRef.current = onCursorChange;
+  const onDiagnosticsRef = useRef(onDiagnostics);
+  onDiagnosticsRef.current = onDiagnostics;
 
   useEffect(() => {
     const parent = parentRef.current;
@@ -314,11 +361,14 @@ export function CodeEditor({
       bracketMatching(),
       highlightSelectionMatches(),
       keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
-      editorTheme(minHeight, maxHeight, fill),
+      editorTheme(minHeight, maxHeight, fill, flush),
       syntaxHighlighting(highlightStyle),
       EditorView.editable.of(!readOnly),
       EditorState.readOnly.of(readOnly),
       EditorView.updateListener.of((u) => {
+        // The cursor is a fact about the view, not an edit: reported whether
+        // the reader moved it or a reload moved the text under it.
+        if (u.selectionSet || u.docChanged) onCursorRef.current?.(u.state.selection.main.head);
         if (!u.docChanged) return;
         // A reset or a reload replaces the document from outside. That is the
         // caller telling us, not the user typing, and reporting it back as an
@@ -330,17 +380,30 @@ export function CodeEditor({
     if (language === "yaml") {
       // Lint YAML syntax first (local, instant); if it parses, validate against
       // the caller's validator (debounced via the linter delay) for deeper errors.
+      // Every pass's findings go to the caller as well as to the gutter.
+      const report = (view: EditorView, diagnostics: Diagnostic[]) => {
+        onDiagnosticsRef.current?.(
+          diagnostics.map((d) => ({
+            from: d.from,
+            to: d.to,
+            line: view.state.doc.lineAt(Math.min(d.from, view.state.doc.length)).number,
+            severity: d.severity,
+            message: d.message,
+          })),
+        );
+        return diagnostics;
+      };
       const yamlLinter = linter(
         async (view) => {
           const text = view.state.doc.toString();
           const syntax = yamlDiagnostics(text);
-          if (syntax.length) return syntax;
+          if (syntax.length) return report(view, syntax);
           const validate = validateRef.current;
-          if (!validate || !text.trim()) return [];
+          if (!validate || !text.trim()) return report(view, []);
           try {
-            return documentDiagnostics(text, await validate(text));
+            return report(view, documentDiagnostics(text, await validate(text)));
           } catch {
-            return [];
+            return report(view, []);
           }
         },
         {
@@ -371,13 +434,14 @@ export function CodeEditor({
       parent,
     });
     viewRef.current = view;
+    onCursorRef.current?.(view.state.selection.main.head);
     return () => {
       view.destroy();
       viewRef.current = null;
     };
     // Re-create only when structural options change, not on every value/onChange.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill]);
+  }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill, flush]);
 
   // A new validator has to be asked about the document already on screen.
   // Swapping it changes what is true — a different cluster, a different set of

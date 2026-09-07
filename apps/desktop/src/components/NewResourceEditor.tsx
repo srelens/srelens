@@ -126,6 +126,7 @@ export function NewResourceEditor({
   return (
     <ManifestEditor
       context={context}
+      namespace={ns}
       yaml={current.yaml}
       onYamlChange={(yaml) => onDraftChange({ ...current, yaml })}
       ariaLabel="New resource YAML"

@@ -5,6 +5,7 @@ import {
   saveOpenTabs,
   scheduleSaveOpenTabs,
   flushSaveOpenTabs,
+  openTabsPersistenceKey,
   nextTabId,
   pruneMissingContexts,
   reconcileActiveTab,
@@ -89,6 +90,30 @@ describe("openTabs persistence (web mode)", () => {
       2,
     );
     expect(localStorage.getItem(KEY)).not.toContain("do-not-persist");
+  });
+
+  it("keeps the persistence key stable across transient editor keystrokes", () => {
+    const base = tab({ id: 1, kind: "pods" });
+    const withDraft = (yaml: string): Tab[] => [
+      base,
+      tab({
+        id: 2,
+        kind: "newresource",
+        create: { initialKind: "Secret", draft: { template: "Secret", yaml } },
+      }),
+    ];
+
+    const first = openTabsPersistenceKey(withDraft("token: first-secret"), 2);
+    const second = openTabsPersistenceKey(withDraft("token: second-secret"), 2);
+
+    expect(second).toBe(first);
+    expect(first).not.toContain("secret");
+  });
+
+  it("changes the persistence key when restorable tab state changes", () => {
+    const first = openTabsPersistenceKey([tab({ id: 1, view: { query: "api" } })], 1);
+    const second = openTabsPersistenceKey([tab({ id: 1, view: { query: "worker" } })], 1);
+    expect(second).not.toBe(first);
   });
 
   it("falls back to the first tab when the stored active id is gone", () => {

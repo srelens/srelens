@@ -68,6 +68,7 @@ import {
 import { invokeCommand } from "@srelens/core/transport";
 import {
   loadOpenTabs,
+  openTabsPersistenceKey,
   scheduleSaveOpenTabs,
   flushSaveOpenTabs,
   nextTabId,
@@ -100,6 +101,12 @@ export function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(
     () => restored?.activeTabId ?? null,
   );
+  // The latest full state is read only when its restorable projection changes.
+  // Draft YAML remains on its tab in memory, but is absent from both the key
+  // and the settings write that the key triggers.
+  const openTabsForSave = useRef({ tabs, activeTabId });
+  openTabsForSave.current = { tabs, activeTabId };
+  const openTabsSaveKey = openTabsPersistenceKey(tabs, activeTabId);
   const [layout, setLayout] = useState(loadWorkspaceLayout);
   const [sidebarWidth, setSidebarWidth] = useState(layout.leftSidebarWidth);
   // Stored by stable id, rendered by display name (#265). A context's name
@@ -444,8 +451,12 @@ export function App() {
   // name-keyed data afterwards, undoing the id migration on disk. The id-keyed
   // setters — rememberNamespace, the migration, delete-context — save instead.
 
-  // Persist the open tabs (web only) so a browser reload restores them.
-  useEffect(() => scheduleSaveOpenTabs(tabs, activeTabId), [tabs, activeTabId]);
+  // Persist only when the restorable projection changes. Editor keystrokes
+  // mutate their transient tab, but must not queue the same fsync every 400ms.
+  useEffect(() => {
+    const snapshot = openTabsForSave.current;
+    scheduleSaveOpenTabs(snapshot.tabs, snapshot.activeTabId);
+  }, [openTabsSaveKey]);
 
   // Web: localStorage writes are synchronous, so unload handlers suffice.
   useEffect(() => {
@@ -473,18 +484,34 @@ export function App() {
     if (typeof win?.onCloseRequested !== "function") return;
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    // Set once we have taken over a close, so the close() below — which
+    // re-emits this event — is let through instead of cancelled a second time.
+    let closing = false;
     void win
       .onCloseRequested(async (event) => {
+        if (closing) return;
         event.preventDefault();
-        flushSaveOpenTabs();
-        // Bounded: a stuck or slow write must never leave the user unable to
-        // quit, so the close proceeds either way.
-        await Promise.race([
-          flushSettingsWrites(),
-          new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
-        ]);
-        // destroy(), not close() — close() re-emits this event and would loop.
-        await win.destroy();
+        closing = true;
+        try {
+          flushSaveOpenTabs();
+          // Bounded: a stuck or slow write must never leave the user unable to
+          // quit, so the close proceeds either way.
+          await Promise.race([
+            flushSettingsWrites(),
+            new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
+          ]);
+        } finally {
+          // Whatever the drain did, the close it cancelled has to be re-issued:
+          // a best-effort flush must never cost the user the ability to quit.
+          // Anything thrown above escaped here and left the window stuck open
+          // with the red light dead — which is exactly what an ungranted
+          // `core:window:allow-destroy` did to every close but Cmd+Q. (#425)
+          //
+          // destroy(), not close() — close() re-emits this event, so it is the
+          // last resort rather than the path, and the guard above stops it
+          // looping.
+          await win.destroy().catch(() => win.close());
+        }
       })
       .then((fn) => {
         if (disposed) fn();
@@ -1112,7 +1139,7 @@ export function App() {
                       namespace={activeTab.edit.namespace}
                       name={activeTab.edit.name}
                       draft={activeTab.edit.draft ?? null}
-                      onDraftChange={(draft) => setEditResourceDraft(activeTab.id, draft)}
+                      onDraftChange={(yaml) => setEditResourceDraft(activeTab.id, yaml)}
                       onEdited={() => setEditResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster ? (

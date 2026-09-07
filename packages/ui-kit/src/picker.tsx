@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Popover } from "radix-ui";
 import { Command } from "cmdk";
 import { cx } from "./cx";
+import { OptionCheck } from "./OptionCheck";
 import { usePortalContainer } from "./portal";
 import { filled } from "./slot";
 
@@ -193,19 +194,7 @@ export function PickerRow({ value, label, checked, onSelect, mark = "check", tra
           )}
         </span>
       ) : (
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          aria-hidden="true"
-          // Always rendered, never removed: the labels line up in a column, and
-          // a check appearing would otherwise shove its row sideways.
-          className={cx("shrink-0", checked ? "opacity-100" : "opacity-0")}
-          style={{ color: "var(--accent)" }}
-        >
-          <path d="M20 6 9 17l-5-5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <OptionCheck checked={checked} />
       )}
       <span className="flex-1 truncate">{label}</span>
       {filled(trailing) && trailing}
