@@ -119,18 +119,36 @@ jobs:
           # which needs the winget client itself present on the runner.
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
 
-      # Validation before submission, so a schema mistake is ours to see here
-      # rather than a reviewer's to find in a pull request.
-      - name: Validate
+      # A shape check, not a schema check. `wingetcreate show` takes a package
+      # identifier and reads winget-pkgs -- it does not parse a local directory,
+      # so pointing it at one only fails the run. Schema validation is what
+      # `submit` does before it opens anything, and winget-pkgs runs it again on
+      # the pull request; the authoritative local equivalent is
+      # `winget validate --manifest`, which needs the winget client and is in
+      # packaging/winget/README.md for a human to run.
+      #
+      # What is left here is the cheap half worth catching before a submission:
+      # that all three files exist and the checksum really is a checksum.
+      - name: Check the rendered files
         if: steps.gate.outputs.publish == 'true'
-        shell: pwsh
+        shell: bash
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          $dir = "winget-out/manifests/s/srelens/srelens-tui/$env:VERSION"
-          ./wingetcreate.exe show --format yaml $dir 2>&1 | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "wingetcreate could not read the rendered manifests" }
-          Write-Host "manifests parse"
+          set -euo pipefail
+          dir="winget-out/manifests/s/srelens/srelens-tui/${VERSION}"
+          for f in srelens.srelens-tui.yaml \
+                   srelens.srelens-tui.locale.en-US.yaml \
+                   srelens.srelens-tui.installer.yaml; do
+            [ -f "$dir/$f" ] || { echo "::error::render produced no $f"; exit 1; }
+          done
+          sha=$(grep -oE "InstallerSha256: [0-9A-Fa-f]{64}" "$dir/srelens.srelens-tui.installer.yaml" | head -n 1 | cut -d" " -f2)
+          if [ -z "$sha" ]; then
+            echo "::error::the installer manifest carries no 64-character InstallerSha256"
+            cat "$dir/srelens.srelens-tui.installer.yaml"
+            exit 1
+          fi
+          echo "three manifests, InstallerSha256 ${sha}"
 
       - name: Submit to microsoft/winget-pkgs
         if: steps.gate.outputs.publish == 'true'
