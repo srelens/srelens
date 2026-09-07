@@ -94,11 +94,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // this process IS that displaced file, put it back. A no-op anywhere
     // else, and off Windows entirely.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(restored) = srelens_tui::self_update::recover_interrupted_update(&exe) {
-            eprintln!(
+        match srelens_tui::self_update::recover_interrupted_update(&exe) {
+            Ok(Some(restored)) => eprintln!(
                 "srelens-tui: an interrupted update left this binary beside its own name; restored it to {}",
                 restored.display()
-            );
+            ),
+            Ok(None) => {}
+            // Needed and failed, which is not the same as nothing to do.
+            // The command path is still missing, so say so rather than
+            // letting someone rediscover it later.
+            Err(why) => eprintln!(
+                "srelens-tui: an interrupted update left this binary at {}, and it could not be moved back: {why}. Rename it yourself to restore the command.",
+                exe.display()
+            ),
         }
     }
 
@@ -621,6 +629,9 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
     };
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not find this binary on disk: {e}"))?;
+    // After a recovery this process is still reported as running from the
+    // displaced name; updating that path would leave the real one alone.
+    let exe = self_update::installed_path(&exe);
 
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
         let client = reqwest::blocking::Client::builder()

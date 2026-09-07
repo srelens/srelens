@@ -732,10 +732,27 @@ fn world_writable_without_sticky(_dir: &Path) -> bool {
 /// nothing left to run. What they CAN run is the displaced file itself, so
 /// every start checks whether that is what is happening and repairs it.
 ///
-/// Returns where it restored the binary to, so the caller can say so.
+/// `Ok(None)` means there was nothing to recover, which is the ordinary
+/// case. An `Err` means recovery was NEEDED and failed — a different thing
+/// entirely, and one the caller has to say out loud: the command path is
+/// still missing, so staying quiet would leave someone with a broken
+/// install and no clue why.
+///
 /// Deliberately narrow: it acts only when this process IS the displaced
 /// file and the real name is free, which cannot be true in ordinary use.
-pub fn recover_interrupted_update(exe: &Path) -> Option<PathBuf> {
+pub fn recover_interrupted_update(exe: &Path) -> Result<Option<PathBuf>, UpdateError> {
+    let Some(target) = displaced_original(exe) else {
+        return Ok(None);
+    };
+    // Windows allows renaming a running image, which is the same property
+    // the update itself relies on.
+    std::fs::rename(exe, &target).map_err(io)?;
+    Ok(Some(target))
+}
+
+/// The name this binary should have, if it is sitting under the displaced
+/// one with the real name free.
+fn displaced_original(exe: &Path) -> Option<PathBuf> {
     if !cfg!(windows) {
         return None;
     }
@@ -745,12 +762,27 @@ pub fn recover_interrupted_update(exe: &Path) -> Option<PathBuf> {
         return None;
     }
     let target = exe.with_file_name(restored);
-    if target.exists() {
-        return None;
-    }
-    // Windows allows renaming a running image, which is the same property
-    // the update itself relies on.
-    std::fs::rename(exe, &target).ok().map(|()| target)
+    (!target.exists()).then_some(target)
+}
+
+/// Where the installed binary lives, given the path this process started
+/// from.
+///
+/// After a recovery renames us back, `current_exe` still reports the path
+/// the image was loaded from — the displaced one. An update that trusted
+/// that would stage beside `.<binary>.old` and rename onto it, leaving the
+/// command path untouched and the mess intact.
+pub fn installed_path(exe: &Path) -> PathBuf {
+    let displaced = || -> Option<PathBuf> {
+        let name = exe.file_name()?.to_str()?;
+        let restored = name.strip_prefix(".")?.strip_suffix(".old")?;
+        if restored != BIN {
+            return None;
+        }
+        let target = exe.with_file_name(restored);
+        target.exists().then_some(target)
+    };
+    displaced().unwrap_or_else(|| exe.to_path_buf())
 }
 
 /// Confirm the file at `path` still holds exactly `bytes`.
@@ -878,6 +910,21 @@ fn set_executable(_path: &Path) -> Result<(), UpdateError> {
 mod tests {
     use super::create_new_file;
 
+    /// `umask` is process-global, and unit tests share a process. Every
+    /// test in this module that creates a file takes this first, so the one
+    /// that changes the mask cannot hand a permissive default to another
+    /// test's file — which would make the suite depend on thread timing
+    /// rather than on the code.
+    static FILE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn file_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking test poisons the mutex; the next one wants the lock,
+        // not the panic.
+        FILE_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The staged file must be private to its owner from the instant it
     /// exists, not from the moment its mode is corrected.
     ///
@@ -893,6 +940,7 @@ mod tests {
     fn a_staged_file_is_created_private_to_its_owner() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = file_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let previous = unsafe { libc::umask(0) };
         let created = create_new_file(dir.path(), ".probe-");
@@ -913,6 +961,7 @@ mod tests {
     fn a_staged_file_that_changed_underneath_us_is_refused() {
         use super::{assert_staged_is_unchanged, UpdateError};
 
+        let _guard = file_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("staged");
 
@@ -952,6 +1001,7 @@ mod tests {
         use super::world_writable_without_sticky;
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = file_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let set = |mode: u32| {
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode))
@@ -989,6 +1039,7 @@ mod tests {
     /// rather than derived from the process id.
     #[test]
     fn staged_files_do_not_reuse_a_name() {
+        let _guard = file_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let (first, _a) = create_new_file(dir.path(), ".probe-").expect("first");
         let (second, _b) = create_new_file(dir.path(), ".probe-").expect("second");
