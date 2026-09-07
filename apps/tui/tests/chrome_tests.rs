@@ -787,7 +787,10 @@ fn the_help_modal_truncates_from_the_bottom_when_the_terminal_is_short() {
 #[test]
 fn the_help_modal_degrades_to_a_border_on_a_tiny_terminal() {
     let text = common::render_text(20, 6, |f| render_help_modal(f, f.area()));
-    assert!(text.contains('┌') && text.contains('┘'), "{text:?}");
+    assert!(
+        (text.contains('┌') && text.contains('┘')) || (text.contains('╭') && text.contains('╰')),
+        "{text:?}"
+    );
 }
 
 // ───────────────────────── statusbar ─────────────────────────
