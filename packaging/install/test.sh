@@ -296,6 +296,21 @@ else
     echo "  skip  not root, or no useradd: cannot test the foreign sticky directory"
 fi
 
+# A safe symlink must still install -- through the directory it points at,
+# named canonically. Approving the resolved path but staging and running
+# through the path as given would leave the link repointable after the check.
+target="$work/real-bin"
+mkdir -p "$target"
+link="$work/link-to-real"
+ln -sfn "$target" "$link"
+out="$(sh "$script" --version "$version" --install-dir "$link" 2>&1)" && rc=0 || rc=$?
+check "a safe symlink installs into its target" "Installed: $target/srelens-tui" "$out" "$rc" 0
+if [ -x "$target/srelens-tui" ]; then
+    ok "the binary landed in the resolved directory"
+else
+    no "nothing landed in the resolved directory"
+fi
+
 echo "hashing tool"
 
 # Every image this was first tested on has sha256sum, which is why the

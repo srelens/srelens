@@ -37,8 +37,11 @@ which tells the reader nothing actionable. The static build has no floor.
 sticky bit; a world-writable sticky one owned by somebody else, since sticky
 never stops the directory OWNER unlinking what is inside it; and -- running
 as root -- a directory root does not own. The path is resolved with
-`cd` + `pwd -P` first, because `ls -ld` on a symlink describes the link
-rather than the directory the install would land in.
+`cd` + `pwd -P` before any of that, because `ls -ld` on a symlink describes
+the link rather than the directory the install would land in -- and the
+resolved path is then what staging, the rename and the final version check
+all use. Approving one path and installing through another would leave the
+link repointable in between.
 An unpredictable staging name is not enough on its own: mktemp closes the
 file it creates and `cp` reopens it by name, so anyone who can unlink entries
 in that directory can swap in a symlink between the two, or replace the
@@ -77,7 +80,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Thirty cases: argument handling, the macOS and unknown-architecture refusals,
+Thirty-two cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

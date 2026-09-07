@@ -68,6 +68,10 @@ main() {
     version="${version#v}"
 
     install_dir="$(resolve_install_dir "$install_dir")"
+    # Sets INSTALL_DIR to the canonical path, which is what everything below
+    # uses. Before the download, so an unwritable destination costs nothing.
+    prepare_install_dir "$install_dir"
+    install_dir="$INSTALL_DIR"
     assert_safe_dir "$install_dir"
 
     say "Installing $BIN $version ($target) into $install_dir"
@@ -247,6 +251,25 @@ verify_checksum() {
     say "Checksum verified: $actual"
 }
 
+# Create the destination, confirm it can be written to, and settle on the
+# canonical path for it.
+#
+# Canonical matters as much as the checks that follow. Inspecting a resolved
+# path but then staging, renaming and finally RUNNING through the path as
+# given leaves the whole window open: a symlink the caller passed can be
+# repointed the moment after it is approved, and the install lands wherever
+# it now says. Everything downstream uses what this sets.
+prepare_install_dir() {
+    dir="$1"
+    mkdir -p "$dir" 2>/dev/null ||
+        die "cannot create $dir"
+    [ -w "$dir" ] ||
+        die "$dir is not writable. Re-run with --install-dir <somewhere you own>, or with sudo."
+    resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || resolved=""
+    [ -n "$resolved" ] && dir="$resolved"
+    INSTALL_DIR="$dir"
+}
+
 # Refuse a destination that another user could tamper with mid-install.
 #
 # mktemp closes the file it creates and `cp` reopens it by name, so anyone
@@ -328,13 +351,9 @@ assert_safe_dir() {
 install_binary() {
     src="$1"
     dest="$2"
-    dir="$(dirname "$dest")"
-
-    mkdir -p "$dir" 2>/dev/null ||
-        die "cannot create $dir"
-    [ -w "$dir" ] ||
-        die "$dir is not writable. Re-run with --install-dir <somewhere you own>, or with sudo."
-    assert_safe_dir "$dir"
+    # Already created, checked and canonicalised by prepare_install_dir and
+    # assert_safe_dir. Deliberately not re-derived from $dest here.
+    dir="$INSTALL_DIR"
 
     # mktemp, not a name built from the pid. Installing as root into a directory
     # someone else can write to, the old `.srelens-tui.install.<pid>` was
