@@ -130,15 +130,23 @@ jobs:
           cp _tap/Formula/srelens-tui.rb tap/Formula/srelens-tui.rb
           cd tap
 
+          # Staged BEFORE the comparison, and compared against the index.
+          # `git diff` only looks at tracked files, so on the very first publish
+          # — when the tap has no Formula/srelens-tui.rb yet — the freshly
+          # copied file is untracked, the diff is empty, and this would report
+          # "already carries" and exit without publishing anything. That is the
+          # one run where being wrong matters most: the install command has just
+          # been advertised and nothing is behind it.
+          git add Formula/srelens-tui.rb
+
           # Nothing to do is a success, not a failure: re-running the publish
           # for a version already on the tap should be a no-op rather than an
           # empty commit or a red run.
-          if git diff --quiet -- Formula/srelens-tui.rb; then
+          if git diff --cached --quiet; then
             echo "The tap already carries srelens-tui ${VERSION} — nothing to push."
             exit 0
           fi
 
-          git add Formula/srelens-tui.rb
           git commit -m "srelens-tui ${VERSION}"
           git push
           echo "Pushed srelens-tui ${VERSION} to ${TAP_REPO}."
