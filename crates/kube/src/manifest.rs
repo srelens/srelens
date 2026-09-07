@@ -578,6 +578,80 @@ fn overall_applied(docs: &[ApplyDoc]) -> bool {
     !docs.is_empty() && docs.iter().all(|d| d.applied)
 }
 
+/// Apply every parsed document while preserving one result per document.
+///
+/// Manifest application is deliberately non-atomic: an earlier document may
+/// already be committed when a later one fails. Discovery failures therefore
+/// belong in that document's result just like API patch failures; returning
+/// early would hide prior mutations and skip the remaining documents.
+async fn apply_documents(
+    client: &kube::Client,
+    docs: Vec<serde_json::Value>,
+    fallback_namespace: Option<&str>,
+    force: bool,
+) -> Vec<ApplyDoc> {
+    let mut documents = Vec::with_capacity(docs.len());
+    for value in docs {
+        let r = match resource_ref(&value) {
+            Some(r) => r,
+            None => {
+                documents.push(ApplyDoc {
+                    kind: String::new(),
+                    name: String::new(),
+                    applied: false,
+                    conflict: None,
+                    error: Some("document missing apiVersion/kind/metadata.name".into()),
+                });
+                continue;
+            }
+        };
+        let (ar, namespaced) = match resolve_manifest_resource(client, &r).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                documents.push(ApplyDoc {
+                    kind: r.kind,
+                    name: r.name,
+                    applied: false,
+                    conflict: None,
+                    error: Some(clean_capability_error(error)),
+                });
+                continue;
+            }
+        };
+        let (api, _) = manifest_api(
+            client.clone(),
+            &ar,
+            namespaced,
+            r.namespace.as_deref(),
+            fallback_namespace,
+        );
+        let mut params = PatchParams::apply("srelens");
+        if force {
+            params = params.force();
+        }
+        let result = match tokio::time::timeout(
+            request_timeout(),
+            api.patch(&r.name, &params, &Patch::Apply(&value)),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                documents.push(ApplyDoc {
+                    kind: r.kind,
+                    name: r.name,
+                    applied: false,
+                    conflict: None,
+                    error: Some("apply timed out".into()),
+                });
+                continue;
+            }
+        };
+        documents.push(apply_doc_from_result(r.kind, r.name, result.map(|_| ())));
+    }
+    documents
+}
+
 /// `k8s.applyManifest` — server-side apply one or more YAML documents with field
 /// manager `srelens`. Non-forcing by default: field conflicts come back as
 /// structured `Conflict` data (per document) rather than a raw 409.
@@ -599,56 +673,13 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                let mut documents = Vec::with_capacity(docs.len());
-                for value in docs {
-                    let r = match resource_ref(&value) {
-                        Some(r) => r,
-                        None => {
-                            documents.push(ApplyDoc {
-                                kind: String::new(),
-                                name: String::new(),
-                                applied: false,
-                                conflict: None,
-                                error: Some(
-                                    "document missing apiVersion/kind/metadata.name".into(),
-                                ),
-                            });
-                            continue;
-                        }
-                    };
-                    let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
-                    let (api, _) = manifest_api(
-                        client.clone(),
-                        &ar,
-                        namespaced,
-                        r.namespace.as_deref(),
-                        input.namespace.as_deref(),
-                    );
-                    let mut params = PatchParams::apply("srelens");
-                    if input.force {
-                        params = params.force();
-                    }
-                    let result = match tokio::time::timeout(
-                        request_timeout(),
-                        api.patch(&r.name, &params, &Patch::Apply(&value)),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            documents.push(ApplyDoc {
-                                kind: r.kind,
-                                name: r.name,
-                                applied: false,
-                                conflict: None,
-                                error: Some("apply timed out".into()),
-                            });
-                            continue;
-                        }
-                    };
-                    let doc = apply_doc_from_result(r.kind, r.name, result.map(|_| ()));
-                    documents.push(doc);
-                }
+                let documents = apply_documents(
+                    &client,
+                    docs,
+                    input.namespace.as_deref(),
+                    input.force,
+                )
+                .await;
                 let applied = overall_applied(&documents);
                 Ok(ApplyOut { documents, applied })
             }
@@ -1609,6 +1640,101 @@ metadata:
 
         assert!(message.starts_with("discover Person:"), "got: {message}");
         assert!(!message.contains("handler error:"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn apply_keeps_prior_results_and_continues_after_discovery_error() {
+        use std::convert::Infallible;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            captured
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", request.method(), request.uri().path()));
+            async move {
+                let is_discovery = request.uri().path() == "/apis/missing.example/v1";
+                let (status, body) = if is_discovery {
+                    (
+                        404,
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "Status",
+                            "status": "Failure",
+                            "message": "the server could not find the requested resource",
+                            "reason": "NotFound",
+                            "code": 404
+                        }),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "ConfigMap",
+                            "metadata": { "name": "applied" }
+                        }),
+                    )
+                };
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+        let docs = vec![
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": { "name": "first" }
+            }),
+            serde_json::json!({
+                "apiVersion": "missing.example/v1",
+                "kind": "Widget",
+                "metadata": { "name": "missing" }
+            }),
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": { "name": "third" }
+            }),
+        ];
+
+        let documents = apply_documents(&client, docs, Some("team-a"), false).await;
+
+        assert_eq!(documents.len(), 3);
+        assert!(documents[0].applied);
+        assert!(!documents[1].applied);
+        assert!(
+            documents[1]
+                .error
+                .as_deref()
+                .is_some_and(|message| message.starts_with("discover Widget:")),
+            "got: {:?}",
+            documents[1].error,
+        );
+        assert!(
+            !documents[1]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("handler error:"),
+        );
+        assert!(documents[2].applied, "processing stopped after discovery failed");
+        assert!(!overall_applied(&documents));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "PATCH /api/v1/namespaces/team-a/configmaps/first",
+                "GET /apis/missing.example/v1",
+                "PATCH /api/v1/namespaces/team-a/configmaps/third",
+            ],
+        );
     }
 
     // -- aggregate_validation -----------------------------------------------
