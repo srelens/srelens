@@ -7,6 +7,7 @@ pub mod app;
 pub mod commands;
 pub mod deep_link;
 pub mod event;
+pub mod self_update;
 pub mod sink;
 pub mod theme;
 pub mod ui;

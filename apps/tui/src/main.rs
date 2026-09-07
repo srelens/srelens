@@ -71,6 +71,12 @@ pub enum CliCommand {
     Toolbox,
     /// Print version information
     Version,
+    /// Update srelens-tui to the latest release
+    Update {
+        /// Report what an update would do, without changing anything
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[tokio::main]
@@ -103,6 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}{} -> cluster: {}, server: {}", mark, ctx.display_name, ctx.cluster, ctx.server);
                 }
                 return Ok(());
+            }
+            CliCommand::Update { check } => {
+                return run_update(check);
             }
             CliCommand::Toolbox => {
                 let state = views::ToolboxViewState::new();
@@ -538,4 +547,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     Ok(())
+}
+
+/// `srelens-tui update` — see `self_update` for why each step is where it is.
+///
+/// Written as a plain synchronous function: it runs before the terminal is
+/// touched and exits, so there is nothing to interleave with.
+fn run_update(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use srelens_tui::self_update::{self, UpdateError};
+
+    // reqwest is built with `rustls-no-provider`, which does NOT pick a
+    // provider on its own: building a client without one panics inside
+    // reqwest's runtime thread, which surfaces as "event loop thread panicked"
+    // and tells the user nothing. Elsewhere in the app a kube client is built
+    // first and leaves a provider installed as a side effect; `update` runs
+    // before anything touches a cluster, so it has to say so itself.
+    //
+    // `ring` to match kube-rs. Installing a SECOND provider would be worse than
+    // installing none: rustls refuses to choose between two and panics on the
+    // first handshake. `Err` here means one is already installed, which is the
+    // state we want.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let current = env!("CARGO_PKG_VERSION");
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("could not find this binary on disk: {e}"))?;
+    // A Windows update leaves the displaced binary behind because the running
+    // process still holds it open. This is the next run.
+    self_update::clear_displaced_binary(&exe);
+
+    let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(concat!("srelens-tui/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| UpdateError::Download(e.to_string()))?;
+        let response = client
+            .get(url)
+            .send()
+            .map_err(|e| UpdateError::Download(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(UpdateError::Download(format!(
+                "{} for {url}",
+                response.status()
+            )));
+        }
+        response
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| UpdateError::Download(e.to_string()))
+    };
+
+    // Errors are printed here rather than returned. `main` reports a
+    // `Box<dyn Error>` with its DEBUG formatting, so returning one turns a
+    // written-out sentence into `Download("404 Not Found for https://…")` —
+    // the quotes and the variant name are noise, and the message is the part
+    // that tells the user what to do.
+    let plan = match self_update::plan(current, exe.clone(), &fetch) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => {
+            println!("srelens-tui {current} is the latest release.");
+            return Ok(());
+        }
+        Err(error) => fail(error),
+    };
+
+    if check_only {
+        println!(
+            "srelens-tui {} is available (you have {}).\n  {}\nRun `srelens-tui update` to install it.",
+            plan.latest, plan.current, plan.archive_url
+        );
+        return Ok(());
+    }
+
+    println!("Updating srelens-tui {} -> {}…", plan.current, plan.latest);
+    if let Err(error) = self_update::apply(&plan, &fetch) {
+        fail(error);
+    }
+    println!("Installed {} to {}", plan.latest, exe.display());
+    Ok(())
+}
+
+/// Report an update failure the way a command-line tool should: the sentence
+/// the error carries, on stderr, and a non-zero status so a script wrapping
+/// this can tell.
+fn fail(error: srelens_tui::self_update::UpdateError) -> ! {
+    eprintln!("srelens-tui: {error}");
+    std::process::exit(1);
 }

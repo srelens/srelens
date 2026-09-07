@@ -146,6 +146,32 @@ carry detached GPG signatures like every other release asset — see
 [Verifying a download](#verifying-a-download) below, which applies to them
 unchanged.
 
+**Keeping it current.** The binary updates itself:
+
+```bash
+srelens-tui update --check   # what is available, without changing anything
+srelens-tui update           # download it and replace this binary
+```
+
+It follows the **stable** channel, and only ever replaces the binary you ran
+it from. Before writing anything it checks the download against the published
+SHA-256, so a corrupted or substituted archive is refused and the copy you
+already have is left alone. The last step is a rename, so an interrupted
+update cannot leave a half-written binary on your `PATH`.
+
+Two cases where it declines rather than acting, both on purpose:
+
+- **A package manager owns the binary.** If it lives somewhere Homebrew, your
+  distribution, Scoop, winget or Nix put it, srelens says so and names the
+  tool to use instead — writing over those files would leave the manager's
+  database describing a version that is no longer there.
+- **You cannot write to the directory.** A copy in `/usr/local/bin` usually
+  needs elevation. It says which directory refused rather than failing with a
+  bare permission error.
+
+A musl build updates to a musl build, since that binary exists precisely
+because the host cannot run the glibc one.
+
 Run `srelens-tui --help` for the full set of flags. `srelens-tui info` lists
 the contexts found in your kubeconfig with the cluster and server each names —
 it reads the file and does not contact any cluster, so it tells you what is
