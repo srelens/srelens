@@ -247,7 +247,7 @@ if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
     mkdir -p "$dest"
     if chown tester "$dest" 2>/dev/null; then
         out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "root into another user's directory is refused" "belongs to tester" "$out" "$rc" 1
+        check "a directory owned by another user is refused" "belongs to tester" "$out" "$rc" 1
         if [ -e "$dest/srelens-tui" ]; then
             no "it installed into the other user's directory anyway"
         else
@@ -288,7 +288,7 @@ if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
     chmod 1777 "$dest"
     if chown tester "$dest" 2>/dev/null; then
         out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "a sticky directory owned by someone else is refused" "owned by tester" "$out" "$rc" 1
+        check "a sticky directory owned by someone else is refused" "belongs to tester" "$out" "$rc" 1
     else
         echo "  skip  could not chown a sticky directory to another user"
     fi
@@ -309,6 +309,69 @@ if [ -x "$target/srelens-tui" ]; then
     ok "the binary landed in the resolved directory"
 else
     no "nothing landed in the resolved directory"
+fi
+
+echo "shared groups and ancestors"
+
+# A group-writable directory is only safe when the group is the owner's
+# own -- the per-user-group convention. A shared group is a set of people
+# who can each replace the binary between staging and running it.
+if [ "$(id -u)" = "0" ] && command -v groupadd >/dev/null 2>&1; then
+    groupadd -f shared >/dev/null 2>&1 || true
+    dest="$work/shared-group"
+    mkdir -p "$dest"
+    if chgrp shared "$dest" 2>/dev/null; then
+        chmod 0775 "$dest"
+        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "a directory writable by a shared group is refused" "group shared" "$out" "$rc" 1
+    else
+        echo "  skip  could not set a shared group"
+    fi
+else
+    echo "  skip  not root, or no groupadd: cannot test the shared-group refusal"
+fi
+
+# The per-user-group case must keep working, or every Fedora install with a
+# 002 umask breaks.
+dest="$work/own-group"
+mkdir -p "$dest"
+chmod 0775 "$dest"
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "group-writable by the owner's own group still installs" "Installed:" "$out" "$rc" 0
+
+# A directory can be impeccable itself and still sit under one somebody
+# else owns, who can rename it and put their own in its place after the
+# check. Every component is walked, so the parent is what fails here.
+if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
+    id -u tester >/dev/null 2>&1 || useradd -m tester >/dev/null 2>&1 || true
+    parent="$work/theirs-parent"
+    mkdir -p "$parent/child"
+    if chown tester "$parent" 2>/dev/null; then
+        out="$(sh "$script" --version "$version" --install-dir "$parent/child" 2>&1)" && rc=0 || rc=$?
+        check "a root-owned directory under a foreign parent is refused" "belongs to tester" "$out" "$rc" 1
+        if [ -e "$parent/child/srelens-tui" ]; then
+            no "it installed under the replaceable parent anyway"
+        else
+            ok "nothing was installed under the replaceable parent"
+        fi
+    else
+        echo "  skip  could not chown a parent directory"
+    fi
+else
+    echo "  skip  not root, or no useradd: cannot test the ancestor walk"
+fi
+
+echo "unpacking"
+
+# The archive carries a `./` member, and GNU tar restores directory
+# ownership and permissions from the archive when it runs as root. Into the
+# private temp directory itself that would rewrite mktemp -d's 0700 into
+# whatever the release runner had; one level down leaves it untouched.
+# shellcheck disable=SC2016
+if grep -q 'tar -xzf "$tmp/$archive" -C "$tmp/unpack"' "$script"; then
+    ok "the archive is unpacked below the private directory, not into it"
+else
+    no "the archive is unpacked straight into the private directory"
 fi
 
 echo "hashing tool"

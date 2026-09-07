@@ -33,28 +33,31 @@ Debian 11 or RHEL 9, which is exactly the sort of host a cluster gets
 administered from. The failure is a `GLIBC_2.3x not found` before `main()`,
 which tells the reader nothing actionable. The static build has no floor.
 
-**Unsafe destinations are refused.** A world-writable directory without the
-sticky bit; a world-writable sticky one owned by somebody else, since sticky
-never stops the directory OWNER unlinking what is inside it; and -- running
-as root -- a directory root does not own. The path is resolved with
-`cd` + `pwd -P` before any of that, because `ls -ld` on a symlink describes
-the link rather than the directory the install would land in -- and the
-resolved path is then what staging, the rename and the final version check
-all use. Approving one path and installing through another would leave the
-link repointable in between.
-An unpredictable staging name is not enough on its own: mktemp closes the
-file it creates and `cp` reopens it by name, so anyone who can unlink entries
-in that directory can swap in a symlink between the two, or replace the
-finished binary before it is run. Only the directory permissions close that.
-Group-writable alone is allowed, because distributions with per-user groups
-leave `~/.local/bin` group-writable under a 002 umask. This is the same rule
-`srelens-tui update` applies to the binary it replaces.
+**Every component of the destination is checked, not just the leaf.** A
+directory can be impeccable itself and still sit under one somebody else
+owns, who can rename it and put their own directory at the same path after
+the check. The walk is the one `sudo` and `ssh` do over their own paths, and
+each component must be:
 
-**Unpredictable staging.** The file is created with `mktemp` inside the
-destination directory rather than at `.srelens-tui.install.<pid>`. Installed
-as root into a directory someone else can write to, a name derived from the
-pid can be pre-created as a symlink, and `cp` writes through a destination
-symlink — as root, into a file of that user's choosing.
+- owned by root or by you;
+- if world-writable, sticky — only an entry's owner may unlink it, which is
+  what makes `/tmp` usable rather than disqualifying;
+- if group-writable, owned by its own group. That is the per-user-group
+  convention (`alice:alice`, one member), which Fedora leaves on
+  `~/.local/bin` under a 002 umask. A shared group is a set of people who can
+  each replace the binary.
+
+The path is resolved with `cd` + `pwd -P` first, and the resolved path is
+what staging, the rename and the final version check all use — approving one
+path and installing through another leaves a symlink repointable in between.
+
+**Unpredictable staging, and a private unpack.** The staging file is created
+with `mktemp` rather than at `.srelens-tui.install.<pid>`, which could be
+pre-created as a symlink for `cp` to write through. The archive is unpacked
+one level below the private temp directory, never into it: it carries a `./`
+member, and GNU tar restores directory ownership and permissions from the
+archive when it runs as root, which would rewrite `mktemp -d`'s 0700 into
+whatever the release runner had.
 
 **No sudo.** A script fetched over the network that re-invokes itself as root
 is the pattern people are right to be nervous about, and the `~/.local/bin`
@@ -80,7 +83,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Thirty-two cases: argument handling, the macOS and unknown-architecture refusals,
+Thirty-seven cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

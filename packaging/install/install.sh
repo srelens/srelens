@@ -87,17 +87,27 @@ main() {
     download "$base/$BIN-$version-SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
     verify_checksum "$tmp" "$archive"
 
-    tar -xzf "$tmp/$archive" -C "$tmp"
-    [ -f "$tmp/$BIN" ] || die "the archive did not contain $BIN"
-    chmod 0755 "$tmp/$BIN"
+    # Into a subdirectory, never into $tmp itself. The archive contains a
+    # `./` member, and GNU tar restores directory ownership and permissions
+    # from the archive when it runs as root -- which under `sudo` would
+    # rewrite the 0700 root-owned directory mktemp -d just made into
+    # whatever the release runner had, typically 0755 and a numeric uid.
+    # An account matching that uid could then swap the binary between the
+    # checksum below and the moment it is run. Extracting one level down
+    # leaves $tmp itself untouched at 0700, so nothing can be reached
+    # through it whatever the archive claims about its own directory.
+    mkdir "$tmp/unpack" || die "cannot prepare a private directory to unpack into"
+    tar -xzf "$tmp/$archive" -C "$tmp/unpack"
+    [ -f "$tmp/unpack/$BIN" ] || die "the archive did not contain $BIN"
+    chmod 0755 "$tmp/unpack/$BIN"
 
     # Run it before it is installed, not after. A binary for the wrong
     # architecture or a corrupt one that still hashed correctly fails here,
     # while the only thing that has happened is a write to a temp dir.
-    "$tmp/$BIN" --version >/dev/null 2>&1 ||
+    "$tmp/unpack/$BIN" --version >/dev/null 2>&1 ||
         die "the downloaded binary does not run on this machine"
 
-    install_binary "$tmp/$BIN" "$install_dir/$BIN"
+    install_binary "$tmp/unpack/$BIN" "$install_dir/$BIN"
 
     say ""
     say "Installed: $install_dir/$BIN"
@@ -272,46 +282,59 @@ prepare_install_dir() {
 
 # Refuse a destination that another user could tamper with mid-install.
 #
-# mktemp closes the file it creates and `cp` reopens it by name, so anyone
-# who can unlink entries in the directory can swap a symlink in between the
-# two and have the copy write through it -- as root, when this is run under
-# sudo. The same window lets them replace the finished binary before the
-# version line runs it. An unpredictable name does not close that; only the
-# directory's own permissions do.
+# EVERY component is checked, not just the leaf. A directory can pass on its
+# own permissions and still sit under one somebody else owns -- and that
+# owner can rename it and put their own directory at the same path, after the
+# check and before the install. The staging file, the rename and the version
+# line would then all run inside theirs. This is the walk `sudo` and `ssh` do
+# over their own paths, for the same reason.
 #
-# Two rules, both narrow enough not to catch an ordinary machine:
+# The rules per component:
 #
-#   * world-writable without the sticky bit. With the sticky bit set only an
-#     entry's owner may unlink it, so a staged file cannot be taken away --
-#     which is exactly why /tmp has it.
-#   * running as root into a directory root does not own. That is the case
-#     worth refusing outright: the owner can arrange the swap at leisure and
-#     gets a root-written file out of it.
+#   * owned by root or by us. Anyone else can replace what is inside it.
+#   * if world-writable, the sticky bit must be set, so only an entry's owner
+#     may unlink it. That is what makes /tmp usable rather than disqualifying.
+#   * if group-writable, the group must be the owner's own -- the per-user
+#     group convention, where `alice:alice` has one member. A shared group is
+#     a set of people who can all replace the binary.
 #
-# Group-writable alone is deliberately NOT refused. Distributions with
-# per-user groups leave ~/.local/bin group-writable under a 002 umask, where
-# the only member of that group is the user themselves.
-#
-# This is the rule srelens-tui's own `update` applies to the binary it
-# replaces, for the same reason.
+# The same rule srelens-tui's own `update` applies to the binary it replaces.
 assert_safe_dir() {
     dir="$1"
-    [ -d "$dir" ] || return 0
 
-    # Follow the path to the directory it really is, first. `ls -ld` on a
-    # symlink describes the LINK -- mode `lrwxrwxrwx`, owned by whoever made
-    # it -- which says nothing about where the install lands, and would let
-    # `--install-dir /some/link` sail past both checks below. `cd` + `pwd -P`
-    # is the portable resolution; `readlink -f` is GNU.
+    # Resolve first. `ls -ld` on a symlink describes the LINK -- mode
+    # `lrwxrwxrwx`, owned by whoever made it -- which says nothing about where
+    # the install lands. `cd` + `pwd -P` is portable; `readlink -f` is GNU.
     resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || resolved=""
     [ -n "$resolved" ] || return 0
 
+    SAFE_ME="$(id -un 2>/dev/null)" || SAFE_ME=""
+
+    assert_component "/"
+    rest="${resolved#/}"
+    prefix=""
+    while [ -n "$rest" ]; do
+        name="${rest%%/*}"
+        case "$rest" in
+            */*) rest="${rest#*/}" ;;
+            *) rest="" ;;
+        esac
+        prefix="$prefix/$name"
+        assert_component "$prefix"
+    done
+}
+
+# One component of the path, against the rules above.
+assert_component() {
+    path="$1"
+
     # `ls -ld` rather than stat: stat's flags differ between GNU and BSD, and
     # this has to run under BusyBox too.
-    listing="$(ls -ld "$resolved" 2>/dev/null)" || return 0
+    listing="$(ls -ld "$path" 2>/dev/null)" || return 0
     [ -n "$listing" ] || return 0
     perms="$(printf %s "$listing" | cut -c1-10)"
     owner="$(printf %s "$listing" | awk '{print $3}')"
+    group="$(printf %s "$listing" | awk '{print $4}')"
 
     # Anything that is not a directory mode is not something to guess from.
     case "$perms" in
@@ -319,32 +342,29 @@ assert_safe_dir() {
         *) return 0 ;;
     esac
 
-    me="$(id -un 2>/dev/null)" || me=""
-    sticky="$(printf %s "$perms" | cut -c10)"
-    other_w="$(printf %s "$perms" | cut -c9)"
+    if [ -n "$owner" ] && [ "$owner" != "root" ] && [ "$owner" != "$SAFE_ME" ]; then
+        die "$path belongs to $owner, who could replace what is inside it while this installs. Choose a path you control: --install-dir \$HOME/.local/bin"
+    fi
 
-    if [ "$other_w" = "w" ]; then
-        case "$sticky" in
-            t | T)
-                # Sticky stops OTHER users unlinking entries -- but not the
-                # directory's own owner, who may remove anything inside it.
-                # A world-writable sticky directory belonging to someone else
-                # is therefore still theirs to tamper with.
-                if [ -n "$owner" ] && [ "$owner" != "root" ] && [ "$owner" != "$me" ]; then
-                    die "$resolved is world-writable and owned by $owner, who may replace files in it even with the sticky bit set. Install somewhere you control: --install-dir \$HOME/.local/bin"
-                fi
-                ;;
+    if [ "$(printf %s "$perms" | cut -c9)" = "w" ]; then
+        case "$(printf %s "$perms" | cut -c10)" in
+            t | T) ;;
             *)
-                die "$resolved is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Install somewhere you control: --install-dir \$HOME/.local/bin"
+                die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
                 ;;
         esac
     fi
 
-    if [ "$(id -u)" = "0" ] && [ -n "$owner" ] && [ "$owner" != "root" ]; then
-        die "$resolved belongs to $owner, and installing there as root would let $owner substitute the file being installed. Install it somewhere root owns, or run as $owner without sudo."
+    # Group-writable is only safe when the group is the owner's own, which is
+    # the per-user-group convention (`alice:alice`, one member). Distributions
+    # using it leave ~/.local/bin group-writable under a 002 umask, so
+    # refusing that outright would break an ordinary Fedora install; a group
+    # with a different name is a set of people who can all replace the binary.
+    if [ "$(printf %s "$perms" | cut -c6)" = "w" ] &&
+        [ -n "$group" ] && [ "$group" != "$owner" ]; then
+        die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
     fi
 }
-
 # Install by rename where possible: a running binary being overwritten in
 # place gets ETXTBSY on Linux, while replacing the directory entry does not
 # disturb a process already holding the old inode.
