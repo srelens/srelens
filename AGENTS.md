@@ -145,6 +145,54 @@ Before you push, run the failing crate the way CI does — at minimum
 and check `cargo tree -e features -i <dep>` when a test depends on a
 dependency's behaviour.
 
+## Never run rustfmt on a binary target
+
+`rustfmt apps/tui/src/main.rs` does not format one file. It follows the
+`mod` declarations and reformats every module behind them — 31 files and
+~5,400 lines in `apps/tui`, none of it asked for, all of it landing in your
+commit if you `git add` the directory afterwards.
+
+Format the file you edited:
+
+```bash
+rustfmt --edition 2021 apps/tui/src/self_update.rs   # this file only
+rustfmt --edition 2021 apps/tui/src/main.rs          # and 31 others
+```
+
+It has caught two commits so far. If it catches you, restore the files you
+did not mean to touch from the base branch rather than force-pushing over
+the mistake — a follow-up commit is honest history and costs nothing.
+
+The same applies to `cargo fmt`, which formats the whole workspace. In a
+repository where much of the tree is not rustfmt-clean, that is a very large
+diff hiding a small change.
+
+## One pnpm version, and it lives in package.json
+
+`packageManager` in the root `package.json` is the only place the pnpm
+version is written down. `pnpm/action-setup` reads it and carries no
+`version:` of its own; the Dockerfile installs from the same field:
+
+```dockerfile
+RUN npm install -g "pnpm@$(node -p "require('./package.json').packageManager.split('@').pop()")"
+```
+
+A second copy of that version goes stale, and both copies that ever existed
+did. CI ran pnpm 9 against a lockfile written by 11, which silently dropped
+the CVE overrides on every local install. Then the image went on running
+pnpm 9 after those overrides moved into `pnpm-workspace.yaml`, which only
+pnpm 10 and later read — so inside the image there were no overrides at all,
+the lockfile recorded nine, and every release build died on
+`ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`. Two dev releases shipped no container
+image before anyone looked.
+
+Build the image rather than letting a release find out for you:
+
+```bash
+docker build --target frontend .   # the pnpm half, a couple of minutes
+docker build .                     # and the Rust half, much longer
+```
+
 ## Windows
 
 Three suites fail on Windows only and are unrelated to your change:
