@@ -53,7 +53,7 @@ main() {
     check_platform
     need curl
     need tar
-    sha_tool="$(find_sha_tool)"
+    require_sha_tool
 
     target="$(detect_target)"
     [ -n "$version" ] || version="$(latest_version)"
@@ -74,7 +74,7 @@ main() {
 
     download "$base/$archive" "$tmp/$archive"
     download "$base/$BIN-$version-SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
-    verify_checksum "$tmp" "$archive" "$sha_tool"
+    verify_checksum "$tmp" "$archive"
 
     tar -xzf "$tmp/$archive" -C "$tmp"
     [ -f "$tmp/$BIN" ] || die "the archive did not contain $BIN"
@@ -129,16 +129,27 @@ need() {
     command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
 }
 
-# sha256sum on most distributions, shasum where coreutils is not the one in
-# use. Refusing to install without one is deliberate: installing an unverified
-# binary quietly would defeat the point of publishing checksums at all.
-find_sha_tool() {
+# Refusing to install without a hashing tool is deliberate: installing an
+# unverified binary quietly would defeat the point of publishing checksums.
+require_sha_tool() {
+    if command -v sha256sum >/dev/null 2>&1; then return 0; fi
+    if command -v shasum >/dev/null 2>&1; then return 0; fi
+    die "neither sha256sum nor shasum found; cannot verify the download"
+}
+
+# The SHA-256 of one file.
+#
+# The algorithm travels WITH the command, never as a bare tool name: plain
+# `shasum` is SHA-1, so selecting it by name and calling it without -a 256
+# yields a 40-character digest that can never match a 64-character one. Every
+# archive would be rejected as corrupt, on exactly the machines that have
+# shasum and no sha256sum -- which is why neither Debian nor Alpine, where
+# this was first tested, could show it.
+sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
-        printf 'sha256sum'
-    elif command -v shasum >/dev/null 2>&1; then
-        printf 'shasum'
+        sha256sum "$1" | cut -d" " -f1
     else
-        die "neither sha256sum nor shasum found; cannot verify the download"
+        shasum -a 256 "$1" | cut -d" " -f1
     fi
 }
 
@@ -210,7 +221,6 @@ download() {
 verify_checksum() {
     dir="$1"
     file="$2"
-    tool="$3"
 
     expected="$(
         grep "  $file\$" "$dir/SHA256SUMS.txt" 2>/dev/null |
@@ -219,7 +229,7 @@ verify_checksum() {
     [ -n "$expected" ] ||
         die "$file is not listed in the release's SHA256SUMS"
 
-    actual="$(cd "$dir" && "$tool" "$file" | cut -d' ' -f1)"
+    actual="$(cd "$dir" && sha256_of "$file")"
 
     if [ "$expected" != "$actual" ]; then
         printf 'error: checksum mismatch for %s\n' "$file" >&2

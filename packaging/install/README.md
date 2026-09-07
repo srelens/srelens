@@ -50,10 +50,17 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Twelve cases: argument handling, the macOS and unknown-architecture refusals,
-a corrupted archive (which must install nothing), a real install of the latest
-release, and installing over an existing copy. The refusal cases put a fake
-`curl` and `uname` ahead of the real ones on `PATH`.
+Sixteen cases: argument handling, the macOS and unknown-architecture refusals,
+a corrupted archive (which must install nothing), latest-version resolution, a
+real install, installing over an existing copy, and a run with a PATH that
+lacks `sha256sum` so the `shasum` branch is actually taken. The refusal cases
+put a fake `curl` and `uname` ahead of the real ones on `PATH`.
+
+Only one call reaches the real GitHub API, and the test makes it with a token
+when one is present. `install.sh` itself is deliberately unauthenticated --
+that is how a stranger runs it -- so leaving the live cases to resolve
+`latest` themselves would spend the shared per-IP quota that hosted runners
+draw on, and exhausting it would fail this job on unrelated pull requests.
 
 CI runs this and `shellcheck -s sh` on every pull request, under `dash` rather
 than bash — the script promises POSIX `sh`, and bash would quietly accept

@@ -101,6 +101,7 @@ base="https://github.com/srelens/srelens/releases/download/srelens-v$version"
 mkdir -p "$work/fixtures"
 curl -fsSL -o "$work/fixtures/$archive" "$base/$archive"
 curl -fsSL -o "$work/fixtures/SHA256SUMS.txt" "$base/srelens-tui-$version-SHA256SUMS.txt"
+cp "$work/fixtures/$archive" "$work/fixtures/good.tar.gz"
 printf 'X' | dd of="$work/fixtures/$archive" bs=1 seek=5000 conv=notrunc status=none
 
 cat > "$work/fake/curl" <<EOF
@@ -116,7 +117,12 @@ done
 case "\$url" in
   *api.github.com*) echo '{"tag_name": "srelens-v$version"}' ;;
   *SHA256SUMS*)     cp "$work/fixtures/SHA256SUMS.txt" "\$out" ;;
-  *.tar.gz)         cp "$work/fixtures/\$(basename "\$url")" "\$out" ;;
+  *.tar.gz)
+    if [ -n "\${SERVE_GOOD:-}" ]; then
+      cp "$work/fixtures/good.tar.gz" "\$out"
+    else
+      cp "$work/fixtures/\$(basename "\$url")" "\$out"
+    fi ;;
   *) exit 1 ;;
 esac
 EOF
@@ -131,11 +137,21 @@ else
     ok "nothing is installed when the checksum fails"
 fi
 
+echo "latest-version resolution"
+
+# Offline, through the fake curl that serves the API's tag_name. Proves the
+# script parses `latest` correctly without spending an unauthenticated API
+# call per run on a shared runner IP.
+dest="$work/latest"
+out="$(SERVE_GOOD=1 PATH="$work/fake:$PATH" sh "$script" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "the newest release is resolved from the API" "srelens-tui $version" "$out" "$rc" 0
+check "and installed" "Installed: $dest/srelens-tui" "$out" "$rc" 0
+
 echo "install"
 
 dest="$work/bin"
-out="$(sh "$script" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-check "the latest release installs" "Installed: $dest/srelens-tui" "$out" "$rc" 0
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "the release installs" "Installed: $dest/srelens-tui" "$out" "$rc" 0
 check "the checksum is reported, not assumed" "Checksum verified:" "$out" "$rc" 0
 
 if [ -x "$dest/srelens-tui" ] && "$dest/srelens-tui" --version >/dev/null 2>&1; then
@@ -146,12 +162,41 @@ fi
 
 # Installing over an existing copy is the update path, and must not fail on
 # ETXTBSY or leave the staging file behind.
-out="$(sh "$script" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
 check "installing over an existing copy succeeds" "Installed:" "$out" "$rc" 0
 if [ -z "$(find "$dest" -name '.srelens-tui.install.*' 2>/dev/null)" ]; then
     ok "no staging file is left behind"
 else
     no "a staging file was left in $dest"
+fi
+
+echo "hashing tool"
+
+# Every image this was first tested on has sha256sum, which is why the
+# shasum branch could ship computing SHA-1 and pass. Running with a PATH
+# that deliberately lacks sha256sum is the only way to take that branch.
+if command -v shasum >/dev/null 2>&1; then
+    limited="$work/limited"
+    mkdir -p "$limited"
+    missing=''
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm cat shasum; do
+        path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
+        ln -sf "$path" "$limited/$tool"
+    done
+    if [ -n "$missing" ]; then
+        echo "  skip  no shasum-only run:$missing not found"
+    else
+        dest="$work/shasum"
+        out="$(PATH="$limited" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        check "shasum computes SHA-256, not SHA-1" "Checksum verified:" "$out" "$rc" 0
+        if [ -x "$dest/srelens-tui" ]; then
+            ok "the binary installs with only shasum available"
+        else
+            no "nothing was installed with only shasum available"
+        fi
+    fi
+else
+    echo "  skip  shasum is not installed here"
 fi
 
 echo
