@@ -789,6 +789,12 @@ pub fn recover_interrupted_update(exe: &Path) -> Result<Option<PathBuf>, UpdateE
 
 /// The suffix the updater gives a binary it has moved aside.
 ///
+/// This one DOES carry the target's name, because the recovery has to know
+/// what to restore. That costs 21 characters, so a binary named close to a
+/// filesystem's component limit fails the rename — cleanly, with the original
+/// untouched, which is the right way round: restoring a truncated name would
+/// leave someone with a command they never had.
+///
 /// It carries the tool's own name on purpose. `.<name>.old` is what a
 /// PERSON calls a backup, and treating every such file as an interrupted
 /// update meant running `.lens.exe.old` renamed it, or — worse, with a
@@ -878,7 +884,13 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| BIN.to_string());
-    let (staged, mut file) = create_new_file(dir, &format!(".{name}.new-"))?;
+    // A CONSTANT prefix, unlike the displaced name below. The staged file is
+    // transient and nothing reads its name, so encoding the target in it only
+    // added length: `.<name>.new-<uuid>` costs 43 characters beyond the name,
+    // which on a filesystem with a 255-byte component limit made every update
+    // of a validly-named 214-byte binary fail with ENAMETOOLONG. The uuid is
+    // what keeps it unique; the name never was.
+    let (staged, mut file) = create_new_file(dir, ".srelens-update.new-")?;
     // From here every exit removes the staged file, including the ones added
     // later by someone who did not read this far. It used to be a cleanup line
     // per early return, and the one that got missed leaked a whole downloaded
@@ -1172,6 +1184,27 @@ mod tests {
                 assert_eq!(installed_path(&displaced), renamed);
             }
         }
+    }
+
+    /// A long but valid filename must still be updatable.
+    ///
+    /// The staging name used to embed the target's, costing 43 characters
+    /// beyond it, so on a filesystem with the usual 255-byte component limit
+    /// a perfectly legal 214-byte binary could not be updated at all. 200
+    /// characters is comfortably inside the limit and comfortably outside
+    /// what the old prefix could have handled.
+    #[test]
+    fn a_long_filename_does_not_exceed_the_component_limit() {
+        use super::replace_running_binary;
+
+        let _guard = file_test_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let long = "l".repeat(200) + if cfg!(windows) { ".exe" } else { "" };
+        let target = dir.path().join(&long);
+        std::fs::write(&target, b"old").expect("seed");
+
+        replace_running_binary(&target, b"new").expect("a long name is still updatable");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
     }
 
     /// Only a file this updater displaced is treated as one.
