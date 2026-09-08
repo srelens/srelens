@@ -181,7 +181,8 @@ fn logs_view_starts_empty_and_following() {
     assert!(state.follow);
     assert!(!state.timestamps);
     assert!(!state.previous);
-    assert!(state.wrap);
+    // Machine text does not wrap by default; `w` turns it on.
+    assert!(!state.wrap);
     assert_eq!(state.horizontal_scroll, 0);
     assert_eq!(state.scroll_offset, 0);
     assert!(state.search_query.is_empty());
@@ -246,16 +247,41 @@ fn logs_view_toggle_follow_jumps_back_to_the_bottom() {
 }
 
 #[test]
+fn a_long_log_entry_is_one_row_by_default_and_scrolls_sideways() {
+    // A pod that logs one long JSON entry. Wrapped, that is a wall that
+    // pushes the short lines around it out of view; and the wrapped renderer
+    // scrolls by entry, so an entry taller than the viewport has middle rows
+    // nothing can reach. Unwrapped, it is one row, and `l` reveals the rest.
+    let mut state = logs();
+    state.follow = false;
+    state.push_line("before".to_string());
+    let long = format!("{{\"payload\":\"{}\",\"tail\":\"END\"}}", "x".repeat(400));
+    state.push_line(long);
+    state.push_line("after".to_string());
+
+    let lines = common::render_lines(60, 8, |f| render_logs_view(f, f.area(), &state));
+    let before = lines.iter().position(|l| l.contains("before")).expect("before");
+    let after = lines.iter().position(|l| l.contains("after")).expect("after");
+    assert_eq!(after, before + 2, "the long entry takes exactly one row: {lines:#?}");
+    assert!(!lines.iter().any(|l| l.contains("END")), "the tail is off screen, not wrapped down");
+
+    // Sideways to the end of it.
+    state.scroll_right(380);
+    let lines = common::render_lines(60, 8, |f| render_logs_view(f, f.area(), &state));
+    assert!(lines.iter().any(|l| l.contains("END")), "{lines:#?}");
+}
+
+#[test]
 fn logs_view_flag_toggles_flip_each_flag_independently() {
     let mut state = logs();
     state.toggle_timestamps();
     state.toggle_previous();
     state.toggle_wrap();
-    assert!(state.timestamps && state.previous && !state.wrap);
+    assert!(state.timestamps && state.previous && state.wrap);
     state.toggle_timestamps();
-    assert!(!state.timestamps && state.previous && !state.wrap);
+    assert!(!state.timestamps && state.previous && state.wrap);
     state.toggle_wrap();
-    assert!(state.wrap);
+    assert!(!state.wrap);
 }
 
 #[test]
@@ -339,7 +365,7 @@ fn logs_view_renders_a_waiting_placeholder_when_there_are_no_lines() {
     let state = logs();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: web-0 (default/app) [FtpW] [1/0 lines]"),
+        text.contains("Logs: web-0 (default/app) [Ftpw] [1/0 lines]"),
         "{text}"
     );
     assert!(text.contains("Waiting for logs..."));
@@ -356,7 +382,7 @@ fn logs_view_renders_numbered_lines_and_the_flag_letters_when_following() {
     state.toggle_previous();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: api (prod/all) [FTPW] [3/3 lines]"),
+        text.contains("Logs: api (prod/all) [FTPw] [3/3 lines]"),
         "{text}"
     );
     assert!(text.contains("    1 │ message 1"));
@@ -431,7 +457,8 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
     let mut state = logs();
     state.push_line("x".repeat(100));
     state.set_search_query("nothing");
-    // With wrap enabled by default, the 100-char line wraps onto line 2 with hanging indent.
+    // Asked for with `w`, the 100-char line wraps onto line 2 with hanging indent.
+    state.toggle_wrap();
     let wrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
     assert!(wrapped[1].starts_with("│    1 │ xxxx"), "{}", wrapped[1]);
     assert!(
@@ -460,8 +487,7 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
 
 #[test]
 fn logs_view_horizontal_scroll_when_unwrapped() {
-    let mut state = logs();
-    state.toggle_wrap(); // turn off wrap
+    let mut state = logs(); // unwrapped is the default
     state.push_line("0123456789abcdefghij".to_string());
 
     // At h_scroll = 0: contains initial digits
@@ -484,6 +510,7 @@ fn logs_view_horizontal_scroll_when_unwrapped() {
 #[test]
 fn logs_view_wrapped_follow_shows_bottom_rows() {
     let mut state = logs();
+    state.toggle_wrap();
     // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
     // Pushing a line of 120 chars wraps onto 3 visual lines.
     state.push_line("START_".to_string() + &"a".repeat(110) + "_END");
@@ -2206,6 +2233,50 @@ fn table_renders_loading_and_empty_states() {
 }
 
 #[test]
+fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
+    // Three pods that fit, then one far below the fold whose status is a
+    // 300-character string. Sizing columns from every row would hand STATUS
+    // the whole table and clip NAME, NODE and AGE for the rows that ARE
+    // visible. Widths come from the drawn window, and a column grows only
+    // into the slack the declared layout leaves (Pods declare 135 + 9 spacing;
+    // a 160-wide frame has 158 inside, so 14 to spare).
+    let mut t = ResourceTableState::new(ResourceKind::Pods);
+    let mut items = vec![
+        json!({ "name": "web-0", "namespace": "prod", "ready": "1/1", "status": "Running", "restarts": 0, "podIp": "10.0.0.1", "nodeName": "node-a", "age": "2d" }),
+        json!({ "name": "web-1", "namespace": "prod", "ready": "0/1", "status": "CrashLoopBackOff", "restarts": 12, "podIp": "10.0.0.2", "nodeName": "node-b", "age": "1h" }),
+        json!({ "name": "web-2", "namespace": "prod", "ready": "1/1", "status": "Running", "restarts": 0, "podIp": "10.0.0.3", "nodeName": "node-c", "age": "3d" }),
+    ];
+    for i in 0..40 {
+        items.push(json!({ "name": format!("filler-{i}"), "namespace": "prod", "status": "Running", "age": "1d" }));
+    }
+    items.push(json!({ "name": "bad", "namespace": "prod", "status": "S".repeat(300), "age": "1d" }));
+    t.set_items(items, "");
+
+    let buf = render_buffer(160, 12, |f| render_resource_table(f, f.area(), &t));
+    let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
+    let (_, r1) = row_containing(&rows, "web-1").expect("web-1 on screen");
+    // Everything for the visible rows is still there, including a status
+    // longer than its declared width -- the column grew to fit what is shown.
+    assert!(r1.contains("CrashLoopBackOff") && r1.contains("node-b") && r1.contains("1h"), "{r1}");
+    let (_, r0) = row_containing(&rows, "web-0").expect("web-0 on screen");
+    assert!(r0.contains("10.0.0.1") && r0.contains("node-a") && r0.contains("2d"), "{r0}");
+    assert!(!rows.iter().any(|l| l.contains("SSSSSSSSSS")), "the wall is off screen");
+
+    // Scroll down to the wall: it is clipped inside its column, one row high,
+    // and the row's other cells survive it.
+    for _ in 0..43 {
+        t.select_next();
+    }
+    let buf = render_buffer(160, 12, |f| render_resource_table(f, f.area(), &t));
+    let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
+    let (_, bad) = row_containing(&rows, "bad").expect("bad on screen");
+    assert!(bad.contains("SSSSSSSSSS"), "{bad}");
+    assert!(bad.contains("prod") && bad.contains("1d"), "other cells survive the wall: {bad}");
+    let walls = rows.iter().filter(|l| l.contains("SSSSSSSSSS")).count();
+    assert_eq!(walls, 1, "one row high, not wrapped: {rows:#?}");
+}
+
+#[test]
 fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
     let mut t = ResourceTableState::new(ResourceKind::Pods);
     t.set_items(
@@ -2310,7 +2381,7 @@ fn table_scrolls_to_keep_a_far_selection_in_a_short_viewport() {
     assert!(!lines.iter().any(|l| l.contains("pod-34")), "{lines:?}");
     assert_eq!(t.last_start_idx.get(), 35);
     // Alternating stripes: the even display row gets the stripe background.
-    let buf = render_buffer(120, 12, |f| render_resource_table(f, f.area(), &t));
+    let buf = render_buffer(160, 12, |f| render_resource_table(f, f.area(), &t));
     let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
     let (y36, _) = row_containing(&rows, "pod-36").unwrap();
     let (y37, _) = row_containing(&rows, "pod-37").unwrap();
