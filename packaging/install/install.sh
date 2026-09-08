@@ -358,9 +358,8 @@ prepare_install_dir() {
 #   * owned by root or by us. Anyone else can replace what is inside it.
 #   * if world-writable, the sticky bit must be set, so only an entry's owner
 #     may unlink it. That is what makes /tmp usable rather than disqualifying.
-#   * if group-writable, the group must be the owner's own -- the per-user
-#     group convention, where `alice:alice` has one member. A shared group is
-#     a set of people who can all replace the binary.
+#   * not group-writable at all, unless sticky. Who is really in a group
+#     cannot be established from a shell -- see the note at that check.
 #
 # The same rule srelens-tui's own `update` applies to the binary it replaces.
 assert_safe_dir() {
@@ -448,69 +447,24 @@ assert_component() {
         die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Nothing can be installed there safely."
     fi
 
-    # Group-writable, without the sticky bit, needs the group to contain
-    # nobody but the owner.
+    # Group-writable is refused, full stop.
     #
-    # A name matching the owner's is the per-user-group convention -- Fedora
-    # leaves ~/.local/bin as `alice:alice` 0775 under a 002 umask, and refusing
-    # that would break an ordinary install -- but a convention is not a
-    # guarantee. Nothing stops another account joining group `alice`, and any
-    # member could replace the binary between staging and the moment it runs.
-    # So the membership is looked up rather than assumed.
+    # This used to try to establish that the group had nobody in it but the
+    # owner -- the member list, then the passwd table for accounts whose
+    # PRIMARY group it is. Neither can be trusted to be complete: an SSSD or
+    # LDAP source can resolve accounts individually while declining to
+    # enumerate, so `getent passwd` succeeds and returns only what is local.
+    # A remote account in that group is then invisible, and the directory is
+    # accepted for exactly the person it should have been refused for.
     #
-    # What this cannot see: accounts whose PRIMARY group is this one do not
-    # appear in the group's member list, and `getent passwd` will not enumerate
-    # LDAP or SSSD directories anyway. A group-writable destination is the
-    # weakest link here; one that is not group-writable does not depend on any
-    # of it.
+    # The reason for all that machinery was that Fedora supposedly leaves
+    # ~/.local/bin group-writable under a 002 umask. It does not: Fedora 41
+    # sets UMASK 022 in login.defs, /etc/bashrc raises umask only when it is
+    # 0, and a fresh account gets `drwxr-xr-x`. The case being protected was
+    # not real, and it cost thirty-five lines that could not answer the
+    # question anyway.
     if [ "$(printf %s "$perms" | cut -c6)" = "w" ]; then
-        if [ -z "$group" ] || [ "$group" != "$owner" ]; then
-            die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Nothing can be installed there safely."
-        fi
-        if command -v getent >/dev/null 2>&1; then
-            # A lookup that FAILS is not a group with nobody in it. An NSS
-            # or LDAP hiccup would otherwise produce an empty entry, whose
-            # empty member list and empty GID then skip both checks below
-            # and accept the directory.
-            entry="$(getent group "$group" 2>/dev/null)" ||
-                die "cannot look up the group $group, so who can write to $path is unknown. Nothing can be installed there safely."
-            [ -n "$entry" ] ||
-                die "the group $group does not resolve, so who can write to $path is unknown. Nothing can be installed there safely."
-            members="$(printf %s "$entry" | cut -d: -f4)"
-            if [ -n "$members" ] && [ "$members" != "$owner" ]; then
-                die "$path is writable by the group $group, which has members besides $owner ($members). Any of them could replace the binary between staging and running it. Nothing can be installed there safely."
-            fi
-
-            # The member list is only half of a group. An account whose
-            # PRIMARY group this is never appears in it -- `getent group
-            # root` reads `root:x:0:` on a host where another account has
-            # GID 0, while that account can write here perfectly well. So
-            # the passwd table is asked as well.
-            #
-            # Still not a complete answer: `getent passwd` enumerates local
-            # accounts, and an LDAP or SSSD source may decline to be listed
-            # at all. A destination that is not group-writable depends on
-            # none of this.
-            gid="$(printf %s "$entry" | cut -d: -f3)"
-            if [ -n "$gid" ]; then
-                # Captured BEFORE awk sees it. In `getent passwd | awk`,
-                # the status belongs to awk, which succeeds happily on no
-                # input -- so a partial NSS outage would have produced an
-                # empty answer and been read as "nobody else is in this
-                # group". The same fail-open the group lookup above had.
-                accounts="$(getent passwd 2>/dev/null)" ||
-                    die "cannot enumerate accounts, so who else is in the group $group is unknown. Nothing can be installed there safely."
-                [ -n "$accounts" ] ||
-                    die "no accounts could be listed, so who else is in the group $group is unknown. Nothing can be installed there safely."
-                primary="$(printf %s "$accounts" |
-                    awk -F: -v g="$gid" -v o="$owner" '$4 == g && $1 != o { printf "%s ", $1 }')" || primary=""
-                if [ -n "$primary" ]; then
-                    die "$path is writable by the group $group, which is the primary group of ${primary%% }. Any of them could replace the binary between staging and running it. Nothing can be installed there safely."
-                fi
-            fi
-        else
-            die "$path is group-writable and there is no getent here to establish who is in group $group. Nothing can be installed there safely."
-        fi
+        die "$path is group-writable, and who is in group $group cannot be established well enough to trust it. Make it private first: chmod g-w $path"
     fi
 }
 # Install by rename where possible: a running binary being overwritten in

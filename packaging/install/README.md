@@ -66,10 +66,15 @@ each component must be:
   entry's owner may unlink it. `/tmp` is `drwxrwxrwt`, group- AND
   world-writable, so treating either bit as disqualifying on its own would
   refuse every path running through it;
-- if group-writable without sticky, owned by its own group AND that group
-  must really have no other members, counted from both the member list and
-  the passwd table -- an account whose PRIMARY group it is never appears in
-  the former. `alice:alice` is the per-user-group
+- not group-writable at all, unless sticky. Who is really in a group cannot
+  be established from a shell: an SSSD or LDAP source resolves accounts one
+  at a time while declining to enumerate, so `getent` gives a lower bound
+  rather than a fact. This used to try -- member list, then the passwd table
+  for primary-group members -- on the grounds that Fedora leaves
+  `~/.local/bin` group-writable under a 002 umask. It does not: Fedora 41
+  sets `UMASK 022`, and a fresh account gets `drwxr-xr-x`. Thirty-five lines
+  defending a case that was not real, and unable to answer the question
+  anyway. `alice:alice` is the per-user-group
   convention Fedora leaves on `~/.local/bin` under a 002 umask, but a
   convention is not a guarantee, so the membership is looked up. Accounts
   whose PRIMARY group is that one stay invisible to it — a group-writable
@@ -150,7 +155,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Fifty-six cases: argument handling, the macOS and unknown-architecture refusals,
+Fifty-five cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

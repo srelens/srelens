@@ -551,9 +551,25 @@ fi
 echo "shared groups and ancestors"
 
 if [ "$made_user" = "tester" ]; then
-    # A group-writable directory is only safe when the group is the owner's
-    # own -- the per-user-group convention. A shared group is a set of people
-    # who can each replace the binary between staging and running it.
+    # Group-writable is refused whatever the group is. Who is really in a
+    # group cannot be established from a shell -- an SSSD or LDAP source can
+    # resolve accounts one at a time while declining to enumerate, so any
+    # answer is a lower bound rather than a fact.
+    home="$work/homes/own-group"
+    new_home "$home"
+    chmod 0775 "$home/.local/bin"
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a group-writable destination is refused" "group-writable" "$out" "$rc" 1
+    if [ -e "$home/.local/bin/srelens-tui" ]; then
+        no "it installed into the group-writable directory anyway"
+    else
+        ok "nothing was installed there"
+    fi
+    check "and says how to fix it" "chmod g-w" "$out" "$rc" 1
+
+    # The owner's own group is refused too: it is the case the old rule tried
+    # to allow, on the strength of a convention that Fedora does not actually
+    # follow -- UMASK is 022 there and a fresh ~/.local/bin is drwxr-xr-x.
     if command -v groupadd >/dev/null 2>&1; then
         if ! getent group shared >/dev/null 2>&1; then
             if groupadd shared >/dev/null 2>&1; then
@@ -565,7 +581,7 @@ if [ "$made_user" = "tester" ]; then
         if chgrp shared "$home/.local/bin" 2>/dev/null; then
             chmod 0775 "$home/.local/bin"
             out="$(install_into "$home")" && rc=0 || rc=$?
-            check "a directory writable by a shared group is refused" "group shared" "$out" "$rc" 1
+            check "a shared group is refused by the same rule" "group-writable" "$out" "$rc" 1
         else
             echo "  skip  could not set a shared group"
         fi
@@ -573,47 +589,13 @@ if [ "$made_user" = "tester" ]; then
         echo "  skip  no groupadd: cannot test a shared group"
     fi
 
-    # The per-user-group case must keep working, or every Fedora install with
-    # a 002 umask breaks: there ~/.local/bin is `alice:alice` mode 0775.
-    home="$work/homes/own-group"
+    # Group-writable WITH the sticky bit is still fine: sticky is what stops
+    # anyone but an entry's owner unlinking it, whoever may write there.
+    home="$work/homes/group-sticky"
     new_home "$home"
-    chmod 0775 "$home/.local/bin"
+    chmod 3775 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "group-writable by the owner's own group still installs" "Installed:" "$out" "$rc" 0
-
-    # A group named after its owner is the per-user-group CONVENTION, not a
-    # guarantee. If the group really has other members, any of them can
-    # replace the binary, so membership is looked up rather than assumed.
-    if [ -n "$other_user" ] && command -v usermod >/dev/null 2>&1 &&
-        usermod -aG tester "$other_user" >/dev/null 2>&1; then
-        home="$work/homes/own-group-shared"
-        new_home "$home"
-        chmod 0775 "$home/.local/bin"
-        out="$(install_into "$home")" && rc=0 || rc=$?
-        check "an owner-named group with real members is refused" "besides tester" "$out" "$rc" 1
-        gpasswd -d "$other_user" tester >/dev/null 2>&1 || true
-    else
-        echo "  skip  cannot add a second member to the account's own group"
-    fi
-
-    # Supplementary members are only half of a group: an account whose PRIMARY
-    # group it is never appears in the member list, while it can write there
-    # perfectly well.
-    if command -v useradd >/dev/null 2>&1 &&
-        useradd -M -g tester primarytester >/dev/null 2>&1; then
-        # Recorded BEFORE it is used: an interrupt between the useradd and the
-        # userdel below would otherwise leave the account behind.
-        made_users="$made_users primarytester"
-        home="$work/homes/primary-gid"
-        new_home "$home"
-        chmod 0775 "$home/.local/bin"
-        out="$(install_into "$home")" && rc=0 || rc=$?
-        check "a group that is someone else's primary group is refused" "primarytester" "$out" "$rc" 1
-        userdel primarytester >/dev/null 2>&1 || true
-        made_users="$(printf %s "$made_users" | sed 's/ primarytester//')"
-    else
-        echo "  skip  could not create an account sharing that primary group"
-    fi
+    check "group-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
 
     # An extended ACL can grant write to any account while the mode bits look
     # impeccable. ls marks one with a trailing +, and reading an ACL portably
@@ -740,43 +722,6 @@ dest="$default_dest"
 out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "a TMPDIR symlink is resolved before it is judged" "writable by anyone" "$out" "$rc" 1
 
-# A lookup that fails is not a group with nobody in it. Only reached for a
-# group-writable destination, so these run as the unprivileged account
-# against a home shaped that way.
-if [ "$made_user" = "tester" ]; then
-    mkdir -p "$work/fake"
-    cat > "$work/fake/getent" <<'EOF'
-#!/bin/sh
-exit 2
-EOF
-    chmod +x "$work/fake/getent"
-    home="$work/homes/getent-down"
-    new_home "$home"
-    chmod 0775 "$home/.local/bin"
-    out="$(install_into "$home" "PATH=$work/fake:\$PATH")" && rc=0 || rc=$?
-    check "a group lookup that fails is not treated as empty" "cannot look up the group" "$out" "$rc" 1
-
-    # And neither is a passwd lookup that fails. In `getent passwd | awk`
-    # the status belongs to awk, which succeeds on no input, so a partial
-    # outage would read as "nobody else is in this group".
-    cat > "$work/fake/getent" <<'EOF'
-#!/bin/sh
-case "${1:-}" in
-  group)  echo "tester:x:1000:" ;;
-  passwd) exit 2 ;;
-  *) exit 2 ;;
-esac
-EOF
-    chmod +x "$work/fake/getent"
-    home="$work/homes/passwd-down"
-    new_home "$home"
-    chmod 0775 "$home/.local/bin"
-    out="$(install_into "$home" "PATH=$work/fake:\$PATH")" && rc=0 || rc=$?
-    check "a passwd lookup that fails is not treated as empty" "cannot enumerate accounts" "$out" "$rc" 1
-    rm -f "$work/fake/getent"
-else
-    echo "  skip  no unprivileged account this run created: cannot test a failed lookup"
-fi
 
 echo "unpacking"
 
