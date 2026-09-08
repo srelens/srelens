@@ -390,12 +390,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "spawns external kubectl; run manually as an integration test"]
     fn test_run_pod_shell_with_explicit_command_failure() {
         let res = ExecRunner::run_pod_shell("ctx", "ns", "pod", None, Some("/nonexistent/sh"));
         assert!(res.is_err());
     }
 
     #[test]
+    #[ignore = "spawns external kubectl; run manually as an integration test"]
     fn test_run_pod_shell_fallback_chain_all_missing() {
         // When running against non-existent cluster/context with no kubectl or missing pod,
         // it fails cleanly with captured error.
@@ -404,12 +406,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "spawns external kubectl; run manually as an integration test"]
     fn test_run_debug_shell_failure() {
         let res = ExecRunner::run_debug_shell("nonexistent-ctx", "ns", "pod", None);
         assert!(res.is_err());
     }
 
     #[test]
+    #[ignore = "spawns external kubectl; run manually as an integration test"]
     fn test_run_node_shell_failure() {
         let res = ExecRunner::run_node_shell("nonexistent-ctx", "nonexistent-node");
         assert!(res.is_err());
