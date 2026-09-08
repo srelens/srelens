@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /**
@@ -16,6 +16,10 @@ import userEvent from "@testing-library/user-event";
  */
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
+  appVersion: vi.fn(async () => "1.0.0"),
+  checkForUpdate: vi.fn(),
+  installUpdate: vi.fn(),
+  loadUpdateNotes: vi.fn(async () => "Release notes"),
   applyUiScale: vi.fn(),
   getMcpToken: vi.fn(),
   mcpHttpStatus: vi.fn(),
@@ -69,11 +73,15 @@ const DESKTOP_SECTIONS = [
   "Appearance",
   "Accessibility",
   "Shortcuts",
+  "Workspace",
+  "Kubernetes",
+  "Application logs",
+  "Updates",
   "Clusters",
 ];
 
 /** The same nav where no vault command can answer. */
-const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security");
+const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security" && s !== "Updates");
 
 function paint(props: { onLocked?: () => void } = {}) {
   const onSwitchToClassic = vi.fn();
@@ -239,7 +247,7 @@ describe("Settings", () => {
     // Roving tabindex: the strip is one stop, and Tab from it leaves rather
     // than walking six sections. `role=tablist` promises this; a run of six
     // Tab stops with dead arrow keys is a worse control than plain buttons.
-    expect(tabs.map((t) => t.tabIndex)).toEqual([0, -1, -1, -1, -1, -1]);
+    expect(tabs.map((t) => t.tabIndex)).toEqual(DESKTOP_SECTIONS.map((_, i) => i === 0 ? 0 : -1));
     tabs[0].focus();
     await user.keyboard("{ArrowDown}");
     expect(sections()[1]).toBe("Security");
@@ -425,4 +433,19 @@ describe("Settings", () => {
       expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });
   });
+});
+
+it("keeps an in-progress update when switching settings sections", async () => {
+  let finish!: () => void;
+  core.checkForUpdate.mockResolvedValue({ version: "2.0.0", currentVersion: "1.0.0", notes: "Release notes", external: false, elevates: false });
+  core.installUpdate.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const { user } = paint();
+  await user.click(screen.getByRole("tab", { name: "Updates" }));
+  await user.click(screen.getByRole("button", { name: "Check for updates" }));
+  await user.click(await screen.findByRole("button", { name: "Download & install" }));
+  await user.click(screen.getByRole("tab", { name: "Workspace" }));
+  await act(async () => finish());
+  await user.click(screen.getByRole("tab", { name: "Updates" }));
+  expect(await screen.findByRole("button", { name: "Restart srelens" })).toBeTruthy();
+  expect(core.installUpdate).toHaveBeenCalledOnce();
 });

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { settingsStorage } from "@srelens/core";
+import { getDefaultNamespace, setDefaultNamespace, settingsStorage } from "@srelens/core";
 import type { Tone } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
 
@@ -104,6 +104,7 @@ let seeded = false;
 
 export function resetView(): void {
   seeded = false;
+  defaultSelection = readDefaultSelection();
   if (isInitial(view)) return;
   emit(initial());
 }
@@ -156,10 +157,8 @@ const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every
  * selection at all. One cluster's entry that is not a string array is
  * dropped on its own rather than taking the rest of the document with it —
  * losing one cluster's remembered namespaces is a nuisance, losing every
- * cluster's is not. An entry that is a valid but empty array is dropped too,
- * for the same reason `setNamespaces` never writes one: it means the same
- * thing as no entry at all, and a document should not accumulate one per
- * cluster a reader ever looked at.
+ * cluster's is not. An empty array is an explicit all-namespaces choice;
+ * a missing entry follows the global default.
  */
 export function parseStoredNamespaces(raw: string | null): Record<string, string[]> {
   if (!raw) return {};
@@ -172,7 +171,7 @@ export function parseStoredNamespaces(raw: string | null): Record<string, string
   if (!isRecord(doc)) return {};
   const namespaces: Record<string, string[]> = {};
   for (const [id, value] of Object.entries(doc)) {
-    if (isStringArray(value) && value.length > 0) namespaces[id] = value;
+    if (isStringArray(value)) namespaces[id] = value;
   }
   return namespaces;
 }
@@ -200,6 +199,7 @@ function saveNamespaces(storage: Storage) {
  * neither is ever written here, but both could in principle already be set.
  */
 export function loadNamespaces(storage: Storage = settingsStorage): void {
+  defaultSelection = readDefaultSelection();
   let next: Record<string, string[]> = {};
   try {
     next = parseStoredNamespaces(storage.getItem(NAMESPACES_KEY));
@@ -215,13 +215,6 @@ export function loadNamespaces(storage: Storage = settingsStorage): void {
  */
 export function setNamespaces(clusterId: string, namespaces: string[], storage: Storage = settingsStorage): void {
   const current = view.namespaces[clusterId];
-  if (namespaces.length === 0) {
-    if (!current) return;
-    const { [clusterId]: _dropped, ...rest } = view.namespaces;
-    emit({ ...view, namespaces: rest });
-    saveNamespaces(storage);
-    return;
-  }
   if (current && sameArray(current, namespaces)) return;
   emit({ ...view, namespaces: { ...view.namespaces, [clusterId]: [...namespaces] } });
   saveNamespaces(storage);
@@ -229,12 +222,24 @@ export function setNamespaces(clusterId: string, namespaces: string[], storage: 
 
 /** A stable empty selection, so an unset cluster's snapshot never changes identity. */
 const NO_NAMESPACES: string[] = [];
+function readDefaultSelection(): string[] {
+  const namespace = getDefaultNamespace();
+  return namespace ? [namespace] : NO_NAMESPACES;
+}
+let defaultSelection = readDefaultSelection();
+
+/** A fallback affects only clusters with no explicit selection, including “all”. */
+export function setNamespaceDefault(namespace: string): void {
+  setDefaultNamespace(namespace);
+  defaultSelection = readDefaultSelection();
+  emit({ ...view });
+}
 
 /** The cluster's namespace selection, re-rendering whoever reads it when it changes. */
 export function useNamespaces(clusterId: string | undefined): string[] {
   return useSyncExternalStore(
     subscribe,
-    () => (clusterId === undefined ? NO_NAMESPACES : (view.namespaces[clusterId] ?? NO_NAMESPACES)),
+    () => (clusterId === undefined ? NO_NAMESPACES : (view.namespaces[clusterId] ?? defaultSelection)),
     () => NO_NAMESPACES,
   );
 }

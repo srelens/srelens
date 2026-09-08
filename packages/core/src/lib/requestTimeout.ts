@@ -5,7 +5,7 @@
 // startup and whenever the user changes it in Settings.
 
 import { invokeCommand } from "../transport/transport";
-import { getRequestTimeoutSecs, setRequestTimeoutSecs } from "./settings";
+import { clampTimeoutSecs, getRequestTimeoutSecs, setRequestTimeoutSecs } from "./settings";
 
 /** Push the persisted timeout to the backend. Call once on startup. */
 export async function applyPersistedTimeout(): Promise<number> {
@@ -18,12 +18,8 @@ export async function applyPersistedTimeout(): Promise<number> {
   }
 }
 
-/** Persist a new timeout and apply it to the backend; returns the clamped value. */
+/** Apply a timeout before persisting it, so a refusal cannot look like a saved change. */
 export async function updateRequestTimeout(secs: number): Promise<number> {
-  const clamped = setRequestTimeoutSecs(secs);
-  try {
-    return await invokeCommand<number>("set_request_timeout", { secs: clamped });
-  } catch {
-    return clamped;
-  }
+  const applied = await invokeCommand<number>("set_request_timeout", { secs: clampTimeoutSecs(secs) });
+  return setRequestTimeoutSecs(applied);
 }

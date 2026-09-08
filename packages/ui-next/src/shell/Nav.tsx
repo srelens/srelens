@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
 import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type StatusKind } from "@srelens/ui-kit";
+import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
@@ -134,8 +135,13 @@ export function Nav({ contexts }: NavProps) {
 
   const link = ctx ? (view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN) : UNKNOWN;
 
+  const navigationWidth = useNavigationWidth();
+
   return (
     <Sidebar
+      width={navigationWidth}
+      onResize={setNavigationWidth}
+      onWidthChange={saveNavigationWidth}
       label="Cluster navigation"
       query={query}
       onQueryChange={setQuery}

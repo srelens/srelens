@@ -24,6 +24,9 @@ export interface SidebarProps {
   emptyTitle?: ReactNode;
   emptyHint?: ReactNode;
   footer?: ReactNode;
+  /** Controlled width, when the host owns a shared layout preference. */
+  width?: number;
+  onResize?: (width: number) => void;
   defaultWidth?: number;
   minWidth?: number;
   maxWidth?: number;
@@ -63,13 +66,16 @@ export function Sidebar({
   emptyTitle = "Nothing here",
   emptyHint,
   footer,
+  width: controlledWidth,
+  onResize,
   defaultWidth = 238,
   minWidth = 180,
   maxWidth = 420,
   onWidthChange,
   className,
 }: SidebarProps) {
-  const [width, setWidth] = useState(defaultWidth);
+  const [localWidth, setWidth] = useState(defaultWidth);
+  const width = controlledWidth ?? localWidth;
 
   return (
     <nav
@@ -134,7 +140,7 @@ export function Sidebar({
         width={width}
         minWidth={minWidth}
         maxWidth={maxWidth}
-        onResize={setWidth}
+        onResize={(next) => { setWidth(next); onResize?.(next); }}
         onCommit={onWidthChange}
       />
     </nav>

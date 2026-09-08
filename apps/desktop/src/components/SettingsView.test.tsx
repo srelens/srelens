@@ -29,6 +29,7 @@ const updaterMocks = vi.hoisted(() => ({
 vi.mock("@srelens/core/lib/updater", () => updaterMocks);
 
 const transportMocks = vi.hoisted(() => ({
+  invokeCommand: vi.fn(async (_command: string, payload: { secs: number }) => payload.secs),
   appVersion: vi.fn(async () => "0.1.0"),
   relaunchApp: vi.fn(async () => {}),
   setWebviewZoom: vi.fn(async () => {}),
@@ -280,11 +281,11 @@ describe("SettingsView", () => {
     // 90s was above the old 30s ceiling — the whole point of #238.
     fireEvent.change(exact, { target: { value: "90" } });
     expect((slider as HTMLInputElement).value).toBe("90");
-    expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("90");
+    await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("90"));
 
     // Out-of-range typing clamps what's stored; the box settles on blur.
     fireEvent.change(exact, { target: { value: "9999" } });
-    expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("120");
+    await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("120"));
     fireEvent.blur(exact);
     expect((exact as HTMLInputElement).value).toBe("120");
 
@@ -292,9 +293,9 @@ describe("SettingsView", () => {
     // committed value must survive the empty box untouched.
     fireEvent.change(exact, { target: { value: "" } });
     expect((exact as HTMLInputElement).value).toBe("");
-    expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("120");
+    await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("120"));
     fireEvent.change(exact, { target: { value: "45" } });
-    expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("45");
+    await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("45"));
     expect((slider as HTMLInputElement).value).toBe("45");
   });
 

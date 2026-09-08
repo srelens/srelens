@@ -50,7 +50,7 @@ import {
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
 import { listContexts, deleteContext, type ClusterContext } from "@srelens/core";
-import { notify } from "@srelens/core";
+import { describeError, notify } from "@srelens/core";
 import {
   DEFAULT_WORKSPACE_LAYOUT,
   REQUEST_TIMEOUT,
@@ -224,7 +224,10 @@ export function SettingsView({
     if (!Number.isFinite(secs)) return;
     const clamped = clampTimeoutSecs(secs);
     setRequestTimeout(clamped);
-    void updateRequestTimeout(clamped);
+    void updateRequestTimeout(clamped).catch((error) => {
+      setRequestTimeout(getRequestTimeoutSecs());
+      notify.error("Could not save request timeout", describeError(error).detail);
+    });
   };
   const editRequestTimeout = (raw: string) => {
     setTimeoutDraft(raw);

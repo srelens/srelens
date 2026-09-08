@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import * as ws from "./workspace";
+import { settingsStorage } from "@srelens/core";
 
 function fakeStorage() {
   const m = new Map<string, string>();
@@ -12,7 +13,7 @@ function fakeStorage() {
   };
 }
 
-beforeEach(() => ws.resetView());
+beforeEach(() => { settingsStorage.removeItem("srelens.defaultNamespace"); ws.resetView(); });
 
 describe("workspace view", () => {
   it("starts with no links and nothing expanded", () => {
@@ -106,18 +107,18 @@ describe("workspace view", () => {
     expect(seen).not.toHaveBeenCalled();
   });
 
-  it("drops the key entirely when narrowed and then set back to all namespaces", () => {
+  it("keeps an explicit all-namespaces choice when a selection is cleared", () => {
     ws.setNamespaces("prod", ["default"]);
     ws.setNamespaces("prod", []);
-    expect("prod" in ws.getView().namespaces).toBe(false);
+    expect(ws.getView().namespaces.prod).toEqual([]);
   });
 
-  it("does not notify when an already-unset cluster is set to all namespaces", () => {
+  it("records all namespaces even when the cluster previously had no choice", () => {
     const seen = vi.fn();
     const off = ws.subscribe(seen);
     ws.setNamespaces("never-set", []);
     off();
-    expect(seen).not.toHaveBeenCalled();
+    expect(seen).toHaveBeenCalledOnce();
   });
 });
 
@@ -142,12 +143,12 @@ describe("persisted namespace selection", () => {
     expect(ws.getView().namespaces["ctx-1"]).toEqual(["prod"]);
   });
 
-  it("removes the key from storage when cleared, rather than persisting an empty array", () => {
+  it("remembers an explicit all-namespaces selection", () => {
     const s = fakeStorage();
     ws.setNamespaces("prod", ["default"], s);
     ws.setNamespaces("prod", [], s);
     const stored = JSON.parse(s.m.get(ws.NAMESPACES_KEY) ?? "{}");
-    expect("prod" in stored).toBe(false);
+    expect(stored.prod).toEqual([]);
   });
 
   it("survives a storage that throws on both read and write, costing only the selection", () => {
@@ -199,4 +200,19 @@ describe("persisted namespace selection", () => {
     expect(result.current).not.toBe(first);
     expect(result.current).toEqual(["default"]);
   });
+});
+
+it("uses the default only for clusters without a choice, and preserves explicit all after reload", () => {
+  const s = fakeStorage();
+  const { result } = renderHook(() => ws.useNamespaces("fresh"));
+  act(() => ws.setNamespaceDefault("team"));
+  expect(result.current).toEqual(["team"]);
+  act(() => ws.setNamespaces("fresh", [], s));
+  expect(result.current).toEqual([]);
+  act(() => ws.loadNamespaces(s));
+  expect(result.current).toEqual([]);
+  act(() => ws.setNamespaceDefault("other"));
+  expect(result.current).toEqual([]);
+  const other = renderHook(() => ws.useNamespaces("unseen"));
+  expect(other.result.current).toEqual(["other"]);
 });

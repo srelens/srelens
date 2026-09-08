@@ -92,6 +92,7 @@ export * from "./lib/toolbox";
 export * from "./lib/uiScale";
 export * from "./lib/updateNotifier";
 export * from "./lib/updater";
+export * from "./lib/updateNotes";
 export * from "./lib/watch";
 export * from "./lib/webClusters";
 export * from "./lib/webKubeconfigs";
