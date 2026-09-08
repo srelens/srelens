@@ -220,6 +220,48 @@ jobs:
           path: ${{ runner.temp }}/smoke-artifacts
           if-no-files-found: ignore
 
+  install-script:
+    name: install script
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # An install script is the easiest file in the repository to leave
+      # broken: nothing builds it, nothing imports it, and the first person to
+      # notice is a stranger following the README. `sh` on this runner is
+      # dash, which is the point -- the script promises POSIX sh, and bash
+      # would happily accept bashisms that Debian and Alpine users would not.
+      - name: Lint
+        run: shellcheck -s sh packaging/install/install.sh packaging/install/test.sh
+      - name: Test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: sh packaging/install/test.sh
+      # Again as root, in a container, because six of the cases skip
+      # otherwise -- and they are the six that matter most. Every rule about
+      # who owns the destination needs a second account and a second group to
+      # mean anything, so on an unprivileged runner the ownership walk, the
+      # ACL refusal and the group-membership lookup all report `skip` and the
+      # job goes green having proven none of them. The suite removes the
+      # account and group it creates; the container is thrown away regardless.
+      - name: Test as root
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker run --rm -i \
+            -e GITHUB_TOKEN="$GITHUB_TOKEN" \
+            -v "$PWD/packaging/install:/packaging/install:ro" \
+            debian:bookworm-slim sh -c '
+              set -e
+              apt-get -qq update >/dev/null
+              # acl for the ACL case, libdigest-sha-perl for shasum -- without
+              # it the sha256sum-absent branch skips here too.
+              apt-get -qq install -y curl ca-certificates acl attr libcap2-bin libdigest-sha-perl >/dev/null
+              # The suite writes nothing into the mount, but it does need to
+              # be able to run from somewhere it owns.
+              cp -r /packaging/install /tmp/install
+              sh /tmp/install/test.sh
+            '
+
   docker:
     name: docker image
     runs-on: ubuntu-22.04
