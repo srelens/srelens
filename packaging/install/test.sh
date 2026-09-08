@@ -530,6 +530,13 @@ if [ "$made_user" = "tester" ]; then
     new_home "$home"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a sticky world-writable ANCESTOR is still fine" "Installed:" "$out" "$rc" 0
+    # Including when the home under it does not exist yet, so the sticky
+    # directory is the nearest EXISTING component of the fallback: it is
+    # judged as the parent it is, not by the destination's stricter rule.
+    home="$sticky_parent/new-home"
+    rm -rf "$home"
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a fallback created beneath a sticky ancestor is still fine" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
 
     # A directory belonging to somebody else: they can arrange the swap at
     # leisure and get a file written by the installing account out of it.

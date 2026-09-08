@@ -456,7 +456,12 @@ prepare_install_dir() {
             die "cannot find an existing ancestor of $want"
         existing="$parent"
     done
-    assert_safe_dir "$existing"
+    # As a PARENT, which is what it is: the destination will be created
+    # beneath it. Judged by the destination's stricter rule, a sticky /tmp
+    # under a HOME that does not exist yet would be refused -- the very
+    # thing the sticky exemption exists to allow. The destination itself
+    # gets its own rule from the caller's walk once it exists.
+    assert_safe_dir "$existing" parent
     dir="$want"
     mkdir -p "$dir" 2>/dev/null ||
         die "cannot create $dir"
@@ -485,8 +490,13 @@ prepare_install_dir() {
 #     cannot be established from a shell -- see the note at that check.
 #
 # The same rule srelens-tui's own `update` applies to the binary it replaces.
+#
+# The last component is the destination unless the caller says `parent`:
+# prepare_install_dir walks the nearest EXISTING ancestor before creating
+# anything beneath it, and that ancestor is a parent, sticky /tmp included.
 assert_safe_dir() {
     dir="$1"
+    last_role="${2:-destination}"
 
     # Resolve first. `ls -ld` on a symlink describes the LINK -- mode
     # `lrwxrwxrwx`, owned by whoever made it -- which says nothing about where
@@ -509,9 +519,10 @@ assert_safe_dir() {
         esac
         prefix="$prefix/$name"
         # The last component is where the binary lands, and it is held to a
-        # stricter rule than the ones above it.
+        # stricter rule than the ones above it -- unless the caller said it
+        # is a parent too.
         if [ -z "$rest" ]; then
-            assert_component "$prefix" destination
+            assert_component "$prefix" "$last_role"
         else
             assert_component "$prefix" parent
         fi
