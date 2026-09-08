@@ -83,10 +83,16 @@ host. Otherwise prefer the glibc build.
 run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh
-sh srelens-install.sh
-rm srelens-install.sh
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh &&
+  sh srelens-install.sh &&
+  rm srelens-install.sh
 ```
+
+Chained, not three separate lines: unchained, a failed download would leave
+the previous `srelens-install.sh` sitting there to be run, and a failed
+install followed by a successful `rm` would end the snippet at status 0 —
+the same way the pipeline did. If the install fails the file is left in
+place, which is what you want when you are about to look at why.
 
 Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
 reports the status of its *last* command. If the download fails — a 404, a

@@ -3,9 +3,9 @@
 `install.sh` is what this serves:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh
-sh srelens-install.sh
-rm srelens-install.sh
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh &&
+  sh srelens-install.sh &&
+  rm srelens-install.sh
 ```
 
 Two steps, not `curl … | sh`: a pipeline reports the status of its last
@@ -119,6 +119,19 @@ be replaced faithfully — the rollback copy is taken by reading the
 destination, which follows the link, so a restore would put a regular file
 where a link had been while reporting the previous copy was put back.
 
+**An install is a transaction, and a signal rolls it back.** Between the
+replacement and the moment the new binary is first run, the destination
+holds something unvalidated and the previous copy is under a random name —
+and on a `noexec` working directory that window covers the *only* time the
+binary is ever checked. `INT` and `TERM` put the old copy back and remove
+the staging file rather than leaving that state behind.
+
+The rollback copy carries bytes, mode, owner and timestamps (`cp -p`, into
+the inode `mktemp` holds, so the name is never released). It does **not**
+carry an extended ACL, an xattr or a file capability — nothing portable
+does — so an existing binary with an ACL is refused rather than restored
+as something quietly less protected.
+
 **Unpredictable staging, and a private unpack.** The staging file is created
 with `mktemp` rather than at `.srelens-tui.install.<pid>`, which could be
 pre-created as a symlink for `cp` to write through. The archive is unpacked
@@ -175,7 +188,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Sixty-four cases: argument handling, the macOS and unknown-architecture refusals,
+Sixty-eight cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

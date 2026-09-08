@@ -71,6 +71,13 @@ main() {
     say "Installing $BIN $version ($target) into $install_dir"
     assert_safe_dir "$install_dir"
 
+    # What a signal would have to undo. Set before the traps below, since
+    # `set -u` makes an unset name an error inside a handler.
+    INSTALL_DEST=""
+    INSTALL_BACKUP=""
+    INSTALL_STAGED=""
+    INSTALL_COMMITTED=""
+
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
     #
@@ -79,9 +86,13 @@ main() {
     # directory it had just deleted -- and could reach the end and report
     # `Installed` after being asked to stop. The EXIT trap then runs a second
     # time, which `rm -rf` does not mind.
-    trap 'rm -rf "$tmp"' EXIT
-    trap 'rm -rf "$tmp"; exit 130' INT
-    trap 'rm -rf "$tmp"; exit 143' TERM
+    # The destination first: a signal arriving after the replacement but
+    # before the new binary has been run leaves an unvalidated copy live and
+    # the old one hidden under a random name -- and on a noexec working
+    # directory that window covers the only time the binary is ever checked.
+    trap 'install_rollback; rm -rf "$tmp"' EXIT
+    trap 'install_rollback; rm -rf "$tmp"; exit 130' INT
+    trap 'install_rollback; rm -rf "$tmp"; exit 143' TERM
 
     # The same walk the destination gets. `mktemp -d` makes the directory
     # itself 0700 and ours, but it puts it under $TMPDIR when that is set --
@@ -145,7 +156,10 @@ main() {
     # swallowed: the install printed `Installed` and exited 0 while the
     # binary was never in place.
     if installed_version="$("$install_dir/$BIN" --version 2>/dev/null)"; then
-        # It runs. The copy that was there before is no longer needed.
+        # It runs. That is the commit: the copy that was there before is no
+        # longer needed, and the traps stop trying to undo anything.
+        INSTALL_COMMITTED=yes
+        INSTALL_STAGED=""
         [ -z "$INSTALL_BACKUP" ] || rm -f "$INSTALL_BACKUP"
     else
         # It does not. Put back whatever was there rather than leaving the
@@ -516,6 +530,26 @@ assert_component() {
         die "$path is group-writable, and who is in group $group cannot be established well enough to trust it. Make it private first: chmod g-w $path"
     fi
 }
+# Undo an installation that never got committed.
+#
+# Committed means the new binary has been run and answered. Until then the
+# replacement is unvalidated, so anything that ends the script early -- a
+# signal, `set -e`, a die -- has to put back what was there and take away
+# what was not. Idempotent on purpose: the failure paths in main do the same
+# work, and whichever gets there first leaves nothing for the other.
+install_rollback() {
+    [ -z "$INSTALL_COMMITTED" ] || return 0
+    if [ -n "$INSTALL_BACKUP" ] && [ -e "$INSTALL_BACKUP" ]; then
+        if [ -n "$INSTALL_DEST" ]; then
+            mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null ||
+                rm -f "$INSTALL_BACKUP"
+        else
+            rm -f "$INSTALL_BACKUP"
+        fi
+    fi
+    [ -z "$INSTALL_STAGED" ] || rm -f "$INSTALL_STAGED"
+}
+
 # Install by rename where possible: a running binary being overwritten in
 # place gets ETXTBSY on Linux, while replacing the directory entry does not
 # disturb a process already holding the old inode.
@@ -537,6 +571,15 @@ install_binary() {
     # bytes -- so a restore would put a regular file where a link had been,
     # silently breaking whatever arrangement the link was part of while
     # reporting that the previous copy was put back.
+    # An extended ACL on the existing binary would not survive a rollback:
+    # the copy carries bytes, mode, owner and times, and nothing else. Better
+    # to refuse than to restore something quietly less protected than what
+    # was there. getfacl is already required by the destination checks.
+    if [ -e "$dest" ] && command -v getfacl >/dev/null 2>&1 &&
+        [ -n "$(getfacl --skip-base --omit-header "$dest" 2>/dev/null)" ]; then
+        die "$dest carries an extended ACL, which a rollback could not put back. Remove the ACL, or move the file aside, and run this again."
+    fi
+
     if [ -L "$dest" ]; then
         die "$dest is a symlink. Install over what it points at, or remove it first: this replaces the path itself and could not put the link back if the new binary failed."
     fi
@@ -552,6 +595,7 @@ install_binary() {
     # exclusively and 0600, under a name nobody can aim at.
     staged="$(mktemp "$dir/.$BIN.install.XXXXXX")" ||
         die "cannot create a staging file in $dir"
+    INSTALL_STAGED="$staged"
     cp "$src" "$staged" || {
         rm -f "$staged"
         die "cannot write to $dir"
@@ -600,7 +644,12 @@ install_binary() {
             rm -f "$staged"
             die "cannot create a rollback file in $dir, so $dest will not be replaced"
         }
-        if ! cat "$dest" > "$INSTALL_BACKUP" 2>/dev/null; then
+        # `cp -p` rather than a redirect: it writes into the inode mktemp
+        # holds -- so the name is still never released -- and carries the
+        # mode, owner and timestamps across as well as the bytes. What it
+        # cannot carry is an extended ACL, an xattr or a file capability;
+        # those are refused below rather than silently dropped.
+        if ! cp -p "$dest" "$INSTALL_BACKUP" 2>/dev/null; then
             rm -f "$INSTALL_BACKUP" "$staged"
             die "cannot preserve the $BIN already at $dest, so it will not be replaced"
         fi
@@ -617,6 +666,10 @@ install_binary() {
         [ -z "$INSTALL_BACKUP" ] || mv -f "$INSTALL_BACKUP" "$dest" 2>/dev/null || true
         die "cannot replace $dest"
     }
+    # From here the destination holds an unvalidated binary, and a signal has
+    # to know where to put the old one back.
+    INSTALL_DEST="$dest"
+    INSTALL_STAGED=""
 }
 
 warn_if_not_on_path() {

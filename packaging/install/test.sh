@@ -347,6 +347,17 @@ fi
 
 echo "how the docs say to run it"
 
+# The chained form the docs show. Unchained, a failed download leaves the
+# previous file sitting there to be run, and a failed install followed by a
+# successful rm ends the snippet at status 0.
+chain_rc=0
+curl -fsSL "https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/no-such-file.sh" -o "$work/chain.sh" 2>/dev/null && sh "$work/chain.sh" >/dev/null 2>&1 && rm "$work/chain.sh" || chain_rc=$?
+if [ "$chain_rc" != "0" ]; then
+    ok "the chained form fails when the download fails, exit $chain_rc"
+else
+    no "the chained form reported success on a failed download"
+fi
+
 # The documented form is download-then-run, not `curl | sh`. A pipeline
 # reports its LAST command, so a download that fails leaves sh reading an
 # empty script, doing nothing, and exiting 0 -- the line succeeds having
@@ -860,6 +871,51 @@ dest="$default_dest"
 out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "a TMPDIR symlink is resolved before it is judged" "writable by other users" "$out" "$rc" 1
 
+
+echo "interrupted mid-update"
+
+# A signal arriving after the destination has been replaced but before the
+# new binary has been run leaves an unvalidated copy live and the old one
+# hidden under a random name. The traps have to undo that.
+#
+# Timed by watching for the line printed just before the download starts,
+# then killing it: the replacement happens after that, so this covers the
+# window rather than one instant inside it. Either outcome is acceptable --
+# the old binary back, or the update having finished first -- but not a
+# destination left empty or littered.
+if [ "$made_user" = "tester" ]; then
+    home="$work/homes/interrupted"
+    new_home "$home"
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
+    chmod 0755 "$home/.local/bin/srelens-tui"
+    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    chmod 0711 "$work" 2>/dev/null || true
+    chmod 0644 "$script" 2>/dev/null || true
+    su tester -c "HOME='$home' sh '$script' --version '$version'" >"$work/int.log" 2>&1 &
+    kill_pid=$!
+    tries=0
+    while [ "$tries" -lt 300 ]; do
+        grep -q "Installing srelens-tui" "$work/int.log" 2>/dev/null && break
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    kill -TERM "$kill_pid" 2>/dev/null || true
+    wait "$kill_pid" 2>/dev/null || true
+    if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null; then
+        ok "an interrupted update leaves the previous binary in place"
+    elif [ -x "$home/.local/bin/srelens-tui" ]; then
+        ok "the update completed before the signal landed, nothing to undo"
+    else
+        no "an interrupted update left no binary at all"
+    fi
+    if [ -z "$(find "$home/.local/bin" -name '.srelens-tui.*' 2>/dev/null)" ]; then
+        ok "and nothing hidden behind it"
+    else
+        no "an interrupted update left hidden files in the install directory"
+    fi
+else
+    echo "  skip  no unprivileged account this run created: cannot interrupt an update"
+fi
 
 echo "unpacking"
 
