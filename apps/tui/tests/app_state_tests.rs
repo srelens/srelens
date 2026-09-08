@@ -952,14 +952,18 @@ async fn the_node_inspector_renders_loading_error_and_detail_states() {
     app.active_view = ActiveView::NodeInspector(NodeInspectorState::new("gpu-1".into()));
     let screen = wide(&mut app);
     assert!(screen.contains("Node Inspector: gpu-1"), "{screen}");
-    assert!(screen.contains("Cordon"), "{screen}");
-    assert!(screen.contains("PodDesc"), "{screen}");
+    assert!(screen.contains("Cmd"), "{screen}");
 
     let mut failed = NodeInspectorState::new("gpu-1".into());
     failed.set_error("node not found".into());
     app.active_view = ActiveView::NodeInspector(failed);
     let screen = wide(&mut app);
     assert!(screen.contains("Node Inspector Error: gpu-1"), "{screen}");
+
+    app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
+    let screen = wide(&mut app);
+    assert!(screen.contains("Cordon"), "{screen}");
+    assert!(screen.contains("Pod Describe"), "{screen}");
 
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", true));
     let screen = wide(&mut app);
@@ -2240,10 +2244,18 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
     assert_eq!(ni.selected_pod_idx, 0);
 
     app.handle_key_event(common::ch('s')).await;
-    assert_eq!(
-        toast(&app),
-        "Node debug command: kubectl debug node/gpu-1 -it --image=busybox"
-    );
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::PodShell { .. })
+    ));
+    app.requires_terminal_suspend = None;
+
+    app.handle_key_event(common::ch('S')).await;
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeShell { node }) if node == "gpu-1"
+    ));
+    app.requires_terminal_suspend = None;
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
@@ -2849,7 +2861,7 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 
     app.prompt_pod_shell("solo".into(), None).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "solo");
             assert_eq!(container.as_deref(), Some("only"));
         }

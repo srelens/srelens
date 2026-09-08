@@ -1184,46 +1184,53 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         })
         .collect();
 
-    let widths: Vec<Constraint> = if state.kind == ResourceKind::Nodes {
-        let max_name_len = state
-            .filtered_indices
-            .iter()
-            .map(|&idx| {
-                let is_marked = state.marked_indices.contains(&idx);
-                let prefix_len = if is_marked { 2 } else { 0 };
-                prefix_len + extract_field_str(&state.raw_items[idx], "name").len()
-            })
-            .max()
-            .unwrap_or(12)
-            .max("NAME".len());
-        let name_width = (max_name_len + 3) as u16;
+    let widths: Vec<Constraint> = state
+        .columns
+        .iter()
+        .map(|col| {
+            let max_item_len = state
+                .filtered_indices
+                .iter()
+                .map(|&idx| {
+                    let item = &state.raw_items[idx];
+                    let text = super::sanitize_span_text(&extract_field_str(item, col.key));
+                    let is_marked = state.marked_indices.contains(&idx);
+                    let prefix_len = if col.key == "name" && is_marked { 2 } else { 0 };
+                    let mut total_len = prefix_len + text.chars().count();
 
-        let max_status_len = state
-            .filtered_indices
-            .iter()
-            .map(|&idx| extract_field_str(&state.raw_items[idx], "status").len())
-            .max()
-            .unwrap_or(8)
-            .max("STATUS".len());
-        let status_width = (max_status_len + 3) as u16;
+                    if col.key == "name" {
+                        let ns = extract_field_str(item, "namespace");
+                        let name = extract_field_str(item, "name");
+                        let active_forwards = state
+                            .active_port_forwards
+                            .get(&(ns.clone(), name.clone()))
+                            .or_else(|| state.active_port_forwards.get(&(String::new(), name.clone())));
+                        if let Some(forwards) = active_forwards {
+                            if !forwards.is_empty() {
+                                let pf_str = forwards
+                                    .iter()
+                                    .map(|(loc, rem, _)| {
+                                        if loc == rem {
+                                            format!("{}", loc)
+                                        } else {
+                                            format!("{}→{}", loc, rem)
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(",");
+                                total_len += 1 + format!("[PF: {}]", pf_str).chars().count();
+                            }
+                        }
+                    }
+                    total_len
+                })
+                .max()
+                .unwrap_or(0);
 
-        state
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                if i == 0 && c.key == "name" {
-                    Constraint::Length(name_width)
-                } else if i == 1 && c.key == "status" {
-                    Constraint::Length(status_width)
-                } else {
-                    c.width
-                }
-            })
-            .collect()
-    } else {
-        state.columns.iter().map(|c| c.width).collect()
-    };
+            let dynamic_width = (max_item_len.max(col.name.len()) + 1) as u16;
+            Constraint::Length(dynamic_width)
+        })
+        .collect();
     let table = Table::new(rows, widths).header(header);
     f.render_widget(table, inner);
 }

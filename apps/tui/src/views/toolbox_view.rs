@@ -151,11 +151,30 @@ pub fn render_toolbox_view(f: &mut Frame, area: Rect, state: &ToolboxViewState) 
         })
         .collect();
 
+    let mut max_tool = "TOOL".len();
+    let mut max_status = "STATUS".len();
+    let mut max_version = "VERSION".len();
+    let mut max_path = "PATH".len();
+
+    for tool in &state.tools {
+        max_tool = max_tool.max(tool.name.len());
+        let status_len = if tool.installed {
+            "● INSTALLED".chars().count()
+        } else if tool.required {
+            "● MISSING (REQUIRED)".chars().count()
+        } else {
+            "○ NOT INSTALLED".chars().count()
+        };
+        max_status = max_status.max(status_len);
+        max_version = max_version.max(tool.version.as_deref().unwrap_or("-").len());
+        max_path = max_path.max(tool.path.as_deref().unwrap_or("-").len());
+    }
+
     let widths = [
-        Constraint::Length(15),
-        Constraint::Length(25),
-        Constraint::Length(16),
-        Constraint::Min(35),
+        Constraint::Length((max_tool + 1) as u16),
+        Constraint::Length((max_status + 1) as u16),
+        Constraint::Length((max_version + 1) as u16),
+        Constraint::Min((max_path + 1) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);

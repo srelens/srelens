@@ -464,10 +464,11 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
             let left_str = dl.line_num_left.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
             let right_str = dl.line_num_right.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
 
+            let clean_text = super::sanitize_span_text(&dl.text);
             Line::from(vec![
                 Span::styled(format!("{} {} ", left_str, right_str), Style::default().fg(Theme::dim())),
                 Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
-                Span::styled(&dl.text, style),
+                Span::styled(clean_text, style),
             ])
         })
         .collect();
@@ -541,12 +542,32 @@ fn render_revisions_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) 
         })
         .collect();
 
+    let mut max_rev = "REVISION".len();
+    let mut max_status = "STATUS".len();
+    let mut max_updated = "UPDATED".len();
+    let mut max_chart = "CHART VERSION".len();
+    let mut max_desc = "DESCRIPTION".len();
+
+    for rev in &d.history {
+        let is_current = rev.revision == d.revision;
+        let rev_len = if is_current {
+            format!("{} (current)", rev.revision).len()
+        } else {
+            rev.revision.to_string().len()
+        };
+        max_rev = max_rev.max(rev_len);
+        max_status = max_status.max(rev.status.len());
+        max_updated = max_updated.max(rev.updated.len());
+        max_chart = max_chart.max(rev.chart_version.len());
+        max_desc = max_desc.max(rev.description.len());
+    }
+
     let widths = [
-        Constraint::Length(16),
-        Constraint::Length(14),
-        Constraint::Length(25),
-        Constraint::Length(20),
-        Constraint::Min(30),
+        Constraint::Length((max_rev + 1) as u16),
+        Constraint::Length((max_status + 1) as u16),
+        Constraint::Length((max_updated + 1) as u16),
+        Constraint::Length((max_chart + 1) as u16),
+        Constraint::Length((max_desc + 1) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);
@@ -591,9 +612,10 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
                 Style::default().fg(Theme::dim())
             };
 
+            let clean_l = super::sanitize_span_text(l);
             Line::from(vec![
                 Span::styled(format!("{:>5} │ ", line_idx), Style::default().fg(Theme::dim())),
-                Span::styled(l, style),
+                Span::styled(clean_l, style),
             ])
         })
         .collect();
@@ -626,7 +648,7 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .lines()
         .skip(state.scroll_offset)
         .take(viewport_height)
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(Theme::fg()))))
+        .map(|l| Line::from(Span::styled(super::sanitize_span_text(l), Style::default().fg(Theme::fg()))))
         .collect();
 
     let para = Paragraph::new(lines);

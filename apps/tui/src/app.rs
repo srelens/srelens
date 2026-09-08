@@ -110,8 +110,8 @@ pub struct App {
 
 pub enum SuspendAction {
     EditYaml,
-    PodShell { pod: String, container: Option<String> },
-    DebugShell { pod: String, container: Option<String> },
+    PodShell { pod: String, namespace: Option<String>, container: Option<String> },
+    DebugShell { pod: String, namespace: Option<String>, container: Option<String> },
     NodeShell { node: String },
 }
 
@@ -1567,6 +1567,7 @@ impl App {
                                 ContainerAction::Shell => {
                                     self.requires_terminal_suspend = Some(SuspendAction::PodShell {
                                         pod: pod_name,
+                                        namespace,
                                         container: chosen_container,
                                     });
                                 }
@@ -2667,11 +2668,19 @@ impl App {
                     }
                     KeyCode::Char('s') => {
                         // Shell / Exec
-                        if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
+                        if table_kind == ResourceKind::Nodes {
+                            if let Some(node_name) = sel_name {
+                                self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name });
+                            }
+                        } else if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
                             self.set_toast(format!("Shell only available for Pods (selected is {})", row_kind), Theme::status_warn());
-                        } else if let Some(pod_name) = sel_name {
-                            let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
-                            self.prompt_pod_shell(pod_name, target_ns).await;
+                        } else if table_kind == ResourceKind::Pods || (table_kind == ResourceKind::Workloads && row_kind == "Pod") {
+                            if let Some(pod_name) = sel_name {
+                                let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                                self.prompt_pod_shell(pod_name, target_ns).await;
+                            }
+                        } else {
+                            self.set_toast("Shell only available for Pods and Nodes".to_string(), Theme::status_warn());
                         }
                     }
                     KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
@@ -2978,6 +2987,13 @@ impl App {
                     KeyCode::Char('k') | KeyCode::Up => logs.scroll_up(1),
                     KeyCode::Char('g') | KeyCode::Home => logs.scroll_top(),
                     KeyCode::Char('G') | KeyCode::End => logs.scroll_to_bottom(),
+                    KeyCode::Char('h') | KeyCode::Left => logs.scroll_left(8),
+                    KeyCode::Char('l') | KeyCode::Right => logs.scroll_right(8),
+                    KeyCode::Char('0') => logs.horizontal_scroll = 0,
+                    KeyCode::PageUp => logs.scroll_up(10),
+                    KeyCode::PageDown => logs.scroll_down(10),
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => logs.scroll_up(10),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => logs.scroll_down(10),
                     KeyCode::Char('f') => logs.toggle_follow(),
                     KeyCode::Char('t') => logs.toggle_timestamps(),
                     KeyCode::Char('p') => logs.toggle_previous(),
@@ -3693,9 +3709,15 @@ impl App {
                         }
                     }
                     KeyCode::Char('s') => {
-                        // Launch root node shell
-                        let cmd_str = format!("kubectl debug node/{} -it --image=busybox", node_name);
-                        self.set_toast(format!("Node debug command: {}", cmd_str), Theme::status_ok());
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.prompt_pod_shell(p_name, Some(p_ns)).await;
+                        } else {
+                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        // Explicit node debug shell even if a pod is highlighted
+                        self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
                     }
                     KeyCode::Char('c') => {
                         let target_unsched = !is_unsched;
@@ -5229,6 +5251,7 @@ impl App {
         } else {
             self.requires_terminal_suspend = Some(SuspendAction::PodShell {
                 pod: pod_name,
+                namespace,
                 container: containers.into_iter().next(),
             });
         }
@@ -6535,8 +6558,12 @@ impl App {
                         self.prompt_pod_logs(resource_name, namespace).await;
                     }
                     QuickActionId::OpenShell => {
-                        let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
-                        self.prompt_pod_shell(resource_name, target_ns).await;
+                        if resource_kind.eq_ignore_ascii_case("node") || resource_kind.eq_ignore_ascii_case("nodes") {
+                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: resource_name });
+                        } else {
+                            let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                            self.prompt_pod_shell(resource_name, target_ns).await;
+                        }
                     }
                     QuickActionId::PortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
@@ -7440,27 +7467,10 @@ impl App {
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            ActiveView::NodeInspector(ni) => {
-                let cordon_act = if ni.details.as_ref().map(|d| d.unschedulable).unwrap_or(false) {
-                    "Uncordon"
-                } else {
-                    "Cordon"
-                };
-                Some(&[
-                    ("<:>", "Cmd"),
-                    ("<↑/↓>", "Pod"),
-                    ("<Enter>", "Jump"),
-                    ("<l>", "Logs"),
-                    ("<d>", "PodDesc"),
-                    ("<D>", "NodeDesc"),
-                    ("<y>", "YAML"),
-                    ("<x>", "Actions"),
-                    ("<c>", cordon_act),
-                    ("<s>", "Shell"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..])
-            }
+            ActiveView::NodeInspector(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Tree(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<↑/↓>", "Move"),
@@ -7670,62 +7680,20 @@ impl App {
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            ActiveView::HelmDetail(detail) => match detail.active_tab {
-                HelmDetailTab::Overview => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<c>", "CopyURL"),
-                    ("<r>", "Rollback"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::ValuesDiff => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<m>", "ToggleDiffMode"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Revisions => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "SelectRev"),
-                    ("<r>", "Rollback"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Manifest => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Notes => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-            },
+            ActiveView::HelmDetail(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Settings(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Toolbox(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<c>", "CopyPath"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            _ => None,
         };
 
         render_statusbar(

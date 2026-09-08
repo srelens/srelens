@@ -181,7 +181,8 @@ fn logs_view_starts_empty_and_following() {
     assert!(state.follow);
     assert!(!state.timestamps);
     assert!(!state.previous);
-    assert!(!state.wrap);
+    assert!(state.wrap);
+    assert_eq!(state.horizontal_scroll, 0);
     assert_eq!(state.scroll_offset, 0);
     assert!(state.search_query.is_empty());
     assert!(state.current_match_idx.is_none());
@@ -250,9 +251,11 @@ fn logs_view_flag_toggles_flip_each_flag_independently() {
     state.toggle_timestamps();
     state.toggle_previous();
     state.toggle_wrap();
-    assert!(state.timestamps && state.previous && state.wrap);
+    assert!(state.timestamps && state.previous && !state.wrap);
     state.toggle_timestamps();
-    assert!(!state.timestamps && state.previous && state.wrap);
+    assert!(!state.timestamps && state.previous && !state.wrap);
+    state.toggle_wrap();
+    assert!(state.wrap);
 }
 
 #[test]
@@ -336,7 +339,7 @@ fn logs_view_renders_a_waiting_placeholder_when_there_are_no_lines() {
     let state = logs();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: web-0 (default/app) [Ftpw] [1/0 lines]"),
+        text.contains("Logs: web-0 (default/app) [FtpW] [1/0 lines]"),
         "{text}"
     );
     assert!(text.contains("Waiting for logs..."));
@@ -351,7 +354,6 @@ fn logs_view_renders_numbered_lines_and_the_flag_letters_when_following() {
     }
     state.toggle_timestamps();
     state.toggle_previous();
-    state.toggle_wrap();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
         text.contains("Logs: api (prod/all) [FTPW] [3/3 lines]"),
@@ -429,28 +431,67 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
     let mut state = logs();
     state.push_line("x".repeat(100));
     state.set_search_query("nothing");
-    let lines = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
+    // With wrap enabled by default, the 100-char line wraps onto line 2 with hanging indent.
+    let wrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
+    assert!(wrapped[1].starts_with("│    1 │ xxxx"), "{}", wrapped[1]);
+    assert!(
+        wrapped[2].starts_with("│      │ xxxx"),
+        "wrapped continuation with gutter indent: {}",
+        wrapped[2]
+    );
+
     // The title is clipped to the width; the badge is still part of it.
     let title_text = common::render_text(200, 20, |f| render_logs_view(f, f.area(), &state));
     assert!(
         title_text.contains("[Search: \"nothing\" (0 matches)]"),
         "{title_text}"
     );
-    // Without wrap the 100-char line is cut at the border.
-    assert!(lines[1].starts_with("│    1 │ xxxx"), "{}", lines[1]);
-    assert!(
-        lines[2].trim_matches(|c| c == '│' || c == ' ').is_empty(),
-        "{}",
-        lines[2]
-    );
 
+    // Toggling wrap off cuts the 100-char line at the border without wrapping.
     state.toggle_wrap();
-    let wrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
+    let unwrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
+    assert!(unwrapped[1].starts_with("│    1 │ xxxx"), "{}", unwrapped[1]);
     assert!(
-        wrapped[2].contains("xxxx"),
-        "wrapped continuation: {}",
-        wrapped[2]
+        unwrapped[2].trim_matches(|c| c == '│' || c == ' ').is_empty(),
+        "{}",
+        unwrapped[2]
     );
+}
+
+#[test]
+fn logs_view_horizontal_scroll_when_unwrapped() {
+    let mut state = logs();
+    state.toggle_wrap(); // turn off wrap
+    state.push_line("0123456789abcdefghij".to_string());
+
+    // At h_scroll = 0: contains initial digits
+    let text = common::render_text(60, 10, |f| render_logs_view(f, f.area(), &state));
+    assert!(text.contains("    1 │ 0123456789abcdefghij"), "{text}");
+
+    // Scroll right by 5 columns: skips first 5 chars while preserving gutter
+    state.scroll_right(5);
+    let text = common::render_text(60, 10, |f| render_logs_view(f, f.area(), &state));
+    assert!(text.contains("    1 │ 56789abcdefghij"), "{text}");
+    assert!(text.contains("[H+5col]"), "{text}");
+
+    // Scroll left back to start
+    state.scroll_left(5);
+    let text = common::render_text(60, 10, |f| render_logs_view(f, f.area(), &state));
+    assert!(text.contains("    1 │ 0123456789abcdefghij"), "{text}");
+    assert!(!text.contains("[H+"), "{text}");
+}
+
+#[test]
+fn logs_view_wrapped_follow_shows_bottom_rows() {
+    let mut state = logs();
+    // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
+    // Pushing a line of 120 chars wraps onto 3 visual lines.
+    state.push_line("START_".to_string() + &"a".repeat(110) + "_END");
+    let lines = common::render_lines(60, 10, |f| render_logs_view(f, f.area(), &state));
+    assert!(lines[1].contains("START_"), "row 1 has start: {}", lines[1]);
+    assert!(lines[3].contains("_END"), "row 3 has end: {}", lines[3]);
+    assert!(lines[2].starts_with("│      │ "), "continuation has indent: {}", lines[2]);
+    assert!(lines[3].starts_with("│      │ "), "continuation has indent: {}", lines[3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2207,9 +2248,9 @@ fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
     );
     assert_eq!(fg_of(&buf, y0 as u16, "Running"), Theme::status_ok().fg);
     let (y1, r1) = row_containing(&rows, "✔ web-1").unwrap();
-    // STATUS is a fixed 14-column cell, so the 16-char phase is clipped.
+    // STATUS column is dynamically sized to the longest status, so CrashLoopBackOff is unclipped.
     assert!(
-        r1.contains("CrashLoopBackO") && r1.contains("12") && r1.contains("0/1"),
+        r1.contains("CrashLoopBackOff") && r1.contains("12") && r1.contains("0/1"),
         "{r1}"
     );
     assert_eq!(

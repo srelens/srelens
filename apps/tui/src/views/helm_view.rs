@@ -210,14 +210,38 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
         })
         .collect();
 
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "NAME".len();
+    let mut max_rev = "REVISION".len();
+    let mut max_status = "STATUS".len();
+    let mut max_chart = "CHART".len();
+    let mut max_app_v = "APP VERSION".len();
+    let mut max_updated = "UPDATED".len();
+
+    for &idx in &filtered {
+        let rel = &state.releases[idx];
+        max_ns = max_ns.max(rel.namespace.len());
+        max_name = max_name.max(rel.name.len());
+        max_rev = max_rev.max(rel.revision.to_string().len());
+        max_status = max_status.max(rel.status.len());
+        let chart_display_len = if rel.chart_version.is_empty() {
+            rel.chart.len()
+        } else {
+            rel.chart.len() + 1 + rel.chart_version.len()
+        };
+        max_chart = max_chart.max(chart_display_len);
+        max_app_v = max_app_v.max(rel.app_version.len());
+        max_updated = max_updated.max(rel.updated.len());
+    }
+
     let widths = [
-        Constraint::Length(18),
-        Constraint::Min(24),
-        Constraint::Length(10),
-        Constraint::Length(14),
-        Constraint::Length(26),
-        Constraint::Length(15),
-        Constraint::Length(25),
+        Constraint::Length((max_ns + 1) as u16),
+        Constraint::Min((max_name + 1) as u16),
+        Constraint::Length((max_rev + 1) as u16),
+        Constraint::Length((max_status + 1) as u16),
+        Constraint::Length((max_chart + 1) as u16),
+        Constraint::Length((max_app_v + 1) as u16),
+        Constraint::Length((max_updated + 1) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);
