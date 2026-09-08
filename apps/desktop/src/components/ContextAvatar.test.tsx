@@ -16,3 +16,9 @@ describe("ContextAvatar", () => {
     expect(screen.getAllByText("EU")).toHaveLength(1);
   });
 });
+
+it("draws new-design symbols and respects the shared badge preference", () => {
+  const { container } = render(<ContextAvatar context="prod" profile={{ logo: "cluster", markIcon: "terminal", shortName: "PR", showShortName: false }} />);
+  expect(container.querySelector(".lucide-terminal")).not.toBeNull();
+  expect(screen.queryByText("PR")).toBeNull();
+});

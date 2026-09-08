@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { settingsStorage } from "@srelens/core";
+import { avatarColor, avatarInitials, migrateRecordKeys, loadContextProfiles, saveContextProfiles, settingsStorage, type ClusterContext, type ContextProfile, type ContextProfiles } from "@srelens/core";
 import type { MarkAppearance } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
 
@@ -18,32 +18,11 @@ import type { Storage } from "./tabsPersist";
  */
 export const MARKS_KEY = "srelens.next.marks";
 
-/**
- * `prod-eu` → `PE`, `staging` → `ST`.
- *
- * The first letter of each of the first two parts, or the first two letters
- * when there is only one part, so that a single-word name is still told apart
- * from its neighbours. Capped at what {@link MarkAppearance.short} can draw.
- */
-export function initials(name: string): string {
-  const parts = name.split(/[-_ ]+/).filter(Boolean);
-  if (parts.length === 0) return "";
-  const letters = parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[1][0];
-  return letters.toUpperCase().slice(0, 3);
-}
+/** Same deterministic initials and colours as the classic design. */
+export const initials = avatarInitials;
 
-/**
- * What a cluster looks like before anyone has customised it.
- *
- * The indigo of the mark palette rather than `var(--accent)`, which is what
- * this used to be: the accent moves with the accent axis, so an uncustomised
- * mark changed colour for anyone who preferred a blue accent, and — because
- * the editor's swatches are radios compared by value — the palette then had
- * nothing checked and no tab stop at all until a colour was picked. The mark
- * tokens are identity rather than meaning and move with nothing.
- */
 export function defaultMark(name: string): MarkAppearance {
-  return { name, short: initials(name), color: "var(--mark-indigo)", mark: "text", withText: true };
+  return { name, short: initials(name), color: avatarColor(name), mark: "text", withText: true };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -84,6 +63,40 @@ export function parseStoredMarks(raw: string | null): Record<string, MarkAppeara
 }
 
 let marks: Record<string, MarkAppearance> = {};
+let profiles: ContextProfiles = {};
+const contextNames = new Map<string, string>();
+const LEGACY_ICONS = new Set(["cluster", "cloud", "shield", "database", "globe"]);
+
+function withProfile(stableId: string, name: string, base: MarkAppearance): MarkAppearance {
+  const profile = profiles[stableId] ?? profiles[name];
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return base;
+  const mark = { ...defaultMark(name) };
+  if (typeof profile.displayName === "string") mark.name = profile.displayName;
+  if (typeof profile.shortName === "string") mark.short = profile.shortName;
+  if (typeof profile.color === "string" && profile.color) mark.color = profile.color;
+  if (profile.logo === "initials") mark.mark = "text";
+  else if (profile.logo === "custom") { mark.mark = "image"; mark.imageSrc = profile.logoUrl; }
+  else if (profile.logo && LEGACY_ICONS.has(profile.logo)) {
+    mark.mark = "icon"; mark.icon = profile.markIcon || profile.logo;
+  }
+  if (profile.logo) mark.withText = profile.showShortName ?? (typeof profile.shortName === "string" && !!profile.shortName.trim());
+  return mark;
+}
+
+function sharedProfile(mark: MarkAppearance): ContextProfile {
+  // Resolve theme tokens while the new design is mounted; classic uses the same colour.
+  let color = mark.color;
+  const token = /^var\((--[a-z-]+)\)$/.exec(color);
+  if (token && typeof document !== "undefined") color = getComputedStyle(document.documentElement).getPropertyValue(token[1]).trim() || color;
+  const legacyIcon = mark.icon && LEGACY_ICONS.has(mark.icon) ? mark.icon as ContextProfile["logo"] : "cluster";
+  return {
+    displayName: mark.name, shortName: mark.short, color,
+    logo: mark.mark === "text" ? "initials" : mark.mark === "image" ? "custom" : legacyIcon,
+    logoUrl: mark.imageSrc,
+    markIcon: mark.mark === "icon" && !LEGACY_ICONS.has(mark.icon ?? "") ? mark.icon : undefined,
+    showShortName: mark.withText,
+  };
+}
 const listeners = new Set<() => void>();
 
 /**
@@ -124,6 +137,8 @@ export function loadMarks(storage: Storage = settingsStorage): void {
     console.error("could not read the saved cluster marks", error);
   }
   marks = next;
+  profiles = loadContextProfiles(storage);
+  contextNames.clear();
   emit();
 }
 
@@ -155,26 +170,37 @@ function save(storage: Storage) {
 export function getMark(stableId: string, name: string): MarkAppearance {
   // Keyed on both, because the unstored answer depends on the name. A stored
   // mark ignores it, and every key then hands back that same one object.
+  contextNames.set(stableId, name);
   const key = `${stableId}\u0000${name}`;
   const cached = snapshots.get(key);
   if (cached) return cached;
-  const mark = marks[stableId] ?? defaultMark(name);
+  const mark = withProfile(stableId, name, marks[stableId] ?? defaultMark(name));
   snapshots.set(key, mark);
   return mark;
 }
 
 /** Give a cluster this appearance, and keep it. */
 export function setMark(stableId: string, mark: MarkAppearance, storage: Storage = settingsStorage): void {
-  marks = { ...marks, [stableId]: mark };
+  profiles = { ...profiles, [stableId]: { ...profiles[stableId], ...sharedProfile(mark) } };
+  // Canonical profiles are already keyed by stable ID. Remove the imported
+  // copy so resetting in classic cannot resurrect an older new-design mark.
+  const { [stableId]: _old, ...rest } = marks;
+  marks = rest;
+  saveContextProfiles(profiles, storage);
   emit();
   save(storage);
 }
 
-/** Forget a cluster's appearance, putting it back to {@link defaultMark}. */
+/** Forget a cluster's appearance in both designs. */
 export function resetMark(stableId: string, storage: Storage = settingsStorage): void {
-  if (!(stableId in marks)) return;
-  const { [stableId]: _dropped, ...rest } = marks;
+  const name = contextNames.get(stableId);
+  const next = { ...profiles };
+  delete next[stableId];
+  if (name) delete next[name];
+  profiles = next;
+  const { [stableId]: _old, ...rest } = marks;
   marks = rest;
+  saveContextProfiles(profiles, storage);
   emit();
   save(storage);
 }
@@ -186,4 +212,21 @@ export function useMark(stableId: string, name: string): MarkAppearance {
     () => getMark(stableId, name),
     () => getMark(stableId, name),
   );
+}
+
+/** Migrate old name-keyed profiles and import customisations from the new UI. */
+export function rememberContextMarks(contexts: readonly ClusterContext[], storage: Storage = settingsStorage): void {
+  const migration = migrateRecordKeys(profiles, contexts);
+  profiles = migration.migrated;
+  let changed = migration.changed;
+  for (const context of contexts) {
+    contextNames.set(context.stableId, context.name);
+    const old = marks[context.stableId];
+    if (!old) continue;
+    if (!profiles[context.stableId]) profiles = { ...profiles, [context.stableId]: sharedProfile(old) };
+    const { [context.stableId]: _old, ...rest } = marks;
+    marks = rest;
+    changed = true;
+  }
+  if (changed) { saveContextProfiles(profiles, storage); save(storage); emit(); }
 }

@@ -43,9 +43,9 @@ export function setRequestTimeoutSecs(secs: number): number {
   return clamped;
 }
 
-function stored(key: string): string | null {
+function stored(key: string, storage: Pick<Storage, "getItem"> = settingsStorage): string | null {
   return (
-    settingsStorage.getItem(key) ?? settingsStorage.getItem(key.replace("srelens", LEGACY_PREFIX))
+    storage.getItem(key) ?? storage.getItem(key.replace("srelens", LEGACY_PREFIX))
   );
 }
 
@@ -57,6 +57,9 @@ export interface ContextProfile {
   color?: string;
   logo?: ContextLogo;
   logoUrl?: string;
+  /** Optional symbol used by the new design, shared with classic. */
+  markIcon?: string;
+  showShortName?: boolean;
 }
 
 export type ContextProfiles = Record<string, ContextProfile>;
@@ -134,9 +137,9 @@ export function saveWorkspaceLayout(layout: WorkspaceLayoutSettings): void {
   }
 }
 
-export function loadContextProfiles(): ContextProfiles {
+export function loadContextProfiles(storage: Pick<Storage, "getItem"> = settingsStorage): ContextProfiles {
   try {
-    const raw = stored(CONTEXT_PROFILES_KEY);
+    const raw = stored(CONTEXT_PROFILES_KEY, storage);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as ContextProfiles;
     return parsed && typeof parsed === "object" ? parsed : {};
@@ -145,9 +148,9 @@ export function loadContextProfiles(): ContextProfiles {
   }
 }
 
-export function saveContextProfiles(profiles: ContextProfiles): void {
+export function saveContextProfiles(profiles: ContextProfiles, storage: Pick<Storage, "setItem"> = settingsStorage): void {
   try {
-    settingsStorage.setItem(CONTEXT_PROFILES_KEY, JSON.stringify(profiles));
+    storage.setItem(CONTEXT_PROFILES_KEY, JSON.stringify(profiles));
   } catch {
     // ignore unavailable/quota-exceeded storage
   }

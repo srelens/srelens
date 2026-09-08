@@ -7,3 +7,20 @@
    the same declaration; the kit's `@source` covers only the kit. (#317 review) */
 @source "../**/*.tsx";
 @source not "../**/*.test.tsx";
+
+/* Settings can be narrow even in a wide window, beside both navigation rails. */
+.context-management { container-type: inline-size; }
+.context-management-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+}
+@container (max-width: 600px) {
+  .context-management-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(130px, 35%) minmax(0, 1fr);
+  }
+  .context-management-layout > section:first-child {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+}

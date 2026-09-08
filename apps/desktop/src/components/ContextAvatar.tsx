@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Boxes, Cloud, Database, Globe2, Server, Shield } from "lucide-react";
+import { Boxes, Cloud, Database, Globe2, Server, Shield, Layers, Box, HardDrive, Network, KeyRound, Terminal, Compass, ShipWheel, Wrench } from "lucide-react";
 import { avatarColor, avatarInitials } from "../ui";
 import type { ContextLogo, ContextProfile } from "@srelens/core";
 
@@ -9,6 +9,11 @@ const LOGOS: Record<Exclude<ContextLogo, "initials" | "custom">, React.ElementTy
   shield: Shield,
   database: Database,
   globe: Globe2,
+};
+
+const MARK_ICONS: Record<string, React.ElementType> = {
+  server: Server, layers: Layers, box: Box, disk: HardDrive, network: Network,
+  key: KeyRound, terminal: Terminal, compass: Compass, wheel: ShipWheel, wrench: Wrench,
 };
 
 export const CONTEXT_LOGO_OPTIONS: Array<{ value: ContextLogo; label: string }> = [
@@ -44,10 +49,10 @@ export function ContextAvatar({
   const source = logo === "custom" ? safeImageSource(profile?.logoUrl) : null;
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => setImageFailed(false), [source]);
-  const Icon = logo === "initials" || logo === "custom" ? null : LOGOS[logo] ?? Server;
+  const Icon = logo === "initials" || logo === "custom" ? null : (profile?.markIcon && MARK_ICONS[profile.markIcon]) || LOGOS[logo] || Server;
   const shortName = profile?.shortName?.trim().slice(0, 3).toUpperCase() ?? "";
   const label = shortName || avatarInitials(context);
-  const showBadge = showShortName && logo !== "initials" && !!shortName;
+  const showBadge = showShortName && profile?.showShortName !== false && logo !== "initials" && !!shortName;
   return (
     <span
       className={`${className}${showBadge ? " fl-context-avatar--has-short" : ""}`}

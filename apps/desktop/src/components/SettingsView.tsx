@@ -349,7 +349,7 @@ export function SettingsView({
   const updateContext = (name: string, patch: ContextProfiles[string]) => {
     onContextProfilesChange({
       ...contextProfiles,
-      [name]: { ...contextProfiles[name], ...patch },
+      [name]: { ...contextProfiles[name], ...(patch.logo ? { markIcon: undefined } : {}), ...patch },
     });
   };
 
