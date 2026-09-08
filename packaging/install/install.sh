@@ -103,9 +103,13 @@ main() {
     # before the new binary has been run leaves an unvalidated copy live and
     # the old one hidden under a random name -- and on a noexec working
     # directory that window covers the only time the binary is ever checked.
-    trap 'install_rollback; rm -rf "$tmp"' EXIT
-    trap 'install_rollback; rm -rf "$tmp"; exit 130' INT
-    trap 'install_rollback; rm -rf "$tmp"; exit 143' TERM
+    #
+    # And say so when the rollback itself could not finish. A signal handler
+    # that rolls back and exits in silence leaves a rejected binary live, or
+    # the previous one hidden under a random name, with nobody told.
+    trap 'install_rollback; report_rollback; rm -rf "$tmp"' EXIT
+    trap 'install_rollback; report_rollback; rm -rf "$tmp"; exit 130' INT
+    trap 'install_rollback; report_rollback; rm -rf "$tmp"; exit 143' TERM
 
     # The same walk the destination gets. `mktemp -d` makes the directory
     # itself 0700 and ours, but it puts it under $TMPDIR when that is set --
@@ -208,6 +212,9 @@ main() {
         install_rollback
         kept="$INSTALL_ROLLBACK_KEPT"
         stuck="$INSTALL_ROLLBACK_STUCK"
+        # Reported below with the reason; the EXIT trap must not repeat it.
+        INSTALL_ROLLBACK_KEPT=""
+        INSTALL_ROLLBACK_STUCK=""
         # Undone. Nothing left for the EXIT trap to undo a second time.
         INSTALL_DEST=""
         INSTALL_BACKUP=""
@@ -589,8 +596,10 @@ assert_component() {
 # what was not. Idempotent on purpose: the failure paths in main do the same
 # work, and whichever gets there first leaves nothing for the other.
 install_rollback() {
-    INSTALL_ROLLBACK_KEPT=""
-    INSTALL_ROLLBACK_STUCK=""
+    # KEPT and STUCK are NOT reset here. This runs twice on a signal -- the
+    # handler, then EXIT -- and the second pass finds the transaction already
+    # cleared and does nothing; resetting them on the way in would erase
+    # what the first pass learned before anyone could report it.
     [ -z "$INSTALL_COMMITTED" ] || return 0
     # Each branch clears what it dealt with. This runs TWICE on a signal --
     # the INT/TERM handler calls it, then `exit` fires the EXIT handler --
@@ -634,6 +643,22 @@ install_rollback() {
     if [ -n "$INSTALL_STAGED" ]; then
         rm -f "$INSTALL_STAGED"
         INSTALL_STAGED=""
+    fi
+}
+
+# What an interrupted or failed rollback left behind, said out loud.
+#
+# main's own failure path says this itself, with the reason the binary was
+# rejected, and then clears both so this does not repeat it. The handlers
+# have no such message of their own, so this is theirs.
+report_rollback() {
+    if [ -n "$INSTALL_ROLLBACK_STUCK" ]; then
+        printf 'error: interrupted, and the unvalidated %s could NOT be removed. It is still installed at %s -- delete it before running %s from there\n' "$BIN" "$INSTALL_ROLLBACK_STUCK" "$BIN" >&2
+        INSTALL_ROLLBACK_STUCK=""
+    fi
+    if [ -n "$INSTALL_ROLLBACK_KEPT" ]; then
+        printf 'error: interrupted, and the previous %s could NOT be put back. It is still on disk: %s\n' "$BIN" "$INSTALL_ROLLBACK_KEPT" >&2
+        INSTALL_ROLLBACK_KEPT=""
     fi
 }
 

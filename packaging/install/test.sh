@@ -171,7 +171,7 @@ if [ "$(id -u)" = "0" ] && [ "$default_dest" = "/usr/local/bin" ]; then
         echo "  docker run --rm -v \"\$PWD/packaging/install:/i:ro\" \\" >&2
         echo "    debian:bookworm-slim sh -c '" >&2
         echo "      apt-get -qq update" >&2
-        echo "      apt-get -qq install -y curl ca-certificates acl libdigest-sha-perl" >&2
+        echo "      apt-get -qq install -y curl ca-certificates acl attr libcap2-bin libdigest-sha-perl" >&2
         echo "      cp -r /i /tmp/i && sh /tmp/i/test.sh" >&2
         echo "    '" >&2
         echo "" >&2
