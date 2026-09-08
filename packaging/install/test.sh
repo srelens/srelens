@@ -655,7 +655,7 @@ EOF
     mkdir -p "$blind"
     blind_missing=""
     for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname \
-        mkdir cp mv rm ln cat awk id getent sha256sum; do
+        mkdir cp mv rm ln cat awk id getent stat sha256sum; do
         tpath="$(command -v "$tool" 2>/dev/null)" || { blind_missing="$blind_missing $tool"; continue; }
         ln -sf "$tpath" "$blind/$tool"
     done
@@ -730,7 +730,9 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
 
         # With the pre-install check skipped, an incompatible binary reaches
         # the destination before anything has run it. Failing then must not
-        # leave the caller with nothing where a working copy stood.
+        # leave the caller with nothing where a working copy stood -- nor
+        # hand back a copy with permissions it never had.
+        chmod 0700 "$dest/srelens-tui" 2>/dev/null || true
         bad="$work/bad"
         mkdir -p "$bad"
         printf 'this is not a binary\n' > "$bad/srelens-tui"
@@ -765,6 +767,12 @@ EOF
             ok "the working copy survived a failed update"
         else
             no "the working copy was lost"
+        fi
+        restored_mode="$(stat -c %a "$dest/srelens-tui" 2>/dev/null)" || restored_mode="?"
+        if [ "$restored_mode" = "700" ]; then
+            ok "and came back with the permissions it had, not wider ones"
+        else
+            no "the restored binary is mode $restored_mode, was 700"
         fi
         rm -f "$work/fake/curl"
 
@@ -816,7 +824,7 @@ if command -v shasum >/dev/null 2>&1; then
     missing=''
     # getfacl among them: without it, and with a BusyBox ls, the installer
     # refuses before it ever reaches the hashing this case is about.
-    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent getfacl shasum; do
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent getfacl stat shasum; do
         path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
         ln -sf "$path" "$limited/$tool"
     done

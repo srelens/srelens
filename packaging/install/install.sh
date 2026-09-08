@@ -538,14 +538,22 @@ install_binary() {
     # mktemp already holds closes both.
     INSTALL_BACKUP=""
     if [ -e "$dest" ]; then
+        # The mode it has NOW. A rollback has to put back what was there,
+        # not a guess: a binary someone deliberately kept at 0700 must not
+        # come back 0755, readable and runnable by everyone on the machine.
+        # `stat -c` rather than `chmod --reference`, which BusyBox lacks.
+        dest_mode="$(stat -c %a "$dest" 2>/dev/null)" || dest_mode=""
+        [ -n "$dest_mode" ] ||
+            die "cannot read the permissions of $dest, so a rollback could not restore them"
         INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" ||
             die "cannot create a rollback file in $dir, so $dest will not be replaced"
         if ! cat "$dest" > "$INSTALL_BACKUP" 2>/dev/null; then
             rm -f "$INSTALL_BACKUP" "$staged"
             die "cannot preserve the $BIN already at $dest, so it will not be replaced"
         fi
-        # mktemp makes it 0600; a restore has to put back something runnable.
-        chmod 0755 "$INSTALL_BACKUP"
+        # mktemp makes it 0600; the rollback carries the mode the binary
+        # actually had.
+        chmod "$dest_mode" "$INSTALL_BACKUP"
     fi
 
     mv -f "$staged" "$dest" || {
