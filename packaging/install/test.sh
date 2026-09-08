@@ -584,6 +584,23 @@ if [ "$made_user" = "tester" ]; then
         no "nothing landed in the resolved directory"
     fi
 
+    # A FIFO where the binary goes. Reading one waits for a writer that never
+    # comes, so this has to be refused rather than copied -- an installer
+    # that hangs forever is worse than one that says no.
+    if command -v mkfifo >/dev/null 2>&1; then
+        home="$work/homes/fifo-dest"
+        new_home "$home"
+        mkfifo "$home/.local/bin/srelens-tui" 2>/dev/null || true
+        if [ -p "$home/.local/bin/srelens-tui" ]; then
+            out="$(install_into "$home")" && rc=0 || rc=$?
+            check "a FIFO where the binary goes is refused" "not a regular file" "$out" "$rc" 1
+        else
+            echo "  skip  could not create a FIFO here"
+        fi
+    else
+        echo "  skip  no mkfifo: cannot test a special file at the destination"
+    fi
+
     # A symlink where the binary goes is refused: the rollback copy is taken
     # by reading $dest, which follows the link, so a restore would put a
     # regular file where a link had been.
@@ -872,6 +889,54 @@ out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" 2>&1)" && rc=0 || rc
 check "a TMPDIR symlink is resolved before it is judged" "writable by other users" "$out" "$rc" 1
 
 
+echo "wrong version"
+
+# A release that published a stale binary under the right asset name and
+# checksum: it runs, so `--version` succeeding proves nothing. What was
+# asked for has to be what arrived.
+if [ "$made_user" = "tester" ]; then
+    wrong="$work/wrong"
+    rm -rf "$wrong"
+    mkdir -p "$wrong"
+    printf '#!/bin/sh\necho "srelens-tui 9.9.9"\n' > "$wrong/srelens-tui"
+    chmod 0755 "$wrong/srelens-tui"
+    printf 'nothing\n' > "$wrong/LICENSE"
+    wrongarchive="srelens-tui-$version-$host_target.tar.gz"
+    (cd "$wrong" && tar -czf "$work/fixtures/$wrongarchive.wrong" .)
+    wrongsum="$(sha256sum "$work/fixtures/$wrongarchive.wrong" | cut -d' ' -f1)"
+    printf '%s  %s\n' "$wrongsum" "$wrongarchive" > "$work/fixtures/WRONGSUMS.txt"
+    cat > "$work/fake/curl" <<EOF
+#!/bin/sh
+out=""; url=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    http*) url="\$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "\$url" in
+  *api.github.com*) echo '{"tag_name": "srelens-v$version"}' ;;
+  *SHA256SUMS*)     cp "$work/fixtures/WRONGSUMS.txt" "\$out" ;;
+  *.tar.gz)         cp "$work/fixtures/$wrongarchive.wrong" "\$out" ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod +x "$work/fake/curl"
+    home="$work/homes/wrong-version"
+    new_home "$home"
+    out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
+    check "a binary reporting another version is refused" "not the $version that was asked for" "$out" "$rc" 1
+    if [ -e "$home/.local/bin/srelens-tui" ]; then
+        no "the wrong-version binary was left installed"
+    else
+        ok "and it is not left behind"
+    fi
+    rm -f "$work/fake/curl"
+else
+    echo "  skip  no unprivileged account this run created: cannot test a wrong version"
+fi
+
 echo "interrupted mid-update"
 
 # A signal arriving after the destination has been replaced but before the
@@ -912,6 +977,31 @@ if [ "$made_user" = "tester" ]; then
         ok "and nothing hidden behind it"
     else
         no "an interrupted update left hidden files in the install directory"
+    fi
+    # And the same interruption with NOTHING there beforehand. There is no
+    # copy to put back, so the rollback has to remove what it installed --
+    # otherwise an unvalidated binary is left on a PATH under a name that
+    # will be trusted.
+    home="$work/homes/interrupted-fresh"
+    new_home "$home"
+    su tester -c "HOME='$home' sh '$script' --version '$version'" >"$work/int2.log" 2>&1 &
+    kill_pid=$!
+    tries=0
+    while [ "$tries" -lt 300 ]; do
+        grep -q "Installing srelens-tui" "$work/int2.log" 2>/dev/null && break
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    kill -TERM "$kill_pid" 2>/dev/null || true
+    wait "$kill_pid" 2>/dev/null || true
+    if [ -e "$home/.local/bin/srelens-tui" ]; then
+        if "$home/.local/bin/srelens-tui" --version >/dev/null 2>&1; then
+            ok "the first install completed before the signal landed"
+        else
+            no "an interrupted first install left an unvalidated binary behind"
+        fi
+    else
+        ok "an interrupted first install leaves nothing behind"
     fi
 else
     echo "  skip  no unprivileged account this run created: cannot interrupt an update"

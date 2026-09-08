@@ -113,7 +113,13 @@ itself 0700 and yours, but places it under `TMPDIR` when that is set -- and
 parent someone else owns can rename the tree after the checksum passes and
 put their own binary where the verified one was.
 
-**A directory or a symlink where the binary goes is refused.** `mv file dir`
+**The installed binary has to be the one that was asked for.** Running is not
+proof: a release that published a stale binary under the right asset name and
+checksum would install silently, and a pinned `--version` would report success
+having produced a different one. The version it reports is checked before the
+install commits.
+
+**A directory, a symlink, or a special file where the binary goes is refused.** `mv file dir`
 moves the file *into* a directory rather than over it, and a symlink cannot
 be replaced faithfully — the rollback copy is taken by reading the
 destination, which follows the link, so a restore would put a regular file
@@ -188,7 +194,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Sixty-eight cases: argument handling, the macOS and unknown-architecture refusals,
+Seventy-two cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

@@ -155,22 +155,46 @@ main() {
     # Not inside `say`. A failure in a command substitution there is
     # swallowed: the install printed `Installed` and exited 0 while the
     # binary was never in place.
-    if installed_version="$("$install_dir/$BIN" --version 2>/dev/null)"; then
-        # It runs. That is the commit: the copy that was there before is no
-        # longer needed, and the traps stop trying to undo anything.
+    # Two questions, and a different answer for each, because a binary that
+    # will not run and a binary that is the wrong version are different
+    # problems for whoever is reading the output.
+    installed_version="$("$install_dir/$BIN" --version 2>/dev/null)" || installed_version=""
+    if [ -z "$installed_version" ]; then
+        problem="does not run on this machine"
+    else
+        problem=""
+        # Running is not enough: it has to be the version that was asked for.
+        # A release that published a stale binary under the right asset name
+        # and checksum would otherwise install silently, and a pinned
+        # `--version` would report success having produced a different one.
+        case "$installed_version" in
+            *"$version"*) ;;
+            *) problem="reports \"$installed_version\", not the $version that was asked for" ;;
+        esac
+    fi
+
+    if [ -z "$problem" ]; then
+        # That is the commit: the copy that was there before is no longer
+        # needed, and the traps stop trying to undo anything.
         INSTALL_COMMITTED=yes
         INSTALL_STAGED=""
         [ -z "$INSTALL_BACKUP" ] || rm -f "$INSTALL_BACKUP"
     else
-        # It does not. Put back whatever was there rather than leaving the
-        # caller with nothing -- on a noexec working directory this is the
-        # first time the binary could be run at all, so an incompatible
-        # release reaches here having already replaced a copy that worked.
-        rm -f "$install_dir/$BIN"
-        if [ -n "$INSTALL_BACKUP" ] && mv -f "$INSTALL_BACKUP" "$install_dir/$BIN"; then
-            die "the installed $BIN does not run on this machine; the copy that was there before has been put back"
+        # One place decides what undoing an uncommitted install means, and it
+        # is install_rollback -- doing it again here is how the restored copy
+        # got deleted by the trap afterwards. This asks for it, then says what
+        # happened.
+        had_backup=""
+        [ -z "$INSTALL_BACKUP" ] || had_backup=yes
+        install_rollback
+        # Undone. Nothing left for the EXIT trap to undo a second time.
+        INSTALL_DEST=""
+        INSTALL_BACKUP=""
+        INSTALL_STAGED=""
+        if [ -n "$had_backup" ]; then
+            die "the installed $BIN $problem; the copy that was there before has been put back"
         fi
-        die "the installed $BIN does not run on this machine; removed it again"
+        die "the installed $BIN $problem; removed it again"
     fi
     say "Installed: $install_dir/$BIN"
     say "  $installed_version"
@@ -540,12 +564,19 @@ assert_component() {
 install_rollback() {
     [ -z "$INSTALL_COMMITTED" ] || return 0
     if [ -n "$INSTALL_BACKUP" ] && [ -e "$INSTALL_BACKUP" ]; then
+        # Something was there before: put it back.
         if [ -n "$INSTALL_DEST" ]; then
             mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null ||
                 rm -f "$INSTALL_BACKUP"
         else
             rm -f "$INSTALL_BACKUP"
         fi
+    elif [ -n "$INSTALL_DEST" ]; then
+        # Nothing was there before, so the binary at that path is one this
+        # run put there and never got to run. On a noexec working directory
+        # it has been executed by nobody at all, and leaving it is leaving an
+        # unchecked binary on someone's PATH under a name they will trust.
+        rm -f "$INSTALL_DEST"
     fi
     [ -z "$INSTALL_STAGED" ] || rm -f "$INSTALL_STAGED"
 }
@@ -578,6 +609,14 @@ install_binary() {
     if [ -e "$dest" ] && command -v getfacl >/dev/null 2>&1 &&
         [ -n "$(getfacl --skip-base --omit-header "$dest" 2>/dev/null)" ]; then
         die "$dest carries an extended ACL, which a rollback could not put back. Remove the ACL, or move the file aside, and run this again."
+    fi
+
+    # A FIFO, socket or device node where the binary goes. `cp -p` reading a
+    # FIFO waits for a writer that never comes, and a device node reads
+    # whatever the device feels like -- neither is something to copy, and
+    # neither is a binary to replace.
+    if [ -e "$dest" ] && [ ! -f "$dest" ] && [ ! -L "$dest" ]; then
+        die "$dest is not a regular file, so it is not a binary this can replace. Move it aside and run this again."
     fi
 
     if [ -L "$dest" ]; then
