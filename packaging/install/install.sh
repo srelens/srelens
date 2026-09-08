@@ -433,7 +433,14 @@ assert_component() {
     # not see it. A gap that is written down is still a gap.
     # shellcheck disable=SC2012  # the elif asks ls what it is, not for a listing
     if command -v getfacl >/dev/null 2>&1; then
-        if [ -n "$(getfacl --skip-base --omit-header "$path" 2>/dev/null)" ]; then
+        # Status first, then the output. A getfacl that fails -- an
+        # implementation without these options, a filesystem that will not
+        # answer -- produces empty output, which reads exactly like a file
+        # carrying only its base entries. Same fail-open as the group lookup
+        # had, one check over.
+        acl_entries="$(getfacl --skip-base --omit-header "$path" 2>/dev/null)" ||
+            die "cannot read the ACL of $path, so its real permissions are unknown. Check it with: getfacl $path"
+        if [ -n "$acl_entries" ]; then
             die "$path carries an extended ACL, which may grant write access that its mode does not show. Inspect it with: getfacl $path"
         fi
     elif ls --version 2>/dev/null | head -n 1 | grep -q coreutils; then
@@ -518,24 +525,27 @@ install_binary() {
     # Keep whatever is being replaced until the new one has been shown to
     # run. Alongside it, so the restore below stays on one filesystem.
     #
-    # A LINK, not a rename. Renaming the old binary out of the way first
-    # would unlink the live path, and a crash in the gap between that and
-    # the rename below would leave nothing at the documented path with the
-    # only copy under a hidden random name. A second name for the same
-    # inode leaves the path working throughout, and the `mv` below stays a
-    # single atomic replacement.
+    # A copy of the old binary, taken WITHOUT unlinking the live path and
+    # WITHOUT releasing the name mktemp reserved.
+    #
+    # Renaming the old binary aside would leave nothing at the documented
+    # path if the process died in the gap. And unlinking the reserved name
+    # to `ln` over it -- which is what this did -- opens a window in a
+    # sticky directory somebody else can write to: they cannot remove OUR
+    # file, but once it is gone they can put a symlink at that name, the
+    # link fails because the name exists, and the copy behind it writes
+    # through their symlink with our privileges. Writing into the inode
+    # mktemp already holds closes both.
     INSTALL_BACKUP=""
     if [ -e "$dest" ]; then
         INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" ||
             die "cannot create a rollback file in $dir, so $dest will not be replaced"
-        # mktemp made the file; link over it. `cp` is the fallback for a
-        # filesystem that will not hard-link.
-        rm -f "$INSTALL_BACKUP"
-        if ! ln "$dest" "$INSTALL_BACKUP" 2>/dev/null &&
-            ! cp "$dest" "$INSTALL_BACKUP"; then
+        if ! cat "$dest" > "$INSTALL_BACKUP" 2>/dev/null; then
             rm -f "$INSTALL_BACKUP" "$staged"
             die "cannot preserve the $BIN already at $dest, so it will not be replaced"
         fi
+        # mktemp makes it 0600; a restore has to put back something runnable.
+        chmod 0755 "$INSTALL_BACKUP"
     fi
 
     mv -f "$staged" "$dest" || {

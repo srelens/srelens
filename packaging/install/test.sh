@@ -626,6 +626,21 @@ if [ "$made_user" = "tester" ]; then
         echo "  skip  no setfacl, or the filesystem will not take an ACL"
     fi
 
+    # A getfacl that FAILS is not a directory without an ACL. Empty output
+    # from a failed command reads exactly like a file carrying only its base
+    # entries.
+    mkdir -p "$work/fake"
+    cat > "$work/fake/getfacl" <<EOF
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$work/fake/getfacl"
+    home="$work/homes/acl-broken"
+    new_home "$home"
+    out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
+    check "a getfacl that fails is not read as no ACL" "cannot read the ACL" "$out" "$rc" 1
+    rm -f "$work/fake/getfacl"
+
     # And where neither tool can answer -- BusyBox without the acl package --
     # the install refuses rather than proceeding blind. That case used to be
     # documented as a known gap and allowed, which meant an ACL sailed
