@@ -475,6 +475,20 @@ if [ "$made_user" = "tester" ]; then
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "an ordinary home installs" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
 
+    # A relative HOME makes a relative fallback, and the walk up to its
+    # nearest existing ancestor has nowhere to stop: `${x%/*}` of a name
+    # with no slash is the name itself. Refused before the walk. Under
+    # `timeout` where there is one, so a regression fails rather than hangs.
+    hold=""
+    command -v timeout >/dev/null 2>&1 && hold="timeout 60"
+    out="$(su tester -c "cd '$work' && HOME=relative-home $hold sh '$script' --version '$version'" 2>&1)" && rc=0 || rc=$?
+    check "a relative HOME is refused rather than walked forever" "is not an absolute path" "$out" "$rc" 1
+    if [ -e "$work/relative-home" ]; then
+        no "the relative fallback was created"
+    else
+        ok "and nothing was created under the working directory"
+    fi
+
     # An unpredictable staging name does not survive a directory other users
     # can unlink from: they can take the staged file away and leave a symlink,
     # or replace the finished binary before it is run. Only the directory's

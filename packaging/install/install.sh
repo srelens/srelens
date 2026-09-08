@@ -436,10 +436,25 @@ prepare_install_dir() {
     # installed nothing. So: the nearest existing ancestor and everything
     # above it first; the caller walks the full path, new components
     # included, once it exists. assert_safe_dir reuses `dir`, hence `want`.
+    #
+    # Absolute, or nothing. The fallback is built from HOME, which the
+    # caller sets, and a relative HOME would make this a walk of names
+    # relative to wherever the script happens to be run from -- and a walk
+    # with nowhere to stop: `${x%/*}` of a name with no slash in it is the
+    # name itself.
+    case "$want" in
+        /*) ;;
+        *) die "$want is not an absolute path (HOME=${HOME:-unset}), so there is nowhere definite to install to. Set HOME to an absolute directory and run this again." ;;
+    esac
     existing="$want"
     while [ ! -d "$existing" ] && [ "$existing" != "/" ]; do
-        existing="${existing%/*}"
-        [ -n "$existing" ] || existing="/"
+        parent="${existing%/*}"
+        [ -n "$parent" ] || parent="/"
+        # Belt to the case above's braces: a step that removes nothing
+        # would loop forever, so it stops the install instead.
+        [ "$parent" != "$existing" ] ||
+            die "cannot find an existing ancestor of $want"
+        existing="$parent"
     done
     assert_safe_dir "$existing"
     dir="$want"
