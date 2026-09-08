@@ -426,7 +426,23 @@ verify_checksum() {
 # repointed the moment after it is approved, and the install lands wherever
 # it now says. Everything downstream uses what this sets.
 prepare_install_dir() {
-    dir="$1"
+    want="$1"
+    # What already EXISTS of the path is judged before anything is added to
+    # it. `mkdir -p` first and the walk afterwards meant a refused fallback
+    # still left its mark: `sudo` carrying a non-root HOME into a run whose
+    # /usr/local/bin had been rejected would create root-owned .local/bin
+    # directories under that home and only then refuse the foreign-owned
+    # ancestor -- a persistent change from an install that reports having
+    # installed nothing. So: the nearest existing ancestor and everything
+    # above it first; the caller walks the full path, new components
+    # included, once it exists. assert_safe_dir reuses `dir`, hence `want`.
+    existing="$want"
+    while [ ! -d "$existing" ] && [ "$existing" != "/" ]; do
+        existing="${existing%/*}"
+        [ -n "$existing" ] || existing="/"
+    done
+    assert_safe_dir "$existing"
+    dir="$want"
     mkdir -p "$dir" 2>/dev/null ||
         die "cannot create $dir"
     [ -w "$dir" ] ||

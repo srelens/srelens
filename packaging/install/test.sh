@@ -557,6 +557,23 @@ if [ "$made_user" = "tester" ]; then
         else
             ok "nothing was installed under the replaceable ancestor"
         fi
+        # And when the fallback directory does not exist yet, under an
+        # ancestor that is writable but somebody else's: the refusal has to
+        # come BEFORE `mkdir -p`, or the install leaves a fresh .local/bin
+        # behind while reporting that it refused the destination.
+        home="$work/homes/foreign-parent-fresh"
+        rm -rf "$home"
+        mkdir -p "$home/.local"
+        chown tester "$home" 2>/dev/null || true
+        chown "$other_user" "$home/.local" 2>/dev/null || true
+        chmod 0777 "$home/.local"
+        out="$(install_into "$home")" && rc=0 || rc=$?
+        check "a fallback under a foreign ancestor is refused before it is created" "safely" "$out" "$rc" 1
+        if [ -e "$home/.local/bin" ]; then
+            no "the refused fallback directory was created anyway"
+        else
+            ok "and no directory was created under the foreign ancestor"
+        fi
     else
         echo "  skip  no second account: cannot test foreign ownership"
     fi
