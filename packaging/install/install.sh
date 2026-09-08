@@ -1,7 +1,14 @@
 #!/bin/sh
 # Install srelens-tui on Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh &&
+#     sh srelens-install.sh &&
+#     rm srelens-install.sh
+#
+# Download-then-run, chained, rather than piping into sh: a pipeline reports
+# the status of its LAST command, so a download that 404s hands sh an empty
+# script, which does nothing and exits 0. The line then succeeds having
+# installed nothing, and whatever is automating it carries on.
 #
 # Everything is inside main(), called on the very last line. A script read
 # from a pipe is executed as it arrives, so a connection that dies halfway
@@ -575,17 +582,28 @@ assert_component() {
 install_rollback() {
     INSTALL_ROLLBACK_KEPT=""
     [ -z "$INSTALL_COMMITTED" ] || return 0
+    # Each branch clears what it dealt with. This runs TWICE on a signal --
+    # the INT/TERM handler calls it, then `exit` fires the EXIT handler --
+    # and a second pass that still saw a destination but no backup would take
+    # the fresh-install branch and delete the binary the first pass had just
+    # restored.
     if [ -n "$INSTALL_BACKUP" ] && [ -e "$INSTALL_BACKUP" ]; then
         # Something was there before: put it back.
         if [ -n "$INSTALL_DEST" ]; then
-            if ! mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null; then
+            if mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null; then
+                INSTALL_BACKUP=""
+                INSTALL_DEST=""
+            else
                 # It could not go back -- a read-only mount, a full disk.
                 # Deleting it here would destroy the only copy of what was
                 # there, so it stays, and the caller says where.
                 INSTALL_ROLLBACK_KEPT="$INSTALL_BACKUP"
+                INSTALL_BACKUP=""
+                INSTALL_DEST=""
             fi
         else
             rm -f "$INSTALL_BACKUP"
+            INSTALL_BACKUP=""
         fi
     elif [ -n "$INSTALL_DEST" ]; then
         # Nothing was there before, so the binary at that path is one this
@@ -593,8 +611,12 @@ install_rollback() {
         # it has been executed by nobody at all, and leaving it is leaving an
         # unchecked binary on someone's PATH under a name they will trust.
         rm -f "$INSTALL_DEST"
+        INSTALL_DEST=""
     fi
-    [ -z "$INSTALL_STAGED" ] || rm -f "$INSTALL_STAGED"
+    if [ -n "$INSTALL_STAGED" ]; then
+        rm -f "$INSTALL_STAGED"
+        INSTALL_STAGED=""
+    fi
 }
 
 # Install by rename where possible: a running binary being overwritten in

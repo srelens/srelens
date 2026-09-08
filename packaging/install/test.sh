@@ -1043,6 +1043,7 @@ if [ "$made_user" = "tester" ]; then
     else
         ok "an interrupted first install leaves nothing behind"
     fi
+
 else
     echo "  skip  no unprivileged account this run created: cannot interrupt an update"
 fi
