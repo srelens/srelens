@@ -57,6 +57,7 @@ cleanup() {
     [ -z "$made_group" ] || groupdel "$made_group" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+trap 'cleanup; exit 129' HUP
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
@@ -1054,11 +1055,39 @@ EOF
     else
         chmod -R a+rx "$blind_attr"
         # install_into runs as an unprivileged account, and there the check is
-        # deliberately not required: a file capability needs root to set, so a
-        # user's own binary in their own directory cannot have one. Root is
-        # the case that refuses.
+        # deliberately not required: a file capability needs root to set, so
+        # one on a user's own binary is unusual. Root is the case that refuses.
+        # But root CAN set one on a user's file, and a rollback made with
+        # `cp -p` would not bring it back -- so the update says, up front,
+        # that the attributes were not checked and would not survive a
+        # rollback.
         out="$(install_into "$home" "PATH=$blind_attr")" && rc=0 || rc=$?
         check "an unprivileged update proceeds without getfattr" "Installed:" "$out" "$rc" 0
+        check "and says that extended attributes were not checked" "were not checked" "$out" "$rc" 0
+        # And when such an update IS rolled back, the caveat rides on the
+        # "put back" line: the previous copy is back, its attributes are not
+        # claimed to be. Same blind PATH, with the wrong-version fake curl
+        # from above in place of the real one.
+        blind_bad="$work/blind-attr-bad"
+        rm -rf "$blind_bad"
+        mkdir -p "$blind_bad"
+        for tpath in "$blind_attr"/*; do
+            ln -sf "$tpath" "$blind_bad/${tpath##*/}"
+        done
+        ln -sf "$work/fake/curl" "$blind_bad/curl"
+        chmod -R a+rx "$blind_bad"
+        home="$work/homes/blind-attr-rollback"
+        new_home "$home"
+        printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
+        chmod 0755 "$home/.local/bin/srelens-tui"
+        chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+        out="$(install_into "$home" "PATH=$blind_bad")" && rc=0 || rc=$?
+        check "a rolled-back update without getfattr does not claim the attributes came back" "put back -- without any extended attributes" "$out" "$rc" 1
+        if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null; then
+            ok "and the previous copy itself is back"
+        else
+            no "the previous copy did not come back"
+        fi
         if [ "$(id -u)" = "0" ]; then
             root_home="$work/homes/root-no-attr"
             rm -rf "$root_home"
@@ -1119,6 +1148,43 @@ if [ "$made_user" = "tester" ]; then
     else
         no "an interrupted update left hidden files in the install directory"
     fi
+    # HUP as well: an SSH session dropping mid-install. An untrapped HUP
+    # ends dash without running the EXIT trap, so this one has to be caught
+    # in its own right. Sent straight to the installer's pid, recorded by
+    # the shell that execs it, rather than to `su` -- which relays TERM but
+    # is not relied on to relay HUP.
+    home="$work/homes/interrupted-hup"
+    new_home "$home"
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
+    chmod 0755 "$home/.local/bin/srelens-tui"
+    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    pidfile="$work/hup.pid"
+    : > "$pidfile"
+    chown tester "$pidfile" 2>/dev/null || true
+    su tester -c "echo \$\$ > '$pidfile'; HOME='$home' exec sh '$script' --version '$version'" >"$work/hup.log" 2>&1 &
+    kill_pid=$!
+    tries=0
+    while [ "$tries" -lt 300 ]; do
+        grep -q "Installing srelens-tui" "$work/hup.log" 2>/dev/null && break
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    hup_pid="$(cat "$pidfile" 2>/dev/null)"
+    kill -HUP "${hup_pid:-$kill_pid}" 2>/dev/null || true
+    wait "$kill_pid" 2>/dev/null || true
+    if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null; then
+        ok "a hung-up update leaves the previous binary in place"
+    elif [ -x "$home/.local/bin/srelens-tui" ]; then
+        ok "the update completed before the hangup landed, nothing to undo"
+    else
+        no "a hung-up update left no binary at all"
+    fi
+    if [ -z "$(find "$home/.local/bin" -name '.srelens-tui.*' 2>/dev/null)" ]; then
+        ok "and nothing hidden behind it"
+    else
+        no "a hung-up update left hidden files in the install directory"
+    fi
+
     # And the same interruption with NOTHING there beforehand. There is no
     # copy to put back, so the rollback has to remove what it installed --
     # otherwise an unvalidated binary is left on a PATH under a name that

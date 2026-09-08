@@ -89,6 +89,8 @@ main() {
     INSTALL_COMMITTED=""
     INSTALL_ROLLBACK_KEPT=""
     INSTALL_ROLLBACK_STUCK=""
+    INSTALL_ROLLBACK_RESTORED=""
+    INSTALL_XATTR_UNCHECKED=""
     INSTALL_SELINUX_FROM=""
 
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
@@ -107,7 +109,13 @@ main() {
     # And say so when the rollback itself could not finish. A signal handler
     # that rolls back and exits in silence leaves a rejected binary live, or
     # the previous one hidden under a random name, with nobody told.
+    #
+    # HUP as well as INT and TERM: an SSH session that drops mid-install
+    # sends HUP, and an untrapped HUP ends the shell WITHOUT running its
+    # EXIT trap (dash, checked) -- the one window the transaction exists to
+    # cover would be left open with nobody there to see it.
     trap 'install_rollback; report_rollback; rm -rf "$tmp"' EXIT
+    trap 'install_rollback; report_rollback; rm -rf "$tmp"; exit 129' HUP
     trap 'install_rollback; report_rollback; rm -rf "$tmp"; exit 130' INT
     trap 'install_rollback; report_rollback; rm -rf "$tmp"; exit 143' TERM
 
@@ -215,6 +223,7 @@ main() {
         # Reported below with the reason; the EXIT trap must not repeat it.
         INSTALL_ROLLBACK_KEPT=""
         INSTALL_ROLLBACK_STUCK=""
+        INSTALL_ROLLBACK_RESTORED=""
         # Undone. Nothing left for the EXIT trap to undo a second time.
         INSTALL_DEST=""
         INSTALL_BACKUP=""
@@ -226,6 +235,9 @@ main() {
             die "the installed $BIN $problem, and the copy that was there before could NOT be put back. It is still on disk: $kept"
         fi
         if [ -n "$had_backup" ]; then
+            if [ -n "$INSTALL_XATTR_UNCHECKED" ]; then
+                die "the installed $BIN $problem; the copy that was there before has been put back -- without any extended attributes it had, which were not checked (getfattr is not installed)"
+            fi
             die "the installed $BIN $problem; the copy that was there before has been put back"
         fi
         die "the installed $BIN $problem; removed it again"
@@ -602,7 +614,7 @@ install_rollback() {
     # what the first pass learned before anyone could report it.
     [ -z "$INSTALL_COMMITTED" ] || return 0
     # Each branch clears what it dealt with. This runs TWICE on a signal --
-    # the INT/TERM handler calls it, then `exit` fires the EXIT handler --
+    # the HUP/INT/TERM handler calls it, then `exit` fires the EXIT handler --
     # and a second pass that still saw a destination but no backup would take
     # the fresh-install branch and delete the binary the first pass had just
     # restored.
@@ -610,6 +622,7 @@ install_rollback() {
         # Something was there before: put it back.
         if [ -n "$INSTALL_DEST" ]; then
             if mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null; then
+                INSTALL_ROLLBACK_RESTORED=yes
                 INSTALL_BACKUP=""
                 INSTALL_DEST=""
             else
@@ -659,6 +672,13 @@ report_rollback() {
     if [ -n "$INSTALL_ROLLBACK_KEPT" ]; then
         printf 'error: interrupted, and the previous %s could NOT be put back. It is still on disk: %s\n' "$BIN" "$INSTALL_ROLLBACK_KEPT" >&2
         INSTALL_ROLLBACK_KEPT=""
+    fi
+    # A restore that went through, but of a file whose extended attributes
+    # were never checked: `mv` of the backup carries none, so the previous
+    # copy is back and anything root had set on it -- a capability -- is not.
+    if [ -n "$INSTALL_ROLLBACK_RESTORED" ] && [ -n "$INSTALL_XATTR_UNCHECKED" ]; then
+        printf 'note: interrupted; the previous %s has been put back -- without any extended attributes it had, which were not checked (getfattr is not installed)\n' "$BIN" >&2
+        INSTALL_ROLLBACK_RESTORED=""
     fi
 }
 
@@ -761,13 +781,19 @@ install_binary() {
             # one needs CAP_SETFCAP -- so a binary that has one got it from
             # root, and root is exactly who is replacing it now.
             die "cannot tell whether $dest carries extended attributes such as a file capability, and a rollback could not put those back: getfattr is not installed. Install it (Debian: apt install attr; Alpine: apk add attr), or move the file aside, and run this again."
+        else
+            # Unprivileged and no getfattr: carry on, and say so. Setting a
+            # capability needs root, so one on a user's own binary is
+            # unusual -- but root CAN put one there, and the backup is made
+            # with `cp -p`, which carries mode, owner and times and not
+            # xattrs, so a rollback would hand the binary back without it.
+            # Not a reason to make every ordinary `~/.local/bin` update need
+            # a package a stock GitHub runner does not carry; a reason to say
+            # now, and again if it comes to a rollback, that the previous
+            # copy comes back without them.
+            INSTALL_XATTR_UNCHECKED=yes
+            printf 'note: getfattr is not installed, so extended attributes on %s (a file capability, say) were not checked; if this update is rolled back, the previous copy comes back without them\n' "$dest" >&2
         fi
-        # Unprivileged and no getfattr: carry on. A capability cannot be on
-        # this file unless root put it there, and root replacing it is the
-        # case above. Whatever else a user has attached to their own binary
-        # in their own directory is theirs to lose, and stopping the install
-        # over it would mean every ordinary `~/.local/bin` update needing a
-        # package that a stock GitHub runner does not even carry.
     fi
 
     # A FIFO, socket or device node where the binary goes. `cp -p` reading a
