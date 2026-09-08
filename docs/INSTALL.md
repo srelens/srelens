@@ -133,10 +133,13 @@ ordinary `~/.local/bin` update does not need it.
 It never invokes `sudo` on your behalf — run the whole line under `sudo` if
 you want it system-wide from an unprivileged shell.
 
-`--version <x.y.z>` installs a specific release:
+`--version <x.y.z>` installs a specific release. Same shape as above, with
+the option after the script:
 
 ```bash
-sh srelens-install.sh --version 0.9.0
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f" --version 0.9.0 )
 ```
 
 Piped, options cannot simply be appended — everything after `sh` belongs to

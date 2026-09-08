@@ -632,6 +632,24 @@ if [ "$made_user" = "tester" ]; then
     else
         no "the symlink was replaced"
     fi
+    # And a second hard link to the binary. The backup is a copy into a
+    # fresh inode, so a rollback could not give the other name back the
+    # file it shares now -- refuse rather than promise a restore that
+    # splits them.
+    home="$work/homes/hardlinked"
+    new_home "$home"
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
+    chmod 0755 "$home/.local/bin/srelens-tui"
+    ln "$home/.local/bin/srelens-tui" "$home/.local/bin/srelens-tui.other"
+    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a hard-linked binary is refused" "hard links" "$out" "$rc" 1
+    if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null &&
+        [ "$(stat -c %h "$home/.local/bin/srelens-tui" 2>/dev/null)" = "2" ]; then
+        ok "and both names still share the old inode"
+    else
+        no "the hard-linked binary was touched"
+    fi
 
     # `mv file dir` moves the file INTO the directory. A destination that is
     # already a directory would swallow the staging file and leave nothing at

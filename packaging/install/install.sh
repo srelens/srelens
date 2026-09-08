@@ -807,6 +807,25 @@ install_binary() {
     if [ -L "$dest" ]; then
         die "$dest is a symlink. Install over what it points at, or remove it first: this replaces the path itself and could not put the link back if the new binary failed."
     fi
+    # A second hard link to it, for the same reason. The backup is a copy
+    # into a fresh inode, so a rollback would put back a file the other
+    # name is no longer attached to: the sibling keeps the old inode, the
+    # restored path gets a new one, and from then on the two diverge --
+    # while the installer had reported the previous copy put back. Status
+    # first, as with every lookup here: a stat that fails looks like an
+    # empty count.
+    if [ -f "$dest" ]; then
+        dest_links="$(stat -c %h "$dest" 2>/dev/null)" ||
+            die "cannot read the link count of $dest, so a rollback could not be promised to put it back. Check with: stat -c %h $dest"
+        case "$dest_links" in
+            ''|*[!0-9]*)
+                die "cannot read the link count of $dest, so a rollback could not be promised to put it back. Check with: stat -c %h $dest"
+                ;;
+        esac
+        if [ "$dest_links" -gt 1 ]; then
+            die "$dest has $dest_links hard links. A rollback restores a copy, not the shared inode, so the other name(s) would be left pointing at the old file. Remove the extra links, or move the file aside, and run this again."
+        fi
+    fi
     # Already created, checked and canonicalised by prepare_install_dir and
     # assert_safe_dir. Deliberately not re-derived from $dest here.
     dir="$INSTALL_DIR"
