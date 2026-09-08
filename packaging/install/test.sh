@@ -429,20 +429,39 @@ if [ "$made_user" = "tester" ]; then
     new_home "$home"
     chmod 0777 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "a world-writable destination is refused" "writable by anyone" "$out" "$rc" 1
+    check "a world-writable destination is refused" "writable by other users" "$out" "$rc" 1
     if [ -e "$home/.local/bin/srelens-tui" ]; then
         no "it installed into the world-writable directory anyway"
     else
         ok "nothing was installed there"
     fi
 
-    # The sticky bit is what makes /tmp safe: only an entry's owner may unlink
-    # it, so the staged file cannot be taken away. That case must still work.
+    # Sticky does NOT rescue the destination. It stops another user removing
+    # our files; it does not stop them creating srelens-tui there first and
+    # owning it -- after which its mode is read and copied onto the rollback
+    # (a planted 4755 becoming a root-owned setuid file), and it can be
+    # swapped for a symlink to a directory so the mv lands underneath it.
     home="$work/homes/sticky"
     new_home "$home"
     chmod 1777 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "world-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
+    check "a world-writable destination is refused even with sticky" "writable by other users" "$out" "$rc" 1
+    if [ -e "$home/.local/bin/srelens-tui" ]; then
+        no "it installed into the sticky world-writable directory anyway"
+    else
+        ok "nothing was installed there"
+    fi
+
+    # A sticky ANCESTOR is still fine, which is what keeps /tmp usable --
+    # and every path in this suite runs through it.
+    sticky_parent="$work/sticky-parent"
+    rm -rf "$sticky_parent"
+    mkdir -p "$sticky_parent"
+    chmod 1777 "$sticky_parent"
+    home="$sticky_parent/home"
+    new_home "$home"
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a sticky world-writable ANCESTOR is still fine" "Installed:" "$out" "$rc" 0
 
     # A directory belonging to somebody else: they can arrange the swap at
     # leisure and get a file written by the installing account out of it.
@@ -469,7 +488,7 @@ if [ "$made_user" = "tester" ]; then
         chown "$other_user" "$home/.local/bin" 2>/dev/null || true
         chmod 1777 "$home/.local/bin"
         out="$(install_into "$home")" && rc=0 || rc=$?
-        check "a sticky directory owned by someone else is refused" "belongs to $other_user" "$out" "$rc" 1
+        check "a sticky directory owned by someone else is refused" "safely" "$out" "$rc" 1
 
         # A directory can be impeccable itself and still sit under one somebody
         # else owns, who can rename it and put their own in its place after the
@@ -501,7 +520,7 @@ if [ "$made_user" = "tester" ]; then
     rmdir "$home/.local/bin"
     ln -sfn "$target" "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "a symlink to an unsafe directory is refused" "writable by anyone" "$out" "$rc" 1
+    check "a symlink to an unsafe directory is refused" "writable by other users" "$out" "$rc" 1
     if [ -e "$target/srelens-tui" ]; then
         no "it installed through the symlink anyway"
     else
@@ -605,13 +624,13 @@ if [ "$made_user" = "tester" ]; then
         echo "  skip  no groupadd: cannot test a shared group"
     fi
 
-    # Group-writable WITH the sticky bit is still fine: sticky is what stops
-    # anyone but an entry's owner unlinking it, whoever may write there.
+    # Group-writable plus sticky is refused for the same reason: sticky
+    # protects entries that exist, not the right to create one.
     home="$work/homes/group-sticky"
     new_home "$home"
     chmod 3775 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "group-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
+    check "group-writable plus sticky is refused too" "group-writable" "$out" "$rc" 1
 
     # An extended ACL can grant write to any account while the mode bits
     # look impeccable. getfacl answers this properly; GNU ls answers it with
@@ -698,7 +717,7 @@ mkdir -p "$bad"
 chmod 0777 "$bad"
 rm -f "$dest/srelens-tui"
 out="$(TMPDIR="$bad" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
-check "an untrusted TMPDIR is refused" "writable by anyone" "$out" "$rc" 1
+check "an untrusted TMPDIR is refused" "writable by other users" "$out" "$rc" 1
 if [ -e "$dest/srelens-tui" ]; then
     no "it installed with the working tree in an untrusted place"
 else
@@ -797,7 +816,7 @@ link_tmp="$work/tmp-link"
 ln -sfn "$real_tmp" "$link_tmp"
 dest="$default_dest"
 out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
-check "a TMPDIR symlink is resolved before it is judged" "writable by anyone" "$out" "$rc" 1
+check "a TMPDIR symlink is resolved before it is judged" "writable by other users" "$out" "$rc" 1
 
 
 echo "unpacking"

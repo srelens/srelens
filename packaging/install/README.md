@@ -65,10 +65,14 @@ each component must be:
   rather than proceeding blind. **On Alpine that means `apk add acl` first** —
   the alternative was letting an ACL through on precisely the systems that
   cannot see it;
-- sticky, if either write bit is set. Sticky settles both at once: only an
-  entry's owner may unlink it. `/tmp` is `drwxrwxrwt`, group- AND
-  world-writable, so treating either bit as disqualifying on its own would
-  refuse every path running through it;
+- sticky, if either write bit is set **and it is a parent**. Sticky settles
+  both at once there: only an entry's owner may unlink it, and `/tmp` is
+  `drwxrwxrwt`, so treating either write bit as disqualifying would refuse
+  every path running through it. The **destination** gets no such exemption —
+  sticky stops another user removing our files, not creating `srelens-tui`
+  there first and owning it, after which its mode is copied onto the rollback
+  (a planted 4755 becoming a root-owned setuid file) and it can be swapped for
+  a symlink to a directory so the `mv` lands underneath it;
 - not group-writable at all, unless sticky. Who is really in a group cannot
   be established from a shell: an SSSD or LDAP source resolves accounts one
   at a time while declining to enumerate, so `getent` gives a lower bound
@@ -158,7 +162,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Fifty-nine cases: argument handling, the macOS and unknown-architecture refusals,
+Sixty-one cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

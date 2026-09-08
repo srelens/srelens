@@ -375,7 +375,7 @@ assert_safe_dir() {
     SAFE_ME="$(id -un 2>/dev/null)" || SAFE_ME=""
     [ -n "$SAFE_ME" ] || die "cannot determine who is running this"
 
-    assert_component "/"
+    assert_component "/" parent
     rest="${resolved#/}"
     prefix=""
     while [ -n "$rest" ]; do
@@ -385,13 +385,20 @@ assert_safe_dir() {
             *) rest="" ;;
         esac
         prefix="$prefix/$name"
-        assert_component "$prefix"
+        # The last component is where the binary lands, and it is held to a
+        # stricter rule than the ones above it.
+        if [ -z "$rest" ]; then
+            assert_component "$prefix" destination
+        else
+            assert_component "$prefix" parent
+        fi
     done
 }
 
 # One component of the path, against the rules above.
 assert_component() {
     path="$1"
+    role="$2"
 
     # `ls -ld` rather than stat: stat's flags differ between GNU and BSD, and
     # this has to run under BusyBox too.
@@ -455,18 +462,30 @@ assert_component() {
         die "$path belongs to $owner, who could replace what is inside it while this installs. Nothing can be installed there safely."
     fi
 
-    # The sticky bit settles both write bits at once. With it set, only an
-    # entry's owner may unlink or rename that entry, so who else can write
-    # into the directory stops mattering for anything already staged there.
-    # That is what makes /tmp usable -- and /tmp is `drwxrwxrwt`, group- and
-    # world-writable both, so treating either bit as disqualifying on its own
-    # would refuse every install whose path runs through it.
-    case "$(printf %s "$perms" | cut -c10)" in
-        t | T) return 0 ;;
-    esac
+    # The sticky bit settles both write bits at once -- for a PARENT. With
+    # it set only an entry's owner may unlink or rename that entry, so who
+    # else may write into the directory stops mattering for the subtree we
+    # already hold. That is what makes /tmp usable as an ancestor, and /tmp
+    # is `drwxrwxrwt`, so treating either write bit as disqualifying would
+    # refuse every install whose path runs through it.
+    #
+    # It settles nothing for the DESTINATION. Sticky stops another user
+    # removing OUR files; it does not stop them creating `srelens-tui` there
+    # first and owning it. Everything that then happens to that entry
+    # happens to a file they control: its mode is read and reapplied to the
+    # rollback copy, so a planted 4755 becomes a root-owned setuid binary;
+    # and it can be swapped for a symlink to a directory after the check, so
+    # the `mv` moves the staged binary underneath it and leaves theirs at the
+    # path that then gets run. Neither race can be closed from a shell, so
+    # the directory is refused instead.
+    if [ "$role" = parent ]; then
+        case "$(printf %s "$perms" | cut -c10)" in
+            t | T) return 0 ;;
+        esac
+    fi
 
     if [ "$(printf %s "$perms" | cut -c9)" = "w" ]; then
-        die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Nothing can be installed there safely."
+        die "$path is writable by other users, so one of them could create or replace the binary while this installs. Nothing can be installed there safely."
     fi
 
     # Group-writable is refused, full stop.
@@ -543,17 +562,31 @@ install_binary() {
         # come back 0755, readable and runnable by everyone on the machine.
         # `stat -c` rather than `chmod --reference`, which BusyBox lacks.
         dest_mode="$(stat -c %a "$dest" 2>/dev/null)" || dest_mode=""
-        [ -n "$dest_mode" ] ||
+        [ -n "$dest_mode" ] || {
+            rm -f "$staged"
             die "cannot read the permissions of $dest, so a rollback could not restore them"
-        INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" ||
+        }
+        # Keep the permission bits, never the set-ID ones. `stat %a` renders
+        # setuid as a fourth digit, and reapplying it would have this script
+        # create a setuid copy of a file it did not write -- owned by root,
+        # when the install is under sudo. The destination rules make a
+        # planted binary hard to arrange; refusing to propagate the bit at
+        # all means it does not matter if one ever is.
+        dest_mode="$(printf %s "$dest_mode" | sed 's/^.*(...)$//')"
+        INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" || {
+            rm -f "$staged"
             die "cannot create a rollback file in $dir, so $dest will not be replaced"
+        }
         if ! cat "$dest" > "$INSTALL_BACKUP" 2>/dev/null; then
             rm -f "$INSTALL_BACKUP" "$staged"
             die "cannot preserve the $BIN already at $dest, so it will not be replaced"
         fi
         # mktemp makes it 0600; the rollback carries the mode the binary
         # actually had.
-        chmod "$dest_mode" "$INSTALL_BACKUP"
+        chmod "$dest_mode" "$INSTALL_BACKUP" || {
+            rm -f "$INSTALL_BACKUP" "$staged"
+            die "cannot set the rollback copy to mode $dest_mode, so $dest will not be replaced"
+        }
     fi
 
     mv -f "$staged" "$dest" || {
