@@ -94,6 +94,17 @@ export const podFlagged = (row: PodRow): boolean => podStatus(row).flagged;
 export const podColumns: Column<PodRow>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "namespace", header: "Namespace", sortable: true },
+  // Kept in the list contract so a Node detail's "View all" hand-off can
+  // scope this screen to `spec.nodeName` instead of writing a filter key no
+  // column can read. Visible on purpose: a scoped search must say what it is
+  // scoped by, and hiding this column would make useResourceTabView discard
+  // the filter as soon as the Pods screen mounts.
+  {
+    key: "node",
+    header: "Node",
+    sortable: true,
+    render: (p) => <span className="font-mono">{p.node || "—"}</span>,
+  },
   { key: "ready", header: "Ready", align: "end" },
   {
     key: "phase", header: "Status", sortable: true,

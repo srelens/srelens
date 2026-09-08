@@ -42,6 +42,7 @@ function parseView(v: unknown): Tab["view"] | undefined {
   if (isString(v.filter)) view.filter = v.filter;
   if (v.filterKey === null) view.filterKey = null;
   else if (isString(v.filterKey)) view.filterKey = v.filterKey;
+  if (typeof v.regex === "boolean") view.regex = v.regex;
   return view;
 }
 

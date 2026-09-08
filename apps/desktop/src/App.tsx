@@ -68,6 +68,7 @@ import {
 import { invokeCommand } from "@srelens/core/transport";
 import {
   loadOpenTabs,
+  openTabsPersistenceKey,
   scheduleSaveOpenTabs,
   flushSaveOpenTabs,
   nextTabId,
@@ -84,7 +85,7 @@ import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "@srelens/core";
 import { deletePod } from "@srelens/core";
 import { clearAccessCache } from "@srelens/core/react";
-import type { ViewTab } from "@srelens/core";
+import type { NewResourceDraft, ViewTab } from "@srelens/core";
 
 /** How long a closing window waits for the settings write to land. */
 const CLOSE_WRITE_TIMEOUT_MS = 2000;
@@ -100,6 +101,12 @@ export function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(
     () => restored?.activeTabId ?? null,
   );
+  // The latest full state is read only when its restorable projection changes.
+  // Draft YAML remains on its tab in memory, but is absent from both the key
+  // and the settings write that the key triggers.
+  const openTabsForSave = useRef({ tabs, activeTabId });
+  openTabsForSave.current = { tabs, activeTabId };
+  const openTabsSaveKey = openTabsPersistenceKey(tabs, activeTabId);
   const [layout, setLayout] = useState(loadWorkspaceLayout);
   const [sidebarWidth, setSidebarWidth] = useState(layout.leftSidebarWidth);
   // Stored by stable id, rendered by display name (#265). A context's name
@@ -444,8 +451,12 @@ export function App() {
   // name-keyed data afterwards, undoing the id migration on disk. The id-keyed
   // setters — rememberNamespace, the migration, delete-context — save instead.
 
-  // Persist the open tabs (web only) so a browser reload restores them.
-  useEffect(() => scheduleSaveOpenTabs(tabs, activeTabId), [tabs, activeTabId]);
+  // Persist only when the restorable projection changes. Editor keystrokes
+  // mutate their transient tab, but must not queue the same fsync every 400ms.
+  useEffect(() => {
+    const snapshot = openTabsForSave.current;
+    scheduleSaveOpenTabs(snapshot.tabs, snapshot.activeTabId);
+  }, [openTabsSaveKey]);
 
   // Web: localStorage writes are synchronous, so unload handlers suffice.
   useEffect(() => {
@@ -851,6 +862,25 @@ export function App() {
     setActiveTabId(id);
   }
 
+  /** Keep an editor's working copy on its tab so unmounting it is harmless. */
+  function setNewResourceDraft(tabId: number, draft: NewResourceDraft | undefined) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.create
+          ? { ...tab, create: { ...tab.create, draft } }
+          : tab,
+      ),
+    );
+  }
+
+  function setEditResourceDraft(tabId: number, draft: string | undefined) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft } } : tab,
+      ),
+    );
+  }
+
   /** Open (or focus) a full-tab editor preloaded with a resource's manifest. */
   function openEditResource(kind: string, namespace: string | null, name: string) {
     if (!activeCluster) return;
@@ -1097,6 +1127,9 @@ export function App() {
                       key={activeTab.id}
                       context={activeCluster}
                       initialKind={activeTab.create?.initialKind}
+                      draft={activeTab.create?.draft}
+                      onDraftChange={(draft) => setNewResourceDraft(activeTab.id, draft)}
+                      onCreated={() => setNewResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster && activeKind === "editresource" && activeTab.edit ? (
                     <EditResourceTab
@@ -1105,6 +1138,9 @@ export function App() {
                       kind={activeTab.edit.kind}
                       namespace={activeTab.edit.namespace}
                       name={activeTab.edit.name}
+                      draft={activeTab.edit.draft ?? null}
+                      onDraftChange={(yaml) => setEditResourceDraft(activeTab.id, yaml)}
+                      onEdited={() => setEditResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster ? (
                     <ResourceBrowser
