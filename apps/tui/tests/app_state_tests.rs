@@ -2796,6 +2796,81 @@ async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
     );
 }
 
+#[tokio::test]
+async fn crd_live_watch_channel_management_and_stream_updates() {
+    let (mut app, _rx) = common::app().await;
+    app.active_context = "test-cluster".into();
+    app.active_namespace = "default".into();
+
+    let crd = CrdMeta {
+        crd_name: "secretstores.external-secrets.io".into(),
+        group: "external-secrets.io".into(),
+        version: "v1beta1".into(),
+        kind: "SecretStore".into(),
+        plural: "secretstores".into(),
+        singular: "secretstore".into(),
+        namespaced: true,
+        short_names: vec!["ss".into()],
+        printer_columns: vec![
+            PrinterColumn {
+                name: "READY".into(),
+                json_path: ".status.conditions[?(@.type==\"Ready\")].status".into(),
+                col_type: "string".into(),
+                priority: 0,
+                description: None,
+            },
+        ],
+    };
+    app.crds.push(crd.clone());
+
+    // 1. Switching to CRD view starts the watch on the proper channel
+    app.switch_view_to_crd(crd.clone()).await;
+    let expected_ch = "watch:test-cluster:default:SecretStore";
+    assert_eq!(app.current_watch_channel.as_deref(), Some(expected_ch));
+    assert!(app.active_watch_channels.contains(expected_ch));
+    assert!(app.active_watch_pool.contains(&expected_ch.to_string()));
+
+    // 2. Stream event updates the table live and caches the items
+    let payload = json!([
+        {
+            "name": "vault",
+            "namespace": "default",
+            "metadata": { "name": "vault", "namespace": "default" },
+            "status": {
+                "conditions": [{ "type": "Ready", "status": "True" }]
+            }
+        }
+    ]);
+    app.handle_stream_event(expected_ch.to_string(), payload);
+
+    let ActiveView::Table(t) = &app.active_view else { panic!("expected table") };
+    assert!(!t.is_loading);
+    assert_eq!(t.raw_items.len(), 1);
+    assert_eq!(t.raw_items[0]["name"], "vault");
+
+    // Informer cache also updated
+    assert_eq!(
+        app.resource_cache.get(&("test-cluster".into(), "default".into(), "SecretStore".into())).unwrap().len(),
+        1
+    );
+
+    // 3. Switching namespace switches the CRD watch channel
+    app.switch_namespace("prod".into()).await;
+    let prod_ch = "watch:test-cluster:prod:SecretStore";
+    assert_eq!(app.current_watch_channel.as_deref(), Some(prod_ch));
+    assert!(app.active_watch_channels.contains(prod_ch));
+
+    // 4. Cluster-scoped CRD watches with empty namespace
+    let mut cluster_crd = crd.clone();
+    cluster_crd.kind = "ClusterSecretStore".into();
+    cluster_crd.plural = "clustersecretstores".into();
+    cluster_crd.namespaced = false;
+    app.switch_view_to_crd(cluster_crd).await;
+    let cluster_ch = "watch:test-cluster::ClusterSecretStore";
+    assert_eq!(app.current_watch_channel.as_deref(), Some(cluster_ch));
+    assert!(app.active_watch_channels.contains(cluster_ch));
+}
+
 // ---------------------------------------------------------------------------
 // Containers, logs, shells
 // ---------------------------------------------------------------------------

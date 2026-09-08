@@ -1401,6 +1401,65 @@ impl App {
                 if kind == "pods" {
                     self.refresh_pod_metrics();
                 }
+                return;
+            }
+
+            let crd_opt = if let ResourceKind::CustomResource(crd) = &table.kind {
+                Some(crd.clone())
+            } else {
+                None
+            };
+            if let Some(crd) = crd_opt {
+                let ctx = self.active_context.clone();
+                let ns = if crd.namespaced {
+                    self.active_namespace.clone()
+                } else {
+                    String::new()
+                };
+                let kind = crd.kind.clone();
+                let channel = format!("watch:{}:{}:{}", ctx, ns, kind);
+                self.current_watch_channel = Some(channel.clone());
+
+                // 1. Instant Cache Render: If we already have items in memory, render immediately!
+                if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), kind.clone())) {
+                    table.set_items(cached.clone(), &self.filter_buffer);
+                    table.is_loading = false;
+                } else {
+                    table.is_loading = true;
+                    table.raw_items.clear();
+                    table.filtered_indices.clear();
+                    table.selected_idx = 0;
+                    table.scroll_offset = 0;
+                }
+
+                // 2. Informer Pool: Check if watch is already running for this channel
+                if !self.watch_manager.has_channel(&channel) {
+                    // Evict oldest if pool exceeded (keeps max 20 watches warm)
+                    if self.active_watch_pool.len() >= 20 {
+                        let evicted = self.active_watch_pool.remove(0);
+                        self.watch_manager.stop(&evicted);
+                        self.active_watch_channels.remove(&evicted);
+                    }
+
+                    let sink = TuiSink::arc(self.event_tx.clone());
+                    let paths = self.kubeconfig_paths.clone();
+                    self.active_watch_channels.insert(channel.clone());
+                    self.active_watch_pool.push(channel.clone());
+                    let target = srelens_kube::watch::CustomWatchTarget {
+                        group: crd.group.clone(),
+                        version: crd.version.clone(),
+                        kind: crd.kind.clone(),
+                        plural: crd.plural.clone(),
+                        namespaced: crd.namespaced,
+                    };
+                    let _ = self.watch_manager.start_custom(sink, ctx, ns, target, channel, paths).await;
+                } else {
+                    // Move to most-recently-used in pool
+                    if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
+                        let ch = self.active_watch_pool.remove(pos);
+                        self.active_watch_pool.push(ch);
+                    }
+                }
             }
         }
     }
@@ -4959,7 +5018,11 @@ impl App {
         let kind = ResourceKind::CustomResource(crd.clone());
         let mut table = ResourceTableState::new(kind);
         let ctx = &self.active_context;
-        let ns = &self.active_namespace;
+        let ns = if crd.namespaced {
+            self.active_namespace.clone()
+        } else {
+            String::new()
+        };
         if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())) {
             table.set_items(cached.clone(), &self.filter_buffer);
             table.is_loading = false;
@@ -4969,7 +5032,7 @@ impl App {
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Table(table));
         self.nav_stack.push(old_view);
         self.filter_buffer.clear();
-        self.fetch_crd_instances(crd);
+        self.restart_active_watch().await;
     }
 
     pub fn fetch_crd_instances(&self, crd: CrdMeta) {
@@ -7189,6 +7252,14 @@ impl App {
                             }
                             table.set_items(merged_items, &self.filter_buffer);
                         } else {
+                            if let ResourceKind::CustomResource(crd) = &mut table.kind {
+                                if crd.printer_columns.is_empty() {
+                                    if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+                                        crd.printer_columns = discovered.printer_columns.clone();
+                                        table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
+                                    }
+                                }
+                            }
                             table.set_items(items.clone(), &self.filter_buffer);
                         }
                     }

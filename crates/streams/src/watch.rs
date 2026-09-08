@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use srelens_kube::client_cache::ClientCache;
+pub use srelens_kube::watch::CustomWatchTarget;
 use tokio::task::JoinHandle;
 
 use crate::sink::EventSink;
@@ -141,6 +142,54 @@ impl WatchManager {
         Ok(channel)
     }
 
+    /// Start watching a custom resource kind dynamically, emitting each full
+    /// sorted snapshot on `channel`.
+    pub async fn start_custom(
+        &self,
+        sink: Arc<dyn EventSink>,
+        context: String,
+        namespace: String,
+        target: CustomWatchTarget,
+        channel: String,
+        kubeconfig_paths: Vec<PathBuf>,
+    ) -> Result<String, String> {
+        self.stop(&channel);
+
+        if !kubeconfig_paths.is_empty() {
+            self.cache.ensure_paths(kubeconfig_paths).await;
+        }
+
+        let cache = self.cache.clone();
+        let emit_channel = channel.clone();
+
+        let handle = tokio::spawn(async move {
+            let (rows_sink, rows_ch) = (sink.clone(), emit_channel.clone());
+            let (st_sink, st_ch) = (sink.clone(), emit_channel.clone());
+            let result = srelens_kube::watch::watch_custom_resource(
+                cache,
+                context,
+                namespace,
+                target,
+                move |rows| {
+                    if let Ok(v) = serde_json::to_value(rows) {
+                        rows_sink.emit(&rows_ch, v);
+                    }
+                },
+                move |st: srelens_kube::watch::WatchStatus| {
+                    st_sink.emit(&st_ch, serde_json::json!({ "status": st.as_str() }));
+                },
+            )
+            .await;
+            if let Err(msg) = result {
+                eprintln!("custom resource watch error: {msg}");
+                sink.emit(&emit_channel, serde_json::json!({ "error": msg }));
+            }
+        });
+
+        self.tasks.lock().unwrap().insert(channel.clone(), handle);
+        Ok(channel)
+    }
+
     /// Abort every running watch (used when a user's environment is dropped).
     pub fn shutdown_all(&self) {
         let mut tasks = self.tasks.lock().unwrap();
@@ -202,5 +251,34 @@ mod tests {
             .unwrap();
         manager.shutdown_all(); // no panic; subsequent stop is a no-op
         manager.stop("w");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_custom_registers_and_stops_channel() {
+        let manager = WatchManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let target = CustomWatchTarget {
+            group: "example.com".into(),
+            version: "v1".into(),
+            kind: "Foo".into(),
+            plural: "foos".into(),
+            namespaced: true,
+        };
+        let channel = manager
+            .start_custom(
+                sink.clone(),
+                "ctx".into(),
+                "default".into(),
+                target,
+                "watch:crd:1".into(),
+                vec![],
+            )
+            .await
+            .expect("start_custom returns the channel");
+        assert_eq!(channel, "watch:crd:1");
+        assert!(manager.has_channel("watch:crd:1"));
+
+        manager.stop("watch:crd:1");
+        assert!(!manager.has_channel("watch:crd:1"));
     }
 }
