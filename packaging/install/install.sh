@@ -654,13 +654,42 @@ install_binary() {
     # bytes -- so a restore would put a regular file where a link had been,
     # silently breaking whatever arrangement the link was part of while
     # reporting that the previous copy was put back.
-    # An extended ACL on the existing binary would not survive a rollback:
-    # the copy carries bytes, mode, owner and times, and nothing else. Better
-    # to refuse than to restore something quietly less protected than what
-    # was there. getfacl is already required by the destination checks.
-    if [ -e "$dest" ] && command -v getfacl >/dev/null 2>&1 &&
-        [ -n "$(getfacl --skip-base --omit-header "$dest" 2>/dev/null)" ]; then
-        die "$dest carries an extended ACL, which a rollback could not put back. Remove the ACL, or move the file aside, and run this again."
+    # Metadata on the binary being REPLACED. The rollback copy carries bytes,
+    # mode, owner and timestamps, and nothing else -- so anything else there
+    # would come back missing, and the script would report the previous copy
+    # restored while handing back something less capable than what it took.
+    #
+    # Only when something is actually being replaced: a first install has no
+    # previous copy to be faithful to, so nobody installing for the first time
+    # is sent off to fetch tools.
+    if [ -e "$dest" ]; then
+        # An extended ACL. getfacl is already required by the destination
+        # checks, so this costs nothing extra.
+        if command -v getfacl >/dev/null 2>&1 &&
+            [ -n "$(getfacl --skip-base --omit-header "$dest" 2>/dev/null)" ]; then
+            die "$dest carries an extended ACL, which a rollback could not put back. Remove the ACL, or move the file aside, and run this again."
+        fi
+
+        # Everything else in the xattr namespace -- a file capability above
+        # all, whose loss would quietly take privileges from a binary that
+        # had them.
+        #
+        # security.selinux is excluded deliberately. Every file on an SELinux
+        # system carries one, so refusing them would refuse every update on
+        # Fedora and RHEL -- and it is the one piece here the filesystem
+        # re-derives anyway, since the rollback copy is created by mktemp in
+        # the destination directory and labelled by the same policy.
+        if command -v getfattr >/dev/null 2>&1; then
+            kept_attrs="$(getfattr -d -m - "$dest" 2>/dev/null |
+                grep -E '^[a-z_]+\.[a-z_]+' |
+                grep -v '^security\.selinux=' |
+                cut -d= -f1 | tr '\n' ' ')" || kept_attrs=""
+            if [ -n "$kept_attrs" ]; then
+                die "$dest carries extended attributes a rollback could not put back: ${kept_attrs% }. Remove them, or move the file aside, and run this again."
+            fi
+        else
+            die "cannot tell whether $dest carries extended attributes such as a file capability, and a rollback could not put those back: getfattr is not installed. Install it (Debian: apt install attr; Alpine: apk add attr), or move the file aside, and run this again."
+        fi
     fi
 
     # A FIFO, socket or device node where the binary goes. `cp -p` reading a

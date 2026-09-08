@@ -994,6 +994,51 @@ EOF
     check "a rejected first install that cannot be removed says so" "could NOT be removed" "$out" "$rc" 1
     check "and names where it is still installed" "$home/.local/bin/srelens-tui" "$out" "$rc" 1
     rm -f "$work/fake/rm"
+
+    # Metadata the rollback cannot carry. The copy takes bytes, mode, owner
+    # and times; a file capability is not among them, and losing one silently
+    # would take privileges from a binary that had them.
+    if command -v setcap >/dev/null 2>&1; then
+        home="$work/homes/capped"
+        new_home "$home"
+        cp /bin/true "$home/.local/bin/srelens-tui"
+        chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+        if setcap cap_net_raw+ep "$home/.local/bin/srelens-tui" 2>/dev/null; then
+            out="$(install_into "$home")" && rc=0 || rc=$?
+            check "a binary with a file capability is not silently replaced" "security.capability" "$out" "$rc" 1
+        else
+            echo "  skip  could not set a capability on this filesystem"
+        fi
+    else
+        echo "  skip  no setcap: cannot test capability detection"
+    fi
+
+    # A first install has no previous copy to be faithful to, so it must not
+    # be held to any of that -- nobody installing for the first time should be
+    # sent to fetch tools.
+    home="$work/homes/fresh-no-attr"
+    new_home "$home"
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a first install is not asked about metadata" "Installed:" "$out" "$rc" 0
+
+    # And where the question cannot be answered at all, an UPDATE refuses
+    # rather than replacing a binary whose metadata it cannot account for.
+    blind_attr="$work/blind-attr"
+    rm -rf "$blind_attr"
+    mkdir -p "$blind_attr"
+    attr_missing=""
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname \
+        mkdir cp mv rm ln cat ls awk id getent getfacl stat sha256sum; do
+        tpath="$(command -v "$tool" 2>/dev/null)" || { attr_missing="$attr_missing $tool"; continue; }
+        ln -sf "$tpath" "$blind_attr/$tool"
+    done
+    if [ -n "$attr_missing" ]; then
+        echo "  skip  no getfattr-blind run:$attr_missing not found"
+    else
+        chmod -R a+rx "$blind_attr"
+        out="$(install_into "$home" "PATH=$blind_attr")" && rc=0 || rc=$?
+        check "an update refuses when it cannot check for xattrs" "getfattr is not installed" "$out" "$rc" 1
+    fi
     rm -f "$work/fake/curl"
 else
     echo "  skip  no unprivileged account this run created: cannot test a wrong version"
@@ -1094,7 +1139,7 @@ if command -v shasum >/dev/null 2>&1; then
     missing=''
     # getfacl among them: without it, and with a BusyBox ls, the installer
     # refuses before it ever reaches the hashing this case is about.
-    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent getfacl stat shasum; do
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent getfacl getfattr stat shasum; do
         path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
         ln -sf "$path" "$limited/$tool"
     done

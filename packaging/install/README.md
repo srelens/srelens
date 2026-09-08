@@ -134,10 +134,17 @@ binary is ever checked. `INT` and `TERM` put the old copy back and remove
 the staging file rather than leaving that state behind.
 
 The rollback copy carries bytes, mode, owner and timestamps (`cp -p`, into
-the inode `mktemp` holds, so the name is never released). It does **not**
-carry an extended ACL, an xattr or a file capability — nothing portable
-does — so an existing binary with an ACL is refused rather than restored
-as something quietly less protected.
+the inode `mktemp` holds, so the name is never released). It does **not** carry an
+extended ACL, an xattr or a file capability, and nothing portable does — so
+rather than restore something quietly less capable than what it took, it
+refuses to replace a binary carrying any of them.
+
+That check needs `getfacl` and `getfattr`, and an **update** refuses if
+`getfattr` is missing rather than guess. A **first** install is never asked:
+there is no previous copy to be faithful to. `security.selinux` is excluded
+deliberately — every file on an SELinux system has one, and it is the single
+piece here the filesystem re-derives, since the rollback copy is created by
+`mktemp` in the destination directory and labelled by the same policy.
 
 **Unpredictable staging, and a private unpack.** The staging file is created
 with `mktemp` rather than at `.srelens-tui.install.<pid>`, which could be
@@ -195,7 +202,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Seventy-eight cases: argument handling, the macOS and unknown-architecture refusals,
+Eighty-one cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped
