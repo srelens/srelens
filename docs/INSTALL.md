@@ -83,9 +83,9 @@ host. Otherwise prefer the glibc build.
 run it:
 
 ```bash
-f="$(mktemp)" &&
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
   curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
-  sh "$f"; rm -f "$f"
+  sh "$f" )
 ```
 
 `mktemp` rather than a fixed name, and chained rather than three lines.
@@ -98,9 +98,11 @@ the machine. `mktemp` creates the file exclusively, so there is nothing to
 aim at.
 
 The chaining matters because unchained, a failed download leaves the previous
-file to be run, and a failed install followed by a successful `rm` ends the
-snippet at status 0 — the same way the pipeline did. `rm -f` after `;` rather
-than `&&` so the temporary file goes whether the install worked or not.
+file to be run. And the cleanup is a `trap` in a subshell rather than a
+trailing `; rm -f`, because a command after `;` sets the status of the whole
+line — a failed install followed by a successful `rm` would report 0, the
+same way the pipeline did. The subshell exits with the install's status, and
+the trap removes the file on the way out whether it worked or not.
 
 Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
 reports the status of its *last* command. If the download fails — a 404, a

@@ -368,8 +368,7 @@ echo "how the docs say to run it"
 # `curl -o` to truncate; unchained, a failed download leaves the previous file
 # to be run and a successful rm ends the snippet at status 0.
 chain_rc=0
-f="$(mktemp)" && curl -fsSL "https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/no-such-file.sh" -o "$f" && sh "$f" >/dev/null 2>&1 || chain_rc=$?
-rm -f "$f"
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT && curl -fsSL "https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/no-such-file.sh" -o "$f" && sh "$f" >/dev/null 2>&1 ) || chain_rc=$?
 if [ "$chain_rc" != "0" ]; then
     ok "the chained form fails when the download fails, exit $chain_rc"
 else

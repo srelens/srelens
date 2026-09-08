@@ -3,9 +3,9 @@
 `install.sh` is what this serves:
 
 ```bash
-f="$(mktemp)" &&
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
   curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
-  sh "$f"; rm -f "$f"
+  sh "$f" )
 ```
 
 Two steps, not `curl … | sh`: a pipeline reports the status of its last
@@ -191,7 +191,7 @@ the way CI does:
 ```bash
 docker run --rm -v "$PWD/packaging/install:/i:ro" debian:bookworm-slim sh -c '
   apt-get -qq update
-  apt-get -qq install -y curl ca-certificates acl libdigest-sha-perl
+  apt-get -qq install -y curl ca-certificates acl attr libcap2-bin libdigest-sha-perl
   cp -r /i /tmp/i && sh /tmp/i/test.sh
 '
 ```

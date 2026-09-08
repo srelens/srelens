@@ -1,14 +1,17 @@
 #!/bin/sh
 # Install srelens-tui on Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh &&
-#     sh srelens-install.sh &&
-#     rm srelens-install.sh
+#   ( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+#     curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+#     sh "$f" )
 #
-# Download-then-run, chained, rather than piping into sh: a pipeline reports
-# the status of its LAST command, so a download that 404s hands sh an empty
-# script, which does nothing and exits 0. The line then succeeds having
-# installed nothing, and whatever is automating it carries on.
+# Download-then-run rather than piping into sh: a pipeline reports the
+# status of its LAST command, so a download that 404s hands sh an empty
+# script, which does nothing and exits 0 -- the line succeeds having
+# installed nothing. mktemp rather than a fixed name: in a directory another
+# account can write, a fixed name can be pre-created as a symlink for
+# `curl -o` to truncate through. And a trap rather than a trailing `; rm`,
+# which would make the cleanup's status the line's status.
 #
 # Everything is inside main(), called on the very last line. A script read
 # from a pipe is executed as it arrives, so a connection that dies halfway
@@ -666,9 +669,15 @@ install_binary() {
     if [ -e "$dest" ]; then
         # An extended ACL. getfacl is already required by the destination
         # checks, so this costs nothing extra.
-        if command -v getfacl >/dev/null 2>&1 &&
-            [ -n "$(getfacl --skip-base --omit-header "$dest" 2>/dev/null)" ]; then
-            die "$dest carries an extended ACL, which a rollback could not put back. Remove the ACL, or move the file aside, and run this again."
+        if command -v getfacl >/dev/null 2>&1; then
+            # Status first, as with every other lookup in this file: a
+            # getfacl that cannot read this file produces empty output, which
+            # is indistinguishable from a file with no ACL.
+            dest_acl="$(getfacl --skip-base --omit-header "$dest" 2>/dev/null)" ||
+                die "cannot read the ACL of $dest, so a rollback could not account for it. Check with: getfacl $dest"
+            if [ -n "$dest_acl" ]; then
+                die "$dest carries an extended ACL, which a rollback could not put back. Remove the ACL, or move the file aside, and run this again."
+            fi
         fi
 
         # Everything else in the xattr namespace -- a file capability above
