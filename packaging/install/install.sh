@@ -18,7 +18,6 @@ BIN="srelens-tui"
 
 main() {
     version=""
-    install_dir=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -36,15 +35,9 @@ main() {
                 [ -n "$version" ] || die "--version needs a value, e.g. --version=0.9.0"
                 shift
                 ;;
-            --install-dir)
-                install_dir="${2:-}"
-                [ -n "$install_dir" ] || die "--install-dir needs a value"
-                shift 2
-                ;;
-            --install-dir=*)
-                install_dir="${1#--install-dir=}"
-                [ -n "$install_dir" ] || die "--install-dir needs a value"
-                shift
+            --install-dir | --install-dir=*)
+                # Removed deliberately -- see the note above resolve_install_dir.
+                die "--install-dir is no longer accepted. This installs to /usr/local/bin, or ~/.local/bin when that is not writable. To put the binary anywhere else, unpack the tarball yourself: see docs/INSTALL.md."
                 ;;
             -h | --help)
                 usage
@@ -67,7 +60,7 @@ main() {
     version="${version#srelens-v}"
     version="${version#v}"
 
-    install_dir="$(resolve_install_dir "$install_dir")"
+    install_dir="$(resolve_install_dir)"
     # Sets INSTALL_DIR to the canonical path, which is what everything below
     # uses. Before the download, so an unwritable destination costs nothing.
     prepare_install_dir "$install_dir"
@@ -169,12 +162,15 @@ usage() {
 Install $BIN, the srelens terminal UI, on Linux.
 
 Usage:
-  install.sh [--version <x.y.z>] [--install-dir <path>]
+  install.sh [--version <x.y.z>]
 
 Options:
-  --version <x.y.z>     Install this version instead of the latest stable.
-  --install-dir <path>  Install here instead of $(printf '%s' '/usr/local/bin, or ~/.local/bin when that is not writable').
-  -h, --help            Show this message.
+  --version <x.y.z>  Install this version instead of the latest stable.
+  -h, --help         Show this message.
+
+It installs to /usr/local/bin, or ~/.local/bin when that is not writable.
+There is no way to name a different directory: unpack the tarball yourself
+if you want the binary somewhere else. See docs/INSTALL.md.
 
 The binary is the statically linked musl build, so it does not care which
 libc or which distribution is on the machine. Its SHA-256 is checked against
@@ -261,17 +257,26 @@ latest_version() {
     printf '%s' "${tag#srelens-v}"
 }
 
-# /usr/local/bin when it is writable, ~/.local/bin otherwise.
+# /usr/local/bin when it is writable, ~/.local/bin otherwise. Those two, and
+# nothing else.
+#
+# There was an --install-dir flag. It is gone on purpose: an arbitrary
+# caller-chosen destination is most of this script's attack surface, and
+# making one safe from a POSIX shell means winning filesystem races that a
+# shell has no primitives for -- it cannot hold a descriptor across a check
+# and a use, so every rule below is a claim about a path that could change
+# underneath it. The two destinations here are root's or yours by
+# construction. Anyone who wants the binary elsewhere can unpack the tarball
+# themselves, which is a plain `tar -xzf` and is documented.
+#
+# The checks below still run, because both paths remain reachable from the
+# environment: $HOME is whatever the caller says it is.
 #
 # No sudo. A script fetched over the network re-invoking itself as root is
 # exactly the pattern people are right to be nervous about, and the fallback
 # needs no privileges at all. Anyone who wants it system-wide can say so:
 #   curl ... | sudo sh
 resolve_install_dir() {
-    if [ -n "$1" ]; then
-        printf '%s' "$1"
-        return
-    fi
     if [ -w /usr/local/bin ] 2>/dev/null; then
         printf '/usr/local/bin'
     else
@@ -319,7 +324,7 @@ prepare_install_dir() {
     mkdir -p "$dir" 2>/dev/null ||
         die "cannot create $dir"
     [ -w "$dir" ] ||
-        die "$dir is not writable. Re-run with --install-dir <somewhere you own>, or with sudo."
+        die "$dir is not writable. Re-run under sudo to install to /usr/local/bin."
     resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || resolved=""
     [ -n "$resolved" ] && dir="$resolved"
     INSTALL_DIR="$dir"
@@ -401,12 +406,18 @@ assert_component() {
     # portably is not something a POSIX shell can do -- getfacl is neither
     # POSIX nor present on Alpine. Refuse rather than pass a directory whose
     # real permissions have not been seen.
+    #
+    # A gap worth naming: BusyBox ls does not print that marker at all, so on
+    # Alpine an ACL is invisible here. There is no portable way to ask -- the
+    # alternative would be refusing every group- or other-readable directory
+    # on systems whose ls is terse, which refuses the ordinary case to catch
+    # a rare one.
     if [ "$(printf %s "$listing" | cut -c11)" = "+" ]; then
         die "$path carries an extended ACL, which may grant write access that its mode does not show. Check it with: getfacl $path"
     fi
 
     if [ -n "$owner" ] && [ "$owner" != "root" ] && [ "$owner" != "$SAFE_ME" ]; then
-        die "$path belongs to $owner, who could replace what is inside it while this installs. Choose a path you control: --install-dir \$HOME/.local/bin"
+        die "$path belongs to $owner, who could replace what is inside it while this installs. Nothing can be installed there safely."
     fi
 
     # The sticky bit settles both write bits at once. With it set, only an
@@ -420,7 +431,7 @@ assert_component() {
     esac
 
     if [ "$(printf %s "$perms" | cut -c9)" = "w" ]; then
-        die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+        die "$path is writable by anyone and has no sticky bit, so another user could replace the binary between staging and running it. Nothing can be installed there safely."
     fi
 
     # Group-writable, without the sticky bit, needs the group to contain
@@ -440,7 +451,7 @@ assert_component() {
     # of it.
     if [ "$(printf %s "$perms" | cut -c6)" = "w" ]; then
         if [ -z "$group" ] || [ "$group" != "$owner" ]; then
-            die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+            die "$path is writable by the group $group, whose members could replace the binary between staging and running it. Nothing can be installed there safely."
         fi
         if command -v getent >/dev/null 2>&1; then
             # A lookup that FAILS is not a group with nobody in it. An NSS
@@ -448,12 +459,12 @@ assert_component() {
             # empty member list and empty GID then skip both checks below
             # and accept the directory.
             entry="$(getent group "$group" 2>/dev/null)" ||
-                die "cannot look up the group $group, so who can write to $path is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+                die "cannot look up the group $group, so who can write to $path is unknown. Nothing can be installed there safely."
             [ -n "$entry" ] ||
-                die "the group $group does not resolve, so who can write to $path is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+                die "the group $group does not resolve, so who can write to $path is unknown. Nothing can be installed there safely."
             members="$(printf %s "$entry" | cut -d: -f4)"
             if [ -n "$members" ] && [ "$members" != "$owner" ]; then
-                die "$path is writable by the group $group, which has members besides $owner ($members). Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+                die "$path is writable by the group $group, which has members besides $owner ($members). Any of them could replace the binary between staging and running it. Nothing can be installed there safely."
             fi
 
             # The member list is only half of a group. An account whose
@@ -474,17 +485,17 @@ assert_component() {
                 # empty answer and been read as "nobody else is in this
                 # group". The same fail-open the group lookup above had.
                 accounts="$(getent passwd 2>/dev/null)" ||
-                    die "cannot enumerate accounts, so who else is in the group $group is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+                    die "cannot enumerate accounts, so who else is in the group $group is unknown. Nothing can be installed there safely."
                 [ -n "$accounts" ] ||
-                    die "no accounts could be listed, so who else is in the group $group is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+                    die "no accounts could be listed, so who else is in the group $group is unknown. Nothing can be installed there safely."
                 primary="$(printf %s "$accounts" |
                     awk -F: -v g="$gid" -v o="$owner" '$4 == g && $1 != o { printf "%s ", $1 }')" || primary=""
                 if [ -n "$primary" ]; then
-                    die "$path is writable by the group $group, which is the primary group of ${primary%% }. Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"
+                    die "$path is writable by the group $group, which is the primary group of ${primary%% }. Any of them could replace the binary between staging and running it. Nothing can be installed there safely."
                 fi
             fi
         else
-            die "$path is group-writable and there is no getent here to establish who is in group $group. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+            die "$path is group-writable and there is no getent here to establish who is in group $group. Nothing can be installed there safely."
         fi
     fi
 }
@@ -501,7 +512,7 @@ install_binary() {
     # caller asked for. `mv -T` says otherwise but is GNU-only, and this
     # has to run under BusyBox.
     if [ -d "$dest" ]; then
-        die "$dest is a directory, so a binary cannot be installed at that path. Remove it, or choose another --install-dir."
+        die "$dest is a directory, so a binary cannot be installed at that path. Remove it and run this again."
     fi
     # Already created, checked and canonicalised by prepare_install_dir and
     # assert_safe_dir. Deliberately not re-derived from $dest here.

@@ -92,15 +92,21 @@ in `/usr/local/bin` when that is writable or `~/.local/bin` when it is not.
 It never invokes `sudo` on your behalf — run the whole line under `sudo` if
 you want it system-wide from an unprivileged shell.
 
-`--version <x.y.z>` installs a specific release and `--install-dir <path>`
-puts it somewhere else. Options cannot be appended to the line above:
-everything after `sh` is read by the shell, not by the script, so `sh` would
-reject `--version` as its own flag. Pass them after `-s --`:
+`--version <x.y.z>` installs a specific release. Options cannot be appended
+to the line above: everything after `sh` is read by the shell, not by the
+script, so `sh` would reject `--version` as its own flag. Pass it after
+`-s --`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh \
-  | sh -s -- --version 0.9.0 --install-dir ~/bin
+  | sh -s -- --version 0.9.0
 ```
+
+Those two destinations are the only ones. There is no flag for naming
+another: making an arbitrary caller-chosen directory safe against someone
+with a local account is not something a shell script can do honestly, so it
+does not pretend to. To put the binary elsewhere, unpack the tarball by hand
+as shown below.
 
 Read it first if you would rather not pipe a script
 from the internet into a shell; it is short, and

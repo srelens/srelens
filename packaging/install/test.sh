@@ -75,6 +75,47 @@ no() {
     fail=$((fail + 1))
 }
 
+# Where an install lands here, now that it cannot be told.
+#
+# /usr/local/bin when writable -- which for root is always, since
+# permission bits do not apply to uid 0 -- and $HOME/.local/bin otherwise.
+# So as root the cases below shape /usr/local/bin itself, which is the
+# directory a real `curl | sudo sh` installs into.
+if [ -w /usr/local/bin ]; then
+    default_dest="/usr/local/bin"
+else
+    default_dest="$HOME/.local/bin"
+fi
+
+# Put /usr/local/bin back the way a distribution ships it. Every case that
+# bends it calls this afterwards, so the next one starts from a known
+# state rather than from whatever the last one left.
+reset_dest() {
+    if [ "$default_dest" != "/usr/local/bin" ]; then
+        # The home branch: nothing to chown, but the mode and any leftover
+        # binary still carry into the next case.
+        chmod 0755 "$default_dest" 2>/dev/null || true
+        rm -rf "$default_dest/srelens-tui"
+        return 0
+    fi
+    setfacl -b /usr/local/bin 2>/dev/null || true
+    chown root /usr/local/bin 2>/dev/null || true
+    chgrp root /usr/local/bin 2>/dev/null || true
+    chmod 0755 /usr/local/bin 2>/dev/null || true
+    chown root /usr/local 2>/dev/null || true
+    rm -rf /usr/local/bin/srelens-tui
+}
+
+# A case that bends the real destination only means something as root; an
+# unprivileged run would be installing into its own home instead.
+can_shape_dest() {
+    [ "$default_dest" = "/usr/local/bin" ]
+}
+
+# Somebody who is neither root nor us, for the ownership cases.
+other_user="nobody"
+id -u nobody >/dev/null 2>&1 || other_user=""
+
 echo "arguments"
 
 out="$(sh "$script" --help 2>&1)" && rc=0 || rc=$?
@@ -93,8 +134,12 @@ check "--version without a value is refused" "needs a value" "$out" "$rc" 1
 out="$(sh "$script" --version= 2>&1)" && rc=0 || rc=$?
 check "an empty --version= is refused too" "needs a value" "$out" "$rc" 1
 
-out="$(sh "$script" --install-dir= 2>&1)" && rc=0 || rc=$?
-check "an empty --install-dir= is refused too" "needs a value" "$out" "$rc" 1
+# The flag is gone. Saying so beats "unknown option" for anyone following
+# an older README.
+out="$(sh "$script" --install-dir /tmp/x 2>&1)" && rc=0 || rc=$?
+check "--install-dir is refused, and says where it installs instead" "no longer accepted" "$out" "$rc" 1
+out="$(sh "$script" --install-dir=/tmp/x 2>&1)" && rc=0 || rc=$?
+check "and its equals form too" "no longer accepted" "$out" "$rc" 1
 
 echo "platform"
 
@@ -168,8 +213,8 @@ esac
 EOF
 chmod +x "$work/fake/curl"
 
-dest="$work/cksum"
-out="$(PATH="$work/fake:$PATH" sh "$script" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+dest="$default_dest"
+out="$(PATH="$work/fake:$PATH" sh "$script" 2>&1)" && rc=0 || rc=$?
 check "a corrupted archive is refused" "checksum mismatch" "$out" "$rc" 1
 if [ -e "$dest/srelens-tui" ]; then
     no "nothing is installed when the checksum fails"
@@ -182,15 +227,15 @@ echo "latest-version resolution"
 # Offline, through the fake curl that serves the API's tag_name. Proves the
 # script parses `latest` correctly without spending an unauthenticated API
 # call per run on a shared runner IP.
-dest="$work/latest"
-out="$(SERVE_GOOD=1 PATH="$work/fake:$PATH" sh "$script" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+dest="$default_dest"
+out="$(SERVE_GOOD=1 PATH="$work/fake:$PATH" sh "$script" 2>&1)" && rc=0 || rc=$?
 check "the newest release is resolved from the API" "srelens-tui $version" "$out" "$rc" 0
 check "and installed" "Installed: $dest/srelens-tui" "$out" "$rc" 0
 
 echo "install"
 
-dest="$work/bin"
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+dest="$default_dest"
+out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "the release installs" "Installed: $dest/srelens-tui" "$out" "$rc" 0
 check "the checksum is reported, not assumed" "Checksum verified:" "$out" "$rc" 0
 
@@ -202,7 +247,7 @@ fi
 
 # Installing over an existing copy is the update path, and must not fail on
 # ETXTBSY or leave the staging file behind.
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "installing over an existing copy succeeds" "Installed:" "$out" "$rc" 0
 if [ -z "$(find "$dest" -name '.srelens-tui.install.*' -o -name '.srelens-tui.backup.*' 2>/dev/null)" ]; then
     ok "no staging or backup file is left behind"
@@ -215,11 +260,11 @@ echo "through a pipe"
 # How the documented one-liner actually runs. Options cannot follow a bare
 # `sh` -- it reads them as its own -- so the docs say `sh -s --`, and this
 # proves that form reaches the script's parser.
-dest="$work/piped"
+dest="$default_dest"
 # The `cat` is the point: this reproduces the documented one-liner, where
 # the script arrives on stdin rather than as a path.
 # shellcheck disable=SC2002
-out="$(cat "$script" | sh -s -- --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(cat "$script" | sh -s -- --version "$version" 2>&1)" && rc=0 || rc=$?
 check "options survive sh -s --" "Installed: $dest/srelens-tui" "$out" "$rc" 0
 
 echo "staging file"
@@ -228,11 +273,10 @@ echo "staging file"
 # into a directory another user can write to, a predictable name can be
 # pre-created as a symlink, and cp writes through it. mktemp names cannot
 # be aimed at, and a symlink sitting in the directory is left alone.
-dest="$work/staging"
-mkdir -p "$dest"
+dest="$default_dest"
 echo "do not touch me" > "$work/canary"
 ln -sf "$work/canary" "$dest/.srelens-tui.install.99999"
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "installs alongside a planted symlink" "Installed:" "$out" "$rc" 0
 if [ "$(cat "$work/canary")" = "do not touch me" ]; then
     ok "a planted symlink is not written through"
@@ -249,276 +293,249 @@ fi
 
 echo "unsafe destinations"
 
-# An unpredictable staging name does not survive a directory other users
-# can unlink from: they can take the staged file away and leave a symlink,
-# or replace the finished binary before it is run. Only the directory's own
-# permissions close that, so an unsafe one is refused outright.
-dest="$work/world"
-mkdir -p "$dest"
-chmod 0777 "$dest"
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-check "a world-writable destination is refused" "writable by anyone" "$out" "$rc" 1
-if [ -e "$dest/srelens-tui" ]; then
-    no "it installed into the world-writable directory anyway"
-else
-    ok "nothing was installed there"
-fi
+# These bend /usr/local/bin itself, which is where a real `curl | sudo sh`
+# lands. The destination cannot be named any more, so testing what the rules
+# do means shaping the directory they will pick, and putting it back after.
+if can_shape_dest; then
+    # Whatever the install cases above left behind is not part of these.
+    reset_dest
 
-# The sticky bit is what makes /tmp safe: only an entry's owner may unlink
-# it, so the staged file cannot be taken away. That case must still work.
-dest="$work/sticky"
-mkdir -p "$dest"
-chmod 1777 "$dest"
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-check "world-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
-
-# Root writing into a directory root does not own is the case worth
-# refusing outright: the owner can arrange the swap at leisure and gets a
-# root-written file out of it.
-if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
-    if ! id -u tester >/dev/null 2>&1; then
-        if useradd -m tester >/dev/null 2>&1; then
-            made_user="tester"
-        fi
+    # An unpredictable staging name does not survive a directory other users
+    # can unlink from: they can take the staged file away and leave a symlink,
+    # or replace the finished binary before it is run. Only the directory's
+    # own permissions close that, so an unsafe one is refused outright.
+    chmod 0777 /usr/local/bin
+    out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+    check "a world-writable destination is refused" "writable by anyone" "$out" "$rc" 1
+    if [ -e /usr/local/bin/srelens-tui ]; then
+        no "it installed into the world-writable directory anyway"
+    else
+        ok "nothing was installed there"
     fi
-    dest="$work/theirs"
-    mkdir -p "$dest"
-    if chown tester "$dest" 2>/dev/null; then
-        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "a directory owned by another user is refused" "belongs to tester" "$out" "$rc" 1
-        if [ -e "$dest/srelens-tui" ]; then
+    reset_dest
+
+    # The sticky bit is what makes /tmp safe: only an entry's owner may unlink
+    # it, so the staged file cannot be taken away. That case must still work.
+    chmod 1777 /usr/local/bin
+    out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+    check "world-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
+    reset_dest
+
+    # A directory belonging to somebody else: they can arrange the swap at
+    # leisure and get a root-written file out of it.
+    if [ -n "$other_user" ] && chown "$other_user" /usr/local/bin 2>/dev/null; then
+        out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+        check "a directory owned by another user is refused" "belongs to $other_user" "$out" "$rc" 1
+        if [ -e /usr/local/bin/srelens-tui ]; then
             no "it installed into the other user's directory anyway"
         else
             ok "nothing was installed there either"
         fi
     else
-        echo "  skip  could not chown a directory to another user"
+        echo "  skip  no second account to own the destination"
     fi
-else
-    echo "  skip  not root, or no useradd: cannot test the root-into-foreign-dir refusal"
-fi
+    reset_dest
 
-# A symlink is not the directory it points at. `ls -ld` on one reports
-# `lrwxrwxrwx` owned by whoever made the link, so inspecting the path as
-# given would describe the link and let --install-dir <link> past every
-# check while the install lands somewhere else entirely.
-target="$work/unsafe-target"
-mkdir -p "$target"
-chmod 0777 "$target"
-link="$work/looks-fine"
-ln -sfn "$target" "$link"
-out="$(sh "$script" --version "$version" --install-dir "$link" 2>&1)" && rc=0 || rc=$?
-check "a symlink to an unsafe directory is refused" "writable by anyone" "$out" "$rc" 1
-if [ -e "$target/srelens-tui" ]; then
-    no "it installed through the symlink anyway"
-else
-    ok "nothing was installed through the symlink"
-fi
-
-# The sticky bit stops OTHER users unlinking entries, but never the
-# directory's owner, who may remove anything inside it. A world-writable
-# sticky directory belonging to someone else is still theirs to tamper
-# with -- the same condition self_update.rs already applies.
-if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
-    if ! id -u tester >/dev/null 2>&1; then
-        if useradd -m tester >/dev/null 2>&1; then
-            made_user="tester"
-        fi
-    fi
-    dest="$work/their-sticky"
-    mkdir -p "$dest"
-    chmod 1777 "$dest"
-    if chown tester "$dest" 2>/dev/null; then
-        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "a sticky directory owned by someone else is refused" "belongs to tester" "$out" "$rc" 1
+    # Sticky does not save a directory whose OWNER is somebody else: the owner
+    # may remove anything inside it regardless.
+    if [ -n "$other_user" ] && chown "$other_user" /usr/local/bin 2>/dev/null; then
+        chmod 1777 /usr/local/bin
+        out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+        check "a sticky directory owned by someone else is refused" "belongs to $other_user" "$out" "$rc" 1
     else
-        echo "  skip  could not chown a sticky directory to another user"
+        echo "  skip  no second account to own the destination"
     fi
-else
-    echo "  skip  not root, or no useradd: cannot test the foreign sticky directory"
-fi
+    reset_dest
 
-# A safe symlink must still install -- through the directory it points at,
-# named canonically. Approving the resolved path but staging and running
-# through the path as given would leave the link repointable after the check.
-target="$work/real-bin"
-mkdir -p "$target"
-link="$work/link-to-real"
-ln -sfn "$target" "$link"
-out="$(sh "$script" --version "$version" --install-dir "$link" 2>&1)" && rc=0 || rc=$?
-check "a safe symlink installs into its target" "Installed: $target/srelens-tui" "$out" "$rc" 0
-if [ -x "$target/srelens-tui" ]; then
-    ok "the binary landed in the resolved directory"
+    # A symlink is not the directory it points at. `ls -ld` on one reports
+    # `lrwxrwxrwx` owned by whoever made the link, so inspecting the path as
+    # given would describe the link while the install lands somewhere else.
+    target="$work/unsafe-target"
+    mkdir -p "$target"
+    chmod 0777 "$target"
+    mv /usr/local/bin /usr/local/bin.real
+    ln -sfn "$target" /usr/local/bin
+    out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+    check "a symlink to an unsafe directory is refused" "writable by anyone" "$out" "$rc" 1
+    if [ -e "$target/srelens-tui" ]; then
+        no "it installed through the symlink anyway"
+    else
+        ok "nothing was installed through the symlink"
+    fi
+    rm -f /usr/local/bin
+    mv /usr/local/bin.real /usr/local/bin
+    reset_dest
+
+    # A safe symlink must still install -- through the directory it points at,
+    # named canonically. Approving the resolved path but staging and running
+    # through the path as given would leave the link repointable after the
+    # check.
+    target="$work/real-bin"
+    mkdir -p "$target"
+    mv /usr/local/bin /usr/local/bin.real
+    ln -sfn "$target" /usr/local/bin
+    out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+    check "a safe symlink installs into its target" "Installed: $target/srelens-tui" "$out" "$rc" 0
+    if [ -x "$target/srelens-tui" ]; then
+        ok "the binary landed in the resolved directory"
+    else
+        no "nothing landed in the resolved directory"
+    fi
+    rm -f /usr/local/bin
+    mv /usr/local/bin.real /usr/local/bin
+    reset_dest
+
+    # A directory can be impeccable itself and still sit under one somebody
+    # else owns, who can rename it and put their own in its place after the
+    # check. Every component is walked, so the ancestor is what fails here.
+    if [ -n "$other_user" ] && chown "$other_user" /usr/local 2>/dev/null; then
+        out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+        check "a directory under a foreign ancestor is refused" "belongs to $other_user" "$out" "$rc" 1
+        if [ -e /usr/local/bin/srelens-tui ]; then
+            no "it installed under the replaceable ancestor anyway"
+        else
+            ok "nothing was installed under the replaceable ancestor"
+        fi
+    else
+        echo "  skip  no second account to own an ancestor"
+    fi
+    reset_dest
+
+    # `mv file dir` moves the file INTO the directory. A destination that is
+    # already a directory would swallow the staging file and leave nothing at
+    # the path asked for -- and the version line used to hide that inside a
+    # command substitution, so the install printed Installed and exited 0.
+    mkdir -p /usr/local/bin/srelens-tui
+    out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+    check "a directory where the binary goes is refused" "is a directory" "$out" "$rc" 1
+    case "$out" in
+        *Installed:*) no "it claimed to have installed something" ;;
+        *) ok "it did not claim to have installed anything" ;;
+    esac
+    reset_dest
 else
-    no "nothing landed in the resolved directory"
+    echo "  skip  not root: the destination is this account's own home, not a directory to bend"
 fi
 
 echo "shared groups and ancestors"
 
-# A group-writable directory is only safe when the group is the owner's
-# own -- the per-user-group convention. A shared group is a set of people
-# who can each replace the binary between staging and running it.
-if [ "$(id -u)" = "0" ] && command -v groupadd >/dev/null 2>&1; then
+if can_shape_dest && command -v groupadd >/dev/null 2>&1; then
+    # A group-writable directory is only safe when the group is the owner's
+    # own -- the per-user-group convention. A shared group is a set of people
+    # who can each replace the binary between staging and running it.
     if ! getent group shared >/dev/null 2>&1; then
         if groupadd shared >/dev/null 2>&1; then
             made_group="shared"
         fi
     fi
-    dest="$work/shared-group"
-    mkdir -p "$dest"
-    if chgrp shared "$dest" 2>/dev/null; then
-        chmod 0775 "$dest"
-        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+    if chgrp shared /usr/local/bin 2>/dev/null; then
+        chmod 0775 /usr/local/bin
+        out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
         check "a directory writable by a shared group is refused" "group shared" "$out" "$rc" 1
     else
         echo "  skip  could not set a shared group"
     fi
+    reset_dest
+
+    # A group named after its owner is the per-user-group CONVENTION, not a
+    # guarantee. If the group really has other members, any of them can
+    # replace the binary, so membership is looked up rather than assumed.
+    #
+    # Only ever on an account this run created: adding a pre-existing account
+    # to group root and removing it again would strip a membership the host
+    # meant to have.
+    if ! id -u tester >/dev/null 2>&1 && command -v useradd >/dev/null 2>&1; then
+        if useradd -m tester >/dev/null 2>&1; then
+            made_user="tester"
+        fi
+    fi
+    if [ "$made_user" = "tester" ] && command -v usermod >/dev/null 2>&1 &&
+        usermod -aG root tester >/dev/null 2>&1; then
+        chmod 0775 /usr/local/bin
+        out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+        check "an owner-named group with real members is refused" "besides root" "$out" "$rc" 1
+        gpasswd -d tester root >/dev/null 2>&1 || true
+    else
+        echo "  skip  no account this run created: not touching an existing one's groups"
+    fi
+    reset_dest
+
+    # Supplementary members are only half of a group: an account whose PRIMARY
+    # group it is never appears in the member list, while it can write there
+    # perfectly well.
+    if [ "$made_user" = "tester" ] && command -v useradd >/dev/null 2>&1; then
+        if useradd -M -g root primaryroot >/dev/null 2>&1; then
+            # Recorded BEFORE it is used: an interrupt between the useradd and
+            # the userdel below would otherwise leave the account behind.
+            made_users="$made_users primaryroot"
+            chmod 0775 /usr/local/bin
+            out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+            check "a group that is someone else's primary group is refused" "primaryroot" "$out" "$rc" 1
+            userdel primaryroot >/dev/null 2>&1 || true
+            made_users="$(printf %s "$made_users" | sed 's/ primaryroot//')"
+        else
+            echo "  skip  could not create an account with a primary GID of 0"
+        fi
+    else
+        echo "  skip  no account this run created: cannot test primary-group membership"
+    fi
+    reset_dest
+
+    # An extended ACL can grant write to any account while the mode bits look
+    # impeccable. ls marks one with a trailing +, and reading an ACL portably
+    # is not something a POSIX shell can do, so the marker alone is a refusal.
+    # The guard reads the trailing + that `ls -l` puts on a directory with an
+    # extended ACL. BusyBox ls does not print it, so there the ACL is invisible
+    # to the check and this case has nothing to assert.
+    if command -v setfacl >/dev/null 2>&1 && [ -n "$other_user" ] &&
+        setfacl -m "u:$other_user:rwx" /usr/local/bin 2>/dev/null &&
+        [ "$(ls -ld /usr/local/bin | cut -c11)" = "+" ]; then
+        out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+        check "a directory with an extended ACL is refused" "extended ACL" "$out" "$rc" 1
+    else
+        echo "  skip  no setfacl, or this ls does not mark ACLs (BusyBox)"
+    fi
+    reset_dest
 else
-    echo "  skip  not root, or no groupadd: cannot test the shared-group refusal"
+    echo "  skip  not root, or no groupadd: cannot shape the destination's group"
 fi
 
 # The per-user-group case must keep working, or every Fedora install with a
 # 002 umask breaks: there ~/.local/bin is `alice:alice` mode 0775.
 #
-# As the user, into their own group -- which is the actual shape. Root into
-# ROOT's group is a different thing and rightly refused: on Alpine, GID 0 is
-# the primary group of sync, shutdown and halt.
+# As the user, into their own home -- which is the actual shape, and the one
+# branch of the destination choice that root never takes.
 if [ "$made_user" = "tester" ]; then
-    dest="$work/own-group"
-    mkdir -p "$dest"
-    chown tester:tester "$dest" 2>/dev/null || chown tester "$dest" 2>/dev/null || true
-    chmod 0775 "$dest"
-    # Traversable so the account can reach it; still owned by root and
-    # writable by nobody else, so the walk above it stays clean.
-    chmod 0711 "$work"
-    chmod 644 "$script" 2>/dev/null || true
-    out="$(su tester -c "sh $script --version $version --install-dir $dest" 2>&1)" && rc=0 || rc=$?
-    check "group-writable by the owner's own group still installs" "Installed:" "$out" "$rc" 0
-    chmod 0700 "$work"
+    tester_home="$(getent passwd tester | cut -d: -f6)"
+    if [ -n "$tester_home" ] && [ -d "$tester_home" ]; then
+        mkdir -p "$tester_home/.local/bin"
+        # Group as well as owner: made by root, the tree carries root group,
+        # which is not the per-user group this case is about.
+        chown -R tester:tester "$tester_home/.local" 2>/dev/null ||
+            chown -R tester "$tester_home/.local" 2>/dev/null || true
+        chmod 0775 "$tester_home/.local/bin"
+        chmod 0644 "$script" 2>/dev/null || true
+        chmod 0711 "$work" 2>/dev/null || true
+        out="$(su tester -c "sh '$script' --version '$version'" 2>&1)" && rc=0 || rc=$?
+        check "group-writable by the owner's own group still installs" "Installed: $tester_home/.local/bin/srelens-tui" "$out" "$rc" 0
+    else
+        echo "  skip  the created account has no home directory"
+    fi
 else
     echo "  skip  no account this run created: cannot test a per-user group"
 fi
-
-# A directory can be impeccable itself and still sit under one somebody
-# else owns, who can rename it and put their own in its place after the
-# check. Every component is walked, so the parent is what fails here.
-if [ "$(id -u)" = "0" ] && command -v useradd >/dev/null 2>&1; then
-    if ! id -u tester >/dev/null 2>&1; then
-        if useradd -m tester >/dev/null 2>&1; then
-            made_user="tester"
-        fi
-    fi
-    parent="$work/theirs-parent"
-    mkdir -p "$parent/child"
-    if chown tester "$parent" 2>/dev/null; then
-        out="$(sh "$script" --version "$version" --install-dir "$parent/child" 2>&1)" && rc=0 || rc=$?
-        check "a root-owned directory under a foreign parent is refused" "belongs to tester" "$out" "$rc" 1
-        if [ -e "$parent/child/srelens-tui" ]; then
-            no "it installed under the replaceable parent anyway"
-        else
-            ok "nothing was installed under the replaceable parent"
-        fi
-    else
-        echo "  skip  could not chown a parent directory"
-    fi
-else
-    echo "  skip  not root, or no useradd: cannot test the ancestor walk"
-fi
-
-# An extended ACL can grant write to any account while the mode bits look
-# impeccable. ls marks one with a trailing +, and reading an ACL portably is
-# not something a POSIX shell can do, so the marker alone is a refusal.
-if [ "$(id -u)" = "0" ] && command -v setfacl >/dev/null 2>&1; then
-    dest="$work/acl"
-    mkdir -p "$dest"
-    if setfacl -m u:nobody:rwx "$dest" 2>/dev/null; then
-        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "a directory with an extended ACL is refused" "extended ACL" "$out" "$rc" 1
-    else
-        echo "  skip  could not set an ACL on this filesystem"
-    fi
-else
-    echo "  skip  not root, or no setfacl: cannot test the ACL refusal"
-fi
-
-# A group named after its owner is the per-user-group CONVENTION, not a
-# guarantee. If the group really has other members, any of them can replace
-# the binary, so membership is looked up rather than assumed.
-#
-# Only ever on an account this run created. Adding a pre-existing `tester`
-# to group root and then removing it again would strip a membership the
-# host meant to have -- a test that edits the machine it runs on is worse
-# than a test that skips.
-if ! id -u tester >/dev/null 2>&1 && [ "$(id -u)" = "0" ] &&
-    command -v useradd >/dev/null 2>&1; then
-    if useradd -m tester >/dev/null 2>&1; then
-        made_user="tester"
-    fi
-fi
-if [ "$made_user" = "tester" ] && command -v usermod >/dev/null 2>&1; then
-    if usermod -aG root tester >/dev/null 2>&1; then
-        dest="$work/owner-group-shared"
-        mkdir -p "$dest"
-        chmod 0775 "$dest"
-        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "an owner-named group with real members is refused" "members besides root" "$out" "$rc" 1
-        # Safe to undo unconditionally: this membership was added a few
-        # lines up, to an account created a few lines before that.
-        gpasswd -d tester root >/dev/null 2>&1 || true
-    else
-        echo "  skip  could not add a member to a group"
-    fi
-else
-    echo "  skip  no account this run created: not touching an existing one's groups"
-fi
-
-# Supplementary members are only half of a group: an account whose PRIMARY
-# group it is never appears in the member list, while it can write there
-# perfectly well.
-if [ "$made_user" = "tester" ] && command -v useradd >/dev/null 2>&1; then
-    if useradd -M -g root primaryroot >/dev/null 2>&1; then
-        # Recorded BEFORE it is used: an interrupt between the useradd and
-        # the userdel below would otherwise leave the account on the host.
-        made_users="$made_users primaryroot"
-        dest="$work/primary-gid"
-        mkdir -p "$dest"
-        chmod 0775 "$dest"
-        out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-        check "a group that is someone else's primary group is refused" "primaryroot" "$out" "$rc" 1
-        userdel primaryroot >/dev/null 2>&1 || true
-    else
-        echo "  skip  could not create an account with a primary GID of 0"
-    fi
-else
-    echo "  skip  no account this run created: cannot test primary-group membership"
-fi
-
-echo "destination shapes"
-
-# `mv file dir` moves the file INTO the directory. A destination that is
-# already a directory would swallow the staging file and leave nothing at the
-# path asked for -- and the version line used to hide that inside a command
-# substitution, so the install printed Installed and exited 0.
-dest="$work/dir-dest"
-mkdir -p "$dest/srelens-tui"
-out="$(sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
-check "a directory where the binary goes is refused" "is a directory" "$out" "$rc" 1
-case "$out" in
-    *Installed:*) no "it claimed to have installed something" ;;
-    *) ok "it did not claim to have installed anything" ;;
-esac
 
 echo "temporary directory"
 
 # mktemp -d honours TMPDIR, and sudo can carry the invoking user's straight
 # into a root install. The private tree is only private if its parents are,
 # so the destination walk is applied to it as well.
-dest="$work/tmpdir-bin"
-mkdir -p "$dest"
+dest="$default_dest"
 bad="$work/untrusted-tmp"
 mkdir -p "$bad"
 chmod 0777 "$bad"
-out="$(TMPDIR="$bad" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+rm -f "$dest/srelens-tui"
+out="$(TMPDIR="$bad" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "an untrusted TMPDIR is refused" "writable by anyone" "$out" "$rc" 1
 if [ -e "$dest/srelens-tui" ]; then
     no "it installed with the working tree in an untrusted place"
@@ -529,7 +546,7 @@ fi
 # And a TMPDIR that is fine must still work.
 good="$work/trusted-tmp"
 mkdir -p "$good"
-out="$(TMPDIR="$good" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(TMPDIR="$good" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "a trusted TMPDIR still installs" "Installed:" "$out" "$rc" 0
 
 # A hardened host mounts /tmp noexec, and mktemp puts the working tree there.
@@ -544,9 +561,8 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
     if mount -t tmpfs -o rw,noexec,nosuid,size=200m tmpfs "$noexec" 2>/dev/null; then
         # Recorded before use, so an interrupt anywhere below still unmounts.
         mounted="$noexec"
-        dest="$work/noexec-bin"
-        mkdir -p "$dest"
-        out="$(TMPDIR="$noexec" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        dest="$default_dest"
+        out="$(TMPDIR="$noexec" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
         check "a noexec working directory still installs" "Installed:" "$out" "$rc" 0
         check "and says why the check moved" "mounted noexec" "$out" "$rc" 0
 
@@ -580,7 +596,7 @@ esac
 EOF
         chmod +x "$work/fake/curl"
 
-        out="$(TMPDIR="$noexec" PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        out="$(TMPDIR="$noexec" PATH="$work/fake:$PATH" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
         check "a binary that will not run is rejected after install" "does not run" "$out" "$rc" 1
         check "and the previous copy is put back" "put back" "$out" "$rc" 1
         if [ -x "$dest/srelens-tui" ] && "$dest/srelens-tui" --version >/dev/null 2>&1; then
@@ -609,12 +625,14 @@ mkdir -p "$real_tmp"
 chmod 0777 "$real_tmp"
 link_tmp="$work/tmp-link"
 ln -sfn "$real_tmp" "$link_tmp"
-dest="$work/via-link"
-mkdir -p "$dest"
-out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+dest="$default_dest"
+out="$(TMPDIR="$link_tmp" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "a TMPDIR symlink is resolved before it is judged" "writable by anyone" "$out" "$rc" 1
 
-# A lookup that fails is not a group with nobody in it.
+# A lookup that fails is not a group with nobody in it. These only run for a
+# group-writable destination, so shape it that way first -- whichever of the
+# two destinations this account gets.
+chmod 0775 "$default_dest" 2>/dev/null || true
 mkdir -p "$work/fake"
 cat > "$work/fake/getent" <<EOF
 #!/bin/sh
@@ -624,7 +642,7 @@ chmod +x "$work/fake/getent"
 dest="$work/getent-down"
 mkdir -p "$dest"
 chmod 0775 "$dest"
-out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "a group lookup that fails is not treated as empty" "cannot look up the group" "$out" "$rc" 1
 
 # And neither is a passwd lookup that fails. In `getent passwd | awk` the
@@ -642,9 +660,10 @@ chmod +x "$work/fake/getent"
 dest="$work/passwd-down"
 mkdir -p "$dest"
 chmod 0775 "$dest"
-out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "a passwd lookup that fails is not treated as empty" "cannot enumerate accounts" "$out" "$rc" 1
 rm -f "$work/fake/getent"
+reset_dest
 
 echo "unpacking"
 
@@ -675,8 +694,8 @@ if command -v shasum >/dev/null 2>&1; then
     if [ -n "$missing" ]; then
         echo "  skip  no shasum-only run:$missing not found"
     else
-        dest="$work/shasum"
-        out="$(PATH="$limited" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+        dest="$default_dest"
+        out="$(PATH="$limited" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
         check "shasum computes SHA-256, not SHA-1" "Checksum verified:" "$out" "$rc" 0
         if [ -x "$dest/srelens-tui" ]; then
             ok "the binary installs with only shasum available"

@@ -17,13 +17,23 @@ stable release, verifies its SHA-256 against the release's own
 `SHA256SUMS.txt`, and installs the binary to `/usr/local/bin` or
 `~/.local/bin`.
 
-`--version` and `--install-dir` override those two choices. Through a pipe
-they need `-s --`, because everything after `sh` belongs to the shell rather
-than to the script:
+`--version` overrides the version. Through a pipe it needs `-s --`, because
+everything after `sh` belongs to the shell rather than to the script:
 
 ```bash
-curl -fsSL .../install.sh | sh -s -- --version 0.9.0 --install-dir ~/bin
+curl -fsSL .../install.sh | sh -s -- --version 0.9.0
 ```
+
+There is no `--install-dir`. It existed and was removed: an arbitrary
+caller-chosen destination was most of this script's attack surface, and
+making one safe from a POSIX shell means winning filesystem races a shell has
+no primitives for — it cannot hold a descriptor across a check and a use, so
+every rule below is a claim about a path that could change underneath it. The
+two destinations here are root's or yours by construction. Anyone who wants
+the binary elsewhere can unpack the tarball, which is a plain `tar -xzf`.
+
+The checks below still run, because both destinations remain reachable from
+the environment: `$HOME` is whatever the caller says it is.
 
 ## Decisions worth not re-litigating
 
@@ -109,7 +119,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Fifty-three cases: argument handling, the macOS and unknown-architecture refusals,
+Fifty-four cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped
