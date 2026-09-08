@@ -972,6 +972,28 @@ EOF
         no "the previous binary was destroyed by a failed rollback"
     fi
     rm -f "$work/fake/mv"
+
+    # The same honesty on the other branch. A FIRST install that is rejected
+    # has no backup to restore, so the rollback removes what it put there --
+    # and if that removal fails, saying it was removed would leave a rejected
+    # binary on PATH under a name the caller now trusts.
+    #
+    # An `rm` that refuses to delete the installed path is what a read-only
+    # mount or an immutable flag looks like from in there.
+    cat > "$work/fake/rm" <<EOF
+#!/bin/sh
+for a in \$@; do
+  case "\$a" in */srelens-tui) exit 1 ;; esac
+done
+exec /bin/rm "\$@"
+EOF
+    chmod +x "$work/fake/rm"
+    home="$work/homes/removal-fails"
+    new_home "$home"
+    out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
+    check "a rejected first install that cannot be removed says so" "could NOT be removed" "$out" "$rc" 1
+    check "and names where it is still installed" "$home/.local/bin/srelens-tui" "$out" "$rc" 1
+    rm -f "$work/fake/rm"
     rm -f "$work/fake/curl"
 else
     echo "  skip  no unprivileged account this run created: cannot test a wrong version"

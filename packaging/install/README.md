@@ -195,7 +195,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Seventy-six cases: argument handling, the macOS and unknown-architecture refusals,
+Seventy-eight cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

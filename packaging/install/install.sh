@@ -85,6 +85,7 @@ main() {
     INSTALL_STAGED=""
     INSTALL_COMMITTED=""
     INSTALL_ROLLBACK_KEPT=""
+    INSTALL_ROLLBACK_STUCK=""
 
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
@@ -202,10 +203,14 @@ main() {
         [ -z "$INSTALL_BACKUP" ] || had_backup=yes
         install_rollback
         kept="$INSTALL_ROLLBACK_KEPT"
+        stuck="$INSTALL_ROLLBACK_STUCK"
         # Undone. Nothing left for the EXIT trap to undo a second time.
         INSTALL_DEST=""
         INSTALL_BACKUP=""
         INSTALL_STAGED=""
+        if [ -n "$stuck" ]; then
+            die "the installed $BIN $problem, and it could NOT be removed. It is still installed at $stuck -- delete it before running $BIN from there"
+        fi
         if [ -n "$kept" ]; then
             die "the installed $BIN $problem, and the copy that was there before could NOT be put back. It is still on disk: $kept"
         fi
@@ -581,6 +586,7 @@ assert_component() {
 # work, and whichever gets there first leaves nothing for the other.
 install_rollback() {
     INSTALL_ROLLBACK_KEPT=""
+    INSTALL_ROLLBACK_STUCK=""
     [ -z "$INSTALL_COMMITTED" ] || return 0
     # Each branch clears what it dealt with. This runs TWICE on a signal --
     # the INT/TERM handler calls it, then `exit` fires the EXIT handler --
@@ -610,7 +616,15 @@ install_rollback() {
         # run put there and never got to run. On a noexec working directory
         # it has been executed by nobody at all, and leaving it is leaving an
         # unchecked binary on someone's PATH under a name they will trust.
-        rm -f "$INSTALL_DEST"
+        # `rm -f` says nothing useful -- it is happy about a file that was
+        # never there -- so what matters is whether the path is gone
+        # afterwards. A read-only mount or an immutable flag leaves it, and
+        # reporting it removed would be the same lie the failed restore used
+        # to tell.
+        rm -f "$INSTALL_DEST" 2>/dev/null || true
+        if [ -e "$INSTALL_DEST" ]; then
+            INSTALL_ROLLBACK_STUCK="$INSTALL_DEST"
+        fi
         INSTALL_DEST=""
     fi
     if [ -n "$INSTALL_STAGED" ]; then
