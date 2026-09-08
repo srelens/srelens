@@ -119,6 +119,20 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
+As root it refuses to run outside a container, and says so. The destination
+cases install into the real `/usr/local/bin` and bend it -- world-writable,
+foreign-owned, ACL-bearing, briefly a symlink -- and an interrupt would leave
+it that way. In a container that is free; on your machine it is not. Run them
+the way CI does:
+
+```bash
+docker run --rm -v "$PWD/packaging/install:/i:ro" debian:bookworm-slim \n  sh -c "apt-get -qq update && apt-get -qq install -y curl ca-certificates acl \n         libdigest-sha-perl && cp -r /i /tmp/i && sh /tmp/i/test.sh"
+```
+
+The directory is snapshotted before anything touches it and put back from that
+snapshot -- by each case, and by the exit trap, so an interrupt restores it
+too.
+
 Fifty-four cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that

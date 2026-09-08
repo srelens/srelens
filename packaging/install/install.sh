@@ -533,13 +533,25 @@ install_binary() {
     chmod 0755 "$staged"
 
     # Keep whatever is being replaced until the new one has been shown to
-    # run. Alongside it, so the rename below stays on one filesystem.
+    # run. Alongside it, so the restore below stays on one filesystem.
+    #
+    # A LINK, not a rename. Renaming the old binary out of the way first
+    # would unlink the live path, and a crash in the gap between that and
+    # the rename below would leave nothing at the documented path with the
+    # only copy under a hidden random name. A second name for the same
+    # inode leaves the path working throughout, and the `mv` below stays a
+    # single atomic replacement.
     INSTALL_BACKUP=""
     if [ -e "$dest" ]; then
-        INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" || INSTALL_BACKUP=""
-        if [ -n "$INSTALL_BACKUP" ] && ! mv -f "$dest" "$INSTALL_BACKUP"; then
-            rm -f "$INSTALL_BACKUP"
-            INSTALL_BACKUP=""
+        INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" ||
+            die "cannot create a rollback file in $dir, so $dest will not be replaced"
+        # mktemp made the file; link over it. `cp` is the fallback for a
+        # filesystem that will not hard-link.
+        rm -f "$INSTALL_BACKUP"
+        if ! ln "$dest" "$INSTALL_BACKUP" 2>/dev/null &&
+            ! cp "$dest" "$INSTALL_BACKUP"; then
+            rm -f "$INSTALL_BACKUP" "$staged"
+            die "cannot preserve the $BIN already at $dest, so it will not be replaced"
         fi
     fi
 

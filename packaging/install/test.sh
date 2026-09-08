@@ -36,8 +36,15 @@ work="$(mktemp -d)"
 made_user=""
 made_users=""
 mounted=""
+orig_mode=""
+orig_owner=""
+orig_group=""
 made_group=""
 cleanup() {
+    # The destination first: an interrupt during the ownership cases would
+    # otherwise leave /usr/local/bin world-writable, foreign-owned, or a
+    # symlink to a directory this is about to delete.
+    reset_dest 2>/dev/null || true
     # Before the rm. A live mount inside $work makes `rm -rf` fail, and
     # under `set -e` the trap would exit there -- leaving the accounts
     # behind AND the tmpfs mounted on a developer's machine.
@@ -87,9 +94,44 @@ else
     default_dest="$HOME/.local/bin"
 fi
 
-# Put /usr/local/bin back the way a distribution ships it. Every case that
-# bends it calls this afterwards, so the next one starts from a known
-# state rather than from whatever the last one left.
+# Running as root means installing into the real /usr/local/bin and, for
+# the destination cases, bending it: world-writable, foreign-owned, ACL'd,
+# replaced by a symlink. An interrupt between shaping and restoring would
+# leave it that way, and any srelens-tui already there gets overwritten.
+#
+# Fine in a container, not fine on somebody's machine. Refuse rather than
+# do it quietly -- CI runs this inside a container, which is why the root
+# pass exists at all.
+if [ "$(id -u)" = "0" ] && [ "$default_dest" = "/usr/local/bin" ]; then
+    if [ ! -f /.dockerenv ] && [ ! -f /run/.containerenv ] &&
+        [ -z "${SRELENS_TEST_ALLOW_SYSTEM:-}" ]; then
+        echo "Refusing to run as root outside a container." >&2
+        echo "" >&2
+        echo "These cases install into /usr/local/bin and reshape it -- they make it" >&2
+        echo "world-writable, foreign-owned, ACL-bearing, even a symlink -- and an" >&2
+        echo "interrupt would leave it that way. Any srelens-tui already there would" >&2
+        echo "be overwritten too." >&2
+        echo "" >&2
+        echo "Run them in a container:" >&2
+        echo "  docker run --rm -v \"\$PWD/packaging/install:/i:ro\" debian:bookworm-slim \\" >&2
+        echo "    sh -c \"apt-get -qq update && apt-get -qq install -y curl ca-certificates acl \\" >&2
+        echo "           libdigest-sha-perl && cp -r /i /tmp/i && sh /tmp/i/test.sh\"" >&2
+        echo "" >&2
+        echo "or, if this machine is disposable, SRELENS_TEST_ALLOW_SYSTEM=1." >&2
+        exit 1
+    fi
+
+    # What the directory looked like before any of this, so it can be put
+    # back as it was rather than reset to a guess about what it should be.
+    orig_mode="$(stat -c %a /usr/local/bin 2>/dev/null)" || orig_mode=""
+    orig_owner="$(stat -c %u /usr/local/bin 2>/dev/null)" || orig_owner=""
+    orig_group="$(stat -c %g /usr/local/bin 2>/dev/null)" || orig_group=""
+fi
+
+# Put the destination back as it was found. Every case that bends it calls
+# this afterwards, and so does the exit trap -- an interrupt in the middle
+# of the ownership cases would otherwise leave a system directory
+# world-writable or belonging to somebody else.
 reset_dest() {
     if [ "$default_dest" != "/usr/local/bin" ]; then
         # The home branch: nothing to chown, but the mode and any leftover
@@ -98,11 +140,17 @@ reset_dest() {
         rm -rf "$default_dest/srelens-tui"
         return 0
     fi
+    # A case may have moved the directory aside to put a symlink there.
+    if [ -L /usr/local/bin ] && [ -d /usr/local/bin.real ]; then
+        rm -f /usr/local/bin
+        mv /usr/local/bin.real /usr/local/bin
+    fi
     setfacl -b /usr/local/bin 2>/dev/null || true
-    chown root /usr/local/bin 2>/dev/null || true
-    chgrp root /usr/local/bin 2>/dev/null || true
-    chmod 0755 /usr/local/bin 2>/dev/null || true
-    chown root /usr/local 2>/dev/null || true
+    # The values this run found, not a guess at what a distribution ships.
+    [ -z "$orig_owner" ] || chown "$orig_owner" /usr/local/bin 2>/dev/null || true
+    [ -z "$orig_group" ] || chgrp "$orig_group" /usr/local/bin 2>/dev/null || true
+    [ -z "$orig_mode" ] || chmod "$orig_mode" /usr/local/bin 2>/dev/null || true
+    [ -z "$orig_owner" ] || chown "$orig_owner" /usr/local 2>/dev/null || true
     rm -rf /usr/local/bin/srelens-tui
 }
 
@@ -484,6 +532,7 @@ if can_shape_dest && command -v groupadd >/dev/null 2>&1; then
     # An extended ACL can grant write to any account while the mode bits look
     # impeccable. ls marks one with a trailing +, and reading an ACL portably
     # is not something a POSIX shell can do, so the marker alone is a refusal.
+    # shellcheck disable=SC2012  # reading the mode string is the whole point
     # The guard reads the trailing + that `ls -l` puts on a directory with an
     # extended ACL. BusyBox ls does not print it, so there the ACL is invisible
     # to the check and this case has nothing to assert.
