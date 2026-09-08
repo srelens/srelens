@@ -43,6 +43,13 @@ Debian 11 or RHEL 9, which is exactly the sort of host a cluster gets
 administered from. The failure is a `GLIBC_2.3x not found` before `main()`,
 which tells the reader nothing actionable. The static build has no floor.
 
+**An unsafe `/usr/local/bin` falls back, it does not stop the install.**
+Writable is not the same as safe, and the difference decides *where* the
+binary goes rather than whether it arrives. A GitHub runner ships
+`/usr/local/bin` world-writable: the rules refuse that directory and the
+install lands in `~/.local/bin` instead. Whichever is chosen is then checked
+for real, so an unsafe home still stops it.
+
 **Every component of the destination is checked, not just the leaf.** A
 directory can be impeccable itself and still sit under one somebody else
 owns, who can rename it and put their own directory at the same path after
@@ -143,7 +150,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Fifty-four cases: argument handling, the macOS and unknown-architecture refusals,
+Fifty-six cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

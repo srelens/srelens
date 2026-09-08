@@ -65,9 +65,11 @@ main() {
     # uses. Before the download, so an unwritable destination costs nothing.
     prepare_install_dir "$install_dir"
     install_dir="$INSTALL_DIR"
-    assert_safe_dir "$install_dir"
-
+    # Named before it is judged: a refusal should say which directory it is
+    # about, and the answer is not always the obvious one now that an
+    # unsafe /usr/local/bin falls back to the home directory.
     say "Installing $BIN $version ($target) into $install_dir"
+    assert_safe_dir "$install_dir"
 
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
@@ -277,7 +279,19 @@ latest_version() {
 # needs no privileges at all. Anyone who wants it system-wide can say so:
 #   curl ... | sudo sh
 resolve_install_dir() {
-    if [ -w /usr/local/bin ] 2>/dev/null; then
+    # Writable is not the same as safe. A GitHub runner ships
+    # /usr/local/bin world-writable, and plenty of images do something
+    # similar -- there the rules below would refuse it, and refusing is the
+    # right answer for THAT directory but the wrong answer for the install:
+    # ~/.local/bin is sitting right there, belongs to the caller, and is
+    # already the fallback for the unwritable case.
+    #
+    # The check runs in a subshell so its `die` ends only that, leaving this
+    # a question rather than a verdict. Whichever directory is chosen is
+    # then checked again for real by the caller, so an unsafe ~/.local/bin
+    # still stops the install rather than being installed into quietly.
+    if [ -w /usr/local/bin ] 2>/dev/null &&
+        (assert_safe_dir /usr/local/bin) >/dev/null 2>&1; then
         printf '/usr/local/bin'
     else
         printf '%s/.local/bin' "$HOME"
