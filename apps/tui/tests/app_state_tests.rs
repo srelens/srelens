@@ -751,22 +751,36 @@ async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
 async fn every_table_kind_renders_its_own_key_hints() {
     let (mut app, _rx) = common::app().await;
     app.pod_count = 7;
+    let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+    });
     let cases: Vec<(ResourceKind, &str)> = vec![
         (ResourceKind::Workloads, "Segment"),
         (ResourceKind::Pods, "PortForward"),
         (ResourceKind::Deployments, "Restart"),
         (ResourceKind::StatefulSets, "Scale"),
         (ResourceKind::DaemonSets, "Scale"),
+        (ResourceKind::Jobs, "Logs"),
+        (ResourceKind::CronJobs, "Describe"),
         (ResourceKind::Services, "Endpoints"),
         (ResourceKind::Ingresses, "Edit"),
         (ResourceKind::Namespaces, "Pods"),
         (ResourceKind::Events, "Triage"),
         (ResourceKind::Nodes, "Inspect"),
         (ResourceKind::ConfigMaps, "Help"),
+        (secret_store_crd.clone(), "Describe"),
     ];
     for (kind, hint) in cases {
         let title = kind.display_name().to_string();
-        app.active_view = ActiveView::Table(table_with(kind, vec![pod("web-0", "default")]));
+        app.active_view = ActiveView::Table(table_with(kind.clone(), vec![pod("web-0", "default")]));
         let screen = wide(&mut app);
         assert!(
             screen.contains(&title),
@@ -776,6 +790,17 @@ async fn every_table_kind_renders_its_own_key_hints() {
             screen.contains(hint),
             "{title} shows hint {hint}:\n{screen}"
         );
+
+        // Non-pod/non-workload resources must not advertise pod or workload actions
+        if matches!(kind, ResourceKind::ConfigMaps | ResourceKind::CustomResource(_)) {
+            for excluded in ["PortForward", "Shell", "Restart", "Scale"] {
+                assert!(
+                    !screen.contains(excluded),
+                    "{title} unexpectedly contains {excluded}:\n{screen}"
+                );
+            }
+        }
+
         let screen = narrow(&mut app);
         assert!(
             screen.contains(&title),

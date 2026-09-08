@@ -2494,8 +2494,17 @@ impl App {
                         }
 
                         // Rollout restart (r or Ctrl+r)
-                        if table_kind == ResourceKind::Workloads && !matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet") {
-                            self.set_toast(format!("Rollout restart is only available for Deployments, StatefulSets, and DaemonSets (selected is {})", row_kind), Theme::status_warn());
+                        let is_restartable = matches!(
+                            table_kind,
+                            ResourceKind::Deployments | ResourceKind::StatefulSets | ResourceKind::DaemonSets
+                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet"));
+
+                        if !is_restartable {
+                            if table_kind == ResourceKind::Workloads {
+                                self.set_toast(format!("Rollout restart is only available for Deployments, StatefulSets, and DaemonSets (selected is {})", row_kind), Theme::status_warn());
+                            } else {
+                                self.set_toast("Rollout restart is only available for Deployments, StatefulSets, and DaemonSets".to_string(), Theme::status_warn());
+                            }
                             return;
                         }
                         if let Some(name) = sel_name {
@@ -2511,8 +2520,17 @@ impl App {
                     }
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Scale workload (Ctrl+s)
-                        if table_kind == ResourceKind::Workloads && !matches!(row_kind.as_str(), "Deployment" | "StatefulSet") {
-                            self.set_toast(format!("Scale is only available for Deployments and StatefulSets (selected is {})", row_kind), Theme::status_warn());
+                        let is_scalable = matches!(
+                            table_kind,
+                            ResourceKind::Deployments | ResourceKind::StatefulSets
+                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet"));
+
+                        if !is_scalable {
+                            if table_kind == ResourceKind::Workloads {
+                                self.set_toast(format!("Scale is only available for Deployments and StatefulSets (selected is {})", row_kind), Theme::status_warn());
+                            } else {
+                                self.set_toast("Scale is only available for Deployments and StatefulSets".to_string(), Theme::status_warn());
+                            }
                             return;
                         }
                         if let Some(name) = sel_name {
@@ -2525,8 +2543,16 @@ impl App {
                     }
                     KeyCode::Char('f') | KeyCode::Char('F') => {
                         // Port forward (f, Shift+f)
-                        if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
-                            self.set_toast(format!("Port forward is only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                        let is_pf_allowed = table_kind == ResourceKind::Pods
+                            || table_kind == ResourceKind::Services
+                            || (table_kind == ResourceKind::Workloads && row_kind == "Pod");
+
+                        if !is_pf_allowed {
+                            if table_kind == ResourceKind::Workloads {
+                                self.set_toast(format!("Port forward is only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                            } else {
+                                self.set_toast("Port forward is only available for Pods and Services".to_string(), Theme::status_warn());
+                            }
                             return;
                         }
 
@@ -2717,8 +2743,11 @@ impl App {
                                 self.set_toast(format!("Logs only available for Pods or Workloads (selected is {})", row_kind), Theme::status_warn());
                                 (None, None)
                             }
-                        } else {
+                        } else if table_kind == ResourceKind::Pods {
                             (sel_name.clone(), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                        } else {
+                            self.set_toast("Logs are only available for Pods and Workloads".to_string(), Theme::status_warn());
+                            (None, None)
                         };
 
                         if let Some(pod_name) = pod_name {
@@ -7148,7 +7177,11 @@ impl App {
         }
 
         if let ActiveView::Table(ref mut table) = self.active_view {
-            table.active_port_forwards = active_map.clone();
+            if table.kind == ResourceKind::Pods || table.kind == ResourceKind::Services || table.kind == ResourceKind::Workloads {
+                table.active_port_forwards = active_map.clone();
+            } else {
+                table.active_port_forwards.clear();
+            }
         }
         if let ActiveView::Top(ref mut top) = self.active_view {
             top.active_port_forwards = active_map;
@@ -7432,12 +7465,20 @@ impl App {
 
         let selected_active_forwards: Vec<srelens_streams::forward::ForwardEntry> = match &self.active_view {
             ActiveView::Table(table) => {
-                if let Some(item) = table.selected_item() {
-                    let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
-                    let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
-                    let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" };
-                    if !name.is_empty() {
-                        self.active_forwards_for(kind, ns, name)
+                let is_pf_allowed = table.kind == ResourceKind::Pods
+                    || table.kind == ResourceKind::Services
+                    || (table.kind == ResourceKind::Workloads && table.selected_item().and_then(|item| item.get("kind")).and_then(|v| v.as_str()).unwrap_or("") == "Pod");
+
+                if is_pf_allowed {
+                    if let Some(item) = table.selected_item() {
+                        let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
+                        let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
+                        let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" };
+                        if !name.is_empty() {
+                            self.active_forwards_for(kind, ns, name)
+                        } else {
+                            Vec::new()
+                        }
                     } else {
                         Vec::new()
                     }
@@ -7626,11 +7667,30 @@ impl App {
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
                     ("<Enter>", "Pods"),
+                    ("<l>", "Logs"),
                     ("<d>", "Describe"),
                     ("<y>", "YAML"),
                     ("<e>", "Edit"),
                     ("<^s>", "Scale"),
                     ("<^r>", "Restart"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::Jobs => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<l>", "Logs"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::CronJobs => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
                     ("<^d>", "Delete"),
                     ("<?>", "Help"),
                 ][..]),
@@ -7690,19 +7750,27 @@ impl App {
                     ("<c>", "Copy"),
                     ("<?>", "Help"),
                 ][..]),
-                        ResourceKind::Nodes => Some(&[
-                            ("<:>", "Cmd"),
-                            ("</>", "Filter"),
-                            ("<Enter>", "Inspect"),
-                            ("<m>", "Metrics"),
-                            ("<d>", "Describe"),
-                            ("<y>", "YAML"),
-                            ("<x>", "Actions"),
-                            ("<s>", "Shell"),
-                            ("<?>", "Help"),
-                        ][..]),
-                        _ => None,
-                    }
+                ResourceKind::Nodes => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Inspect"),
+                    ("<m>", "Metrics"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<x>", "Actions"),
+                    ("<s>", "Shell"),
+                    ("<?>", "Help"),
+                ][..]),
+                _ => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+            }
                 }
             }
             ActiveView::Overview(_) => Some(&[
