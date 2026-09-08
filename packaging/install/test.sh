@@ -932,6 +932,46 @@ EOF
     else
         ok "and it is not left behind"
     fi
+
+    # A version that CONTAINS the requested one. `1.2.30` contains `1.2.3`,
+    # so a substring match accepts precisely the stale build this is for.
+    # %s so the version really expands: inside single quotes it would not,
+    # and the case would pass for the wrong reason.
+    printf '#!/bin/sh\necho "srelens-tui %s0"\n' "$version" > "$wrong/srelens-tui"
+    (cd "$wrong" && tar -czf "$work/fixtures/$wrongarchive.wrong" .)
+    wrongsum="$(sha256sum "$work/fixtures/$wrongarchive.wrong" | cut -d' ' -f1)"
+    printf '%s  %s\n' "$wrongsum" "$wrongarchive" > "$work/fixtures/WRONGSUMS.txt"
+    home="$work/homes/version-prefix"
+    new_home "$home"
+    out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
+    check "a version that merely contains the requested one is refused" "not the $version that was asked for" "$out" "$rc" 1
+
+    # A rollback that cannot complete must keep the only copy of what was
+    # there and say where it is, rather than delete it and report recovery.
+    # A `mv` that refuses to move the backup is what a read-only mount or a
+    # full disk looks like from here.
+    cat > "$work/fake/mv" <<EOF
+#!/bin/sh
+for a in \$@; do
+  case "\$a" in *.srelens-tui.backup.*) exit 1 ;; esac
+done
+exec /bin/mv "\$@"
+EOF
+    chmod +x "$work/fake/mv"
+    home="$work/homes/rollback-fails"
+    new_home "$home"
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
+    chmod 0755 "$home/.local/bin/srelens-tui"
+    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
+    check "a rollback that fails says so" "could NOT be put back" "$out" "$rc" 1
+    check "and names where the copy still is" ".srelens-tui.backup." "$out" "$rc" 1
+    if [ -n "$(find "$home/.local/bin" -name '.srelens-tui.backup.*' 2>/dev/null)" ]; then
+        ok "the only copy of the previous binary is kept"
+    else
+        no "the previous binary was destroyed by a failed rollback"
+    fi
+    rm -f "$work/fake/mv"
     rm -f "$work/fake/curl"
 else
     echo "  skip  no unprivileged account this run created: cannot test a wrong version"

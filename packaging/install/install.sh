@@ -77,6 +77,7 @@ main() {
     INSTALL_BACKUP=""
     INSTALL_STAGED=""
     INSTALL_COMMITTED=""
+    INSTALL_ROLLBACK_KEPT=""
 
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
@@ -167,10 +168,16 @@ main() {
         # A release that published a stale binary under the right asset name
         # and checksum would otherwise install silently, and a pinned
         # `--version` would report success having produced a different one.
-        case "$installed_version" in
-            *"$version"*) ;;
-            *) problem="reports \"$installed_version\", not the $version that was asked for" ;;
-        esac
+        #
+        # The whole token, not a substring. `1.2.30` contains `1.2.3`, so a
+        # match on containment accepts precisely the stale build this is
+        # meant to catch. The output is `srelens-tui <version>`; the second
+        # field is compared, so the program renaming itself would not quietly
+        # turn this check off either.
+        reported="$(printf %s "$installed_version" | awk '{print $2}')"
+        if [ "$reported" != "$version" ]; then
+            problem="reports \"$installed_version\", not the $version that was asked for"
+        fi
     fi
 
     if [ -z "$problem" ]; then
@@ -187,10 +194,14 @@ main() {
         had_backup=""
         [ -z "$INSTALL_BACKUP" ] || had_backup=yes
         install_rollback
+        kept="$INSTALL_ROLLBACK_KEPT"
         # Undone. Nothing left for the EXIT trap to undo a second time.
         INSTALL_DEST=""
         INSTALL_BACKUP=""
         INSTALL_STAGED=""
+        if [ -n "$kept" ]; then
+            die "the installed $BIN $problem, and the copy that was there before could NOT be put back. It is still on disk: $kept"
+        fi
         if [ -n "$had_backup" ]; then
             die "the installed $BIN $problem; the copy that was there before has been put back"
         fi
@@ -562,12 +573,17 @@ assert_component() {
 # what was not. Idempotent on purpose: the failure paths in main do the same
 # work, and whichever gets there first leaves nothing for the other.
 install_rollback() {
+    INSTALL_ROLLBACK_KEPT=""
     [ -z "$INSTALL_COMMITTED" ] || return 0
     if [ -n "$INSTALL_BACKUP" ] && [ -e "$INSTALL_BACKUP" ]; then
         # Something was there before: put it back.
         if [ -n "$INSTALL_DEST" ]; then
-            mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null ||
-                rm -f "$INSTALL_BACKUP"
+            if ! mv -f "$INSTALL_BACKUP" "$INSTALL_DEST" 2>/dev/null; then
+                # It could not go back -- a read-only mount, a full disk.
+                # Deleting it here would destroy the only copy of what was
+                # there, so it stays, and the caller says where.
+                INSTALL_ROLLBACK_KEPT="$INSTALL_BACKUP"
+            fi
         else
             rm -f "$INSTALL_BACKUP"
         fi
@@ -700,14 +716,21 @@ install_binary() {
         }
     fi
 
-    mv -f "$staged" "$dest" || {
-        rm -f "$staged"
-        [ -z "$INSTALL_BACKUP" ] || mv -f "$INSTALL_BACKUP" "$dest" 2>/dev/null || true
-        die "cannot replace $dest"
-    }
-    # From here the destination holds an unvalidated binary, and a signal has
-    # to know where to put the old one back.
+    # Recorded BEFORE the rename. A signal arriving while the shell is inside
+    # `mv` runs the handler first, and an assignment after it would not have
+    # happened yet -- the rollback would then think nothing had been replaced,
+    # leave an unvalidated binary live and throw away the only old copy.
     INSTALL_DEST="$dest"
+    if ! mv -f "$staged" "$dest"; then
+        rm -f "$staged"
+        # Nothing was replaced after all: $dest still holds whatever it held,
+        # so the rollback must not go near it.
+        INSTALL_DEST=""
+        INSTALL_STAGED=""
+        [ -z "$INSTALL_BACKUP" ] || rm -f "$INSTALL_BACKUP"
+        INSTALL_BACKUP=""
+        die "cannot replace $dest"
+    fi
     INSTALL_STAGED=""
 }
 
