@@ -276,9 +276,21 @@ mod tests {
             .await
             .expect("start_custom returns the channel");
         assert_eq!(channel, "watch:crd:1");
-        assert!(manager.has_channel("watch:crd:1"));
 
-        manager.stop("watch:crd:1");
-        assert!(!manager.has_channel("watch:crd:1"));
+        // Wait for the failure event on the sink to verify the task ran and emitted on channel
+        for _ in 0..50 {
+            if sink
+                .payloads_for("watch:crd:1")
+                .iter()
+                .any(|v| v.get("error").is_some())
+            {
+                manager.stop("watch:crd:1");
+                assert!(!manager.has_channel("watch:crd:1"));
+                manager.shutdown_all();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("error event never arrived on the sink for custom resource watch");
     }
 }

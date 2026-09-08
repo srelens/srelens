@@ -884,13 +884,16 @@ impl App {
             let crd_kind = title.strip_prefix("crd_instances:").unwrap_or(title);
             let ctx = self.active_context.clone();
             let ns = self.active_namespace.clone();
-            self.resource_cache.insert((ctx, ns, crd_kind.to_string()), items.clone());
+            self.resource_cache.insert((ctx.clone(), ns.clone(), crd_kind.to_string()), items.clone());
+            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind) {
+                self.resource_cache.insert((ctx, ns, discovered.crd_name.clone()), items.clone());
+            }
 
             if let ActiveView::Table(table) = &mut self.active_view {
                 if let ResourceKind::CustomResource(crd) = &mut table.kind {
-                    if crd.kind == crd_kind || crd.plural == crd_kind {
+                    if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
                         if crd.printer_columns.is_empty() {
-                            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+                            if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                                 crd.printer_columns = discovered.printer_columns.clone();
                                 table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
                             }
@@ -1416,12 +1419,17 @@ impl App {
                 } else {
                     String::new()
                 };
-                let kind = crd.kind.clone();
-                let channel = format!("watch:{}:{}:{}", ctx, ns, kind);
+                let res_key = crd.crd_name.clone();
+                let channel = format!("watch:{}:{}:{}", ctx, ns, res_key);
                 self.current_watch_channel = Some(channel.clone());
 
                 // 1. Instant Cache Render: If we already have items in memory, render immediately!
-                if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), kind.clone())) {
+                let cached = self
+                    .resource_cache
+                    .get(&(ctx.clone(), ns.clone(), res_key.clone()))
+                    .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())))
+                    .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.plural.clone())));
+                if let Some(cached) = cached {
                     table.set_items(cached.clone(), &self.filter_buffer);
                     table.is_loading = false;
                 } else {
@@ -5040,7 +5048,7 @@ impl App {
 
     pub async fn switch_view_to_crd(&mut self, mut crd: CrdMeta) {
         if crd.printer_columns.is_empty() {
-            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+            if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                 crd.printer_columns = discovered.printer_columns.clone();
             }
         }
@@ -5052,7 +5060,12 @@ impl App {
         } else {
             String::new()
         };
-        if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())) {
+        let cached = self
+            .resource_cache
+            .get(&(ctx.clone(), ns.clone(), crd.crd_name.clone()))
+            .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())))
+            .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.plural.clone())));
+        if let Some(cached) = cached {
             table.set_items(cached.clone(), &self.filter_buffer);
             table.is_loading = false;
         } else {
@@ -7287,7 +7300,7 @@ impl App {
                         } else {
                             if let ResourceKind::CustomResource(crd) = &mut table.kind {
                                 if crd.printer_columns.is_empty() {
-                                    if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+                                    if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                                         crd.printer_columns = discovered.printer_columns.clone();
                                         table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
                                     }

@@ -2850,7 +2850,7 @@ async fn crd_live_watch_channel_management_and_stream_updates() {
 
     // 1. Switching to CRD view starts the watch on the proper channel
     app.switch_view_to_crd(crd.clone()).await;
-    let expected_ch = "watch:test-cluster:default:SecretStore";
+    let expected_ch = "watch:test-cluster:default:secretstores.external-secrets.io";
     assert_eq!(app.current_watch_channel.as_deref(), Some(expected_ch));
     assert!(app.active_watch_channels.contains(expected_ch));
     assert!(app.active_watch_pool.contains(&expected_ch.to_string()));
@@ -2875,23 +2875,24 @@ async fn crd_live_watch_channel_management_and_stream_updates() {
 
     // Informer cache also updated
     assert_eq!(
-        app.resource_cache.get(&("test-cluster".into(), "default".into(), "SecretStore".into())).unwrap().len(),
+        app.resource_cache.get(&("test-cluster".into(), "default".into(), "secretstores.external-secrets.io".into())).unwrap().len(),
         1
     );
 
     // 3. Switching namespace switches the CRD watch channel
     app.switch_namespace("prod".into()).await;
-    let prod_ch = "watch:test-cluster:prod:SecretStore";
+    let prod_ch = "watch:test-cluster:prod:secretstores.external-secrets.io";
     assert_eq!(app.current_watch_channel.as_deref(), Some(prod_ch));
     assert!(app.active_watch_channels.contains(prod_ch));
 
     // 4. Cluster-scoped CRD watches with empty namespace
     let mut cluster_crd = crd.clone();
+    cluster_crd.crd_name = "clustersecretstores.external-secrets.io".into();
     cluster_crd.kind = "ClusterSecretStore".into();
     cluster_crd.plural = "clustersecretstores".into();
     cluster_crd.namespaced = false;
     app.switch_view_to_crd(cluster_crd).await;
-    let cluster_ch = "watch:test-cluster::ClusterSecretStore";
+    let cluster_ch = "watch:test-cluster::clustersecretstores.external-secrets.io";
     assert_eq!(app.current_watch_channel.as_deref(), Some(cluster_ch));
     assert!(app.active_watch_channels.contains(cluster_ch));
 }
