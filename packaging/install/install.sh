@@ -73,7 +73,15 @@ main() {
 
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
-    trap 'rm -rf "$tmp"' EXIT INT TERM
+    #
+    # INT and TERM exit explicitly. A handler that only cleans up returns to
+    # where it interrupted, so the script would carry on against a working
+    # directory it had just deleted -- and could reach the end and report
+    # `Installed` after being asked to stop. The EXIT trap then runs a second
+    # time, which `rm -rf` does not mind.
+    trap 'rm -rf "$tmp"' EXIT
+    trap 'rm -rf "$tmp"; exit 130' INT
+    trap 'rm -rf "$tmp"; exit 143' TERM
 
     # The same walk the destination gets. `mktemp -d` makes the directory
     # itself 0700 and ours, but it puts it under $TMPDIR when that is set --

@@ -3,8 +3,15 @@
 `install.sh` is what this serves:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh
+sh srelens-install.sh
+rm srelens-install.sh
 ```
+
+Two steps, not `curl … | sh`: a pipeline reports the status of its last
+command, so a download that 404s leaves `sh` reading an empty script,
+doing nothing, and exiting 0 — the line succeeds having installed nothing.
+It still works piped; it just cannot tell you when it did not run.
 
 It is served straight from `main` on raw.githubusercontent.com, so **a change
 merged to main is live immediately** — there is no release step between this
@@ -168,7 +175,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Sixty-three cases: argument handling, the macOS and unknown-architecture refusals,
+Sixty-four cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

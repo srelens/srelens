@@ -118,7 +118,7 @@ Download the latest release for your platform from
 | macOS | `.dmg` for Apple Silicon and Intel | Developer ID signed and notarized |
 | Linux | `.AppImage`, `.deb`, `.rpm` | AppImage supports the in-app updater |
 | Windows | `.exe`, `.msi` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
-| Terminal UI | Linux: `curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh \| sh`; macOS: `brew install srelens/tap/srelens-tui`; or `srelens-tui-<version>-<target>.tar.gz` / `.zip` | A single binary for Linux (glibc and static musl), macOS and Windows, on x86-64 and arm64; macOS builds on a stable release are signed and notarized |
+| Terminal UI | Linux: `curl -fsSL <install.sh> -o srelens-install.sh && sh srelens-install.sh`; macOS: `brew install srelens/tap/srelens-tui`; or `srelens-tui-<version>-<target>.tar.gz` / `.zip` | A single binary for Linux (glibc and static musl), macOS and Windows, on x86-64 and arm64; macOS builds on a stable release are signed and notarized |
 
 See the [installation guide](docs/INSTALL.md) for platform-specific installation,
 first-launch, updating, verification, and uninstall instructions.

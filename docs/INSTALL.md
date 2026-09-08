@@ -79,11 +79,28 @@ Take the **musl** build if your distribution is Alpine, or if the glibc build
 reports a version error — it is statically linked and depends on nothing on the
 host. Otherwise prefer the glibc build.
 
-**On Linux, the install script** is the shortest path:
+**On Linux, the install script** is the shortest path. Download it, then
+run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh
+sh srelens-install.sh
+rm srelens-install.sh
 ```
+
+Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
+reports the status of its *last* command. If the download fails — a 404, a
+TLS error, an outage — `sh` reads an empty script, does nothing, and exits
+0, so the whole line succeeds having installed nothing. Anything automated
+around it then carries on as though `srelens-tui` were there.
+
+```
+curl … | sh                       -> pipeline exit=0   (installed nothing)
+curl … -o f && sh f               -> chain exit=22
+```
+
+It still works piped, if you would rather. It just cannot tell you when it
+did not run.
 
 It picks the right architecture, always takes the static musl build so no
 distribution's glibc version matters, checks the download against the
@@ -97,10 +114,15 @@ report one — rather than proceed without knowing, it stops and says so.
 It never invokes `sudo` on your behalf — run the whole line under `sudo` if
 you want it system-wide from an unprivileged shell.
 
-`--version <x.y.z>` installs a specific release. Options cannot be appended
-to the line above: everything after `sh` is read by the shell, not by the
-script, so `sh` would reject `--version` as its own flag. Pass it after
-`-s --`:
+`--version <x.y.z>` installs a specific release:
+
+```bash
+sh srelens-install.sh --version 0.9.0
+```
+
+Piped, options cannot simply be appended — everything after `sh` belongs to
+the shell, which would reject `--version` as its own flag — so they go
+after `-s --`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh \
@@ -113,8 +135,8 @@ with a local account is not something a shell script can do honestly, so it
 does not pretend to. To put the binary elsewhere, unpack the tarball by hand
 as shown below.
 
-Read it first if you would rather not pipe a script
-from the internet into a shell; it is short, and
+Downloading it first also means you can read it before running it; it is
+short, and
 [`packaging/install/install.sh`](../packaging/install/install.sh) is the file
 that URL serves.
 

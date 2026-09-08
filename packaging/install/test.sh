@@ -56,7 +56,9 @@ cleanup() {
     done
     [ -z "$made_group" ] || groupdel "$made_group" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 pass=0
 fail=0
@@ -341,6 +343,29 @@ if [ -z "$(find "$dest" -name '.srelens-tui.install.*' -o -name '.srelens-tui.ba
     ok "no staging or backup file is left behind"
 else
     no "a staging or backup file was left in $dest"
+fi
+
+echo "how the docs say to run it"
+
+# The documented form is download-then-run, not `curl | sh`. A pipeline
+# reports its LAST command, so a download that fails leaves sh reading an
+# empty script, doing nothing, and exiting 0 -- the line succeeds having
+# installed nothing, and anything automated around it carries on.
+missing="https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/no-such-file.sh"
+piped_rc=0
+curl -fsSL "$missing" 2>/dev/null | sh >/dev/null 2>&1 || piped_rc=$?
+if [ "$piped_rc" = "0" ]; then
+    ok "the piped form hides a failed download, which is why the docs do not use it"
+else
+    no "expected the piped form to report success on a failed download"
+fi
+
+chain_rc=0
+curl -fsSL "$missing" -o "$work/should-not-exist.sh" 2>/dev/null && sh "$work/should-not-exist.sh" >/dev/null 2>&1 || chain_rc=$?
+if [ "$chain_rc" != "0" ]; then
+    ok "the documented form reports it, exit $chain_rc"
+else
+    no "the documented form swallowed a failed download too"
 fi
 
 echo "through a pipe"
