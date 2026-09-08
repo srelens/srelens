@@ -83,16 +83,24 @@ host. Otherwise prefer the glibc build.
 run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh &&
-  sh srelens-install.sh &&
-  rm srelens-install.sh
+f="$(mktemp)" &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f"; rm -f "$f"
 ```
 
-Chained, not three separate lines: unchained, a failed download would leave
-the previous `srelens-install.sh` sitting there to be run, and a failed
-install followed by a successful `rm` would end the snippet at status 0 —
-the same way the pipeline did. If the install fails the file is left in
-place, which is what you want when you are about to look at why.
+`mktemp` rather than a fixed name, and chained rather than three lines.
+
+The fixed name was the worse of the two: run from a directory another account
+can write to — `/tmp`, a shared build dir — that account can pre-create
+`srelens-install.sh` as a symlink, and `curl -o` follows it and truncates
+whatever it points at, with your privileges. Under `sudo` that is any file on
+the machine. `mktemp` creates the file exclusively, so there is nothing to
+aim at.
+
+The chaining matters because unchained, a failed download leaves the previous
+file to be run, and a failed install followed by a successful `rm` ends the
+snippet at status 0 — the same way the pipeline did. `rm -f` after `;` rather
+than `&&` so the temporary file goes whether the install worked or not.
 
 Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
 reports the status of its *last* command. If the download fails — a 404, a

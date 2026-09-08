@@ -86,6 +86,7 @@ main() {
     INSTALL_COMMITTED=""
     INSTALL_ROLLBACK_KEPT=""
     INSTALL_ROLLBACK_STUCK=""
+    INSTALL_SELINUX_FROM=""
 
     tmp="$(mktemp -d)" || die "cannot create a private working directory"
     # Covers the error paths too, since `set -e` exits through the trap.
@@ -680,12 +681,45 @@ install_binary() {
         # re-derives anyway, since the rollback copy is created by mktemp in
         # the destination directory and labelled by the same policy.
         if command -v getfattr >/dev/null 2>&1; then
-            kept_attrs="$(getfattr -d -m - "$dest" 2>/dev/null |
-                grep -E '^[a-z_]+\.[a-z_]+' |
-                grep -v '^security\.selinux=' |
-                cut -d= -f1 | tr '\n' ' ')" || kept_attrs=""
+            # Status FIRST, before any filter. In a pipeline the status is
+            # the last command's, so `getfattr | grep | cut | tr` reports on
+            # `tr`, which is delighted by no input -- an implementation that
+            # rejects an option, or an LSM that refuses enumeration, would
+            # read exactly like a file with no attributes.
+            attr_dump="$(getfattr -d -m - "$dest" 2>/dev/null)" ||
+                die "cannot read the extended attributes of $dest, so a rollback could not account for them. Check with: getfattr -d -m - $dest"
+
+            # Every `name=value` line is an attribute. Matching a guessed
+            # shape missed names a namespace happily allows -- `user.0` is
+            # legal, and `[a-z_]` does not match a digit.
+            all_attrs="$(printf %s "$attr_dump" | grep "=" | cut -d= -f1)" || all_attrs=""
+            selinux_label=""
+            kept_attrs=""
+            for attr in $all_attrs; do
+                case "$attr" in
+                    security.selinux) selinux_label=yes ;;
+                    *) kept_attrs="$kept_attrs $attr" ;;
+                esac
+            done
             if [ -n "$kept_attrs" ]; then
-                die "$dest carries extended attributes a rollback could not put back: ${kept_attrs% }. Remove them, or move the file aside, and run this again."
+                die "$dest carries extended attributes a rollback could not put back:$kept_attrs. Remove them, or move the file aside, and run this again."
+            fi
+
+            # An SELinux label is not dropped, it is re-derived -- the backup
+            # inode is created by mktemp in this directory, so policy gives it
+            # the DEFAULT label for the path. That is right for a file that
+            # had the default one and wrong for a file that had been given
+            # something else, and `mv` does not relabel on the way back.
+            #
+            # chcon copies the real one across. Without it, a privileged
+            # update refuses rather than hand back a binary the policy will
+            # treat differently.
+            if [ -n "$selinux_label" ]; then
+                if command -v chcon >/dev/null 2>&1; then
+                    INSTALL_SELINUX_FROM="$dest"
+                elif [ "$(id -u)" = "0" ]; then
+                    die "$dest carries an SELinux context and chcon is not available to copy it onto a rollback copy. Install policycoreutils, or move the file aside, and run this again."
+                fi
             fi
         elif [ "$(id -u)" = "0" ]; then
             # No getfattr, and this is a privileged install. Refuse: the
@@ -782,6 +816,11 @@ install_binary() {
         if ! cp -p "$dest" "$INSTALL_BACKUP" 2>/dev/null; then
             rm -f "$INSTALL_BACKUP" "$staged"
             die "cannot preserve the $BIN already at $dest, so it will not be replaced"
+        fi
+        # While the original is still there to copy it from.
+        if [ -n "$INSTALL_SELINUX_FROM" ]; then
+            chcon --reference="$INSTALL_SELINUX_FROM" "$INSTALL_BACKUP" 2>/dev/null ||
+                die "cannot copy the SELinux context of $dest onto the rollback copy, so $dest will not be replaced"
         fi
         # mktemp makes it 0600; the rollback carries the mode the binary
         # actually had.

@@ -363,11 +363,13 @@ fi
 
 echo "how the docs say to run it"
 
-# The chained form the docs show. Unchained, a failed download leaves the
-# previous file sitting there to be run, and a failed install followed by a
-# successful rm ends the snippet at status 0.
+# The form the docs show: mktemp for the name, chained so a failure carries.
+# A fixed name in a shared directory can be pre-created as a symlink for
+# `curl -o` to truncate; unchained, a failed download leaves the previous file
+# to be run and a successful rm ends the snippet at status 0.
 chain_rc=0
-curl -fsSL "https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/no-such-file.sh" -o "$work/chain.sh" 2>/dev/null && sh "$work/chain.sh" >/dev/null 2>&1 && rm "$work/chain.sh" || chain_rc=$?
+f="$(mktemp)" && curl -fsSL "https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/no-such-file.sh" -o "$f" && sh "$f" >/dev/null 2>&1 || chain_rc=$?
+rm -f "$f"
 if [ "$chain_rc" != "0" ]; then
     ok "the chained form fails when the download fails, exit $chain_rc"
 else

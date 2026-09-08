@@ -3,9 +3,9 @@
 `install.sh` is what this serves:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o srelens-install.sh &&
-  sh srelens-install.sh &&
-  rm srelens-install.sh
+f="$(mktemp)" &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f"; rm -f "$f"
 ```
 
 Two steps, not `curl … | sh`: a pipeline reports the status of its last
