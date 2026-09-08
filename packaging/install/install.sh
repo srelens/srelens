@@ -523,6 +523,15 @@ install_binary() {
     if [ -d "$dest" ]; then
         die "$dest is a directory, so a binary cannot be installed at that path. Remove it and run this again."
     fi
+
+    # And a symlink cannot be replaced faithfully. The rollback copy is
+    # taken by reading $dest, which follows the link and stores its target's
+    # bytes -- so a restore would put a regular file where a link had been,
+    # silently breaking whatever arrangement the link was part of while
+    # reporting that the previous copy was put back.
+    if [ -L "$dest" ]; then
+        die "$dest is a symlink. Install over what it points at, or remove it first: this replaces the path itself and could not put the link back if the new binary failed."
+    fi
     # Already created, checked and canonicalised by prepare_install_dir and
     # assert_safe_dir. Deliberately not re-derived from $dest here.
     dir="$INSTALL_DIR"
@@ -572,7 +581,13 @@ install_binary() {
         # when the install is under sudo. The destination rules make a
         # planted binary hard to arrange; refusing to propagate the bit at
         # all means it does not matter if one ever is.
-        dest_mode="$(printf %s "$dest_mode" | sed 's/^.*(...)$//')"
+        # stat renders a set-ID bit as a fourth digit; drop it. `case`
+        # rather than sed, because the regex this used to be was mangled
+        # into literal parentheses and a control byte, matched nothing,
+        # and stripped nothing -- while looking like it did.
+        case "$dest_mode" in
+            ????) dest_mode="${dest_mode#?}" ;;
+        esac
         INSTALL_BACKUP="$(mktemp "$dir/.$BIN.backup.XXXXXX")" || {
             rm -f "$staged"
             die "cannot create a rollback file in $dir, so $dest will not be replaced"

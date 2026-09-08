@@ -548,6 +548,20 @@ if [ "$made_user" = "tester" ]; then
         no "nothing landed in the resolved directory"
     fi
 
+    # A symlink where the binary goes is refused: the rollback copy is taken
+    # by reading $dest, which follows the link, so a restore would put a
+    # regular file where a link had been.
+    home="$work/homes/link-dest"
+    new_home "$home"
+    ln -sfn /bin/true "$home/.local/bin/srelens-tui"
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a symlink where the binary goes is refused" "is a symlink" "$out" "$rc" 1
+    if [ -L "$home/.local/bin/srelens-tui" ]; then
+        ok "the symlink is left as it was"
+    else
+        no "the symlink was replaced"
+    fi
+
     # `mv file dir` moves the file INTO the directory. A destination that is
     # already a directory would swallow the staging file and leave nothing at
     # the path asked for -- and the version line used to hide that inside a
@@ -751,7 +765,10 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
         # the destination before anything has run it. Failing then must not
         # leave the caller with nothing where a working copy stood -- nor
         # hand back a copy with permissions it never had.
-        chmod 0700 "$dest/srelens-tui" 2>/dev/null || true
+        # 4700, not 0700: the rollback must put back the permissions and
+        # drop the set-ID bit, never reproduce it on a file this script
+        # did not write.
+        chmod 4700 "$dest/srelens-tui" 2>/dev/null || true
         bad="$work/bad"
         mkdir -p "$bad"
         printf 'this is not a binary\n' > "$bad/srelens-tui"
@@ -789,9 +806,9 @@ EOF
         fi
         restored_mode="$(stat -c %a "$dest/srelens-tui" 2>/dev/null)" || restored_mode="?"
         if [ "$restored_mode" = "700" ]; then
-            ok "and came back with the permissions it had, not wider ones"
+            ok "and came back 700: permissions kept, set-ID bit dropped"
         else
-            no "the restored binary is mode $restored_mode, was 700"
+            no "the restored binary is mode $restored_mode, wanted 700 from 4700"
         fi
         rm -f "$work/fake/curl"
 
