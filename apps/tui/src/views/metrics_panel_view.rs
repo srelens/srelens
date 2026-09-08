@@ -181,9 +181,7 @@ pub fn bucket_samples(
 
 pub fn format_axis_val(val: u64, is_mem: bool) -> String {
     if is_mem {
-        if val >= 100_000 {
-            format!("{:.1}G", val as f64 / 1024.0)
-        } else if val >= 10_000 {
+        if val >= 10_000 {
             format!("{:.1}G", val as f64 / 1024.0)
         } else {
             format!("{}M", val)
