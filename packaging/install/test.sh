@@ -82,6 +82,17 @@ no() {
     fail=$((fail + 1))
 }
 
+# An isolated HOME, before anything reads it.
+#
+# The unprivileged branch of the destination choice is $HOME/.local/bin, and
+# these cases install for real: they replace whatever srelens-tui is there,
+# and reset_dest deletes it afterwards. Pointed at a developer's own home,
+# running the tests would uninstall their copy. Pointed here, the same cases
+# run against a directory that goes away with $work.
+HOME="$work/home"
+export HOME
+mkdir -p "$HOME"
+
 # Where an install lands here, now that it cannot be told.
 #
 # /usr/local/bin when writable -- which for root is always, since
@@ -113,9 +124,13 @@ if [ "$(id -u)" = "0" ] && [ "$default_dest" = "/usr/local/bin" ]; then
         echo "be overwritten too." >&2
         echo "" >&2
         echo "Run them in a container:" >&2
-        echo "  docker run --rm -v \"\$PWD/packaging/install:/i:ro\" debian:bookworm-slim \\" >&2
-        echo "    sh -c \"apt-get -qq update && apt-get -qq install -y curl ca-certificates acl \\" >&2
-        echo "           libdigest-sha-perl && cp -r /i /tmp/i && sh /tmp/i/test.sh\"" >&2
+        echo "" >&2
+        echo "  docker run --rm -v \"\$PWD/packaging/install:/i:ro\" \\" >&2
+        echo "    debian:bookworm-slim sh -c '" >&2
+        echo "      apt-get -qq update" >&2
+        echo "      apt-get -qq install -y curl ca-certificates acl libdigest-sha-perl" >&2
+        echo "      cp -r /i /tmp/i && sh /tmp/i/test.sh" >&2
+        echo "    '" >&2
         echo "" >&2
         echo "or, if this machine is disposable, SRELENS_TEST_ALLOW_SYSTEM=1." >&2
         exit 1

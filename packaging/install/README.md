@@ -126,12 +126,22 @@ it that way. In a container that is free; on your machine it is not. Run them
 the way CI does:
 
 ```bash
-docker run --rm -v "$PWD/packaging/install:/i:ro" debian:bookworm-slim \n  sh -c "apt-get -qq update && apt-get -qq install -y curl ca-certificates acl \n         libdigest-sha-perl && cp -r /i /tmp/i && sh /tmp/i/test.sh"
+docker run --rm -v "$PWD/packaging/install:/i:ro" debian:bookworm-slim sh -c '
+  apt-get -qq update
+  apt-get -qq install -y curl ca-certificates acl libdigest-sha-perl
+  cp -r /i /tmp/i && sh /tmp/i/test.sh
+'
 ```
 
 The directory is snapshotted before anything touches it and put back from that
 snapshot -- by each case, and by the exit trap, so an interrupt restores it
-too.
+too. Add `--privileged` to also run the noexec cases, which need to mount a
+tmpfs; without it they skip and say so.
+
+Unprivileged, the suite installs into an isolated `HOME` under its own temp
+directory rather than your real `~/.local/bin` -- the cases replace whatever
+binary is at the destination and delete it afterwards, so running the tests
+would otherwise uninstall your own copy.
 
 Fifty-four cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
