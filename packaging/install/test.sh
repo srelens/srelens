@@ -17,6 +17,17 @@ here="$(cd "$(dirname "$0")" && pwd)"
 script="$here/install.sh"
 [ -f "$script" ] || { echo "install.sh not found next to $0" >&2; exit 1; }
 
+# The fixtures have to match the machine running the suite: the happy path
+# executes the binary it downloads, and an x86-64 one will not run on an
+# aarch64 developer host without binfmt emulation. CI runs x86-64, so only
+# a developer would ever have seen it.
+case "$(uname -m)" in
+    x86_64 | amd64) host_arch="x86_64" ;;
+    aarch64 | arm64) host_arch="aarch64" ;;
+    *) echo "these tests have no fixture for $(uname -m)" >&2; exit 1 ;;
+esac
+host_target="$host_arch-unknown-linux-musl"
+
 work="$(mktemp -d)"
 
 # Some cases need a second account and a shared group to be meaningful.
@@ -24,8 +35,13 @@ work="$(mktemp -d)"
 # login account behind on the host has done more than test.
 made_user=""
 made_users=""
+mounted=""
 made_group=""
 cleanup() {
+    # Before the rm. A live mount inside $work makes `rm -rf` fail, and
+    # under `set -e` the trap would exit there -- leaving the accounts
+    # behind AND the tmpfs mounted on a developer's machine.
+    [ -z "$mounted" ] || umount "$mounted" >/dev/null 2>&1 || true
     rm -rf "$work"
     [ -z "$made_user" ] || userdel -r "$made_user" >/dev/null 2>&1 || true
     for u in $made_users; do
@@ -83,11 +99,11 @@ check "an empty --install-dir= is refused too" "needs a value" "$out" "$rc" 1
 echo "platform"
 
 mkdir -p "$work/fake"
-cat > "$work/fake/uname" <<'EOF'
+cat > "$work/fake/uname" <<EOF
 #!/bin/sh
-case "${1:-}" in
-  -s) echo "${FAKE_OS:-Linux}" ;;
-  -m) echo "${FAKE_ARCH:-x86_64}" ;;
+case "\${1:-}" in
+  -s) echo "\${FAKE_OS:-Linux}" ;;
+  -m) echo "\${FAKE_ARCH:-$host_arch}" ;;
   *)  echo Linux ;;
 esac
 EOF
@@ -120,7 +136,7 @@ version="$(
 version="${version#srelens-v}"
 [ -n "$version" ] || { echo "could not resolve the latest version" >&2; exit 1; }
 
-archive="srelens-tui-$version-x86_64-unknown-linux-musl.tar.gz"
+archive="srelens-tui-$version-$host_target.tar.gz"
 base="https://github.com/srelens/srelens/releases/download/srelens-v$version"
 mkdir -p "$work/fixtures"
 curl -fsSL -o "$work/fixtures/$archive" "$base/$archive"
@@ -526,6 +542,8 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
     noexec="$work/noexec"
     mkdir -p "$noexec"
     if mount -t tmpfs -o rw,noexec,nosuid,size=200m tmpfs "$noexec" 2>/dev/null; then
+        # Recorded before use, so an interrupt anywhere below still unmounts.
+        mounted="$noexec"
         dest="$work/noexec-bin"
         mkdir -p "$dest"
         out="$(TMPDIR="$noexec" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
@@ -539,7 +557,7 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
         mkdir -p "$bad"
         printf 'this is not a binary\n' > "$bad/srelens-tui"
         printf 'nothing here either\n' > "$bad/LICENSE"
-        badarchive="srelens-tui-$version-x86_64-unknown-linux-musl.tar.gz"
+        badarchive="srelens-tui-$version-$host_target.tar.gz"
         (cd "$bad" && tar -czf "$work/fixtures/$badarchive.bad" .)
         badsum="$(sha256sum "$work/fixtures/$badarchive.bad" | cut -d" " -f1)"
         printf '%s  %s\n' "$badsum" "$badarchive" > "$work/fixtures/BADSUMS.txt"
@@ -572,7 +590,9 @@ EOF
         fi
         rm -f "$work/fake/curl"
 
-        umount "$noexec" 2>/dev/null || true
+        if umount "$noexec" 2>/dev/null; then
+            mounted=""
+        fi
     else
         echo "  skip  cannot mount a noexec filesystem here (needs CAP_SYS_ADMIN)"
     fi
@@ -606,6 +626,24 @@ mkdir -p "$dest"
 chmod 0775 "$dest"
 out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
 check "a group lookup that fails is not treated as empty" "cannot look up the group" "$out" "$rc" 1
+
+# And neither is a passwd lookup that fails. In `getent passwd | awk` the
+# status belongs to awk, which succeeds on no input, so a partial outage
+# would read as "nobody else is in this group".
+cat > "$work/fake/getent" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  group)  echo "root:x:0:" ;;
+  passwd) exit 2 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$work/fake/getent"
+dest="$work/passwd-down"
+mkdir -p "$dest"
+chmod 0775 "$dest"
+out="$(PATH="$work/fake:$PATH" sh "$script" --version "$version" --install-dir "$dest" 2>&1)" && rc=0 || rc=$?
+check "a passwd lookup that fails is not treated as empty" "cannot enumerate accounts" "$out" "$rc" 1
 rm -f "$work/fake/getent"
 
 echo "unpacking"

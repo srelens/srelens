@@ -468,7 +468,16 @@ assert_component() {
             # none of this.
             gid="$(printf %s "$entry" | cut -d: -f3)"
             if [ -n "$gid" ]; then
-                primary="$(getent passwd 2>/dev/null |
+                # Captured BEFORE awk sees it. In `getent passwd | awk`,
+                # the status belongs to awk, which succeeds happily on no
+                # input -- so a partial NSS outage would have produced an
+                # empty answer and been read as "nobody else is in this
+                # group". The same fail-open the group lookup above had.
+                accounts="$(getent passwd 2>/dev/null)" ||
+                    die "cannot enumerate accounts, so who else is in the group $group is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+                [ -n "$accounts" ] ||
+                    die "no accounts could be listed, so who else is in the group $group is unknown. Choose a path that is not group-writable: --install-dir \$HOME/.local/bin"
+                primary="$(printf %s "$accounts" |
                     awk -F: -v g="$gid" -v o="$owner" '$4 == g && $1 != o { printf "%s ", $1 }')" || primary=""
                 if [ -n "$primary" ]; then
                     die "$path is writable by the group $group, which is the primary group of ${primary%% }. Any of them could replace the binary between staging and running it. Choose a path you control: --install-dir \$HOME/.local/bin"

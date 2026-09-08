@@ -109,7 +109,7 @@ place for that choice.
 sh packaging/install/test.sh
 ```
 
-Fifty-two cases: argument handling, the macOS and unknown-architecture refusals,
+Fifty-three cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped
