@@ -139,9 +139,13 @@ extended ACL, an xattr or a file capability, and nothing portable does — so
 rather than restore something quietly less capable than what it took, it
 refuses to replace a binary carrying any of them.
 
-That check needs `getfacl` and `getfattr`, and an **update** refuses if
-`getfattr` is missing rather than guess. A **first** install is never asked:
-there is no previous copy to be faithful to. `security.selinux` is excluded
+That check needs `getfacl` and `getfattr`. A **privileged update** refuses if
+`getfattr` is missing rather than guess — the attribute worth caring about is
+a file capability, and setting one needs `CAP_SETFCAP`, so a binary that has
+one got it from root and root is who is replacing it. An **unprivileged**
+update carries on without it: a capability cannot be on your own binary in
+your own directory unless root put it there. A **first** install is never
+asked at all — there is no previous copy to be faithful to. `security.selinux` is excluded
 deliberately — every file on an SELinux system has one, and it is the single
 piece here the filesystem re-derives, since the rollback copy is created by
 `mktemp` in the destination directory and labelled by the same policy.
@@ -202,7 +206,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Eighty-one cases: argument handling, the macOS and unknown-architecture refusals,
+Eighty-two cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

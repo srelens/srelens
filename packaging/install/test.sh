@@ -111,6 +111,22 @@ if ! command -v getfacl >/dev/null 2>&1 &&
     exit 1
 fi
 
+# Same for getfattr, when running as root. A privileged install refuses to
+# REPLACE a binary whose extended attributes it cannot read -- a file
+# capability is the one that matters, and only root can put one there -- and
+# this suite installs over itself repeatedly, so every update case would fail
+# for that one reason.
+if [ "$(id -u)" = "0" ] && ! command -v getfattr >/dev/null 2>&1; then
+    echo "Running as root, but getfattr is not installed." >&2
+    echo "" >&2
+    echo "A privileged install refuses to replace a binary whose extended" >&2
+    echo "attributes it cannot read, and these cases install over themselves," >&2
+    echo "so every update below would fail for that reason alone." >&2
+    echo "" >&2
+    echo "Install the attr package first (Debian: apt install attr; Alpine: apk add attr)." >&2
+    exit 1
+fi
+
 # Where an install lands here, now that it cannot be told.
 #
 # /usr/local/bin when writable -- which for root is always, since
@@ -1036,8 +1052,25 @@ EOF
         echo "  skip  no getfattr-blind run:$attr_missing not found"
     else
         chmod -R a+rx "$blind_attr"
+        # install_into runs as an unprivileged account, and there the check is
+        # deliberately not required: a file capability needs root to set, so a
+        # user's own binary in their own directory cannot have one. Root is
+        # the case that refuses.
         out="$(install_into "$home" "PATH=$blind_attr")" && rc=0 || rc=$?
-        check "an update refuses when it cannot check for xattrs" "getfattr is not installed" "$out" "$rc" 1
+        check "an unprivileged update proceeds without getfattr" "Installed:" "$out" "$rc" 0
+        if [ "$(id -u)" = "0" ]; then
+            root_home="$work/homes/root-no-attr"
+            rm -rf "$root_home"
+            mkdir -p "$root_home/.local/bin"
+            printf '#!/bin/sh
+echo OLD
+' > "$root_home/.local/bin/srelens-tui"
+            chmod 0755 "$root_home/.local/bin/srelens-tui"
+            out="$(PATH="$blind_attr" HOME="$root_home" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
+            check "a ROOT update refuses when it cannot check for xattrs" "getfattr is not installed" "$out" "$rc" 1
+        else
+            echo "  skip  not root: cannot test the privileged xattr requirement"
+        fi
     fi
     rm -f "$work/fake/curl"
 else

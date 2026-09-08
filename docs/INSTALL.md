@@ -116,9 +116,10 @@ otherwise.
 
 On Alpine, install `acl` first (`apk add acl`): the script checks whether the
 destination carries an extended ACL, and BusyBox `ls` cannot report one —
-rather than proceed without knowing, it stops and says so. Add `attr` too if
-you are replacing an existing copy, since it also checks for extended
-attributes it could not put back if the new binary had to be rolled out again.
+rather than proceed without knowing, it stops and says so. Add `attr` too if you are
+replacing an existing copy **under `sudo`**, since it also checks for extended
+attributes it could not put back if the new binary had to be rolled back. An
+ordinary `~/.local/bin` update does not need it.
 It never invokes `sudo` on your behalf — run the whole line under `sudo` if
 you want it system-wide from an unprivileged shell.
 

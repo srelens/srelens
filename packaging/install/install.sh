@@ -687,9 +687,19 @@ install_binary() {
             if [ -n "$kept_attrs" ]; then
                 die "$dest carries extended attributes a rollback could not put back: ${kept_attrs% }. Remove them, or move the file aside, and run this again."
             fi
-        else
+        elif [ "$(id -u)" = "0" ]; then
+            # No getfattr, and this is a privileged install. Refuse: the
+            # attribute worth caring about is a file capability, and setting
+            # one needs CAP_SETFCAP -- so a binary that has one got it from
+            # root, and root is exactly who is replacing it now.
             die "cannot tell whether $dest carries extended attributes such as a file capability, and a rollback could not put those back: getfattr is not installed. Install it (Debian: apt install attr; Alpine: apk add attr), or move the file aside, and run this again."
         fi
+        # Unprivileged and no getfattr: carry on. A capability cannot be on
+        # this file unless root put it there, and root replacing it is the
+        # case above. Whatever else a user has attached to their own binary
+        # in their own directory is theirs to lose, and stopping the install
+        # over it would mean every ordinary `~/.local/bin` update needing a
+        # package that a stock GitHub runner does not even carry.
     fi
 
     # A FIFO, socket or device node where the binary goes. `cp -p` reading a

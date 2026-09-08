@@ -255,7 +255,7 @@ jobs:
               apt-get -qq update >/dev/null
               # acl for the ACL case, libdigest-sha-perl for shasum -- without
               # it the sha256sum-absent branch skips here too.
-              apt-get -qq install -y curl ca-certificates acl libdigest-sha-perl >/dev/null
+              apt-get -qq install -y curl ca-certificates acl attr libcap2-bin libdigest-sha-perl >/dev/null
               # The suite writes nothing into the mount, but it does need to
               # be able to run from somewhere it owns.
               cp -r /packaging/install /tmp/install
