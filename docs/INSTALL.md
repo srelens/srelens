@@ -88,7 +88,12 @@ curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/inst
 It picks the right architecture, always takes the static musl build so no
 distribution's glibc version matters, checks the download against the
 release's published SHA-256 before installing anything, and puts the binary
-in `/usr/local/bin` when that is writable or `~/.local/bin` when it is not.
+in `/usr/local/bin` when that is writable and safe, or `~/.local/bin`
+otherwise.
+
+On Alpine, install the `acl` package first (`apk add acl`). The script checks
+whether the destination carries an extended ACL, and BusyBox `ls` cannot
+report one — rather than proceed without knowing, it stops and says so.
 It never invokes `sudo` on your behalf — run the whole line under `sudo` if
 you want it system-wide from an unprivileged shell.
 

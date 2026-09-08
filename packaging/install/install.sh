@@ -414,19 +414,34 @@ assert_component() {
         *) die "$path is not a directory, so the install path cannot be trusted" ;;
     esac
 
-    # `ls -l` marks an extended ACL with a trailing `+`. An ACL can grant
-    # write to any user while the mode bits look impeccable, and reading one
-    # portably is not something a POSIX shell can do -- getfacl is neither
-    # POSIX nor present on Alpine. Refuse rather than pass a directory whose
-    # real permissions have not been seen.
+    # Extended ACLs, which can grant write to any account while the mode
+    # bits look impeccable.
     #
-    # A gap worth naming: BusyBox ls does not print that marker at all, so on
-    # Alpine an ACL is invisible here. There is no portable way to ask -- the
-    # alternative would be refusing every group- or other-readable directory
-    # on systems whose ls is terse, which refuses the ordinary case to catch
-    # a rare one.
-    if [ "$(printf %s "$listing" | cut -c11)" = "+" ]; then
-        die "$path carries an extended ACL, which may grant write access that its mode does not show. Check it with: getfacl $path"
+    # Three ways this can go, and only two of them are answers:
+    #
+    #   * getfacl, which is authoritative. `--skip-base` prints nothing at
+    #     all for a file carrying only the three base entries, so anything on
+    #     stdout is an extended ACL.
+    #   * GNU ls, which marks one with a trailing `+` on the mode string.
+    #   * neither, which is BusyBox without the acl package -- and there an
+    #     ACL is simply invisible. `ls` does not print the marker and there
+    #     is nothing else to ask.
+    #
+    # The third case refuses. It used to be documented as a known gap and
+    # allowed, which meant a root-owned 0755 directory carrying
+    # `user:attacker:rwx` sailed through on exactly the systems that could
+    # not see it. A gap that is written down is still a gap.
+    # shellcheck disable=SC2012  # the elif asks ls what it is, not for a listing
+    if command -v getfacl >/dev/null 2>&1; then
+        if [ -n "$(getfacl --skip-base --omit-header "$path" 2>/dev/null)" ]; then
+            die "$path carries an extended ACL, which may grant write access that its mode does not show. Inspect it with: getfacl $path"
+        fi
+    elif ls --version 2>/dev/null | head -n 1 | grep -q coreutils; then
+        if [ "$(printf %s "$listing" | cut -c11)" = "+" ]; then
+            die "$path carries an extended ACL, which may grant write access that its mode does not show. Inspect it with: getfacl $path"
+        fi
+    else
+        die "cannot tell whether $path carries an extended ACL: this ls does not report them and getfacl is not installed. Install the acl package (on Alpine: apk add acl) and run this again."
     fi
 
     if [ -n "$owner" ] && [ "$owner" != "root" ] && [ "$owner" != "$SAFE_ME" ]; then

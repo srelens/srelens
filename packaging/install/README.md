@@ -59,9 +59,12 @@ each component must be:
 - owned by root or by you;
 - inspectable at all. A component that cannot be read fails closed: an
   inspection that does not answer is not an answer;
-- free of an extended ACL. `ls` marks one with a trailing `+`, and an ACL can
-  grant write where the mode bits show none — reading one portably is beyond a
-  POSIX shell, so the marker itself is a refusal;
+- free of an extended ACL, which can grant write where the mode bits show
+  none. `getfacl` answers this properly; GNU `ls` answers it with a trailing
+  `+`; BusyBox `ls` does not answer it at all, and there the install refuses
+  rather than proceeding blind. **On Alpine that means `apk add acl` first** —
+  the alternative was letting an ACL through on precisely the systems that
+  cannot see it;
 - sticky, if either write bit is set. Sticky settles both at once: only an
   entry's owner may unlink it. `/tmp` is `drwxrwxrwt`, group- AND
   world-writable, so treating either bit as disqualifying on its own would
@@ -155,7 +158,7 @@ directory rather than your real `~/.local/bin` -- the cases replace whatever
 binary is at the destination and delete it afterwards, so running the tests
 would otherwise uninstall your own copy.
 
-Fifty-five cases: argument handling, the macOS and unknown-architecture refusals,
+Fifty-seven cases: argument handling, the macOS and unknown-architecture refusals,
 a corrupted archive (which must install nothing), latest-version resolution, a
 real install, installing over an existing copy, a run with a PATH that
 lacks `sha256sum` so the `shasum` branch is actually taken, the piped

@@ -93,6 +93,22 @@ HOME="$work/home"
 export HOME
 mkdir -p "$HOME"
 
+# The installer refuses to install anywhere it cannot check for extended
+# ACLs, which needs either getfacl or a GNU ls. On BusyBox without the acl
+# package neither exists, so every case here would fail for that one reason.
+# Say so once instead.
+# shellcheck disable=SC2012  # asking ls what it is, not listing anything
+if ! command -v getfacl >/dev/null 2>&1 &&
+    ! ls --version 2>/dev/null | head -n 1 | grep -q coreutils; then
+    echo "This host cannot inspect extended ACLs: no getfacl, and an ls that" >&2
+    echo "does not identify itself as GNU coreutils. The installer refuses to" >&2
+    echo "install anywhere under those conditions, so every case below would" >&2
+    echo "fail for that reason alone." >&2
+    echo "" >&2
+    echo "Install the acl package first (on Alpine: apk add acl)." >&2
+    exit 1
+fi
+
 # Where an install lands here, now that it cannot be told.
 #
 # /usr/local/bin when writable -- which for root is always, since
@@ -597,22 +613,60 @@ if [ "$made_user" = "tester" ]; then
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "group-writable WITH the sticky bit still installs" "Installed:" "$out" "$rc" 0
 
-    # An extended ACL can grant write to any account while the mode bits look
-    # impeccable. ls marks one with a trailing +, and reading an ACL portably
-    # is not something a POSIX shell can do, so the marker alone is a refusal.
-    #
-    # BusyBox ls does not print that marker, so there the ACL is invisible to
-    # the check and this case has nothing to assert.
+    # An extended ACL can grant write to any account while the mode bits
+    # look impeccable. getfacl answers this properly; GNU ls answers it with
+    # a trailing + on the mode string; BusyBox ls does not answer it at all.
     home="$work/homes/acl"
     new_home "$home"
-    # shellcheck disable=SC2012  # reading the mode string is the whole point
     if command -v setfacl >/dev/null 2>&1 && [ -n "$other_user" ] &&
-        setfacl -m "u:$other_user:rwx" "$home/.local/bin" 2>/dev/null &&
-        [ "$(ls -ld "$home/.local/bin" | cut -c11)" = "+" ]; then
+        setfacl -m "u:$other_user:rwx" "$home/.local/bin" 2>/dev/null; then
         out="$(install_into "$home")" && rc=0 || rc=$?
         check "a directory with an extended ACL is refused" "extended ACL" "$out" "$rc" 1
     else
-        echo "  skip  no setfacl, or this ls does not mark ACLs (BusyBox)"
+        echo "  skip  no setfacl, or the filesystem will not take an ACL"
+    fi
+
+    # And where neither tool can answer -- BusyBox without the acl package --
+    # the install refuses rather than proceeding blind. That case used to be
+    # documented as a known gap and allowed, which meant an ACL sailed
+    # through on precisely the systems that could not see it.
+    #
+    # Simulated with a PATH carrying no getfacl at all and an `ls` that
+    # declines to identify itself, which is what BusyBox looks like from in
+    # there. A restricted PATH rather than a prefix, or the real getfacl in
+    # /usr/bin answers and the case proves nothing.
+    blind="$work/blind"
+    rm -rf "$blind"
+    mkdir -p "$blind"
+    blind_missing=""
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname \
+        mkdir cp mv rm ln cat awk id getent sha256sum; do
+        tpath="$(command -v "$tool" 2>/dev/null)" || { blind_missing="$blind_missing $tool"; continue; }
+        ln -sf "$tpath" "$blind/$tool"
+    done
+    real_ls="$(command -v ls)"
+    cat > "$blind/ls" <<EOF
+#!/bin/sh
+# BusyBox ls: no --version to identify itself, and no ACL marker.
+case "\$1" in
+  --version) echo "ls: unrecognized option: version" >&2; exit 1 ;;
+esac
+exec $real_ls "\$@"
+EOF
+    chmod +x "$blind/ls"
+    if [ -n "$blind_missing" ]; then
+        echo "  skip  no ACL-blind run:$blind_missing not found"
+    else
+        home="$work/homes/acl-blind"
+        new_home "$home"
+        chmod -R a+rx "$blind"
+        out="$(install_into "$home" "PATH=$blind")" && rc=0 || rc=$?
+        check "an ls that cannot report ACLs refuses rather than guessing" "cannot tell whether" "$out" "$rc" 1
+        if [ -e "$home/.local/bin/srelens-tui" ]; then
+            no "it installed without being able to see the ACLs"
+        else
+            ok "nothing was installed while ACLs were unreadable"
+        fi
     fi
 else
     echo "  skip  no unprivileged account this run created: cannot shape a group"
@@ -745,7 +799,9 @@ if command -v shasum >/dev/null 2>&1; then
     limited="$work/limited"
     mkdir -p "$limited"
     missing=''
-    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent shasum; do
+    # getfacl among them: without it, and with a BusyBox ls, the installer
+    # refuses before it ever reaches the hashing this case is about.
+    for tool in sh uname curl sed head cut grep tar gzip chmod mktemp dirname mkdir cp mv rm ln cat ls awk id getent getfacl shasum; do
         path="$(command -v "$tool" 2>/dev/null)" || { missing="$missing $tool"; continue; }
         ln -sf "$path" "$limited/$tool"
     done
