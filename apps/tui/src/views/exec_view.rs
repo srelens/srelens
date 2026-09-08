@@ -390,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "spawns external kubectl; run manually as an integration test"]
     fn test_run_pod_shell_with_explicit_command_failure() {
         let res = ExecRunner::run_pod_shell("ctx", "ns", "pod", None, Some("/nonexistent/sh"));
         assert!(res.is_err());
