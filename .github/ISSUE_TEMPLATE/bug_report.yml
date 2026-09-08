@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a reproducible problem in srelens.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before filing a new report.
+        For vulnerabilities, follow the [security policy](https://github.com/srelens/srelens/security/policy) instead of opening a public issue.
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: What happened?
+      description: Describe the problem and its impact. Include the exact error message if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest sequence that reproduces the problem, or explain when it occurs if it is intermittent.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: srelens version
+      description: Include the release version and stable/dev channel, or the commit if built from source.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where does it happen?
+      multiple: true
+      options:
+        - Desktop — new UI
+        - Desktop — classic UI
+        - Web
+        - TUI
+        - MCP
+        - Build or installation
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS version, CPU architecture and install method. For web mode, include the browser and version.
+      placeholder: macOS on Apple Silicon, DMG install
+    validations:
+      required: true
+
+  - type: textarea
+    id: cluster-context
+    attributes:
+      label: Cluster context
+      description: If relevant, include the Kubernetes version, distribution and affected resource kinds. Do not include kubeconfig credentials or Secret values.
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Logs, screenshots or recordings
+      description: Attach anything that helps reproduce the problem. Remove tokens, credentials and other sensitive values first.
