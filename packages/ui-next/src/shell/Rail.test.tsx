@@ -182,6 +182,7 @@ describe("Rail", () => {
   });
 
   it("draws and names the button using the saved context identity", () => {
+    getMark("prod-eu", "prod-eu");
     setMark("prod-eu", { ...defaultMark("prod-eu"), name: "Production EU", short: "PX" });
     setup();
     expect(screen.getByRole("button", { name: "Production EU" })).toBeDefined();
