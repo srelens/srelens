@@ -1477,10 +1477,13 @@ impl App {
         self.screen_selection = None;
         self.screen_selecting = false;
 
-        // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly
+        // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly,
+        // unless in Assistant view where Ctrl+C is used to copy selection or assistant reply.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.is_running = false;
-            return;
+            if !matches!(self.active_view, ActiveView::Assistant) || self.modal.is_some() || self.show_help {
+                self.is_running = false;
+                return;
+            }
         }
 
         // Clear expired toasts
@@ -1624,6 +1627,18 @@ impl App {
                             }
                             self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = containers.len().saturating_sub(1);
+                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            selected_idx = containers.len().saturating_sub(1);
+                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                        }
                         KeyCode::Enter => {
                             let chosen_container = containers.get(selected_idx).cloned();
                             self.modal = None;
@@ -1698,6 +1713,30 @@ impl App {
                             }
                             self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::End => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::PageDown => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::PageUp => {
+                            selected_idx = selected_idx.saturating_sub(5);
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                             filter.push(c);
                             selected_idx = 0;
@@ -1760,6 +1799,30 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::End => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::PageDown => {
+                            selected_idx = (selected_idx + 10).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::PageUp => {
+                            selected_idx = selected_idx.saturating_sub(10);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = (selected_idx + 10).min(filtered_count.saturating_sub(1));
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
                         }
                         KeyCode::Char('0') if filter.is_empty() => {
@@ -1878,6 +1941,72 @@ impl App {
                                 filter,
                             });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::End => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::PageDown => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::PageUp => {
+                            selected_idx = selected_idx.saturating_sub(5);
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
                         KeyCode::Backspace => {
                             filter.pop();
                             selected_idx = 0;
@@ -1979,6 +2108,22 @@ impl App {
                             }
                             self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !tallies.is_empty() {
+                                selected_idx = tallies.len().saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        }
+                        KeyCode::End => {
+                            if !tallies.is_empty() {
+                                selected_idx = tallies.len().saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        }
                         KeyCode::Enter => {
                             if let Some(tally) = tallies.get(selected_idx) {
                                 if let ActiveView::Table(table) = &mut self.active_view {
@@ -2022,6 +2167,21 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = total.saturating_sub(1);
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::End => {
+                            selected_idx = total.saturating_sub(1);
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
                             Theme::set_theme_by_index(selected_idx);
                             self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
                         }
@@ -3340,6 +3500,9 @@ impl App {
                         let _ = copy_to_clipboard(&last_asst.content);
                         self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
                         return;
+                    } else {
+                        self.set_toast("Nothing to copy".to_string(), Theme::status_warn());
+                        return;
                     }
                 }
                 if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -3352,25 +3515,6 @@ impl App {
                         if !ai.slash_suggestions.is_empty() {
                             ai.apply_selected_slash_suggestion();
                             return;
-                        }
-                    }
-
-                    // Copy selection with 'c' (or copy last assistant message if input is empty)
-                    KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                        if let Some(selected) = ai.get_selected_text() {
-                            let _ = copy_to_clipboard(&selected);
-                            self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
-                        } else if ai.input.is_empty() {
-                            if let Some(last_asst) = ai.messages.iter().rev().find(|m| m.role == "assistant") {
-                                let _ = copy_to_clipboard(&last_asst.content);
-                                self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
-                            } else {
-                                ai.input.push('c');
-                                ai.update_slash_suggestions();
-                            }
-                        } else {
-                            ai.input.push('c');
-                            ai.update_slash_suggestions();
                         }
                     }
 
@@ -3390,11 +3534,34 @@ impl App {
                         ai.history_down();
                     }
 
-                    // Viewport Scrolling (PageUp/PageDown, Home/End, or Mouse Scroll)
+                    // Cursor Navigation inside Input
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ai.move_cursor_word_left();
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ai.move_cursor_word_right();
+                    }
+                    KeyCode::Left => ai.move_cursor_left(),
+                    KeyCode::Right => ai.move_cursor_right(),
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.move_cursor_home(),
+
+                    // Viewport Scrolling & Cursor Home/End
+                    KeyCode::Home => {
+                        if ai.input.is_empty() {
+                            ai.scroll_to_top();
+                        } else {
+                            ai.move_cursor_home();
+                        }
+                    }
+                    KeyCode::End => {
+                        if ai.input.is_empty() {
+                            ai.scroll_to_bottom();
+                        } else {
+                            ai.move_cursor_end();
+                        }
+                    }
                     KeyCode::PageUp => ai.scroll_up(10),
                     KeyCode::PageDown => ai.scroll_down(10),
-                    KeyCode::Home => ai.scroll_to_top(),
-                    KeyCode::End => ai.scroll_to_bottom(),
                     KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(2),
                     KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(2),
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(10),
@@ -3402,27 +3569,25 @@ impl App {
 
                     // Editing & Input
                     _ if is_word_delete_key(&key) => {
-                        delete_prev_word(&mut ai.input);
-                        ai.update_slash_suggestions();
+                        ai.delete_word_back();
                     }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        ai.input.clear();
-                        ai.update_slash_suggestions();
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        ai.clear_input();
                     }
                     KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(clip) = get_clipboard_text() {
                             let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
-                            ai.input.push_str(&cleaned);
-                            ai.update_slash_suggestions();
+                            ai.insert_str(&cleaned);
                         }
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                        ai.input.push(c);
-                        ai.update_slash_suggestions();
-                    }
                     KeyCode::Backspace => {
-                        ai.input.pop();
-                        ai.update_slash_suggestions();
+                        ai.backspace();
+                    }
+                    KeyCode::Delete => {
+                        ai.delete();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        ai.insert_char(c);
                     }
                     KeyCode::Enter => {
                         if ai.is_busy {

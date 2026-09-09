@@ -885,6 +885,14 @@ async fn namespace_picker_filters_navigates_and_switches() {
     assert_eq!(sel(&app).0, 0);
     press(&mut app, ctrl('k')).await;
     assert_eq!(sel(&app).0, 2);
+    press(&mut app, key(KeyCode::Home)).await;
+    assert_eq!(sel(&app).0, 0, "Home moves to the start");
+    press(&mut app, ctrl('g')).await;
+    assert_eq!(sel(&app).0, 2, "Ctrl+g moves to the end");
+    press(&mut app, key(KeyCode::Home)).await;
+    assert_eq!(sel(&app).0, 0);
+    press(&mut app, key(KeyCode::End)).await;
+    assert_eq!(sel(&app).0, 2, "End moves to the end");
     press(&mut app, key(KeyCode::Null)).await;
     assert_eq!(sel(&app).0, 2, "unknown keys leave the picker alone");
 
