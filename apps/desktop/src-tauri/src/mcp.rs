@@ -428,7 +428,7 @@ fn dir_on_path(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn usable_cli_path(path: &std::path::Path, current_exe: &std::path::Path) -> bool {
+fn executable_file(path: &std::path::Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
@@ -442,10 +442,48 @@ fn usable_cli_path(path: &std::path::Path, current_exe: &std::path::Path) -> boo
             return false;
         }
     }
-    match (std::fs::canonicalize(path), std::fs::canonicalize(current_exe)) {
+    true
+}
+
+fn usable_cli_path(path: &std::path::Path, expected_exe: &std::path::Path) -> bool {
+    if !executable_file(path) {
+        return false;
+    }
+    match (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(expected_exe),
+    ) {
         (Ok(candidate), Ok(expected)) => candidate == expected,
         _ => false,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn select_linux_cli_source(
+    current_exe: std::path::PathBuf,
+    appimage: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, String> {
+    match appimage {
+        Some(path) if path.is_absolute() && executable_file(&path) => Ok(path),
+        Some(path) => Err(format!(
+            "APPIMAGE does not name an executable file: {}",
+            path.display()
+        )),
+        None => Ok(current_exe),
+    }
+}
+
+fn cli_source_executable() -> Result<std::path::PathBuf, String> {
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    {
+        return select_linux_cli_source(
+            current,
+            std::env::var_os("APPIMAGE").map(std::path::PathBuf::from),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(current)
 }
 
 /// Report whether the `srelens` CLI is installed and where it points.
@@ -465,11 +503,11 @@ pub fn srelens_cli_status() -> CliStatus {
     {
         let dir = cli_dir();
         let path = cli_path();
-        let current_exe = std::env::current_exe().ok();
+        let source_exe = cli_source_executable().ok();
         CliStatus {
             installed: path
                 .as_ref()
-                .zip(current_exe.as_ref())
+                .zip(source_exe.as_ref())
                 .is_some_and(|(candidate, expected)| usable_cli_path(candidate, expected)),
             path: path
                 .as_ref()
@@ -484,12 +522,14 @@ pub fn srelens_cli_status() -> CliStatus {
     }
 }
 
-/// Symlink the running executable to `~/.local/bin/srelens` so MCP clients can
-/// spawn `srelens --mcp-stdio`. Creates the directory if needed (no elevation);
-/// returns the install path on success, or the manual command on failure.
+/// Symlink the persistent executable to `~/.local/bin/srelens` so MCP clients
+/// can spawn `srelens --mcp-stdio`. AppImage builds use `$APPIMAGE`, not the
+/// temporary FUSE-mounted process path. Creates the directory if needed (no
+/// elevation); returns the install path on success, or the manual command on
+/// failure.
 #[tauri::command]
 pub fn install_srelens_cli() -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = cli_source_executable()?;
 
     #[cfg(unix)]
     {
@@ -539,6 +579,25 @@ mod tests {
     fn an_unrelated_executable_is_not_a_usable_cli_path() {
         let current = std::env::current_exe().unwrap();
         assert!(!usable_cli_path(std::path::Path::new("/bin/sh"), &current));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_path_replaces_the_temporary_process_path() {
+        let appimage = std::env::current_exe().unwrap();
+        let transient = appimage.parent().unwrap().to_path_buf();
+        assert_eq!(
+            select_linux_cli_source(transient, Some(appimage.clone())).unwrap(),
+            appimage
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_appimage_path_is_not_silently_replaced_by_the_fuse_path() {
+        let current = std::env::current_exe().unwrap();
+        let invalid = current.parent().unwrap().to_path_buf();
+        assert!(select_linux_cli_source(current, Some(invalid)).is_err());
     }
 
     /// The command boundary, where the distinction has to survive: the pane
