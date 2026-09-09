@@ -1627,6 +1627,18 @@ impl App {
                             }
                             self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = containers.len().saturating_sub(1);
+                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            selected_idx = containers.len().saturating_sub(1);
+                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                        }
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                        }
                         KeyCode::Enter => {
                             let chosen_container = containers.get(selected_idx).cloned();
                             self.modal = None;
@@ -1701,6 +1713,30 @@ impl App {
                             }
                             self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::End => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::PageDown => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::PageUp => {
+                            selected_idx = selected_idx.saturating_sub(5);
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                        }
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                             filter.push(c);
                             selected_idx = 0;
@@ -1763,6 +1799,30 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::End => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::PageDown => {
+                            selected_idx = (selected_idx + 10).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::PageUp => {
+                            selected_idx = selected_idx.saturating_sub(10);
+                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = (selected_idx + 10).min(filtered_count.saturating_sub(1));
                             self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
                         }
                         KeyCode::Char('0') if filter.is_empty() => {
@@ -1881,6 +1941,72 @@ impl App {
                                 filter,
                             });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::End => {
+                            selected_idx = filtered_count.saturating_sub(1);
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::PageDown => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::PageUp => {
+                            selected_idx = selected_idx.saturating_sub(5);
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::ActionPalette {
+                                resource_kind,
+                                resource_name,
+                                namespace,
+                                actions,
+                                selected_idx,
+                                filter,
+                            });
+                        }
                         KeyCode::Backspace => {
                             filter.pop();
                             selected_idx = 0;
@@ -1982,6 +2108,22 @@ impl App {
                             }
                             self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
                         }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if !tallies.is_empty() {
+                                selected_idx = tallies.len().saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        }
+                        KeyCode::End => {
+                            if !tallies.is_empty() {
+                                selected_idx = tallies.len().saturating_sub(1);
+                            }
+                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
+                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        }
                         KeyCode::Enter => {
                             if let Some(tally) = tallies.get(selected_idx) {
                                 if let ActiveView::Table(table) = &mut self.active_view {
@@ -2025,6 +2167,21 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            selected_idx = total.saturating_sub(1);
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::End => {
+                            selected_idx = total.saturating_sub(1);
+                            Theme::set_theme_by_index(selected_idx);
+                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                        }
+                        KeyCode::Home => {
+                            selected_idx = 0;
                             Theme::set_theme_by_index(selected_idx);
                             self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
                         }

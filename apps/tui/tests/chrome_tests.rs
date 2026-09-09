@@ -583,6 +583,20 @@ fn the_namespace_picker_filter_narrows_the_list_and_reindexes_the_selection() {
     assert!(!text.contains("payments"), "{text}");
 }
 
+#[test]
+fn the_namespace_picker_windows_when_selected_at_the_end_of_a_long_list() {
+    let namespaces: Vec<String> = (1..=30).map(|i| format!("ns-{:02}", i)).collect();
+    let modal = Modal::NamespacePicker {
+        namespaces,
+        current_namespace: "ns-01".into(),
+        selected_idx: 29, // last item: ns-30
+        filter: String::new(),
+    };
+    let text = modal_text(100, 20, &modal);
+    assert!(text.contains("▶ ns-30"), "selected item at the end is visible: {text}");
+    assert!(!text.contains("ns-01"), "first item scrolled out of view: {text}");
+}
+
 // ───────────────────────── dialogs: ActionPalette ─────────────────────────
 
 #[test]
