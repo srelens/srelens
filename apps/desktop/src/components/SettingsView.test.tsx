@@ -349,6 +349,42 @@ describe("SettingsView", () => {
     expect((slider as HTMLInputElement).value).toBe("45");
   });
 
+  it("does not roll back a newer timeout after an older update fails", async () => {
+    localStorage.setItem("srelens.requestTimeoutSecs", "12");
+    let rejectFirst!: (error: Error) => void;
+    transportMocks.invokeCommand
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce(60);
+    const callsBefore = transportMocks.invokeCommand.mock.calls.length;
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Kubernetes/ }));
+    const slider = screen.getByRole("slider", { name: "Cluster request timeout in seconds" });
+    fireEvent.change(slider, { target: { value: "30" } });
+    fireEvent.change(slider, { target: { value: "60" } });
+    expect((slider as HTMLInputElement).value).toBe("60");
+
+    await waitFor(() => expect(transportMocks.invokeCommand).toHaveBeenCalledTimes(callsBefore + 1));
+    rejectFirst(new Error("older update failed"));
+    await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("60"));
+    expect((slider as HTMLInputElement).value).toBe("60");
+  });
+
   it("scales the interface from the Appearance slider and persists it (#237)", () => {
     render(
       <SettingsView
