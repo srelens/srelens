@@ -36,22 +36,21 @@ export async function loadUpdateNotes(
   const tag = encodeURIComponent(`srelens-v${update.version}`);
   const controller = options.signal ? null : new AbortController();
   const timeout = controller ? setTimeout(() => controller.abort(), 15_000) : null;
-  let response: Response;
   try {
-    response = await fetch(`https://api.github.com/repos/srelens/srelens/releases/tags/${tag}`, {
+    const response = await fetch(`https://api.github.com/repos/srelens/srelens/releases/tags/${tag}`, {
       headers: { Accept: "application/vnd.github+json" },
       signal: options.signal ?? controller!.signal,
       credentials: "omit",
     });
+    if (!response.ok) throw new Error(`Could not read the GitHub release (HTTP ${response.status}).`);
+    const release: unknown = await response.json();
+    if (!release || typeof release !== "object" || !("body" in release)) {
+      throw new Error("GitHub returned an invalid release response.");
+    }
+    if (release.body === null) return "";
+    if (typeof release.body !== "string") throw new Error("GitHub returned invalid release notes.");
+    return rememberNotes(update.version, release.body);
   } finally {
     if (timeout !== null) clearTimeout(timeout);
   }
-  if (!response.ok) throw new Error(`Could not read the GitHub release (HTTP ${response.status}).`);
-  const release: unknown = await response.json();
-  if (!release || typeof release !== "object" || !("body" in release)) {
-    throw new Error("GitHub returned an invalid release response.");
-  }
-  if (release.body === null) return "";
-  if (typeof release.body !== "string") throw new Error("GitHub returned invalid release notes.");
-  return rememberNotes(update.version, release.body);
 }

@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { loadUpdateNotes } from "./updateNotes";
 beforeEach(() => localStorage.clear());
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 it("uses embedded notes without a network request", async () => {
   const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
   expect(await loadUpdateNotes({ version: "0.10.1-159", notes: "Changes" })).toBe("Changes");
@@ -20,6 +20,21 @@ it("loads notes when AbortSignal.timeout is unavailable", async () => {
 
   await expect(loadUpdateNotes({ version: "0.10.2", notes: "" })).resolves.toBe("Compatible notes");
   expect(fetcher.mock.calls[0][1].signal).toBeInstanceOf(Object);
+});
+it("keeps the timeout active while the response body is being read", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (_url, init: RequestInit) => ({
+    ok: true,
+    json: () => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+  })));
+
+  const notes = loadUpdateNotes({ version: "0.10.2", notes: "" });
+  const rejected = expect(notes).rejects.toMatchObject({ name: "AbortError" });
+  await vi.advanceTimersByTimeAsync(15_000);
+
+  await rejected;
 });
 it("distinguishes a refused read from a release without notes", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403 }));
