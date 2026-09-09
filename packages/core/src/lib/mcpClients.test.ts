@@ -38,6 +38,13 @@ describe("mcpClientConfig", () => {
     }
   });
 
+  it("uses an absolute executable path when stdio cannot rely on PATH", () => {
+    const command = String.raw`C:\Program Files\srelens\srelens.exe`;
+    expect(JSON.parse(mcpClientConfig("cursor", "stdio", { command }).snippet).mcpServers.srelens.command).toBe(command);
+    expect(mcpClientConfig("codex", "stdio", { command }).snippet).toContain(String.raw`command = "C:\\Program Files\\srelens\\srelens.exe"`);
+    expect(mcpClientConfig("claude-code", "stdio", { command }).snippet).toContain(`-- "${command}" --mcp-stdio`);
+  });
+
   it("emits a url entry with a bearer header for JSON tools over http", () => {
     const c = mcpClientConfig("cursor", "http", {
       url: "http://127.0.0.1:9000/mcp",

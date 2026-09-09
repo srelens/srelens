@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { McpClientSetup } from "./McpClientSetup";
@@ -6,11 +6,13 @@ const core = vi.hoisted(() => ({ installSrelensCli: vi.fn(), srelensCliStatus: v
 vi.mock("@srelens/core", async original => ({ ...await original<object>(), ...core }));
 const URL = "http://127.0.0.1:9411/mcp";
 const TOKEN = "a".repeat(64);
+const PLATFORM = navigator.platform;
 beforeEach(() => {
   vi.clearAllMocks();
   core.srelensCliStatus.mockResolvedValue({ installed: false, path: "/home/user/.local/bin/srelens", links_to: null, on_path: false });
   core.installSrelensCli.mockResolvedValue("/home/user/.local/bin/srelens");
 });
+afterEach(() => Object.defineProperty(navigator, "platform", { configurable: true, value: PLATFORM }));
 it("installs the CLI and refreshes its PATH status", async () => {
   const user = userEvent.setup(); render(<McpClientSetup url={URL} token={TOKEN} />);
   await screen.findByRole("button", { name: "Install srelens CLI" });
@@ -50,4 +52,36 @@ it("reports installation failure and allows retry", async () => {
   expect((await screen.findByRole("alert")).textContent).toMatch(/permission denied/i);
   await user.click(screen.getByRole("button", { name: "Install srelens CLI" }));
   expect(core.installSrelensCli).toHaveBeenCalledTimes(2);
+});
+it("generates Windows stdio config with the absolute desktop executable", async () => {
+  Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
+  const executable = String.raw`C:\Program Files\srelens\srelens.exe`;
+  core.srelensCliStatus.mockResolvedValue({ installed: true, path: executable, links_to: null, on_path: false });
+  render(<McpClientSetup url={URL} token={TOKEN} />);
+  expect(await screen.findAllByText(new RegExp(executable.replace(/[\\]/g, "\\\\")))).not.toHaveLength(0);
+  await userEvent.selectOptions(screen.getByLabelText("MCP client"), "cursor");
+  expect(JSON.parse(screen.getByTestId("mcp-client-config").textContent!).mcpServers.srelens.command).toBe(executable);
+  expect(screen.queryByRole("button", { name: /Install srelens CLI/ })).toBeNull();
+});
+it("reports failed HTTP prerequisites and retries them instead of claiming the server is stopped", async () => {
+  const retryStatus = vi.fn(); const retryToken = vi.fn();
+  const user = userEvent.setup();
+  render(<McpClientSetup url={null} token={null} statusError={new Error("status denied")} tokenError={new Error("token denied")}
+    onRetryStatus={retryStatus} onRetryToken={retryToken} />);
+  await user.selectOptions(screen.getByLabelText("Transport"), "http");
+  expect(screen.getByText(/status denied/)).toBeTruthy();
+  expect(screen.getByText(/token denied/)).toBeTruthy();
+  expect(screen.queryByText(/Start the MCP server/)).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Retry server status" }));
+  await user.click(screen.getByRole("button", { name: "Retry bearer token" }));
+  expect(retryStatus).toHaveBeenCalledOnce(); expect(retryToken).toHaveBeenCalledOnce();
+});
+it("reveals the usable HTTP configuration when clipboard copying fails", async () => {
+  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("clipboard denied"));
+  const user = userEvent.setup(); render(<McpClientSetup url={URL} token={TOKEN} />);
+  await user.selectOptions(screen.getByLabelText("Transport"), "http");
+  expect(screen.getByTestId("mcp-client-config").textContent).not.toContain(TOKEN);
+  await user.click(screen.getByRole("button", { name: "Copy configuration" }));
+  expect(screen.getByRole("alert").textContent).toMatch(/copy (?:it )?manually/);
+  expect(screen.getByTestId("mcp-client-config").textContent).toContain(TOKEN);
 });

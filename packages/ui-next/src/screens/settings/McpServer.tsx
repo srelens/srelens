@@ -233,6 +233,8 @@ export function McpServer() {
   /** The running server's own URL, or `null` for "not running" — the value
    *  `mcpHttpStatus()` actually returns, kept rather than reduced to a flag. */
   const [statusRead, setStatusRead] = useState<Read<string | null>>(LOADING);
+  const [tokenNonce, setTokenNonce] = useState(0);
+  const [statusNonce, setStatusNonce] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
@@ -301,7 +303,7 @@ export function McpServer() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [tokenNonce]);
 
   // Re-taken when the shell's auto-start settles. See the note above
   // `useMcpAutoStart` for the race: this pane's read can answer `null` with
@@ -324,7 +326,7 @@ export function McpServer() {
     return () => {
       cancelled = true;
     };
-  }, [shellSettled]);
+  }, [shellSettled, statusNonce]);
 
   const token = tokenRead.kind === "ready" ? tokenRead.value : null;
   const hasToken = tokenRead.kind === "ready" && tokenRead.value !== null;
@@ -613,7 +615,12 @@ export function McpServer() {
         />
       )}
     </Panel>
-    <McpClientSetup url={address} token={token} />
+    <McpClientSetup url={address} token={token}
+      statusLoading={statusRead.kind === "loading"} tokenLoading={tokenRead.kind === "loading"}
+      statusError={statusRead.kind === "error" ? statusRead.error : undefined}
+      tokenError={tokenRead.kind === "error" ? tokenRead.error : undefined}
+      onRetryStatus={() => { setStatusRead(LOADING); setStatusNonce(value => value + 1); }}
+      onRetryToken={() => { setTokenRead(LOADING); setTokenNonce(value => value + 1); }} />
     </>
   );
 }

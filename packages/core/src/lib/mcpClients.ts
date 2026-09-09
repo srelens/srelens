@@ -56,16 +56,18 @@ function mcpServersJson(entry: Record<string, unknown>): string {
 export function mcpClientConfig(
   tool: McpTool,
   transport: McpTransport,
-  opts: { url?: string; token?: string | null },
+  opts: { url?: string; token?: string | null; command?: string },
 ): McpClientConfig {
   const url = opts.url || DEFAULT_URL;
+  const command = opts.command || "srelens";
+  const shellCommand = /^[A-Za-z0-9_./:\\-]+$/.test(command) ? command : `"${command.replace(/"/g, '\\"')}"`;
   const authValue = transport === "http" ? (opts.token ? `Bearer ${opts.token}` : NO_TOKEN_PLACEHOLDER) : "";
   const hint = MCP_TOOLS.find((t) => t.id === tool)?.hint ?? "";
 
   if (tool === "claude-code") {
     const snippet =
       transport === "stdio"
-        ? "claude mcp add srelens -- srelens --mcp-stdio"
+        ? `claude mcp add srelens -- ${shellCommand} --mcp-stdio`
         : `claude mcp add --transport http srelens ${url} --header "Authorization: ${authValue}"`;
     return { format: "shell", snippet, hint };
   }
@@ -73,7 +75,7 @@ export function mcpClientConfig(
   if (tool === "codex") {
     const snippet =
       transport === "stdio"
-        ? `[mcp_servers.srelens]\ncommand = "srelens"\nargs = ["--mcp-stdio"]`
+        ? `[mcp_servers.srelens]\ncommand = ${JSON.stringify(command)}\nargs = ["--mcp-stdio"]`
         : `[mcp_servers.srelens]\nurl = "${url}"\n\n[mcp_servers.srelens.headers]\nAuthorization = "${authValue}"`;
     return { format: "toml", snippet, hint };
   }
@@ -81,7 +83,7 @@ export function mcpClientConfig(
   // JSON mcpServers tools: Claude Desktop, Cursor, Antigravity, generic.
   const entry =
     transport === "stdio"
-      ? { command: "srelens", args: ["--mcp-stdio"] }
+      ? { command, args: ["--mcp-stdio"] }
       : { url, headers: { Authorization: authValue } };
   return { format: "json", snippet: mcpServersJson(entry), hint };
 }

@@ -403,7 +403,8 @@ pub fn mcp_prompt_issues(
 #[derive(Debug, Serialize)]
 pub struct CliStatus {
     installed: bool,
-    /// The install path (`~/.local/bin/srelens`).
+    /// The usable command path (`~/.local/bin/srelens` on Unix, the running
+    /// desktop executable on Windows).
     path: String,
     /// What the symlink resolves to, if present.
     links_to: Option<String>,
@@ -430,19 +431,32 @@ fn dir_on_path(dir: &std::path::Path) -> bool {
 /// Report whether the `srelens` CLI is installed and where it points.
 #[tauri::command]
 pub fn srelens_cli_status() -> CliStatus {
-    let dir = cli_dir();
-    let path = cli_path();
-    CliStatus {
-        installed: path.as_ref().is_some_and(|p| p.exists()),
-        path: path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        links_to: path
-            .as_ref()
-            .and_then(|p| std::fs::read_link(p).ok())
-            .map(|p| p.to_string_lossy().to_string()),
-        on_path: dir.as_deref().is_some_and(dir_on_path),
+    #[cfg(windows)]
+    {
+        let path = std::env::current_exe().ok();
+        return CliStatus {
+            installed: path.as_ref().is_some_and(|p| p.exists()),
+            path: path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+            links_to: None,
+            on_path: path.as_ref().and_then(|p| p.parent()).is_some_and(dir_on_path),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = cli_dir();
+        let path = cli_path();
+        CliStatus {
+            installed: path.as_ref().is_some_and(|p| p.exists()),
+            path: path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            links_to: path
+                .as_ref()
+                .and_then(|p| std::fs::read_link(p).ok())
+                .map(|p| p.to_string_lossy().to_string()),
+            on_path: dir.as_deref().is_some_and(dir_on_path),
+        }
     }
 }
 
