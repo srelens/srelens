@@ -61,7 +61,7 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
         cli && <p className="text-[0.75rem] text-muted">{windows ? (cli.path ? <>Using <code>{cli.path}</code></> : "The desktop executable could not be located.") :
           cli.installed ? <>Installed at <code>{cli.path}</code></> : "The srelens CLI is not installed."}</p>}
       <div className="mt-2 flex flex-wrap gap-2">
-        {!windows && <Button variant="secondary" disabled={loading || busy} onClick={() => void install()}>
+        {!windows && <Button variant="secondary" disabled={loading || busy || readError !== null} onClick={() => void install()}>
           {busy ? "Installing…" : cli?.installed ? "Reinstall srelens CLI" : "Install srelens CLI"}
         </Button>}
         {readError !== null && <Button variant="ghost" disabled={loading || busy} onClick={() => setNonce(n => n + 1)}>Retry status</Button>}
@@ -89,7 +89,7 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Button variant="secondary" disabled={!ready} onClick={() => void copy()}>Copy configuration</Button>
         {transport === "http" && ready && <>
-          <Button variant="ghost" onClick={() => setRevealed(value => !value)}>{revealed ? "Hide configuration token" : "Reveal configuration token"}</Button>
+          <Button variant="ghost" onClick={() => { setRevealed(value => !value); if (copyState === "failed") setCopyState("idle"); }}>{revealed ? "Hide configuration token" : "Reveal configuration token"}</Button>
           <span className="text-[0.6875rem] text-muted">Copy includes the bearer token.</span>
         </>}
         {copyState === "copied" && <span role="status" className="text-[0.75rem]">Configuration copied.</span>}

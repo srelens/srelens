@@ -505,27 +505,26 @@ fn cli_source_executable() -> Result<std::path::PathBuf, String> {
 
 /// Report whether the `srelens` CLI is installed and where it points.
 #[tauri::command]
-pub fn srelens_cli_status() -> CliStatus {
+pub fn srelens_cli_status() -> Result<CliStatus, String> {
     #[cfg(windows)]
     {
         let path = std::env::current_exe().ok();
-        return CliStatus {
+        return Ok(CliStatus {
             installed: path.as_ref().is_some_and(|p| usable_cli_path(p, p)),
             path: path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
             links_to: None,
             on_path: path.as_ref().and_then(|p| p.parent()).is_some_and(dir_on_path),
-        };
+        });
     }
     #[cfg(not(windows))]
     {
         let dir = cli_dir();
         let path = cli_path();
-        let source_exe = cli_source_executable().ok();
-        CliStatus {
+        let source_exe = cli_source_executable()?;
+        Ok(CliStatus {
             installed: path
                 .as_ref()
-                .zip(source_exe.as_ref())
-                .is_some_and(|(candidate, expected)| usable_cli_path(candidate, expected)),
+                .is_some_and(|candidate| usable_cli_path(candidate, &source_exe)),
             path: path
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
@@ -535,7 +534,7 @@ pub fn srelens_cli_status() -> CliStatus {
                 .and_then(|p| std::fs::read_link(p).ok())
                 .map(|p| p.to_string_lossy().to_string()),
             on_path: dir.as_deref().is_some_and(dir_on_path),
-        }
+        })
     }
 }
 

@@ -60,6 +60,13 @@ it("reports installation failure and allows retry", async () => {
   await user.click(screen.getByRole("button", { name: "Install srelens CLI" }));
   expect(core.installSrelensCli).toHaveBeenCalledTimes(2);
 });
+it("does not offer installation after CLI status could not be read", async () => {
+  core.srelensCliStatus.mockRejectedValue(new Error("status unavailable"));
+  render(<McpClientSetup url={URL} token={TOKEN} />);
+  const install = await screen.findByRole("button", { name: "Install srelens CLI" });
+  expect((install as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("alert").textContent).toMatch(/status unavailable/i);
+});
 it("generates Windows stdio config with the absolute desktop executable", async () => {
   Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
   const executable = String.raw`C:\Program Files\srelens\srelens.exe`;
@@ -91,4 +98,7 @@ it("reveals the usable HTTP configuration when clipboard copying fails", async (
   await user.click(screen.getByRole("button", { name: "Copy configuration" }));
   expect(screen.getByRole("alert").textContent).toMatch(/copy (?:it )?manually/);
   expect(screen.getByTestId("mcp-client-config").textContent).toContain(TOKEN);
+  await user.click(screen.getByRole("button", { name: "Hide configuration token" }));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByTestId("mcp-client-config").textContent).not.toContain(TOKEN);
 });
