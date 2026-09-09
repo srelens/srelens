@@ -43,10 +43,10 @@ describe("Home", () => {
     setLink(PROD.stableId, "connected");
     render(<Home />);
     expect(screen.getAllByRole("button", { name: /^Open cluster / }).map(row => row.getAttribute("aria-label")))
-      .toEqual(["Open cluster staging", "Open cluster Production Europe"]);
+      .toEqual(["Open cluster staging — Not checked", "Open cluster Production Europe — Connected"]);
     expect(screen.getByText("PE")).toBeTruthy();
     expect(screen.getByText("Connected")).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "Open cluster Production Europe" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open cluster Production Europe — Connected" }));
     expect(activeCluster()).toBe(PROD.stableId);
     expect(currentWorkspace().clusters).toContain(PROD.stableId);
     expect(activeRoute()).toBe("/overview");
@@ -58,15 +58,15 @@ describe("Home", () => {
     render(<Home />);
     const filter = screen.getByRole("searchbox", { name: "Find a cluster" });
     await userEvent.type(filter, "prod");
-    expect(screen.getByRole("button", { name: "Open cluster Europe" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Open cluster staging" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open cluster Europe — Not checked" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open cluster staging — Not checked" })).toBeNull();
     await userEvent.clear(filter);
     await userEvent.type(filter, "missing");
     expect(screen.getByText("No matching clusters")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Clear search" }));
     expect(screen.getAllByRole("button", { name: /^Open cluster / })).toHaveLength(2);
     act(() => setMark(PROD.stableId, { ...defaultMark(PROD.name), name: "Production renamed" }));
-    expect(screen.getByRole("button", { name: "Open cluster Production renamed" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open cluster Production renamed — Not checked" })).toBeTruthy();
   });
 
   it("distinguishes loading and failed discovery from an empty configuration", () => {
@@ -84,7 +84,7 @@ describe("Home", () => {
     setLink(PROD.stableId, "error", "connection refused");
     render(<Home />);
     expect(screen.getByText("Could not load all clusters")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Open cluster prod" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open cluster prod — Unreachable" })).toBeTruthy();
     expect(screen.getByText("Unreachable")).toBeTruthy();
   });
 
@@ -104,10 +104,10 @@ it("retries a failed discovery and retains readable clusters if retry fails", as
   listContexts.mockRejectedValueOnce(Error("still unavailable")).mockResolvedValueOnce({ contexts: [PROD, STAGE] });
   render(<Home />);
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
-  expect(screen.getByRole("button", { name: "Open cluster prod" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Open cluster prod — Not checked" })).toBeTruthy();
   expect(screen.getByText("Could not load all clusters")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
-  expect(screen.getByRole("button", { name: "Open cluster staging" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Open cluster staging — Not checked" })).toBeTruthy();
   expect(screen.queryByText("Could not load all clusters")).toBeNull();
 });
 
@@ -119,6 +119,6 @@ it("does not let a delayed retry replace a newer context inventory", async () =>
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   act(() => setContexts([STAGE]));
   await act(async () => resolve({ contexts: [PROD] }));
-  expect(screen.getByRole("button", { name: "Open cluster staging" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Open cluster prod" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Open cluster staging — Not checked" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open cluster prod — Not checked" })).toBeNull();
 });

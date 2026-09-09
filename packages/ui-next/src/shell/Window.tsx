@@ -268,6 +268,7 @@ export function Window({
   // re-runs it, and the probe store's memory is what keeps it to once each.
   const startupOverviewOffered = useRef(false);
   const workspaceId = workspace.id;
+  const workspaceClusterIds = workspace.clusters.join("\u0000");
   useEffect(() => {
     if (!booted) return;
     if (!active) return;
@@ -293,7 +294,7 @@ export function Window({
     }
     // `contexts` rides along because a kubeconfig change replaces them; the
     // workspace id is the trigger for the switch case.
-  }, [booted, contexts, workspaceId, active]);
+  }, [booted, contexts, workspaceId, workspaceClusterIds, active]);
 
   /**
    * Which accelerators survive a raised cover, and why one of them does.

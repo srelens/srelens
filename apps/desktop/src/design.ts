@@ -291,6 +291,7 @@ export function toggleNextDesignTheme(): void {
  * so they cannot drift. A screen is added here in the PR that ports it.
  */
 export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
+  { route: "/", name: "Home" },
   { route: "/applog", name: "Application log" },
   { route: "/notes", name: "Release notes" },
   // The full view of the one agent run this window holds — the transcript,

@@ -44,7 +44,7 @@ export function Home() {
 
   return (
     <Screen title="Home" eyebrow="srelens" fill>
-      <div className="home-page scroll min-h-0 flex-1">
+      <div className="home-page min-h-0 flex-1">
         <div className="home-intro">
           <div>
             <span className="home-eyebrow">Explore · Observe · Troubleshoot</span>
@@ -68,7 +68,7 @@ export function Home() {
             {status === "loading" ? <LoadingState label="Loading clusters…" /> : contexts.length === 0 ? (
               status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
             ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
-              <ul aria-label="Saved clusters">
+              <ul className="home-cluster-list scroll" aria-label="Saved clusters">
                 {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} />)}
               </ul>
             )}
@@ -88,20 +88,21 @@ export function Home() {
 
 function ClusterRow({ context, link }: { context: ClusterContext; link?: ReturnType<typeof useWorkspaceView>["links"][string] }) {
   const mark = getMark(context.stableId, context.name);
+  const status = link ? LINK_WORD[link.state] : "Not checked";
   let secondary = context.name;
   if (mark.name === context.name) {
     try { secondary = new URL(context.server).host; }
     catch { secondary = context.cluster !== context.name ? context.cluster : context.sourceFile; }
   }
   return <li className="border-b border-rule">
-    <button type="button" className="home-cluster-row" aria-label={`Open cluster ${mark.name}`} onClick={() => openCluster(context)}>
+    <button type="button" className="home-cluster-row" aria-label={`Open cluster ${mark.name} — ${status}`} onClick={() => openCluster(context)}>
       <Mark decorative name={mark.name} short={mark.short} color={mark.color} size="sm" withBadge={mark.withText}
         icon={mark.mark === "icon" ? symbolFor(mark.icon) : undefined} imageSrc={mark.mark === "image" ? mark.imageSrc : undefined} />
       <span className="min-w-0 flex-1 text-left">
         <span className="block truncate font-medium">{mark.name}</span>
         <span className="block truncate text-xs text-muted" title={secondary}>{secondary}</span>
       </span>
-      <StatusPill status={link ? LINK_WORD[link.state] : "Not checked"} kind={link?.state === "connected" ? "success" : link?.state === "connecting" ? "info" : link?.state === "error" ? "danger" : "neutral"} />
+      <StatusPill status={status} kind={link?.state === "connected" ? "success" : link?.state === "connecting" ? "info" : link?.state === "error" ? "danger" : "neutral"} />
       <span aria-hidden className="text-muted">→</span>
     </button>
   </li>;

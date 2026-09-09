@@ -189,6 +189,7 @@ import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
 import { resetLock } from "./LockGate";
 import { mcpAutoStartPhase, resetMcpAutoStart } from "../lib/mcpAutoStart";
+import { openCluster } from "../lib/openCluster";
 
 /** An open vault: the state every test in this file but the lock ones needs. */
 const VAULT_OPEN = {
@@ -666,6 +667,16 @@ describe("Window accelerators", () => {
     await screen.findByRole("tablist");
     await waitFor(() => expect(connectCluster).toHaveBeenCalledTimes(2));
     expect(connectCluster.mock.calls.map((c) => c[0])).toEqual(["prod", "dev"]);
+  });
+
+  it("probes a configured cluster when Home adds it to the workspace", async () => {
+    const saved = defaultState([ctx("prod")]);
+    loadTabsState.mockReturnValue(saved);
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
+    await booted();
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+    act(() => openCluster(ctx("dev")));
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("dev"));
   });
 
   it("offers Close others on a tab's context menu", async () => {
