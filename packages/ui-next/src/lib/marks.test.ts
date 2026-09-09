@@ -179,6 +179,28 @@ describe("classic context identity parity", () => {
       color: "var(--mark-teal)",
     });
   });
+  it("does not reassign a persistently ambiguous legacy profile after a duplicate disappears", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Original production" } }));
+    loadMarks(s);
+    rememberContextMarks([
+      { name: "file-a/prod", stableId: "id-a" },
+      { name: "file-b/prod", stableId: "id-b" },
+    ] as import("@srelens/core").ClusterContext[], s);
+
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
+    expect(JSON.parse(s.m.get("srelens.next.ambiguousContextProfiles")!)).toContain("prod");
+
+    // A later launch sees only the survivor. Disappearance is not evidence
+    // that the unresolved profile belonged to it.
+    loadMarks(s);
+    rememberContextMarks([
+      { name: "file-b/prod", stableId: "id-b" },
+    ] as import("@srelens/core").ClusterContext[], s);
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).not.toHaveProperty("id-b");
+    expect(getMark("id-b", "file-b/prod").name).toBe("file-b/prod");
+  });
   it("uses the same generated initials as classic for long context names", () => {
     expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
   });

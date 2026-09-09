@@ -17,6 +17,7 @@ import type { Storage } from "./tabsPersist";
  * injectable so tests need a Map and no platform.
  */
 export const MARKS_KEY = "srelens.next.marks";
+const AMBIGUOUS_PROFILES_KEY = "srelens.next.ambiguousContextProfiles";
 
 /** Same deterministic initials and colours as the classic design. */
 export const initials = avatarInitials;
@@ -64,6 +65,7 @@ export function parseStoredMarks(raw: string | null): Record<string, MarkAppeara
 
 let marks: Record<string, MarkAppearance> = {};
 let profiles: ContextProfiles = {};
+let ambiguousProfileKeys = new Set<string>();
 const contextNames = new Map<string, string>();
 const LEGACY_ICONS = new Set(["cluster", "cloud", "shield", "database", "globe"]);
 
@@ -140,6 +142,12 @@ export function loadMarks(storage: Storage = settingsStorage): void {
   }
   marks = next;
   profiles = loadContextProfiles(storage);
+  try {
+    const saved = JSON.parse(storage.getItem(AMBIGUOUS_PROFILES_KEY) ?? "[]") as unknown;
+    ambiguousProfileKeys = new Set(Array.isArray(saved) ? saved.filter(isString) : []);
+  } catch {
+    ambiguousProfileKeys = new Set();
+  }
   contextNames.clear();
   emit();
 }
@@ -220,8 +228,30 @@ export function useEditableMark(stableId: string, name: string): MarkAppearance 
 
 /** Migrate old name-keyed profiles and import customisations from the new UI. */
 export function rememberContextMarks(contexts: readonly ClusterContext[], storage: Storage = settingsStorage): void {
-  const migration = migrateRecordKeys(profiles, contexts);
-  profiles = migration.migrated;
+  const ids = new Set(contexts.map(context => context.stableId));
+  let ambiguityChanged = false;
+  for (const key of Object.keys(profiles)) {
+    if (ids.has(key) || ambiguousProfileKeys.has(key)) continue;
+    const exact = contexts.filter(context => context.name === key);
+    const candidates = exact.length > 0
+      ? exact
+      : contexts.filter(context => unprefixedName(context.name) === key);
+    if (candidates.length > 1) {
+      ambiguousProfileKeys.add(key);
+      ambiguityChanged = true;
+    }
+  }
+
+  const migratable = { ...profiles };
+  for (const key of ambiguousProfileKeys) {
+    if (!ids.has(key)) delete migratable[key];
+  }
+  const migration = migrateRecordKeys(migratable, contexts);
+  const nextProfiles = migration.migrated;
+  for (const key of ambiguousProfileKeys) {
+    if (!ids.has(key) && key in profiles) nextProfiles[key] = profiles[key];
+  }
+  profiles = nextProfiles;
   let changed = migration.changed;
   for (const context of contexts) {
     contextNames.set(context.stableId, context.name);
@@ -237,6 +267,13 @@ export function rememberContextMarks(contexts: readonly ClusterContext[], storag
     const { [context.stableId]: _old, ...rest } = marks;
     marks = rest;
     changed = true;
+  }
+  if (ambiguityChanged) {
+    try {
+      storage.setItem(AMBIGUOUS_PROFILES_KEY, JSON.stringify([...ambiguousProfileKeys]));
+    } catch (error) {
+      console.error("could not persist ambiguous context profile keys", error);
+    }
   }
   if (changed) { saveContextProfiles(profiles, storage); save(storage); emit(); }
 }
