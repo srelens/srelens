@@ -59,8 +59,8 @@ jobs:
         # they are measured across apps/desktop and packages/core together.
         # Running the packages individually would report green with no gate at all.
         run: pnpm test
-      - name: Updater manifest tests
-        run: node --test .github/scripts/compose-latest.test.cjs
+      - name: Release workflow tests
+        run: node --test .github/scripts/*.test.cjs
       - name: Performance-baseline script tests
         # The size classifier decides which artifacts are compared against
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
