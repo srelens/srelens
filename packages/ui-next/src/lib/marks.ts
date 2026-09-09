@@ -152,29 +152,20 @@ function save(storage: Storage) {
   }
 }
 
-/**
- * The cluster's mark: the stored appearance if there is one, and otherwise a
- * default seeded from the name the kubeconfig gives the context.
- *
- * A stored mark comes back exactly as stored, `name` included. That name is a
- * display name the operator typed, not a cache of the context's. This used to
- * overwrite it with the `name` argument on the way out, which made the editor's
- * name field inert: every keystroke was stored and then reverted on the very
- * next read (#325 review). `short` is not re-derived either, for the same
- * reason — an edit nobody asked to undo should not be undone.
- *
- * So a cluster renamed in the kubeconfig follows that rename only while nobody
- * has customised it, which is the case the rename mattered for; once someone
- * has named it themselves, that is its name.
- */
+/** Display labels match classic: trim custom names and fall back when blank. */
 export function getMark(stableId: string, name: string): MarkAppearance {
-  // Keyed on both, because the unstored answer depends on the name. A stored
-  // mark ignores it, and every key then hands back that same one object.
+  return readMark(stableId, name, false);
+}
+
+function readMark(stableId: string, name: string, editing: boolean): MarkAppearance {
+  // Raw editor values and display labels each need a stable snapshot. The
+  // fallback also depends on the current kubeconfig name.
   contextNames.set(stableId, name);
-  const key = `${stableId}\u0000${name}`;
+  const key = `${editing}\u0000${stableId}\u0000${name}`;
   const cached = snapshots.get(key);
   if (cached) return cached;
-  const mark = withProfile(stableId, name, marks[stableId] ?? defaultMark(name));
+  const saved = withProfile(stableId, name, marks[stableId] ?? defaultMark(name));
+  const mark = editing ? saved : { ...saved, name: saved.name.trim() || name };
   snapshots.set(key, mark);
   return mark;
 }
@@ -211,6 +202,15 @@ export function useMark(stableId: string, name: string): MarkAppearance {
     subscribe,
     () => getMark(stableId, name),
     () => getMark(stableId, name),
+  );
+}
+
+/** Keep raw input in editors so clearing a name or typing spaces is not undone. */
+export function useEditableMark(stableId: string, name: string): MarkAppearance {
+  return useSyncExternalStore(
+    subscribe,
+    () => readMark(stableId, name, true),
+    () => readMark(stableId, name, true),
   );
 }
 

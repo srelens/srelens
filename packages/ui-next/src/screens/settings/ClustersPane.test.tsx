@@ -5,11 +5,11 @@ import { loadContextProfiles, loadContextOrder, saveContextProfiles, saveContext
 import { setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
-const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn() }));
+const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@srelens/core", async (original) => ({ ...await original<object>(), ...backend }));
 const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
 beforeEach(() => {
-  localStorage.clear(); vi.clearAllMocks();
+  localStorage.clear(); vi.clearAllMocks(); backend.isTauri.mockReturnValue(true);
   saveContextProfiles({ "prod-id": { displayName: "Production Europe", shortName: "PE", logo: "cloud", color: "#123456" } });
   saveContextOrder(["staging-id", "prod-id"]); loadMarks(); setContexts(contexts);
 });
@@ -90,4 +90,27 @@ it("reorders through the pointer drag handle and cancels without saving", async 
   handle.focus();
   await user.keyboard("{ArrowUp}");
   expect(loadContextOrder()).toEqual(["staging-id", "prod-id"]);
+});
+
+it("keeps appearance editing available on web without offering kubeconfig deletion", async () => {
+  backend.isTauri.mockReturnValue(false);
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  expect(screen.queryByRole("button", { name: "Remove context" })).toBeNull();
+  await user.clear(screen.getByLabelText("Display name"));
+  await user.type(screen.getByLabelText("Display name"), "Web production");
+  expect(loadContextProfiles()["prod-id"].displayName).toBe("Web production");
+  expect(backend.deleteContext).not.toHaveBeenCalled();
+});
+it("falls back to the context name in the list while retaining an editable blank name", async () => {
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  const input = screen.getByLabelText("Display name") as HTMLInputElement;
+  await user.clear(input);
+  expect(input.value).toBe("");
+  expect(screen.getByRole("button", { name: "Edit prod" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Drag prod to reorder" })).toBeTruthy();
+  await user.type(input, "  Production Europe  ");
+  expect(input.value).toBe("  Production Europe  ");
+  expect(screen.getByRole("button", { name: "Edit Production Europe" }).textContent).toContain("Production Europe");
 });

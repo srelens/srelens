@@ -151,3 +151,10 @@ it("reads classic profiles stored by stable ID, including after a context rename
   loadMarks(s);
   expect(getMark("stable-id", "config/prod")).toMatchObject({ name: "Production", short: "PRD", icon: "cloud" });
 });
+
+it.each(["", "   ", "  Production Europe  "])("matches classic display labels for %j", displayName => {
+  const s = fakeStorage();
+  s.m.set("srelens.contextProfiles", JSON.stringify({ id: { displayName } }));
+  loadMarks(s);
+  expect(getMark("id", "prod").name).toBe(displayName.trim() || "prod");
+});

@@ -14,7 +14,7 @@ import {
 } from "@srelens/ui-kit";
 import { friendly } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
-import { getMark, resetMark, setMark, useMark } from "../lib/marks";
+import { getMark, resetMark, setMark, useEditableMark } from "../lib/marks";
 import { useInfos } from "../lib/probe";
 import { openTab, setActiveCluster, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceView } from "../lib/workspace";
@@ -67,7 +67,7 @@ const MAX_IMAGE_BYTES = 64 * 1024;
  * per cluster: the number of clusters changes between renders, so a hook per
  * item would be a hook count that changes with the list, which React refuses.
  * `useInfos` is the probe store's whole-record snapshot, which exists for this.
- * The marks have no such hook, so the subscription rides on the `useMark` call
+ * The marks have no such hook, so the subscription rides on the `useEditableMark` call
  * the dialog's editor needs anyway — that hook subscribes whatever id it is
  * asked about, so it re-renders this rail on any mark change and the items then
  * read the plain `getMark` beside it.
@@ -82,7 +82,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   const target = editing === null ? null : (byId.get(editing) ?? null);
 
   // One subscription each, standing in for the per-item hooks — see above.
-  const value = useMark(target?.stableId ?? "", target?.name ?? "");
+  const value = useEditableMark(target?.stableId ?? "", target?.name ?? "");
   const infos = useInfos();
 
   // A context can leave while its dialog is open — a kubeconfig rewritten under

@@ -1,15 +1,15 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
-import { deleteContext, describeError, listContexts, type ClusterContext } from "@srelens/core";
+import { deleteContext, describeError, isTauri, listContexts, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, Mark, TextInput } from "@srelens/ui-kit";
 import { getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, useOrderedContexts } from "../../lib/contextOrder";
-import { getMark, resetMark, setMark, useMark } from "../../lib/marks";
+import { getMark, resetMark, setMark, useEditableMark, useMark } from "../../lib/marks";
 import { PALETTE, SYMBOLS, symbolFor } from "../../lib/markSymbols";
 import { openTab } from "../../lib/tabsStore";
 
 function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemove: () => void }) {
-  const mark = useMark(context.stableId, context.name);
+  const mark = useEditableMark(context.stableId, context.name);
   return <section aria-label="Context details" className="scroll min-h-0 min-w-0 flex-1">
     <div className="pane-head">Context appearance</div>
     <CustomizeMark value={mark} onChange={next => setMark(context.stableId, next)}
@@ -26,7 +26,7 @@ function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemov
         <dt className="text-muted">{label}</dt><dd className="overflow-x-auto whitespace-nowrap font-mono" title={value}>{value}</dd>
       </div>)}
     </dl>
-    <div className="border-t border-rule p-3"><Button variant="danger" onClick={onRemove}>Remove context</Button></div>
+    {isTauri() && <div className="border-t border-rule p-3"><Button variant="danger" onClick={onRemove}>Remove context</Button></div>}
   </section>;
 }
 
@@ -90,7 +90,7 @@ export function ClustersPane() {
     } finally { setBusy(false); }
   }
   async function remove() {
-    if (!pending || busy) return;
+    if (!isTauri() || !pending || busy) return;
     setBusy(true); setError("");
     try {
       const result = await deleteContext(pending.name);
