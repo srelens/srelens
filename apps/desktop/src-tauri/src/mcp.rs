@@ -428,6 +428,26 @@ fn dir_on_path(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn usable_cli_path(path: &std::path::Path, current_exe: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    match (std::fs::canonicalize(path), std::fs::canonicalize(current_exe)) {
+        (Ok(candidate), Ok(expected)) => candidate == expected,
+        _ => false,
+    }
+}
+
 /// Report whether the `srelens` CLI is installed and where it points.
 #[tauri::command]
 pub fn srelens_cli_status() -> CliStatus {
@@ -435,7 +455,7 @@ pub fn srelens_cli_status() -> CliStatus {
     {
         let path = std::env::current_exe().ok();
         return CliStatus {
-            installed: path.as_ref().is_some_and(|p| p.exists()),
+            installed: path.as_ref().is_some_and(|p| usable_cli_path(p, p)),
             path: path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
             links_to: None,
             on_path: path.as_ref().and_then(|p| p.parent()).is_some_and(dir_on_path),
@@ -445,8 +465,12 @@ pub fn srelens_cli_status() -> CliStatus {
     {
         let dir = cli_dir();
         let path = cli_path();
+        let current_exe = std::env::current_exe().ok();
         CliStatus {
-            installed: path.as_ref().is_some_and(|p| p.exists()),
+            installed: path
+                .as_ref()
+                .zip(current_exe.as_ref())
+                .is_some_and(|(candidate, expected)| usable_cli_path(candidate, expected)),
             path: path
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
@@ -497,6 +521,25 @@ pub fn install_srelens_cli() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_executable_is_a_usable_cli_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(usable_cli_path(&current, &current));
+    }
+
+    #[test]
+    fn a_directory_is_not_a_usable_cli_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(!usable_cli_path(current.parent().unwrap(), &current));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unrelated_executable_is_not_a_usable_cli_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(!usable_cli_path(std::path::Path::new("/bin/sh"), &current));
+    }
 
     /// The command boundary, where the distinction has to survive: the pane
     /// only ever sees what `mcp_audit_tail` returns. An absent log resolves to
