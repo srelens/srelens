@@ -162,6 +162,23 @@ describe("classic context identity parity", () => {
     });
     expect(JSON.parse(s.m.get(MARKS_KEY)!)).not.toHaveProperty("id");
   });
+  it("does not pin labels generated before a duplicate context gained a prefix", () => {
+    const s = fakeStorage();
+    s.m.set(MARKS_KEY, JSON.stringify({ id: { ...defaultMark("prod"), color: "var(--mark-teal)" } }));
+    loadMarks(s);
+
+    rememberContextMarks([{ name: "file/prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+
+    const profile = JSON.parse(s.m.get("srelens.contextProfiles")!).id;
+    expect(profile).not.toHaveProperty("displayName");
+    expect(profile).not.toHaveProperty("shortName");
+    loadMarks(s);
+    expect(getMark("id", "file/prod")).toMatchObject({
+      name: "file/prod",
+      short: defaultMark("file/prod").short,
+      color: "var(--mark-teal)",
+    });
+  });
   it("uses the same generated initials as classic for long context names", () => {
     expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
   });

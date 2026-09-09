@@ -107,6 +107,7 @@ export function ClustersPane() {
       resetMark(pending.stableId);
       removeContextFromOrder(pending.stableId);
       removeClusterNamespace(pending.stableId);
+      if (pending.name !== pending.stableId) removeClusterNamespace(pending.name);
       removeNamespaces(pending.stableId);
       const remaining = getContexts().filter(c => c.stableId !== pending.stableId);
       setContexts(remaining);

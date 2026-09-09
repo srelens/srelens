@@ -54,7 +54,7 @@ it("confirms removal and sends the raw context name to the backend", async () =>
 it("clears both namespace stores after confirmed removal", async () => {
   backend.deleteContext.mockResolvedValue({ success: true });
   backend.listContexts.mockResolvedValue({ contexts: [contexts[1]] });
-  saveClusterNamespaces({ "prod-id": "payments", "staging-id": "default" });
+  saveClusterNamespaces({ "prod-id": "payments", prod: "legacy-payments", "staging-id": "default" });
   setNamespaces("prod-id", ["payments"]);
   setNamespaces("staging-id", ["default"]);
   const user = userEvent.setup(); render(<ClustersPane />);

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { avatarColor, avatarInitials, migrateRecordKeys, loadContextProfiles, saveContextProfiles, settingsStorage, type ClusterContext, type ContextProfile, type ContextProfiles } from "@srelens/core";
+import { avatarColor, avatarInitials, migrateRecordKeys, loadContextProfiles, saveContextProfiles, settingsStorage, unprefixedName, type ClusterContext, type ContextProfile, type ContextProfiles } from "@srelens/core";
 import type { MarkAppearance } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
 
@@ -83,13 +83,15 @@ function withProfile(stableId: string, name: string, base: MarkAppearance): Mark
   return mark;
 }
 
-function sharedProfile(stableId: string, mark: MarkAppearance): ContextProfile {
+function sharedProfile(stableId: string, mark: MarkAppearance, previousDefaultName?: string): ContextProfile {
   const contextName = contextNames.get(stableId) ?? mark.name;
-  const generatedShort = initials(contextName);
+  const defaultNames = previousDefaultName && previousDefaultName !== contextName
+    ? [contextName, previousDefaultName]
+    : [contextName];
   const legacyIcon = mark.icon && LEGACY_ICONS.has(mark.icon) ? mark.icon as ContextProfile["logo"] : "cluster";
   return {
-    displayName: mark.name === contextName ? undefined : mark.name,
-    shortName: mark.short === generatedShort ? undefined : mark.short,
+    displayName: defaultNames.includes(mark.name) ? undefined : mark.name,
+    shortName: defaultNames.some(name => mark.short === initials(name)) ? undefined : mark.short,
     color: mark.color,
     logo: mark.mark === "text" ? "initials" : mark.mark === "image" ? "custom" : legacyIcon,
     logoUrl: mark.imageSrc,
@@ -226,7 +228,7 @@ export function rememberContextMarks(contexts: readonly ClusterContext[], storag
     profiles = {
       ...profiles,
       [context.stableId]: {
-        ...sharedProfile(context.stableId, old),
+        ...sharedProfile(context.stableId, old, unprefixedName(context.name)),
         ...profiles[context.stableId],
       },
     };
