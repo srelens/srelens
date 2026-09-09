@@ -42,14 +42,19 @@ describe("mcpClientConfig", () => {
     const command = String.raw`C:\Program Files\srelens\srelens.exe`;
     expect(JSON.parse(mcpClientConfig("cursor", "stdio", { command }).snippet).mcpServers.srelens.command).toBe(command);
     expect(mcpClientConfig("codex", "stdio", { command }).snippet).toContain(String.raw`command = "C:\\Program Files\\srelens\\srelens.exe"`);
-    expect(mcpClientConfig("claude-code", "stdio", { command }).snippet).toContain(String.raw`-- "C:\\Program Files\\srelens\\srelens.exe" --mcp-stdio`);
+    expect(mcpClientConfig("claude-code", "stdio", { command }).snippet).toContain(String.raw`-- 'C:\Program Files\srelens\srelens.exe' --mcp-stdio`);
   });
 
   it("shell-escapes command substitution characters in executable paths", () => {
     const command = String.raw`/Applications/Srelens $(touch /tmp/unsafe) ` + "`whoami`";
     const snippet = mcpClientConfig("claude-code", "stdio", { command }).snippet;
-    expect(snippet).toContain(String.raw`\$(touch /tmp/unsafe)`);
-    expect(snippet).toContain("\\`whoami\\`");
+    expect(snippet).toContain(`'/Applications/Srelens $(touch /tmp/unsafe) \`whoami\`'`);
+  });
+
+  it("protects Bash history expansion in Unix executable paths", () => {
+    const command = "/home/user!/srelens";
+    expect(mcpClientConfig("claude-code", "stdio", { command }).snippet)
+      .toContain("-- '/home/user!/srelens' --mcp-stdio");
   });
 
   it("uses PowerShell quoting for shell-active Windows executable paths", () => {

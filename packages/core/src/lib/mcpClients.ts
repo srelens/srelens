@@ -51,7 +51,7 @@ function quoteShellCommand(command: string, platform: "unix" | "windows"): strin
   if (/^[A-Za-z0-9_./:\\-]+$/.test(command)) return command;
   return platform === "windows"
     ? `'${command.replace(/'/g, "''")}'`
-    : `"${command.replace(/[\\"$`]/g, "\\$&")}"`;
+    : `'${command.split("'").join("'\\''")}'`;
 }
 
 /**
