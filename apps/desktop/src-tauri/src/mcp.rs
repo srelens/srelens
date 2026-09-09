@@ -462,15 +462,31 @@ fn usable_cli_path(path: &std::path::Path, expected_exe: &std::path::Path) -> bo
 fn select_linux_cli_source(
     current_exe: std::path::PathBuf,
     appimage: Option<std::path::PathBuf>,
+    appdir: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, String> {
-    match appimage {
-        Some(path) if path.is_absolute() && executable_file(&path) => Ok(path),
-        Some(path) => Err(format!(
+    let Some(path) = appimage else {
+        return Ok(current_exe);
+    };
+    let Some(mount) = appdir else {
+        return Err("APPIMAGE is set without its APPDIR mount".to_string());
+    };
+    if !path.is_absolute() || !executable_file(&path) {
+        return Err(format!(
             "APPIMAGE does not name an executable file: {}",
             path.display()
-        )),
-        None => Ok(current_exe),
+        ));
     }
+    let inside_mount = match (
+        std::fs::canonicalize(&current_exe),
+        std::fs::canonicalize(&mount),
+    ) {
+        (Ok(current), Ok(mount)) => current.starts_with(mount),
+        _ => false,
+    };
+    if !inside_mount {
+        return Err("APPIMAGE and APPDIR do not belong to the running executable".to_string());
+    }
+    Ok(path)
 }
 
 fn cli_source_executable() -> Result<std::path::PathBuf, String> {
@@ -480,6 +496,7 @@ fn cli_source_executable() -> Result<std::path::PathBuf, String> {
         return select_linux_cli_source(
             current,
             std::env::var_os("APPIMAGE").map(std::path::PathBuf::from),
+            std::env::var_os("APPDIR").map(std::path::PathBuf::from),
         );
     }
     #[cfg(not(target_os = "linux"))]
@@ -585,9 +602,10 @@ mod tests {
     #[test]
     fn appimage_path_replaces_the_temporary_process_path() {
         let appimage = std::env::current_exe().unwrap();
-        let transient = appimage.parent().unwrap().to_path_buf();
+        let mount = appimage.parent().unwrap().to_path_buf();
         assert_eq!(
-            select_linux_cli_source(transient, Some(appimage.clone())).unwrap(),
+            select_linux_cli_source(appimage.clone(), Some(appimage.clone()), Some(mount))
+                .unwrap(),
             appimage
         );
     }
@@ -597,7 +615,20 @@ mod tests {
     fn invalid_appimage_path_is_not_silently_replaced_by_the_fuse_path() {
         let current = std::env::current_exe().unwrap();
         let invalid = current.parent().unwrap().to_path_buf();
-        assert!(select_linux_cli_source(current, Some(invalid)).is_err());
+        assert!(select_linux_cli_source(current, Some(invalid.clone()), Some(invalid)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_appimage_environment_is_rejected() {
+        let current = std::env::current_exe().unwrap();
+        let unrelated_mount = std::path::PathBuf::from("/definitely-not-this-appimage-mount");
+        assert!(select_linux_cli_source(
+            current.clone(),
+            Some(current),
+            Some(unrelated_mount)
+        )
+        .is_err());
     }
 
     /// The command boundary, where the distinction has to survive: the pane

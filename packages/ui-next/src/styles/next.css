@@ -26,7 +26,8 @@
 }
 
 /* Agent settings form one scrollable region, divided by hairlines. */
-.settings-agent > .card {
+.settings-agent > .card,
+.settings-agent > .settings-agent-groups > .card {
   border-radius: 0;
   border-width: 0 0 1px;
   box-shadow: none;

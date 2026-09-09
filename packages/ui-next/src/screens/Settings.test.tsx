@@ -209,6 +209,9 @@ describe("Settings", () => {
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
     expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
     expect(screen.getByText(/every capability call/i)).toBeTruthy();
+    const nested = screen.getByText("Providers").closest(".card")?.parentElement;
+    expect(nested?.className).toContain("settings-agent-groups");
+    expect(nested?.className).not.toContain("gap-4");
   });
 
   it("shows one section at a time", async () => {
