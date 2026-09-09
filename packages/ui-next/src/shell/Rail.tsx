@@ -15,9 +15,9 @@ import {
 import { friendly } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { getMark, resetMark, setMark, useEditableMark } from "../lib/marks";
-import { openCluster, reconnectCluster } from "../lib/openCluster";
+import { openCluster, pauseCluster, reconnectCluster } from "../lib/openCluster";
 import { useInfos } from "../lib/probe";
-import { openTab, setClusterPaused, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
+import { openTab, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceView } from "../lib/workspace";
 
 export interface RailProps {
@@ -163,7 +163,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     const context = byId.get(id);
     if (!context) return;
     if (workspace.pausedClusters?.includes(id)) reconnectCluster(context);
-    else setClusterPaused(workspace.id, id, true);
+    else pauseCluster(workspace.id, id);
   }
 
   function menuFor(item: ClusterRailItem): ContextMenuItem[] {

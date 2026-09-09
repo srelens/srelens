@@ -1,12 +1,18 @@
 import type { ClusterContext } from "@srelens/core";
 import { currentWorkspace, openTab, setActiveCluster, setClusterPaused, setWorkspaceClusters } from "./tabsStore";
-import { probeCluster } from "./probe";
+import { invalidateProbe, probeCluster } from "./probe";
+
+/** Pause one workspace's reading and invalidate any observation already out. */
+export function pauseCluster(workspaceId: string, clusterId: string): void {
+  setClusterPaused(workspaceId, clusterId, true);
+  invalidateProbe(workspaceId, clusterId);
+}
 
 /** Resume a paused cluster and begin its explicit reachability read. */
 export function reconnectCluster(context: ClusterContext): void {
   const workspace = currentWorkspace();
   setClusterPaused(workspace.id, context.stableId, false);
-  void probeCluster(context);
+  void probeCluster(context, undefined, undefined, { workspaceId: workspace.id, fresh: true });
 }
 
 /**

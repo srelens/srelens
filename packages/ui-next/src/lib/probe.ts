@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { connectCluster, describeError, type ClusterContext, type ClusterInfo } from "@srelens/core";
 import { setLink } from "./workspace";
-import { isClusterPaused } from "./tabsStore";
+import { currentWorkspace, isClusterPaused } from "./tabsStore";
 
 let infos: Record<string, ClusterInfo> = {};
 
@@ -48,7 +48,7 @@ const emit = () => { for (const l of listeners) l(); };
 
 export function getInfo(stableId: string): ClusterInfo | undefined { return infos[stableId]; }
 export function getProbe(stableId: string): Probe { return probes[stableId] ?? UNREAD; }
-export function resetProbes(): void { infos = {}; probes = {}; reading.clear(); emit(); }
+export function resetProbes(): void { infos = {}; probes = {}; reading.clear(); pauseGenerations.clear(); emit(); }
 function subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l); }
 export function useProbe(stableId: string | null): Probe {
   return useSyncExternalStore(subscribe, () => (stableId ? (probes[stableId] ?? UNREAD) : UNREAD), () => UNREAD);
@@ -110,6 +110,22 @@ export function useInfos(): Record<string, ClusterInfo> {
  * a read hanging does not leave the next one joined to it.
  */
 const reading = new Map<string, Promise<void>>();
+const pauseGenerations = new Map<string, number>();
+
+function pauseKey(workspaceId: string, clusterId: string) {
+  return `${workspaceId}\u0000${clusterId}`;
+}
+
+/** Invalidate a workspace's in-flight reading when its reader disconnects. */
+export function invalidateProbe(workspaceId: string, clusterId: string): void {
+  const key = pauseKey(workspaceId, clusterId);
+  pauseGenerations.set(key, (pauseGenerations.get(key) ?? 0) + 1);
+}
+
+interface ProbeOptions {
+  workspaceId?: string;
+  fresh?: boolean;
+}
 
 /**
  * Read one cluster: connect to it, time the round trip, and record what came
@@ -137,11 +153,14 @@ export function probeCluster(
   ctx: ClusterContext,
   connect: typeof connectCluster = connectCluster,
   now: () => number = Date.now,
+  options: ProbeOptions = {},
 ): Promise<void> {
-  if (isClusterPaused(ctx.stableId)) return Promise.resolve();
+  const workspaceId = options.workspaceId ?? currentWorkspace().id;
+  if (isClusterPaused(ctx.stableId, workspaceId)) return Promise.resolve();
+  const generation = pauseGenerations.get(pauseKey(workspaceId, ctx.stableId)) ?? 0;
   const running = reading.get(ctx.stableId);
-  if (running) return running;
-  const run = read(ctx, connect, now).finally(() => {
+  if (running && !options.fresh) return running;
+  const run = read(ctx, connect, now, workspaceId, generation).finally(() => {
     // **By identity, not by key.** A read that {@link resetProbes} forgot
     // still lands, and deleting by key alone would clear whatever is under
     // that key by then — which is the CURRENT read. That silently reopens the
@@ -159,6 +178,8 @@ async function read(
   ctx: ClusterContext,
   connect: typeof connectCluster,
   now: () => number,
+  workspaceId: string,
+  generation: number,
 ): Promise<void> {
   setLink(ctx.stableId, "connecting");
   const started = now();
@@ -171,7 +192,10 @@ async function read(
   const elapsedMs = now() - started;
   // Disconnect may have been picked while the probe was in flight. Its result
   // is an observation from before that choice, so never revive a paused row.
-  if (isClusterPaused(ctx.stableId)) return;
+  if (
+    isClusterPaused(ctx.stableId, workspaceId) ||
+    generation !== (pauseGenerations.get(pauseKey(workspaceId, ctx.stableId)) ?? 0)
+  ) return;
   infos = { ...infos, [ctx.stableId]: info };
   probes = { ...probes, [ctx.stableId]: deriveProbe(info, elapsedMs) };
   emit();

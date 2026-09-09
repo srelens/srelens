@@ -76,7 +76,7 @@ export function Nav({ contexts }: NavProps) {
 
   // Subscribes the sidebar to the strip: which row is highlighted is a fact
   // about the active tab, and that changes from a dozen places that are not here.
-  const { tabs, activeId } = useTabs();
+  const { tabs, activeId, workspace } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
 
   const name = ctx?.name;
@@ -118,7 +118,9 @@ export function Nav({ contexts }: NavProps) {
     [crds, crdChildren],
   );
 
-  const link = ctx ? (view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN) : UNKNOWN;
+  const link = ctx
+    ? (workspace.pausedClusters?.includes(ctx.stableId) ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
+    : UNKNOWN;
 
   const navigationWidth = useNavigationWidth();
 

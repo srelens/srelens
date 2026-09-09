@@ -369,8 +369,9 @@ export function setClusterPaused(workspaceId: string, clusterId: string, paused:
   });
 }
 
-export function isClusterPaused(clusterId: string): boolean {
-  return (currentWorkspace().pausedClusters ?? []).includes(clusterId);
+export function isClusterPaused(clusterId: string, workspaceId = currentWorkspace().id): boolean {
+  const workspace = getState().workspaces.find((w) => w.id === workspaceId);
+  return (workspace?.pausedClusters ?? []).includes(clusterId);
 }
 
 const EMPTY_VIEW: NonNullable<Tab["view"]> = {};

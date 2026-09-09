@@ -23,7 +23,7 @@ import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { openCluster } from "../lib/openCluster";
 import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { isClusterPaused, openTab } from "../lib/tabsStore";
 import { ClusterTable, type ClusterRow } from "./connections/ClusterTable";
 import { SourcesRail } from "./connections/SourcesRail";
 
@@ -247,6 +247,8 @@ export function Connections({ route }: { route: string }) {
 
     async function read(context: ClusterContext) {
       const id = context.stableId;
+      // A saved reading is not permission to contact a paused cluster again.
+      if (isClusterPaused(id)) return;
       /**
        * **Awaited, never skipped.**
        *
