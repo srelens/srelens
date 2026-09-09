@@ -298,6 +298,14 @@ describe("Window boot", () => {
     expect(store.activeRoute()).toBe("/settings");
   });
 
+  it("keeps a restored Home tab active after connecting", async () => {
+    connectCluster.mockResolvedValue({ context: "prod", reachable: true });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
+    await booted();
+    await waitFor(() => expect(connectCluster).toHaveBeenCalled());
+    expect(store.activeRoute()).toBe("/");
+  });
+
   it("loads the cluster's saved sidebar groups before navigation mounts", async () => {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify({ prod: ["network"], offline: ["workloads"] }));
     await booted();

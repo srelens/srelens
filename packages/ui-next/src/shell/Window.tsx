@@ -102,6 +102,9 @@ export function Window({
   active = true,
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
+  // A Home tab restored from disk is an explicit reader choice. Keep this
+  // separate from the tab shape: a fresh state has the same single `/` tab.
+  const restoredWorkspace = useRef(false);
   const mounted = useRef(false);
   const visible = useRef(active);
   visible.current = active;
@@ -218,6 +221,7 @@ export function Window({
         failure = outcome.error ?? "";
         listed = true;
         const saved = loadTabsState();
+        restoredWorkspace.current = saved !== null;
         if (saved && failure !== "") {
           // The list failed, not the clusters: reconciling against nothing would
           // strip every workspace's cluster ids and the next change would persist
@@ -280,7 +284,7 @@ export function Window({
       const initialState = getState();
       const initialWorkspace = currentWorkspace();
       const ctx = byId.get(initialWorkspace.activeCluster ?? "");
-      if (ctx && initialWorkspace.tabs.length === 1 && initialWorkspace.tabs[0].route === "/") {
+      if (!restoredWorkspace.current && ctx && initialWorkspace.tabs.length === 1 && initialWorkspace.tabs[0].route === "/") {
         const ready = getInfo(ctx.stableId) ? Promise.resolve() : probeCluster(ctx);
         void ready.then(() => {
           if (mounted.current && visible.current && getState() === initialState && getInfo(ctx.stableId)?.reachable) openCluster(ctx);
