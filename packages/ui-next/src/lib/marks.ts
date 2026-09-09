@@ -223,7 +223,13 @@ export function rememberContextMarks(contexts: readonly ClusterContext[], storag
     contextNames.set(context.stableId, context.name);
     const old = marks[context.stableId];
     if (!old) continue;
-    if (!profiles[context.stableId]) profiles = { ...profiles, [context.stableId]: sharedProfile(context.stableId, old) };
+    profiles = {
+      ...profiles,
+      [context.stableId]: {
+        ...sharedProfile(context.stableId, old),
+        ...profiles[context.stableId],
+      },
+    };
     const { [context.stableId]: _old, ...rest } = marks;
     marks = rest;
     changed = true;

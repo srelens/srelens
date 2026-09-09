@@ -5,6 +5,8 @@ import { loadContextProfiles, loadContextOrder, saveContextProfiles, saveContext
 import { setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
+import { activeCluster, setState } from "../../lib/tabsStore";
+import { defaultState } from "../../lib/tabs";
 const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@srelens/core", async (original) => ({ ...await original<object>(), ...backend }));
 const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
@@ -59,6 +61,8 @@ it("keeps identity and shows the reason when removal fails", async () => {
 it("retains the remaining contexts when relisting after removal fails", async () => {
   backend.deleteContext.mockResolvedValue({ success: true });
   backend.listContexts.mockResolvedValue({ error: "kubeconfig became unreadable" });
+  setState(defaultState(contexts));
+  setContexts(contexts, "previous listing failed");
   const user = userEvent.setup(); render(<ClustersPane />);
   await user.click(screen.getByRole("button", {name: "Edit Production Europe"}));
   await user.click(screen.getByRole("button", {name: "Remove context"}));
@@ -66,6 +70,7 @@ it("retains the remaining contexts when relisting after removal fails", async ()
 
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
   expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
+  expect(activeCluster()).toBe("staging-id");
   expect(screen.getByRole("alert").textContent).toMatch(/kubeconfig became unreadable/);
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();

@@ -97,7 +97,7 @@ export function ClustersPane() {
       if (!result.success) throw new Error("The context was not removed.");
       resetMark(pending.stableId);
       const remaining = contexts.filter(c => c.stableId !== pending.stableId);
-      setContexts(remaining, listingError);
+      setContexts(remaining);
       setPending(null);
       const outcome = await listContexts(getKubeconfigFiles());
       setContexts(outcome.contexts ?? remaining, outcome.error ?? "");

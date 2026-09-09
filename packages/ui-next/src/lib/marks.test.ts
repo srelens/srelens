@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { defaultMark, getMark, setMark, resetMark, loadMarks, useMark, MARKS_KEY } from "./marks";
+import { defaultMark, getMark, setMark, resetMark, loadMarks, rememberContextMarks, useMark, MARKS_KEY } from "./marks";
 
 function fakeStorage() {
   const m = new Map<string, string>();
@@ -144,6 +144,23 @@ describe("classic context identity parity", () => {
       short: defaultMark("renamed-prod").short,
       color: "var(--mark-teal)",
     });
+  });
+  it("merges a legacy new-design mark into an existing classic profile", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({ id: { displayName: "Production" } }));
+    s.m.set(MARKS_KEY, JSON.stringify({ id: { ...defaultMark("prod"), color: "var(--mark-teal)", mark: "icon", icon: "server", withText: true } }));
+    loadMarks(s);
+
+    rememberContextMarks([{ name: "prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toMatchObject({
+      displayName: "Production",
+      color: "var(--mark-teal)",
+      logo: "cluster",
+      markIcon: "server",
+      showShortName: true,
+    });
+    expect(JSON.parse(s.m.get(MARKS_KEY)!)).not.toHaveProperty("id");
   });
   it("uses the same generated initials as classic for long context names", () => {
     expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
