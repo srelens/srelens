@@ -1,6 +1,6 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
-import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, type ClusterContext } from "@srelens/core";
+import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, Mark, TextInput } from "@srelens/ui-kit";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
@@ -106,8 +106,9 @@ export function ClustersPane() {
       if (!result.success) throw new Error("The context was not removed.");
       resetMark(pending.stableId);
       removeContextFromOrder(pending.stableId);
-      removeClusterNamespace(pending.stableId);
-      if (pending.name !== pending.stableId) removeClusterNamespace(pending.name);
+      for (const key of new Set([pending.stableId, pending.name, unprefixedName(pending.name)])) {
+        removeClusterNamespace(key);
+      }
       removeNamespaces(pending.stableId);
       const remaining = getContexts().filter(c => c.stableId !== pending.stableId);
       setContexts(remaining);

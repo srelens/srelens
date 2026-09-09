@@ -16,13 +16,14 @@ interface SettingsSetInput {
 // Every desktop preference that existed before the file store. Keeping this
 // list explicit prevents a broad localStorage sweep from importing unrelated
 // WebView/application data.
+const NEXT_MARKS_KEY = "srelens.next.marks";
 const MIGRATION_KEYS = [
   "srelens.requestTimeoutSecs",
   "srelens.clusterNamespaces",
   "srelens.defaultNamespace",
   "srelens.workspaceLayout",
   "srelens.contextProfiles",
-  "srelens.next.marks",
+  NEXT_MARKS_KEY,
   "srelens.kubeconfigFiles",
   "srelens.hiddenColumns",
   "srelens.contextOrder",
@@ -136,6 +137,27 @@ export async function initializeSettingsStorage(): Promise<void> {
             error,
           );
         }
+      }
+    } else if (!values.has(NEXT_MARKS_KEY)) {
+      // `next.marks` was added to the allowlist after the original one-time
+      // migration shipped. Give already-migrated desktops a narrow follow-up
+      // import so their localStorage marks are not stranded behind the flag.
+      try {
+        const raw = localStorage.getItem(NEXT_MARKS_KEY);
+        if (raw !== null) {
+          const value = decode(raw);
+          await invokeCapability("settings.set", { values: { [NEXT_MARKS_KEY]: value } });
+          values.set(NEXT_MARKS_KEY, value);
+          try {
+            localStorage.removeItem(NEXT_MARKS_KEY);
+          } catch (error) {
+            console.warn("saved context marks migrated but localStorage could not be cleared", error);
+          }
+        }
+      } catch (error) {
+        // Keep the durable backend active and leave the old value for a later
+        // launch if either the legacy read or follow-up write is unavailable.
+        console.warn("could not run the saved context marks migration", error);
       }
     }
     fileBacked = true;

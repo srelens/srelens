@@ -385,6 +385,26 @@ describe("SettingsView", () => {
     expect((slider as HTMLInputElement).value).toBe("60");
   });
 
+  it("clears the exact timeout draft when the latest update fails", async () => {
+    localStorage.setItem("srelens.requestTimeoutSecs", "12");
+    transportMocks.invokeCommand.mockRejectedValueOnce(new Error("save failed"));
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }} onThemeNameChange={() => {}} onThemeModeChange={() => {}}
+        defaultNamespace="" onDefaultNamespaceChange={() => {}} layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}} contextProfiles={{}} onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]} onKubeconfigFilesChange={() => {}} contextOrder={[]} onContextOrderChange={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Kubernetes/ }));
+    const exact = screen.getByRole("spinbutton", { name: "Cluster request timeout in seconds (exact)" });
+    const slider = screen.getByRole("slider", { name: "Cluster request timeout in seconds" });
+    fireEvent.change(exact, { target: { value: "90" } });
+
+    await waitFor(() => expect((slider as HTMLInputElement).value).toBe("12"));
+    expect((exact as HTMLInputElement).value).toBe("12");
+  });
+
   it("scales the interface from the Appearance slider and persists it (#237)", () => {
     render(
       <SettingsView

@@ -240,6 +240,7 @@ export function SettingsView({
     void updateRequestTimeout(clamped).catch((error) => {
       if (generation !== requestTimeoutGeneration.current) return;
       setRequestTimeout(getRequestTimeoutSecs());
+      setTimeoutDraft(null);
       notify.error("Could not save request timeout", describeError(error).detail);
     });
   };

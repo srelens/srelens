@@ -65,6 +65,19 @@ it("clears both namespace stores after confirmed removal", async () => {
   expect(loadClusterNamespaces()).toEqual({ "staging-id": "default" });
   expect(getView().namespaces).toEqual({ "staging-id": ["default"] });
 });
+it("clears the original namespace key when removing a prefixed duplicate context", async () => {
+  const duplicate = { ...contexts[0], name: "file-a/prod" };
+  setContexts([duplicate, contexts[1]]);
+  backend.deleteContext.mockResolvedValue({ success: true });
+  backend.listContexts.mockResolvedValue({ contexts: [contexts[1]] });
+  saveClusterNamespaces({ "prod-id": "payments", "file-a/prod": "current", prod: "legacy", "staging-id": "default" });
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", {name: "Edit Production Europe"}));
+  await user.click(screen.getByRole("button", {name: "Remove context"}));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Remove context"}));
+
+  expect(loadClusterNamespaces()).toEqual({ "staging-id": "default" });
+});
 it("keeps identity and shows the reason when removal fails", async () => {
   backend.deleteContext.mockRejectedValue(new Error("permission denied"));
   const user = userEvent.setup(); render(<ClustersPane />);
