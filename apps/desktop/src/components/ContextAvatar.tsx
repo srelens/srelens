@@ -52,7 +52,8 @@ export function ContextAvatar({
   const Icon = logo === "initials" || logo === "custom" ? null : (profile?.markIcon && MARK_ICONS[profile.markIcon]) || LOGOS[logo] || Server;
   const shortName = profile?.shortName?.trim().slice(0, 3).toUpperCase() ?? "";
   const label = shortName || avatarInitials(context);
-  const showBadge = showShortName && profile?.showShortName !== false && logo !== "initials" && !!shortName;
+  const badgeText = shortName || (profile?.showShortName === true ? label : "");
+  const showBadge = showShortName && profile?.showShortName !== false && logo !== "initials" && !!badgeText;
   return (
     <span
       className={`${className}${showBadge ? " fl-context-avatar--has-short" : ""}`}
@@ -67,7 +68,7 @@ export function ContextAvatar({
           onError={() => setImageFailed(true)}
         />
       ) : Icon ? <Icon /> : label}
-      {showBadge && <span className="fl-context-avatar__short">{shortName}</span>}
+      {showBadge && <span className="fl-context-avatar__short">{badgeText}</span>}
     </span>
   );
 }

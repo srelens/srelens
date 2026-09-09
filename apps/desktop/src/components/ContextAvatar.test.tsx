@@ -22,3 +22,11 @@ it("draws new-design symbols and respects the shared badge preference", () => {
   expect(container.querySelector(".lucide-terminal")).not.toBeNull();
   expect(screen.queryByText("PR")).toBeNull();
 });
+
+it("derives badge text when a shared symbol explicitly enables it", () => {
+  const { container } = render(
+    <ContextAvatar context="production-eu" profile={{ logo: "cluster", markIcon: "terminal", showShortName: true }} />,
+  );
+  expect(container.querySelector(".fl-context-avatar--has-short")).not.toBeNull();
+  expect(screen.getByText("PE")).toBeDefined();
+});
