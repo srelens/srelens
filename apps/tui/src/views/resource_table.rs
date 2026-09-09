@@ -1130,7 +1130,8 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                 };
 
                 let prefix = if col.key == "name" && is_marked { "✔ " } else { "" };
-                if col.key == "name" {
+                let is_pf_resource = state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services || state.kind == ResourceKind::Workloads;
+                if col.key == "name" && is_pf_resource {
                     let ns = extract_field_str(item, "namespace");
                     let name = extract_field_str(item, "name");
                     let active_forwards = state.active_port_forwards.get(&(ns.clone(), name.clone()))
@@ -1227,7 +1228,8 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                     let prefix_len = if col.key == "name" && is_marked { 2 } else { 0 };
                     let mut total_len = prefix_len + text.chars().count();
 
-                    if col.key == "name" {
+                    let is_pf_resource = state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services || state.kind == ResourceKind::Workloads;
+                    if col.key == "name" && is_pf_resource {
                         let ns = extract_field_str(item, "namespace");
                         let name = extract_field_str(item, "name");
                         let active_forwards = state

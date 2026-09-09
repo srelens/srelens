@@ -3035,3 +3035,55 @@ async fn test_node_inspector_press_capital_s_triggers_node_shell_even_with_pods(
         _ => panic!("expected NodeShell suspend action when pressing capital S"),
     }
 }
+
+#[tokio::test]
+async fn non_pod_and_custom_resources_reject_pod_actions() {
+    let (mut app, _rx) = common::app().await;
+    let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+    });
+
+    for kind in [secret_store_crd, ResourceKind::ConfigMaps, ResourceKind::Secrets] {
+        set_table(
+            &mut app,
+            kind.clone(),
+            vec![json!({ "name": "my-resource", "namespace": "default" })],
+        );
+
+        // 1. Port forward rejected
+        press(&mut app, ch('f')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Port forward is only available for Pods and Services");
+
+        press(&mut app, ch('F')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Port forward is only available for Pods and Services");
+
+        // 2. Logs rejected
+        press(&mut app, ch('l')).await;
+        assert_eq!(toast(&app), "Logs are only available for Pods and Workloads");
+
+        // 3. Rollout restart rejected
+        press(&mut app, ch('r')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Rollout restart is only available for Deployments, StatefulSets, and DaemonSets");
+
+        // 4. Scale rejected
+        press(&mut app, ctrl('s')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Scale is only available for Deployments and StatefulSets");
+
+        // 5. Shell rejected
+        press(&mut app, ch('s')).await;
+        assert_eq!(toast(&app), "Shell only available for Pods and Nodes");
+    }
+}
+
