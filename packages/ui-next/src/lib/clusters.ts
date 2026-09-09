@@ -98,7 +98,7 @@ export function getContextsError(): string {
  */
 export function setContexts(next: ClusterContext[], error = ""): void {
   contexts = next;
-  rememberContextMarks(next);
+  rememberContextMarks(next, undefined, error === "");
   status = error === "" ? "loaded" : "failed";
   failure = error;
   // Before this store's own listeners: the tabs store's subscribers read the

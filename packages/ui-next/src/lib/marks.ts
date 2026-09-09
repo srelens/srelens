@@ -66,11 +66,12 @@ export function parseStoredMarks(raw: string | null): Record<string, MarkAppeara
 let marks: Record<string, MarkAppearance> = {};
 let profiles: ContextProfiles = {};
 let ambiguousProfileKeys = new Set<string>();
+let profileInventoryComplete = true;
 const contextNames = new Map<string, string>();
 const LEGACY_ICONS = new Set(["cluster", "cloud", "shield", "database", "globe"]);
 
 function withProfile(stableId: string, name: string, base: MarkAppearance): MarkAppearance {
-  const profile = profiles[stableId] ?? profiles[name];
+  const profile = profiles[stableId] ?? (profileInventoryComplete && !ambiguousProfileKeys.has(name) ? profiles[name] : undefined);
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) return base;
   const mark = { ...defaultMark(name) };
   if (typeof profile.displayName === "string") mark.name = profile.displayName;
@@ -140,6 +141,7 @@ export function loadMarks(storage: Storage = settingsStorage): void {
   } catch (error) {
     console.error("could not read the saved cluster marks", error);
   }
+  profileInventoryComplete = true;
   marks = next;
   profiles = loadContextProfiles(storage);
   try {
@@ -227,7 +229,9 @@ export function useEditableMark(stableId: string, name: string): MarkAppearance 
 }
 
 /** Migrate old name-keyed profiles and import customisations from the new UI. */
-export function rememberContextMarks(contexts: readonly ClusterContext[], storage: Storage = settingsStorage): void {
+export function rememberContextMarks(contexts: readonly ClusterContext[], storage: Storage = settingsStorage, complete = true): void {
+  const completenessChanged = profileInventoryComplete !== complete;
+  profileInventoryComplete = complete;
   const ids = new Set(contexts.map(context => context.stableId));
   let ambiguityChanged = false;
   for (const key of Object.keys(profiles)) {
@@ -246,7 +250,7 @@ export function rememberContextMarks(contexts: readonly ClusterContext[], storag
   for (const key of ambiguousProfileKeys) {
     if (!ids.has(key)) delete migratable[key];
   }
-  const migration = migrateRecordKeys(migratable, contexts);
+  const migration = complete ? migrateRecordKeys(migratable, contexts) : { migrated: migratable, changed: false };
   const nextProfiles = migration.migrated;
   for (const key of ambiguousProfileKeys) {
     if (!ids.has(key) && key in profiles) nextProfiles[key] = profiles[key];
@@ -275,5 +279,6 @@ export function rememberContextMarks(contexts: readonly ClusterContext[], storag
       console.error("could not persist ambiguous context profile keys", error);
     }
   }
-  if (changed) { saveContextProfiles(profiles, storage); save(storage); emit(); }
+  if (changed) { saveContextProfiles(profiles, storage); save(storage); }
+  if (changed || ambiguityChanged || completenessChanged) emit();
 }

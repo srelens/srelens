@@ -44,3 +44,20 @@ it("forgets a confirmed deletion while retaining offline contexts", () => {
   removeContextFromOrder("prod-id");
   expect(loadContextOrder()).toEqual(["staging-id", "offline-id"]);
 });
+
+it("remembers ambiguous order entries after a duplicate disappears and the view remounts", () => {
+  const all = [{ name: "file-a/prod", stableId: "a-id" }, { name: "file-b/prod", stableId: "b-id" }];
+  saveContextOrder(["prod"]);
+  const view = renderHook(() => useOrderedContexts(all)); view.unmount();
+  renderHook(() => useOrderedContexts([all[1]]));
+  expect(loadContextOrder()).toEqual(["prod"]);
+});
+it("does not migrate order from a partial context inventory", async () => {
+  const { setContexts, resetContexts } = await import("./clusters");
+  const all = [{ name: "prod", stableId: "a-id" }];
+  saveContextOrder(["prod"]);
+  act(() => setContexts(all as import("@srelens/core").ClusterContext[], "Unreadable source"));
+  const view = renderHook(() => useOrderedContexts(all));
+  expect(loadContextOrder()).toEqual(["prod"]);
+  view.unmount(); resetContexts();
+});
