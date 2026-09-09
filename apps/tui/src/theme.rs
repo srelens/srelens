@@ -440,9 +440,11 @@ impl Theme {
     /// Set theme by case-insensitive name or alias
     pub fn set_theme_by_name(name: &str) -> Option<&'static ThemePalette> {
         let lower = name.trim().to_lowercase();
+        let clean_lower: String = lower.chars().filter(|c| *c != '-' && *c != '_' && *c != ' ').collect();
         for (i, p) in ALL_THEMES.iter().enumerate() {
+            let clean_p: String = p.name.chars().filter(|c| *c != '-' && *c != '_' && *c != ' ').collect();
             if p.name == lower
-                || p.name.replace('-', "") == lower.replace(['-', '_', ' '], "")
+                || clean_p == clean_lower
                 || (lower == "default" && p.id == ThemeId::CatppuccinMocha)
                 || (lower == "light" && p.id == ThemeId::CatppuccinLatte)
                 || (lower == "latte" && p.id == ThemeId::CatppuccinLatte)

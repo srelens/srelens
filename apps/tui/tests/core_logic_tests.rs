@@ -1649,6 +1649,9 @@ fn cluster_scoped_kinds_are_not_namespaced() {
         );
     }
     assert!(ResourceKind::CustomResource(cilium_pool()).is_namespaced());
+    let mut cluster_crd = cilium_pool();
+    cluster_crd.namespaced = false;
+    assert!(!ResourceKind::CustomResource(cluster_crd).is_namespaced());
 }
 
 // ---------------------------------------------------------------------------

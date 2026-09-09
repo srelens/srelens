@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import * as ws from "./workspace";
+import { settingsStorage } from "@srelens/core";
 
 function fakeStorage() {
   const m = new Map<string, string>();
@@ -12,11 +13,11 @@ function fakeStorage() {
   };
 }
 
-beforeEach(() => ws.resetView());
+beforeEach(() => { settingsStorage.removeItem("srelens.defaultNamespace"); ws.resetView(); });
 
 describe("workspace view", () => {
   it("starts with no links and nothing expanded", () => {
-    expect(ws.getView()).toEqual({ links: {}, expanded: [], namespaces: {} });
+    expect(ws.getView()).toEqual({ links: {}, expanded: {}, namespaces: {} });
   });
 
   it("tells the hook when a link changes", () => {
@@ -41,16 +42,16 @@ describe("workspace view", () => {
   });
 
   it("toggles expansion", () => {
-    ws.toggleExpanded("workloads");
-    expect(ws.getView().expanded).toEqual(["workloads"]);
-    ws.toggleExpanded("workloads");
-    expect(ws.getView().expanded).toEqual([]);
+    ws.toggleExpanded("prod", "workloads");
+    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
+    ws.toggleExpanded("prod", "workloads");
+    expect(ws.getView().expanded.prod).toEqual([]);
   });
 
   it("replaces expansion wholesale when told", () => {
-    ws.toggleExpanded("a");
-    ws.setExpanded(["b", "c"]);
-    expect(ws.getView().expanded).toEqual(["b", "c"]);
+    ws.toggleExpanded("prod", "a");
+    ws.setExpanded("prod", ["b", "c"]);
+    expect(ws.getView().expanded.prod).toEqual(["b", "c"]);
   });
 
   it("does not notify for a no-op", () => {
@@ -65,13 +66,13 @@ describe("workspace view", () => {
   });
 
   it("does not notify when setExpanded is handed the same list again", () => {
-    ws.setExpanded(["a", "b"]);
+    ws.setExpanded("prod", ["a", "b"]);
     let n = 0;
     const off = ws.subscribe(() => n++);
-    ws.setExpanded(["a", "b"]);
-    ws.setExpanded([...ws.getView().expanded]);
+    ws.setExpanded("prod", ["a", "b"]);
+    ws.setExpanded("prod", [...ws.getView().expanded.prod]);
     expect(n).toBe(0);
-    ws.setExpanded(["b", "a"]);
+    ws.setExpanded("prod", ["b", "a"]);
     expect(n).toBe(1);
     off();
   });
@@ -106,18 +107,18 @@ describe("workspace view", () => {
     expect(seen).not.toHaveBeenCalled();
   });
 
-  it("drops the key entirely when narrowed and then set back to all namespaces", () => {
+  it("keeps an explicit all-namespaces choice when a selection is cleared", () => {
     ws.setNamespaces("prod", ["default"]);
     ws.setNamespaces("prod", []);
-    expect("prod" in ws.getView().namespaces).toBe(false);
+    expect(ws.getView().namespaces.prod).toEqual([]);
   });
 
-  it("does not notify when an already-unset cluster is set to all namespaces", () => {
+  it("records all namespaces even when the cluster previously had no choice", () => {
     const seen = vi.fn();
     const off = ws.subscribe(seen);
     ws.setNamespaces("never-set", []);
     off();
-    expect(seen).not.toHaveBeenCalled();
+    expect(seen).toHaveBeenCalledOnce();
   });
 });
 
@@ -142,12 +143,23 @@ describe("persisted namespace selection", () => {
     expect(ws.getView().namespaces["ctx-1"]).toEqual(["prod"]);
   });
 
-  it("removes the key from storage when cleared, rather than persisting an empty array", () => {
+  it("remembers an explicit all-namespaces selection", () => {
     const s = fakeStorage();
     ws.setNamespaces("prod", ["default"], s);
     ws.setNamespaces("prod", [], s);
     const stored = JSON.parse(s.m.get(ws.NAMESPACES_KEY) ?? "{}");
-    expect("prod" in stored).toBe(false);
+    expect(stored.prod).toEqual([]);
+  });
+
+  it("removes only the deleted cluster's persisted selection", () => {
+    const s = fakeStorage();
+    ws.setNamespaces("prod", ["default"], s);
+    ws.setNamespaces("dev", ["kube-system"], s);
+
+    ws.removeNamespaces("prod", s);
+
+    expect(ws.getView().namespaces).toEqual({ dev: ["kube-system"] });
+    expect(JSON.parse(s.m.get(ws.NAMESPACES_KEY) ?? "{}")).toEqual({ dev: ["kube-system"] });
   });
 
   it("survives a storage that throws on both read and write, costing only the selection", () => {
@@ -169,11 +181,11 @@ describe("persisted namespace selection", () => {
 
   it("loading namespaces leaves links and expanded exactly as they were", () => {
     ws.setLink("prod", "connected");
-    ws.toggleExpanded("workloads");
+    ws.toggleExpanded("prod", "workloads");
     const s = fakeStorage();
     ws.loadNamespaces(s);
     expect(ws.getView().links.prod).toEqual({ state: "connected" });
-    expect(ws.getView().expanded).toEqual(["workloads"]);
+    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
   });
 
   it("reads a document that is not valid JSON, or not a map, as nothing stored", () => {
@@ -198,5 +210,57 @@ describe("persisted namespace selection", () => {
     act(() => ws.setNamespaces("prod", ["default"], s));
     expect(result.current).not.toBe(first);
     expect(result.current).toEqual(["default"]);
+  });
+});
+
+it("uses the default only for clusters without a choice, and preserves explicit all after reload", () => {
+  const s = fakeStorage();
+  const { result } = renderHook(() => ws.useNamespaces("fresh"));
+  act(() => ws.setNamespaceDefault("team"));
+  expect(result.current).toEqual(["team"]);
+  act(() => ws.setNamespaces("fresh", [], s));
+  expect(result.current).toEqual([]);
+  act(() => ws.loadNamespaces(s));
+  expect(result.current).toEqual([]);
+  act(() => ws.setNamespaceDefault("other"));
+  expect(result.current).toEqual([]);
+  const other = renderHook(() => ws.useNamespaces("unseen"));
+  expect(other.result.current).toEqual(["other"]);
+});
+
+describe("persisted sidebar groups", () => {
+  it("saves through the settings adapter and restores independent cluster choices", () => {
+    const s = fakeStorage();
+    const save = vi.spyOn(settingsStorage, "setItem").mockImplementation(s.setItem);
+    ws.toggleExpanded("stable-prod", "workloads");
+    ws.toggleExpanded("stable-stage", "network");
+    expect(save).toHaveBeenLastCalledWith(ws.EXPANDED_KEY, JSON.stringify({
+      "stable-prod": ["workloads"], "stable-stage": ["network"],
+    }));
+    ws.resetView();
+    ws.loadExpanded(s);
+    expect(ws.getView().expanded).toEqual({ "stable-prod": ["workloads"], "stable-stage": ["network"] });
+    save.mockRestore();
+  });
+
+  it("drops malformed entries without losing other clusters or live connection state", () => {
+    const s = fakeStorage();
+    s.setItem(ws.EXPANDED_KEY, JSON.stringify({ good: ["workloads"], bad: true, mixed: [3], closed: [] }));
+    ws.setLink("good", "connected");
+    ws.loadExpanded(s);
+    expect(ws.getView().expanded).toEqual({ good: ["workloads"], closed: [] });
+    expect(ws.getView().links.good.state).toBe("connected");
+    s.setItem(ws.EXPANDED_KEY, "invalid json");
+    ws.loadExpanded(s);
+    expect(ws.getView().expanded).toEqual({});
+  });
+
+  it("still allows navigation when storage is unavailable", () => {
+    const bad = { getItem: () => { throw Error("offline"); }, setItem: () => { throw Error("offline"); }, removeItem: () => {} };
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(() => ws.loadExpanded(bad)).not.toThrow();
+    expect(() => ws.toggleExpanded("prod", "workloads", bad)).not.toThrow();
+    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
+    error.mockRestore();
   });
 });

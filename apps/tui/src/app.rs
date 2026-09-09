@@ -110,8 +110,8 @@ pub struct App {
 
 pub enum SuspendAction {
     EditYaml,
-    PodShell { pod: String, container: Option<String> },
-    DebugShell { pod: String, container: Option<String> },
+    PodShell { pod: String, namespace: Option<String>, container: Option<String> },
+    DebugShell { pod: String, namespace: Option<String>, container: Option<String> },
     NodeShell { node: String },
 }
 
@@ -884,13 +884,16 @@ impl App {
             let crd_kind = title.strip_prefix("crd_instances:").unwrap_or(title);
             let ctx = self.active_context.clone();
             let ns = self.active_namespace.clone();
-            self.resource_cache.insert((ctx, ns, crd_kind.to_string()), items.clone());
+            self.resource_cache.insert((ctx.clone(), ns.clone(), crd_kind.to_string()), items.clone());
+            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind) {
+                self.resource_cache.insert((ctx, ns, discovered.crd_name.clone()), items.clone());
+            }
 
             if let ActiveView::Table(table) = &mut self.active_view {
                 if let ResourceKind::CustomResource(crd) = &mut table.kind {
-                    if crd.kind == crd_kind || crd.plural == crd_kind {
+                    if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
                         if crd.printer_columns.is_empty() {
-                            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+                            if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                                 crd.printer_columns = discovered.printer_columns.clone();
                                 table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
                             }
@@ -1401,6 +1404,70 @@ impl App {
                 if kind == "pods" {
                     self.refresh_pod_metrics();
                 }
+                return;
+            }
+
+            let crd_opt = if let ResourceKind::CustomResource(crd) = &table.kind {
+                Some(crd.clone())
+            } else {
+                None
+            };
+            if let Some(crd) = crd_opt {
+                let ctx = self.active_context.clone();
+                let ns = if crd.namespaced {
+                    self.active_namespace.clone()
+                } else {
+                    String::new()
+                };
+                let res_key = crd.crd_name.clone();
+                let channel = format!("watch:{}:{}:{}", ctx, ns, res_key);
+                self.current_watch_channel = Some(channel.clone());
+
+                // 1. Instant Cache Render: If we already have items in memory, render immediately!
+                let cached = self
+                    .resource_cache
+                    .get(&(ctx.clone(), ns.clone(), res_key.clone()))
+                    .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())))
+                    .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.plural.clone())));
+                if let Some(cached) = cached {
+                    table.set_items(cached.clone(), &self.filter_buffer);
+                    table.is_loading = false;
+                } else {
+                    table.is_loading = true;
+                    table.raw_items.clear();
+                    table.filtered_indices.clear();
+                    table.selected_idx = 0;
+                    table.scroll_offset = 0;
+                }
+
+                // 2. Informer Pool: Check if watch is already running for this channel
+                if !self.watch_manager.has_channel(&channel) {
+                    // Evict oldest if pool exceeded (keeps max 20 watches warm)
+                    if self.active_watch_pool.len() >= 20 {
+                        let evicted = self.active_watch_pool.remove(0);
+                        self.watch_manager.stop(&evicted);
+                        self.active_watch_channels.remove(&evicted);
+                    }
+
+                    let sink = TuiSink::arc(self.event_tx.clone());
+                    let paths = self.kubeconfig_paths.clone();
+                    self.active_watch_channels.insert(channel.clone());
+                    self.active_watch_pool.push(channel.clone());
+                    let target = srelens_kube::watch::CustomWatchTarget {
+                        group: crd.group.clone(),
+                        version: crd.version.clone(),
+                        kind: crd.kind.clone(),
+                        plural: crd.plural.clone(),
+                        namespaced: crd.namespaced,
+                    };
+                    let _ = self.watch_manager.start_custom(sink, ctx, ns, target, channel, paths).await;
+                } else {
+                    // Move to most-recently-used in pool
+                    if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
+                        let ch = self.active_watch_pool.remove(pos);
+                        self.active_watch_pool.push(ch);
+                    }
+                }
             }
         }
     }
@@ -1567,6 +1634,7 @@ impl App {
                                 ContainerAction::Shell => {
                                     self.requires_terminal_suspend = Some(SuspendAction::PodShell {
                                         pod: pod_name,
+                                        namespace,
                                         container: chosen_container,
                                     });
                                 }
@@ -2434,8 +2502,17 @@ impl App {
                         }
 
                         // Rollout restart (r or Ctrl+r)
-                        if table_kind == ResourceKind::Workloads && !matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet") {
-                            self.set_toast(format!("Rollout restart is only available for Deployments, StatefulSets, and DaemonSets (selected is {})", row_kind), Theme::status_warn());
+                        let is_restartable = matches!(
+                            table_kind,
+                            ResourceKind::Deployments | ResourceKind::StatefulSets | ResourceKind::DaemonSets
+                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet"));
+
+                        if !is_restartable {
+                            if table_kind == ResourceKind::Workloads {
+                                self.set_toast(format!("Rollout restart is only available for Deployments, StatefulSets, and DaemonSets (selected is {})", row_kind), Theme::status_warn());
+                            } else {
+                                self.set_toast("Rollout restart is only available for Deployments, StatefulSets, and DaemonSets".to_string(), Theme::status_warn());
+                            }
                             return;
                         }
                         if let Some(name) = sel_name {
@@ -2451,8 +2528,17 @@ impl App {
                     }
                     KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         // Scale workload (Ctrl+s)
-                        if table_kind == ResourceKind::Workloads && !matches!(row_kind.as_str(), "Deployment" | "StatefulSet") {
-                            self.set_toast(format!("Scale is only available for Deployments and StatefulSets (selected is {})", row_kind), Theme::status_warn());
+                        let is_scalable = matches!(
+                            table_kind,
+                            ResourceKind::Deployments | ResourceKind::StatefulSets
+                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet"));
+
+                        if !is_scalable {
+                            if table_kind == ResourceKind::Workloads {
+                                self.set_toast(format!("Scale is only available for Deployments and StatefulSets (selected is {})", row_kind), Theme::status_warn());
+                            } else {
+                                self.set_toast("Scale is only available for Deployments and StatefulSets".to_string(), Theme::status_warn());
+                            }
                             return;
                         }
                         if let Some(name) = sel_name {
@@ -2465,8 +2551,16 @@ impl App {
                     }
                     KeyCode::Char('f') | KeyCode::Char('F') => {
                         // Port forward (f, Shift+f)
-                        if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
-                            self.set_toast(format!("Port forward is only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                        let is_pf_allowed = table_kind == ResourceKind::Pods
+                            || table_kind == ResourceKind::Services
+                            || (table_kind == ResourceKind::Workloads && row_kind == "Pod");
+
+                        if !is_pf_allowed {
+                            if table_kind == ResourceKind::Workloads {
+                                self.set_toast(format!("Port forward is only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                            } else {
+                                self.set_toast("Port forward is only available for Pods and Services".to_string(), Theme::status_warn());
+                            }
                             return;
                         }
 
@@ -2657,8 +2751,11 @@ impl App {
                                 self.set_toast(format!("Logs only available for Pods or Workloads (selected is {})", row_kind), Theme::status_warn());
                                 (None, None)
                             }
-                        } else {
+                        } else if table_kind == ResourceKind::Pods {
                             (sel_name.clone(), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                        } else {
+                            self.set_toast("Logs are only available for Pods and Workloads".to_string(), Theme::status_warn());
+                            (None, None)
                         };
 
                         if let Some(pod_name) = pod_name {
@@ -2667,11 +2764,19 @@ impl App {
                     }
                     KeyCode::Char('s') => {
                         // Shell / Exec
-                        if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
+                        if table_kind == ResourceKind::Nodes {
+                            if let Some(node_name) = sel_name {
+                                self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name });
+                            }
+                        } else if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
                             self.set_toast(format!("Shell only available for Pods (selected is {})", row_kind), Theme::status_warn());
-                        } else if let Some(pod_name) = sel_name {
-                            let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
-                            self.prompt_pod_shell(pod_name, target_ns).await;
+                        } else if table_kind == ResourceKind::Pods || (table_kind == ResourceKind::Workloads && row_kind == "Pod") {
+                            if let Some(pod_name) = sel_name {
+                                let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                                self.prompt_pod_shell(pod_name, target_ns).await;
+                            }
+                        } else {
+                            self.set_toast("Shell only available for Pods and Nodes".to_string(), Theme::status_warn());
                         }
                     }
                     KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
@@ -2978,6 +3083,13 @@ impl App {
                     KeyCode::Char('k') | KeyCode::Up => logs.scroll_up(1),
                     KeyCode::Char('g') | KeyCode::Home => logs.scroll_top(),
                     KeyCode::Char('G') | KeyCode::End => logs.scroll_to_bottom(),
+                    KeyCode::Char('h') | KeyCode::Left => logs.scroll_left(8),
+                    KeyCode::Char('l') | KeyCode::Right => logs.scroll_right(8),
+                    KeyCode::Char('0') => logs.horizontal_scroll = 0,
+                    KeyCode::PageUp => logs.scroll_up(10),
+                    KeyCode::PageDown => logs.scroll_down(10),
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => logs.scroll_up(10),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => logs.scroll_down(10),
                     KeyCode::Char('f') => logs.toggle_follow(),
                     KeyCode::Char('t') => logs.toggle_timestamps(),
                     KeyCode::Char('p') => logs.toggle_previous(),
@@ -3693,9 +3805,15 @@ impl App {
                         }
                     }
                     KeyCode::Char('s') => {
-                        // Launch root node shell
-                        let cmd_str = format!("kubectl debug node/{} -it --image=busybox", node_name);
-                        self.set_toast(format!("Node debug command: {}", cmd_str), Theme::status_ok());
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            self.prompt_pod_shell(p_name, Some(p_ns)).await;
+                        } else {
+                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        // Explicit node debug shell even if a pod is highlighted
+                        self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
                     }
                     KeyCode::Char('c') => {
                         let target_unsched = !is_unsched;
@@ -4937,15 +5055,24 @@ impl App {
 
     pub async fn switch_view_to_crd(&mut self, mut crd: CrdMeta) {
         if crd.printer_columns.is_empty() {
-            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd.kind || c.plural == crd.plural) {
+            if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                 crd.printer_columns = discovered.printer_columns.clone();
             }
         }
         let kind = ResourceKind::CustomResource(crd.clone());
         let mut table = ResourceTableState::new(kind);
         let ctx = &self.active_context;
-        let ns = &self.active_namespace;
-        if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())) {
+        let ns = if crd.namespaced {
+            self.active_namespace.clone()
+        } else {
+            String::new()
+        };
+        let cached = self
+            .resource_cache
+            .get(&(ctx.clone(), ns.clone(), crd.crd_name.clone()))
+            .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())))
+            .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.plural.clone())));
+        if let Some(cached) = cached {
             table.set_items(cached.clone(), &self.filter_buffer);
             table.is_loading = false;
         } else {
@@ -4954,7 +5081,7 @@ impl App {
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Table(table));
         self.nav_stack.push(old_view);
         self.filter_buffer.clear();
-        self.fetch_crd_instances(crd);
+        self.restart_active_watch().await;
     }
 
     pub fn fetch_crd_instances(&self, crd: CrdMeta) {
@@ -5229,6 +5356,7 @@ impl App {
         } else {
             self.requires_terminal_suspend = Some(SuspendAction::PodShell {
                 pod: pod_name,
+                namespace,
                 container: containers.into_iter().next(),
             });
         }
@@ -6535,8 +6663,12 @@ impl App {
                         self.prompt_pod_logs(resource_name, namespace).await;
                     }
                     QuickActionId::OpenShell => {
-                        let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
-                        self.prompt_pod_shell(resource_name, target_ns).await;
+                        if resource_kind.eq_ignore_ascii_case("node") || resource_kind.eq_ignore_ascii_case("nodes") {
+                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: resource_name });
+                        } else {
+                            let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                            self.prompt_pod_shell(resource_name, target_ns).await;
+                        }
                     }
                     QuickActionId::PortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
@@ -7065,7 +7197,11 @@ impl App {
         }
 
         if let ActiveView::Table(ref mut table) = self.active_view {
-            table.active_port_forwards = active_map.clone();
+            if table.kind == ResourceKind::Pods || table.kind == ResourceKind::Services || table.kind == ResourceKind::Workloads {
+                table.active_port_forwards = active_map.clone();
+            } else {
+                table.active_port_forwards.clear();
+            }
         }
         if let ActiveView::Top(ref mut top) = self.active_view {
             top.active_port_forwards = active_map;
@@ -7169,6 +7305,14 @@ impl App {
                             }
                             table.set_items(merged_items, &self.filter_buffer);
                         } else {
+                            if let ResourceKind::CustomResource(crd) = &mut table.kind {
+                                if crd.printer_columns.is_empty() {
+                                    if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
+                                        crd.printer_columns = discovered.printer_columns.clone();
+                                        table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
+                                    }
+                                }
+                            }
                             table.set_items(items.clone(), &self.filter_buffer);
                         }
                     }
@@ -7341,12 +7485,20 @@ impl App {
 
         let selected_active_forwards: Vec<srelens_streams::forward::ForwardEntry> = match &self.active_view {
             ActiveView::Table(table) => {
-                if let Some(item) = table.selected_item() {
-                    let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
-                    let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
-                    let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" };
-                    if !name.is_empty() {
-                        self.active_forwards_for(kind, ns, name)
+                let is_pf_allowed = table.kind == ResourceKind::Pods
+                    || table.kind == ResourceKind::Services
+                    || (table.kind == ResourceKind::Workloads && table.selected_item().and_then(|item| item.get("kind")).and_then(|v| v.as_str()).unwrap_or("") == "Pod");
+
+                if is_pf_allowed {
+                    if let Some(item) = table.selected_item() {
+                        let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
+                        let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
+                        let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" };
+                        if !name.is_empty() {
+                            self.active_forwards_for(kind, ns, name)
+                        } else {
+                            Vec::new()
+                        }
                     } else {
                         Vec::new()
                     }
@@ -7440,27 +7592,10 @@ impl App {
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            ActiveView::NodeInspector(ni) => {
-                let cordon_act = if ni.details.as_ref().map(|d| d.unschedulable).unwrap_or(false) {
-                    "Uncordon"
-                } else {
-                    "Cordon"
-                };
-                Some(&[
-                    ("<:>", "Cmd"),
-                    ("<↑/↓>", "Pod"),
-                    ("<Enter>", "Jump"),
-                    ("<l>", "Logs"),
-                    ("<d>", "PodDesc"),
-                    ("<D>", "NodeDesc"),
-                    ("<y>", "YAML"),
-                    ("<x>", "Actions"),
-                    ("<c>", cordon_act),
-                    ("<s>", "Shell"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..])
-            }
+            ActiveView::NodeInspector(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Tree(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<↑/↓>", "Move"),
@@ -7552,11 +7687,30 @@ impl App {
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
                     ("<Enter>", "Pods"),
+                    ("<l>", "Logs"),
                     ("<d>", "Describe"),
                     ("<y>", "YAML"),
                     ("<e>", "Edit"),
                     ("<^s>", "Scale"),
                     ("<^r>", "Restart"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::Jobs => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<l>", "Logs"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+                ResourceKind::CronJobs => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
                     ("<^d>", "Delete"),
                     ("<?>", "Help"),
                 ][..]),
@@ -7616,19 +7770,27 @@ impl App {
                     ("<c>", "Copy"),
                     ("<?>", "Help"),
                 ][..]),
-                        ResourceKind::Nodes => Some(&[
-                            ("<:>", "Cmd"),
-                            ("</>", "Filter"),
-                            ("<Enter>", "Inspect"),
-                            ("<m>", "Metrics"),
-                            ("<d>", "Describe"),
-                            ("<y>", "YAML"),
-                            ("<x>", "Actions"),
-                            ("<s>", "Shell"),
-                            ("<?>", "Help"),
-                        ][..]),
-                        _ => None,
-                    }
+                ResourceKind::Nodes => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Inspect"),
+                    ("<m>", "Metrics"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<x>", "Actions"),
+                    ("<s>", "Shell"),
+                    ("<?>", "Help"),
+                ][..]),
+                _ => Some(&[
+                    ("<:>", "Cmd"),
+                    ("</>", "Filter"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<e>", "Edit"),
+                    ("<^d>", "Delete"),
+                    ("<?>", "Help"),
+                ][..]),
+            }
                 }
             }
             ActiveView::Overview(_) => Some(&[
@@ -7670,62 +7832,20 @@ impl App {
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            ActiveView::HelmDetail(detail) => match detail.active_tab {
-                HelmDetailTab::Overview => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<c>", "CopyURL"),
-                    ("<r>", "Rollback"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::ValuesDiff => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<m>", "ToggleDiffMode"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Revisions => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "SelectRev"),
-                    ("<r>", "Rollback"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Manifest => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-                HelmDetailTab::Notes => Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "NextTab"),
-                    ("<1..5>", "Tab"),
-                    ("<j/k>", "Scroll"),
-                    ("<y>", "Copy"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..]),
-            },
+            ActiveView::HelmDetail(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Settings(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Toolbox(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<c>", "CopyPath"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
-            _ => None,
         };
 
         render_statusbar(

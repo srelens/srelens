@@ -907,13 +907,16 @@ fn normal_mode_shows_the_default_key_palette() {
     for hint in [
         "<:> Cmd",
         "</> Filter",
-        "<c> CopyURL",
-        "<l> Logs",
-        "<s> Shell",
-        "<f>/<F> PortForward",
         "<d> Describe",
+        "<y> YAML",
+        "<e> Edit",
+        "<^d> Delete",
+        "<?> Help",
     ] {
         assert!(text.contains(hint), "missing {hint}: {text}");
+    }
+    for excluded in ["PortForward", "Logs", "Shell", "Restart", "Scale"] {
+        assert!(!text.contains(excluded), "unexpected {excluded} in default palette: {text}");
     }
     assert!(!text.contains("Filter:"), "{text}");
     assert!(!text.contains('➜'), "{text}");

@@ -181,12 +181,11 @@ describe("Rail", () => {
     expect(onConnect).toHaveBeenCalled();
   });
 
-  it("draws a customised mark, and still names the button after the context", () => {
+  it("draws and names the button using the saved context identity", () => {
+    getMark("prod-eu", "prod-eu");
     setMark("prod-eu", { ...defaultMark("prod-eu"), name: "Production EU", short: "PX" });
     setup();
-    // The rail is a list of the workspace's contexts: what a button is called
-    // is the context's business, and what the square says is the mark's.
-    expect(screen.getByRole("button", { name: "prod-eu" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Production EU" })).toBeDefined();
     expect(screen.getByText("PX")).toBeDefined();
   });
 
@@ -283,4 +282,26 @@ describe("Rail draws a symbol mark", () => {
     expect(container.querySelector('[data-slot="chip-mark"] svg')).toBeNull();
     expect(screen.getByText("PE")).toBeDefined();
   });
+});
+
+it("uses classic context order for the workspace rail", async () => {
+  const { saveContextOrder } = await import("@srelens/core");
+  saveContextOrder(["staging", "prod-eu"]);
+  setup();
+  const buttons = screen.getAllByRole("button").filter(b => ["staging", "prod-eu"].includes(b.getAttribute("aria-label") ?? ""));
+  expect(buttons.map(b => b.getAttribute("aria-label"))).toEqual(["staging", "prod-eu"]);
+});
+
+it("keeps blank names editable while the rail retains its context label", async () => {
+  const user = userEvent.setup(); setup();
+  await pick("prod-eu", "Customise…");
+  const panel = await screen.findByRole("dialog");
+  const input = within(panel).getByLabelText("Display name") as HTMLInputElement;
+  await user.clear(input);
+  expect(input.value).toBe("");
+  expect(getMark("prod-eu", "prod-eu").name).toBe("prod-eu");
+  await user.type(input, "  Production Europe  ");
+  expect(input.value).toBe("  Production Europe  ");
+  await user.click(within(panel).getByRole("button", { name: "Done" }));
+  expect(screen.getByRole("button", { name: "Production Europe" })).toBeTruthy();
 });

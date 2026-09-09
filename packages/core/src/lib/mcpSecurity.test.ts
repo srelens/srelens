@@ -91,3 +91,11 @@ describe("mcpSecurity", () => {
     await expect(vaultLock()).rejects.toThrow("no master password");
   });
 });
+
+it("reports prompt diagnostics read failures to callers that need a reliable result", async () => {
+  const { readPromptIssues } = await import("./mcpSecurity");
+  invoke.mockRejectedValueOnce(new Error("vault locked"));
+  await expect(readPromptIssues()).rejects.toThrow("vault locked");
+  invoke.mockResolvedValueOnce([{ file: "broken.md", problem: "invalid frontmatter" }]);
+  await expect(readPromptIssues()).resolves.toEqual([{ file: "broken.md", problem: "invalid frontmatter" }]);
+});

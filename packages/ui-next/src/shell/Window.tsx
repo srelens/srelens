@@ -17,11 +17,11 @@ import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
-import { loadMarks } from "../lib/marks";
+import { getMark, loadMarks, useMark } from "../lib/marks";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
-import { loadNamespaces } from "../lib/workspace";
+import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { defaultState, reconcile } from "../lib/tabs";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
@@ -134,6 +134,7 @@ export function Window({
   const desktop = useMemo(() => isTauri(), []);
   const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
+  useMark("", "");
   const activeIdCluster = useActiveCluster();
   const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
   // The console dock's own scope label — `Window`'s job because it is the one
@@ -173,9 +174,9 @@ export function Window({
       // unfolded — and the first unfold then spreads over an empty record and
       // erases every other kind's, exactly as `loadMarks` above describes.
       loadSectionFolds();
-      // And the namespace selection each cluster was narrowed to — unlike
-      // `links`/`expanded` on the same store, this one is persisted, and
-      // unread it costs the reader their picker choice on every launch.
+      // Restore each cluster's sidebar groups and namespace selection before
+      // rendering navigation, so the first toggle preserves other clusters.
+      loadExpanded();
       loadNamespaces();
       // And the subjects a bare `/logs` offers as a way in. Unread, that
       // screen has nothing to offer on the first visit of every launch — and
@@ -537,7 +538,10 @@ export function Window({
       <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
         {active && (
           <TabStrip
-            tabs={tabs}
+            tabs={tabs.map(tab => {
+              const context = contexts.find(c => c.name === tab.sub);
+              return context ? { ...tab, sub: getMark(context.stableId, context.name).name } : tab;
+            })}
             activeId={activeId}
             onSelect={activateTab}
             onClose={closeTab}

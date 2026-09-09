@@ -144,6 +144,7 @@ pub fn router(state: AppState) -> Router {
             "/api/command/:command",
             axum::routing::post(api_command::dispatch),
         )
+        .route("/api/settings", get(api_settings::list))
         .route(
             "/api/settings/:key",
             get(api_settings::get)

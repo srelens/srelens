@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { settingsStorage } from "@srelens/core";
+import { getDefaultNamespace, setDefaultNamespace, settingsStorage } from "@srelens/core";
 import type { Tone } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
 
@@ -38,16 +38,16 @@ export const LINK_TONE: Record<LinkState, Tone> = {
 export interface WorkspaceView {
   /** Per cluster. Derived from `ClusterInfo.reachable` and in-flight connects; never persisted. */
   links: Record<string, { state: LinkState; error?: string }>;
-  /** Which sidebar sections are open. Not persisted. */
-  expanded: string[];
+  /** Open sidebar groups per stable cluster ID, persisted through settingsStorage. */
+  expanded: Record<string, string[]>;
   /**
    * Namespace selection per cluster, keyed by `ClusterContext.stableId`, never
    * a display name — a context renamed in the kubeconfig keeps its selection.
    * One selection per cluster, shared by every screen looking at that
    * cluster, rather than one per tab. An empty array means "all namespaces",
    * and so does a cluster with no entry at all — a cluster is only ever added
-   * here when something narrows it, never seeded up front. Unlike `links` and
-   * `expanded`, this *is* persisted (`loadNamespaces`/`setNamespaces`,
+   * here when something narrows it, never seeded up front. This is persisted
+   * (`loadNamespaces`/`setNamespaces`,
    * through `settingsStorage`, the same as `marks.ts` and `columnPrefs.ts`):
    * a namespace selection is a standing choice about what a reader wants to
    * see, not a fact about this sitting.
@@ -55,20 +55,8 @@ export interface WorkspaceView {
   namespaces: Record<string, string[]>;
 }
 
-/**
- * What the current workspace looks like right now, as distinct from what it
- * contains. The tab store owns clusters, tabs and the active cluster and is
- * written to disk; this owns three things, kept for two different reasons.
- * `links` and `expanded` should not outlive the window — a cluster's
- * reachability is a fact about now and an expanded section is a fact about
- * this sitting — so neither is ever read from or written to storage.
- * `namespaces` is the odd one out: a namespace selection is a standing
- * choice about what a reader wants to see, so it alone survives a restart.
- * (It was added to this struct later and inherited non-persistence by
- * accident of where it lives rather than by that argument — see
- * `loadNamespaces` below for where it actually persists.)
- */
-const initial = (): WorkspaceView => ({ links: {}, expanded: [], namespaces: {} });
+/** Live connection status and the reader's persisted per-cluster choices. */
+const initial = (): WorkspaceView => ({ links: {}, expanded: {}, namespaces: {} });
 let view: WorkspaceView = initial();
 const listeners = new Set<() => void>();
 
@@ -83,41 +71,17 @@ function sameArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 function isInitial(v: WorkspaceView): boolean {
-  return Object.keys(v.links).length === 0 && v.expanded.length === 0 && Object.keys(v.namespaces).length === 0;
+  return Object.keys(v.links).length === 0 && Object.keys(v.expanded).length === 0 && Object.keys(v.namespaces).length === 0;
 }
 
 export function getView(): WorkspaceView {
   return view;
 }
 
-/**
- * Whether {@link seedExpandedOnce} has already run for this window's
- * lifetime. Module-level rather than a ref kept on `Nav`: a ref resets every
- * time the component remounts, so a ref-guarded seed cannot tell "nothing has
- * opened a group yet" from "the user just closed all of them" — both show up
- * as an empty `expanded` on the next mount. A flag that survives remounts is
- * what makes the two distinguishable. `resetView` clears it alongside the
- * rest of the view because tests use one call to `resetView` as "a fresh
- * window"; production never calls `resetView` at all.
- */
-let seeded = false;
-
 export function resetView(): void {
-  seeded = false;
+  defaultSelection = readDefaultSelection();
   if (isInitial(view)) return;
   emit(initial());
-}
-
-/**
- * Seeds `expanded` with `ids`, but only the first time this is ever called
- * for the running window — not once per mount of whatever calls it. Everything
- * else about the sidebar's folds already works whether `Nav` is mounted once
- * or remounted a dozen times; this is the one piece of it that must not.
- */
-export function seedExpandedOnce(ids: string[]): void {
-  if (seeded) return;
-  seeded = true;
-  if (view.expanded.length === 0) setExpanded(ids);
 }
 
 export function subscribe(listener: () => void): () => void {
@@ -136,14 +100,32 @@ export function setLink(id: string, state: LinkState, error?: string): void {
   emit({ ...view, links: { ...view.links, [id]: entry } });
 }
 
-export function toggleExpanded(id: string): void {
-  const expanded = view.expanded.includes(id) ? view.expanded.filter((x) => x !== id) : [...view.expanded, id];
+export const EXPANDED_KEY = "srelens.next.navigationExpanded";
+
+/** Restore choices before mounting the sidebar. Missing clusters start collapsed. */
+export function loadExpanded(storage: Storage = settingsStorage): void {
+  let expanded: Record<string, string[]> = {};
+  try {
+    expanded = parseStoredClusterLists(storage.getItem(EXPANDED_KEY));
+  } catch (error) {
+    console.error("could not read the saved sidebar groups", error);
+  }
   emit({ ...view, expanded });
 }
 
-export function setExpanded(ids: string[]): void {
-  if (sameArray(view.expanded, ids)) return;
-  emit({ ...view, expanded: [...ids] });
+export function toggleExpanded(clusterId: string, id: string, storage: Storage = settingsStorage): void {
+  const current = view.expanded[clusterId] ?? [];
+  setExpanded(clusterId, current.includes(id) ? current.filter((x) => x !== id) : [...current, id], storage);
+}
+
+export function setExpanded(clusterId: string, ids: string[], storage: Storage = settingsStorage): void {
+  if (sameArray(view.expanded[clusterId] ?? [], ids)) return;
+  emit({ ...view, expanded: { ...view.expanded, [clusterId]: [...ids] } });
+  try {
+    storage.setItem(EXPANDED_KEY, JSON.stringify(view.expanded));
+  } catch (error) {
+    console.error("could not persist the sidebar groups", error);
+  }
 }
 
 export const NAMESPACES_KEY = "srelens.next.namespaces";
@@ -156,12 +138,12 @@ const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every
  * selection at all. One cluster's entry that is not a string array is
  * dropped on its own rather than taking the rest of the document with it —
  * losing one cluster's remembered namespaces is a nuisance, losing every
- * cluster's is not. An entry that is a valid but empty array is dropped too,
- * for the same reason `setNamespaces` never writes one: it means the same
- * thing as no entry at all, and a document should not accumulate one per
- * cluster a reader ever looked at.
+ * cluster's is not. An empty array is an explicit all-namespaces choice;
+ * a missing entry follows the global default.
  */
-export function parseStoredNamespaces(raw: string | null): Record<string, string[]> {
+export const parseStoredNamespaces = parseStoredClusterLists;
+
+function parseStoredClusterLists(raw: string | null): Record<string, string[]> {
   if (!raw) return {};
   let doc: unknown;
   try {
@@ -170,11 +152,7 @@ export function parseStoredNamespaces(raw: string | null): Record<string, string
     return {};
   }
   if (!isRecord(doc)) return {};
-  const namespaces: Record<string, string[]> = {};
-  for (const [id, value] of Object.entries(doc)) {
-    if (isStringArray(value) && value.length > 0) namespaces[id] = value;
-  }
-  return namespaces;
+  return Object.fromEntries(Object.entries(doc).filter((entry): entry is [string, string[]] => isStringArray(entry[1])));
 }
 
 function saveNamespaces(storage: Storage) {
@@ -191,15 +169,15 @@ function saveNamespaces(storage: Storage) {
  * Read the saved namespace selections once at boot — and in tests, as often
  * as they like.
  *
- * Guarded like every accessor in `marks.ts`/`columnPrefs.ts`: `settingsStorage`
- * falls back to raw `localStorage` when the backend file is unavailable, and
- * `localStorage` throws outright in a WebView with storage disabled. Boot
+ * Guarded like every accessor in `marks.ts`/`columnPrefs.ts`: the settings adapter
+ * can refuse reads if backend initialization failed. Boot
  * must survive it, so a refusing storage costs the remembered selections and
  * nothing else. Merged onto the current view rather than replacing it, so a
  * `links`/`expanded` set before boot finishes reading storage is not undone —
- * neither is ever written here, but both could in principle already be set.
+ * neither is written here, but both could already be set.
  */
 export function loadNamespaces(storage: Storage = settingsStorage): void {
+  defaultSelection = readDefaultSelection();
   let next: Record<string, string[]> = {};
   try {
     next = parseStoredNamespaces(storage.getItem(NAMESPACES_KEY));
@@ -215,26 +193,40 @@ export function loadNamespaces(storage: Storage = settingsStorage): void {
  */
 export function setNamespaces(clusterId: string, namespaces: string[], storage: Storage = settingsStorage): void {
   const current = view.namespaces[clusterId];
-  if (namespaces.length === 0) {
-    if (!current) return;
-    const { [clusterId]: _dropped, ...rest } = view.namespaces;
-    emit({ ...view, namespaces: rest });
-    saveNamespaces(storage);
-    return;
-  }
   if (current && sameArray(current, namespaces)) return;
   emit({ ...view, namespaces: { ...view.namespaces, [clusterId]: [...namespaces] } });
   saveNamespaces(storage);
 }
 
+/** Forget a removed cluster's namespace without disturbing other clusters. */
+export function removeNamespaces(clusterId: string, storage: Storage = settingsStorage): void {
+  if (!(clusterId in view.namespaces)) return;
+  const namespaces = { ...view.namespaces };
+  delete namespaces[clusterId];
+  emit({ ...view, namespaces });
+  saveNamespaces(storage);
+}
+
 /** A stable empty selection, so an unset cluster's snapshot never changes identity. */
 const NO_NAMESPACES: string[] = [];
+function readDefaultSelection(): string[] {
+  const namespace = getDefaultNamespace();
+  return namespace ? [namespace] : NO_NAMESPACES;
+}
+let defaultSelection = readDefaultSelection();
+
+/** A fallback affects only clusters with no explicit selection, including “all”. */
+export function setNamespaceDefault(namespace: string): void {
+  setDefaultNamespace(namespace);
+  defaultSelection = readDefaultSelection();
+  emit({ ...view });
+}
 
 /** The cluster's namespace selection, re-rendering whoever reads it when it changes. */
 export function useNamespaces(clusterId: string | undefined): string[] {
   return useSyncExternalStore(
     subscribe,
-    () => (clusterId === undefined ? NO_NAMESPACES : (view.namespaces[clusterId] ?? NO_NAMESPACES)),
+    () => (clusterId === undefined ? NO_NAMESPACES : (view.namespaces[clusterId] ?? defaultSelection)),
     () => NO_NAMESPACES,
   );
 }

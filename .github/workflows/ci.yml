@@ -59,6 +59,8 @@ jobs:
         # they are measured across apps/desktop and packages/core together.
         # Running the packages individually would report green with no gate at all.
         run: pnpm test
+      - name: Updater manifest tests
+        run: node --test .github/scripts/compose-latest.test.cjs
       - name: Performance-baseline script tests
         # The size classifier decides which artifacts are compared against
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
@@ -104,7 +106,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       # Same reason: pinned, so the tool comes from an input rather than the tag.
-      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -112,7 +114,7 @@ jobs:
         with:
           version: v3.16.3
       - name: Create kind cluster
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: srelens-e2e
       # ONE instrumented run covers everything (#28): the unit suites AND the
@@ -201,7 +203,7 @@ jobs:
       - name: Build the app binary
         run: cargo build -p srelens-desktop --features custom-protocol --profile ci-smoke
       - name: Create kind cluster
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: srelens-e2e
       - name: Smoke suite through the real app
@@ -219,6 +221,48 @@ jobs:
           name: smoke-failure-artifacts
           path: ${{ runner.temp }}/smoke-artifacts
           if-no-files-found: ignore
+
+  install-script:
+    name: install script
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # An install script is the easiest file in the repository to leave
+      # broken: nothing builds it, nothing imports it, and the first person to
+      # notice is a stranger following the README. `sh` on this runner is
+      # dash, which is the point -- the script promises POSIX sh, and bash
+      # would happily accept bashisms that Debian and Alpine users would not.
+      - name: Lint
+        run: shellcheck -s sh packaging/install/install.sh packaging/install/test.sh
+      - name: Test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: sh packaging/install/test.sh
+      # Again as root, in a container, because six of the cases skip
+      # otherwise -- and they are the six that matter most. Every rule about
+      # who owns the destination needs a second account and a second group to
+      # mean anything, so on an unprivileged runner the ownership walk, the
+      # ACL refusal and the group-membership lookup all report `skip` and the
+      # job goes green having proven none of them. The suite removes the
+      # account and group it creates; the container is thrown away regardless.
+      - name: Test as root
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker run --rm -i \
+            -e GITHUB_TOKEN="$GITHUB_TOKEN" \
+            -v "$PWD/packaging/install:/packaging/install:ro" \
+            debian:bookworm-slim sh -c '
+              set -e
+              apt-get -qq update >/dev/null
+              # acl for the ACL case, libdigest-sha-perl for shasum -- without
+              # it the sha256sum-absent branch skips here too.
+              apt-get -qq install -y curl ca-certificates acl attr libcap2-bin libdigest-sha-perl >/dev/null
+              # The suite writes nothing into the mount, but it does need to
+              # be able to run from somewhere it owns.
+              cp -r /packaging/install /tmp/install
+              sh /tmp/install/test.sh
+            '
 
   packaging:
     name: packaging renderers

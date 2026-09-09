@@ -403,7 +403,8 @@ pub fn mcp_prompt_issues(
 #[derive(Debug, Serialize)]
 pub struct CliStatus {
     installed: bool,
-    /// The install path (`~/.local/bin/srelens`).
+    /// The usable command path (`~/.local/bin/srelens` on Unix, the running
+    /// desktop executable on Windows).
     path: String,
     /// What the symlink resolves to, if present.
     links_to: Option<String>,
@@ -427,31 +428,129 @@ fn dir_on_path(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Report whether the `srelens` CLI is installed and where it points.
-#[tauri::command]
-pub fn srelens_cli_status() -> CliStatus {
-    let dir = cli_dir();
-    let path = cli_path();
-    CliStatus {
-        installed: path.as_ref().is_some_and(|p| p.exists()),
-        path: path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        links_to: path
-            .as_ref()
-            .and_then(|p| std::fs::read_link(p).ok())
-            .map(|p| p.to_string_lossy().to_string()),
-        on_path: dir.as_deref().is_some_and(dir_on_path),
+fn executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn usable_cli_path(path: &std::path::Path, expected_exe: &std::path::Path) -> bool {
+    if !executable_file(path) {
+        return false;
+    }
+    match (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(expected_exe),
+    ) {
+        (Ok(candidate), Ok(expected)) => candidate == expected,
+        _ => false,
     }
 }
 
-/// Symlink the running executable to `~/.local/bin/srelens` so MCP clients can
-/// spawn `srelens --mcp-stdio`. Creates the directory if needed (no elevation);
-/// returns the install path on success, or the manual command on failure.
+#[cfg(target_os = "linux")]
+fn select_linux_cli_source(
+    current_exe: std::path::PathBuf,
+    appimage: Option<std::path::PathBuf>,
+    appdir: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, String> {
+    let Some(path) = appimage else {
+        return Ok(current_exe);
+    };
+    let Some(mount) = appdir else {
+        return Err("APPIMAGE is set without its APPDIR mount".to_string());
+    };
+    if !path.is_absolute() || !executable_file(&path) {
+        return Err(format!(
+            "APPIMAGE does not name an executable file: {}",
+            path.display()
+        ));
+    }
+    let inside_mount = match (
+        std::fs::canonicalize(&current_exe),
+        std::fs::canonicalize(&mount),
+    ) {
+        (Ok(current), Ok(mount)) => current.starts_with(mount),
+        _ => false,
+    };
+    if !inside_mount {
+        return Err("APPIMAGE and APPDIR do not belong to the running executable".to_string());
+    }
+    Ok(path)
+}
+
+fn cli_source_executable() -> Result<std::path::PathBuf, String> {
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    {
+        return select_linux_cli_source(
+            current,
+            std::env::var_os("APPIMAGE").map(std::path::PathBuf::from),
+            std::env::var_os("APPDIR").map(std::path::PathBuf::from),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(current)
+}
+
+/// Report whether the `srelens` CLI is installed and where it points.
+#[tauri::command]
+pub fn srelens_cli_status() -> Result<CliStatus, String> {
+    #[cfg(windows)]
+    {
+        let path = std::env::current_exe().map_err(|e| e.to_string())?;
+        return Ok(CliStatus {
+            installed: usable_cli_path(&path, &path),
+            path: path.to_string_lossy().to_string(),
+            links_to: None,
+            on_path: path.parent().is_some_and(dir_on_path),
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = cli_dir();
+        let path = cli_path();
+        let source_exe = cli_source_executable()?;
+        Ok(CliStatus {
+            installed: path
+                .as_ref()
+                .is_some_and(|candidate| usable_cli_path(candidate, &source_exe)),
+            path: path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            links_to: path
+                .as_ref()
+                .and_then(|p| std::fs::read_link(p).ok())
+                .map(|p| p.to_string_lossy().to_string()),
+            on_path: dir.as_deref().is_some_and(dir_on_path),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn posix_shell_path(path: &std::path::Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Symlink the persistent executable to `~/.local/bin/srelens` so MCP clients
+/// can spawn `srelens --mcp-stdio`. AppImage builds use `$APPIMAGE`, not the
+/// temporary FUSE-mounted process path. Creates the directory if needed (no
+/// elevation); returns the install path on success, or the manual command on
+/// failure.
 #[tauri::command]
 pub fn install_srelens_cli() -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = cli_source_executable()?;
 
     #[cfg(unix)]
     {
@@ -466,10 +565,10 @@ pub fn install_srelens_cli() -> Result<String, String> {
         match std::os::unix::fs::symlink(&exe, &target) {
             Ok(()) => Ok(target.to_string_lossy().to_string()),
             Err(e) => Err(format!(
-                "Could not write {} ({e}). Run this in a terminal:\n  ln -sf \"{}\" \"{}\"",
+                "Could not write {} ({e}). Run this in a terminal:\n  ln -sf {} {}",
                 target.display(),
-                exe.display(),
-                target.display()
+                posix_shell_path(&exe),
+                posix_shell_path(&target)
             )),
         }
     }
@@ -483,6 +582,68 @@ pub fn install_srelens_cli() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_command_quotes_shell_active_paths() {
+        let path = std::path::Path::new("/tmp/Srelens $HOME O'Brien\\build");
+        assert_eq!(
+            posix_shell_path(path),
+            "'/tmp/Srelens $HOME O'\\''Brien\\build'"
+        );
+    }
+
+    #[test]
+    fn running_executable_is_a_usable_cli_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(usable_cli_path(&current, &current));
+    }
+
+    #[test]
+    fn a_directory_is_not_a_usable_cli_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(!usable_cli_path(current.parent().unwrap(), &current));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unrelated_executable_is_not_a_usable_cli_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(!usable_cli_path(std::path::Path::new("/bin/sh"), &current));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_path_replaces_the_temporary_process_path() {
+        let appimage = std::env::current_exe().unwrap();
+        let mount = appimage.parent().unwrap().to_path_buf();
+        assert_eq!(
+            select_linux_cli_source(appimage.clone(), Some(appimage.clone()), Some(mount))
+                .unwrap(),
+            appimage
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_appimage_path_is_not_silently_replaced_by_the_fuse_path() {
+        let current = std::env::current_exe().unwrap();
+        let invalid = current.parent().unwrap().to_path_buf();
+        assert!(select_linux_cli_source(current, Some(invalid.clone()), Some(invalid)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_appimage_environment_is_rejected() {
+        let current = std::env::current_exe().unwrap();
+        let unrelated_mount = std::path::PathBuf::from("/definitely-not-this-appimage-mount");
+        assert!(select_linux_cli_source(
+            current.clone(),
+            Some(current),
+            Some(unrelated_mount)
+        )
+        .is_err());
+    }
 
     /// The command boundary, where the distinction has to survive: the pane
     /// only ever sees what `mcp_audit_tail` returns. An absent log resolves to
