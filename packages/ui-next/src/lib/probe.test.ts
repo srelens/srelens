@@ -234,6 +234,24 @@ describe("one read per cluster", () => {
     expect(getProbe(ctx.stableId).state).toBe("reachable");
   });
 
+  it("joins a valid cross-workspace read even when reconnect asks fresh", async () => {
+    const firstWorkspace = currentWorkspace().id;
+    const secondWorkspace = "second";
+    const state = defaultState([ctx]);
+    state.workspaces.push({ ...state.workspaces[0], id: secondWorkspace, name: "Second", pausedClusters: [] });
+    setState(state);
+    let settle!: (value: unknown) => void;
+    const connect = vi.fn(() => new Promise<never>((resolve) => { settle = resolve as never; }));
+
+    const first = probeCluster(ctx, connect as never, () => 0, { workspaceId: firstWorkspace });
+    const second = probeCluster(ctx, connect as never, () => 0, { workspaceId: secondWorkspace, fresh: true });
+
+    expect(second).toBe(first);
+    expect(connect).toHaveBeenCalledTimes(1);
+    settle({ context: ctx.name, reachable: true });
+    await second;
+  });
+
   it("joins the read already out rather than starting a second", async () => {
     let settle!: (v: unknown) => void;
     const connect = vi.fn(() => new Promise<never>((r) => { settle = r as never; }));

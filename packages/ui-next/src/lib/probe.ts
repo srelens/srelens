@@ -12,7 +12,7 @@ let infos: Record<string, ClusterInfo> = {};
  * `infos`, so `getInfo`/`useInfo`/`useInfos` and their callers — the rail, the
  * status strip, Overview, Toolbox — stay untouched.
  */
-export type ProbeState = "unread" | "reachable" | "unreachable";
+export type ProbeState = "unread" | "reachable" | "unreachable" | "paused";
 
 export interface Probe {
   state: ProbeState;
@@ -173,7 +173,10 @@ export function probeCluster(
   const runningIsValid = running &&
     !isClusterPaused(ctx.stableId, running.workspaceId) &&
     running.generation === (pauseGenerations.get(pauseKey(running.workspaceId, ctx.stableId)) ?? 0);
-  if (runningIsValid && !options.fresh) return running.promise;
+  // A reconnect only needs a fresh read when the prior one was invalidated.
+  // A valid read owned by another workspace is safe to share, and avoids two
+  // accepted writes racing each other.
+  if (runningIsValid) return running.promise;
   const run = read(ctx, connect, now, workspaceId, generation).finally(() => {
     // **By identity, not by key.** A read that {@link resetProbes} forgot
     // still lands, and deleting by key alone would clear whatever is under

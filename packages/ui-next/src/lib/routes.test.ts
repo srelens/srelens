@@ -6,6 +6,7 @@ import { describe as suite, it, expect } from "vitest";
 import {
   describe,
   isBuiltInKind,
+  isClusterScopedRoute,
   screenFor,
   type RoutedScreenProps,
   type ScreenComponent,
@@ -224,6 +225,17 @@ suite("describe", () => {
     // /k/ branch's RESOURCE_LABELS lookup must still resolve it — this pins
     // that against a regression, not against screenFor's routing.
     expect(describe("/k/events", "c")).toMatchObject({ title: "Events", kind: "workloads" });
+  });
+});
+
+suite("isClusterScopedRoute", () => {
+  it("distinguishes cluster-following routes from app screens", () => {
+    for (const route of ["/overview", "/helm", "/forwards", "/k/pods", "/k/Pod/default/web", "/edit/Pod/default/web"]) {
+      expect(isClusterScopedRoute(route), route).toBe(true);
+    }
+    for (const route of ["/", "/settings", "/connections", "/notes"]) {
+      expect(isClusterScopedRoute(route), route).toBe(false);
+    }
   });
 });
 

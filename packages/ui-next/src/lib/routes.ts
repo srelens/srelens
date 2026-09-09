@@ -189,6 +189,14 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   return { route, title: route.replace(/^\//, "") || "Untitled", sub, kind: "control" };
 }
 
+/** Whether a route follows a cluster rather than being an app-level screen. */
+export function isClusterScopedRoute(route: string): boolean {
+  // `describe` is already the one exhaustive parser for route shapes. Passing
+  // a sentinel lets its `sub` answer this without duplicating dynamic routes.
+  const sentinel = "__cluster_scope__";
+  return describe(route, sentinel).sub === sentinel;
+}
+
 /**
  * What every routed screen is handed.
  *

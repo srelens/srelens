@@ -445,6 +445,19 @@ describe("Connections", () => {
     expect(core.clusterFacts.mock.calls.filter((c) => c[0] === "staging-eu").length).toBe(2);
   });
 
+  it("shows a paused cluster as paused instead of its retained reading", async () => {
+    const user = userEvent.setup();
+    open();
+    await user.click(refreshAll());
+    await waitFor(() => expect(within(rowFor("prod-eu")).getByText("reachable")).toBeTruthy());
+
+    act(() => store.setClusterPaused(store.currentWorkspace().id, PROD.stableId, true));
+
+    await waitFor(() => expect(within(rowFor("prod-eu")).getByText("paused")).toBeTruthy());
+    expect(within(rowFor("prod-eu")).queryByText("41 ms")).toBeNull();
+    expect(detailFor(PROD)).toBeNull();
+  });
+
   /**
    * **The sequence guard.** A reader who hits `Refresh all` twice must be left
    * looking at the second answer, whatever order the two listings come back in.

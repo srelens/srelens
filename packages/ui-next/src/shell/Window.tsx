@@ -23,6 +23,7 @@ import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { defaultState, reconcile } from "../lib/tabs";
+import { isClusterScopedRoute } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
   activateTab,
@@ -535,7 +536,12 @@ export function Window({
         )}
         <div className="relative min-h-0 flex-1">
           {tabs.map((tab) => {
-            const context = tab.sub === undefined ? undefined : contexts.find((c) => c.name === tab.sub);
+            // Status-bar actions open cluster-following routes without a
+            // `clusterName`. They follow the active cluster and need its pause
+            // gate; app-level tabs never receive one just because it is active.
+            const context = tab.sub === undefined
+              ? (isClusterScopedRoute(tab.route) ? activeCtx : undefined)
+              : contexts.find((c) => c.name === tab.sub);
             const pausedContext = context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
