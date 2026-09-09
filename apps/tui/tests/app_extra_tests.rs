@@ -2022,6 +2022,17 @@ async fn ctrl_c_in_the_assistant_copies_the_last_answer() {
     assert_eq!(toast(&app), "✓ Copied assistant answer to clipboard");
 }
 
+#[tokio::test]
+async fn ctrl_c_in_the_assistant_without_messages_warns_and_does_not_exit() {
+    let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.messages.clear();
+
+    app.handle_key_event(common::ctrl('c')).await;
+    assert!(app.is_running, "Ctrl+C does not exit the TUI");
+    assert_eq!(toast(&app), "Nothing to copy");
+}
+
 // ---------------------------------------------------------------------------
 // Watch pool
 // ---------------------------------------------------------------------------

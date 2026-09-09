@@ -446,9 +446,10 @@ impl AssistantViewState {
     pub fn history_up(&mut self) {
         if self.prompt_history.is_empty() {
             for msg in &self.messages {
-                if msg.role == "user" && !msg.content.trim().is_empty() {
-                    if self.prompt_history.last().map(|s| s.as_str()) != Some(msg.content.trim()) {
-                        self.prompt_history.push(msg.content.clone());
+                if msg.role == "user" {
+                    let trimmed = msg.content.trim();
+                    if !trimmed.is_empty() && self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed) {
+                        self.prompt_history.push(trimmed.to_string());
                     }
                 }
             }
@@ -2477,17 +2478,26 @@ Done.";
     #[test]
     fn test_assistant_history_seeding_from_messages() {
         let mut state = AssistantViewState::new();
-        // Prompt history is empty, but messages has a user message
+        // Prompt history is empty, but messages has user messages with whitespace and duplicates
         state.messages.push(ChatMessage {
             role: "user".to_string(),
-            content: "seeded query".to_string(),
+            content: "  seeded query  ".to_string(),
             timestamp: "12:00:00".to_string(),
             tool_calls: Vec::new(),
             token_usage: None,
         });
+        state.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "seeded query".to_string(),
+            timestamp: "12:00:05".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
 
-        // Pressing Up seeds prompt_history and loads "seeded query"
+        // Pressing Up seeds prompt_history with trimmed content and deduplicates
         state.history_up();
+        assert_eq!(state.prompt_history.len(), 1);
+        assert_eq!(state.prompt_history[0], "seeded query");
         assert_eq!(state.input, "seeded query");
         assert_eq!(state.cursor_pos(), 12);
     }

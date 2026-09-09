@@ -416,7 +416,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .map(|(rel_i, c)| {
                     let i = start_idx + rel_i;
                     let is_active = c.name == *current_context;
-                    let is_sel = i == *selected_idx;
+                    let is_sel = i == sel;
                     let color = Theme::context_color(&c.name, c.is_local);
 
                     let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
@@ -529,7 +529,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .map(|(rel_i, name)| {
                     let i = start_idx + rel_i;
                     let is_active = name == current_namespace;
-                    let is_sel = i == *selected_idx;
+                    let is_sel = i == sel;
                     let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
                     let style = if is_sel {
                         Theme::selected_row()
@@ -620,7 +620,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .enumerate()
                 .map(|(rel_i, a)| {
                     let i = start_idx + rel_i;
-                    let is_sel = i == *selected_idx;
+                    let is_sel = i == sel;
                     let prefix = if is_sel { "▶ " } else { "  " };
 
                     let line1 = Line::from(vec![

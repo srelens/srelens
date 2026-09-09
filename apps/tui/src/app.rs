@@ -3501,7 +3501,7 @@ impl App {
                         self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
                         return;
                     } else {
-                        self.is_running = false;
+                        self.set_toast("Nothing to copy".to_string(), Theme::status_warn());
                         return;
                     }
                 }

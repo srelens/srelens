@@ -597,6 +597,20 @@ fn the_namespace_picker_windows_when_selected_at_the_end_of_a_long_list() {
     assert!(!text.contains("ns-01"), "first item scrolled out of view: {text}");
 }
 
+#[test]
+fn the_namespace_picker_renders_selection_marker_even_when_selected_idx_is_out_of_bounds() {
+    let namespaces = vec!["alpha".into(), "beta".into(), "gamma".into()];
+    let modal = Modal::NamespacePicker {
+        namespaces,
+        current_namespace: "alpha".into(),
+        selected_idx: 99, // out of bounds
+        filter: String::new(),
+    };
+    let text = modal_text(80, 15, &modal);
+    // Clamped selection is index 2 ("gamma"), which must be marked with ▶
+    assert!(text.contains("▶ gamma"), "clamped row is marked selected: {text}");
+}
+
 // ───────────────────────── dialogs: ActionPalette ─────────────────────────
 
 #[test]
