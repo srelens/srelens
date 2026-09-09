@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, notifyErrorMock } = vi.hoisted(() => ({
+const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, notifyErrorMock, flushMock } = vi.hoisted(() => ({
+  flushMock: vi.fn(),
   isTauriMock: vi.fn(),
   isApplePlatformMock: vi.fn(),
   setTitleBarStyleMock: vi.fn(),
@@ -9,6 +10,7 @@ const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, no
 }));
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
+  flushSettingsWrites: (options: unknown) => flushMock(options),
   isTauri: () => isTauriMock(),
   isApplePlatform: (platform?: string) => isApplePlatformMock(platform),
   notify: { error: notifyErrorMock, success: vi.fn(), info: vi.fn() },
@@ -25,6 +27,7 @@ let originalLocation: Location;
 beforeEach(() => {
   localStorage.clear();
   reload.mockClear();
+  flushMock.mockReset().mockResolvedValue(undefined);
   setTitleBarStyleMock.mockReset().mockResolvedValue(undefined);
   setTitleMock.mockReset().mockResolvedValue(undefined);
   isApplePlatformMock.mockReset().mockReturnValue(true);
@@ -108,4 +111,21 @@ describe("switchDesign", () => {
     expect(setTitleBarStyleMock).not.toHaveBeenCalled();
     expect(reload).toHaveBeenCalledTimes(1);
   });
+});
+
+it("waits for the backend commit before reloading the selected design", async () => {
+  let commit!: () => void;
+  flushMock.mockReturnValueOnce(new Promise<void>(resolve => { commit = resolve; }));
+  const switching = switchDesign("next");
+  expect(reload).not.toHaveBeenCalled();
+  expect(flushMock).toHaveBeenCalledWith({ throwOnError: true });
+  commit();
+  expect((await switching).ok).toBe(true);
+  expect(reload).toHaveBeenCalledOnce();
+});
+it("keeps the current design when the backend rejects the preference", async () => {
+  flushMock.mockRejectedValueOnce(new Error("disk full"));
+  expect((await switchDesign("next")).ok).toBe(false);
+  expect(reload).not.toHaveBeenCalled();
+  expect(setTitleBarStyleMock).not.toHaveBeenCalled();
 });
