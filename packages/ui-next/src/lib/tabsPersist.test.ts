@@ -60,6 +60,17 @@ describe("storage that refuses", () => {
 });
 
 describe("parseStoredState", () => {
+  it("restores legacy Control room tabs as app-wide Home without changing identity or saved work", () => {
+    const state = valid();
+    const home = state.workspaces[0].tabs[0];
+    home.title = "Control room";
+    home.sub = "old-prod";
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[0]).toEqual({ id: home.id, route: "/", title: "Home", kind: "control", pinned: true });
+    expect(parsed.workspaces[0].tabs[1]).toEqual(state.workspaces[0].tabs[1]);
+    expect(parsed.workspaces[0].activeId).toBe(state.workspaces[0].activeId);
+  });
+
   it("round-trips a state written by saveTabsState", () => {
     const storage = memory();
     const state = valid();

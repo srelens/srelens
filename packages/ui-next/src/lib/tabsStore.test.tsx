@@ -403,7 +403,7 @@ describe("activeCluster", () => {
     expect(tabs.filter((t) => t.sub === "prod-eu")).toEqual([]);
     expect(subFor("/overview")).toBe("staging-eu");
     expect(subFor("/k/pods")).toBe("staging-eu");
-    expect(subFor("/")).toBe("staging-eu");
+    expect(subFor("/")).toBeUndefined();
     // A stableId on the strip would satisfy "no longer prod-eu" and be the
     // same bug wearing the other name.
     expect(tabs.filter((t) => t.sub === "id-stage")).toEqual([]);

@@ -47,6 +47,7 @@ import {
   useTabs,
 } from "../lib/tabsStore";
 import { useConsole } from "../console";
+import { openCluster } from "../lib/openCluster";
 import { getInfo, probeCluster } from "../lib/probe";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
@@ -101,6 +102,10 @@ export function Window({
   active = true,
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
+  const mounted = useRef(false);
+  const visible = useRef(active);
+  visible.current = active;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   /**
    * The vault is usable, as `LockGate` reports it — classic's `vaultReady`, by
    * the same name and for the same one consumer. Flipped once per window; see
@@ -261,11 +266,26 @@ export function Window({
   // state and the status bar shows a version without waiting to be asked. The
   // effect runs per workspace rather than per render — switching away and back
   // re-runs it, and the probe store's memory is what keeps it to once each.
+  const startupOverviewOffered = useRef(false);
   const workspaceId = workspace.id;
   useEffect(() => {
     if (!booted) return;
     if (!active) return;
     const byId = new Map(contexts.map((c) => [c.stableId, c]));
+    // Only the untouched initial Home is a default destination. A slow probe
+    // must never replace a restored tab or navigation performed while it waits.
+    if (!startupOverviewOffered.current) {
+      startupOverviewOffered.current = true;
+      const initialState = getState();
+      const initialWorkspace = currentWorkspace();
+      const ctx = byId.get(initialWorkspace.activeCluster ?? "");
+      if (ctx && initialWorkspace.tabs.length === 1 && initialWorkspace.tabs[0].route === "/") {
+        const ready = getInfo(ctx.stableId) ? Promise.resolve() : probeCluster(ctx);
+        void ready.then(() => {
+          if (mounted.current && visible.current && getState() === initialState && getInfo(ctx.stableId)?.reachable) openCluster(ctx);
+        });
+      }
+    }
     for (const id of currentWorkspace().clusters) {
       if (getInfo(id)) continue;
       const ctx = byId.get(id);
@@ -527,7 +547,7 @@ export function Window({
       {active && (
         <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
       )}
-      {active && <Nav contexts={contexts} />}
+      {active && activeTabRoute !== "/" && <Nav contexts={contexts} />}
       {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
           and the screen, and a flex item's implicit `min-width: auto`
           refuses to shrink below its content — so a wide screen widens the

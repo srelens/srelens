@@ -15,8 +15,9 @@ import {
 import { friendly } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { getMark, resetMark, setMark, useEditableMark } from "../lib/marks";
+import { openCluster } from "../lib/openCluster";
 import { useInfos } from "../lib/probe";
-import { openTab, setActiveCluster, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
+import { openTab, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceView } from "../lib/workspace";
 
 export interface RailProps {
@@ -149,21 +150,10 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     });
   }
 
-  /**
-   * Switch the rail's cluster, and hand the store the name the strip needs.
-   *
-   * `setActiveCluster` takes a stableId — that is what a workspace holds (#265)
-   * — but a tab's label is the context's NAME, and the store cannot translate
-   * between the two (`lib/clusters` imports it, not the other way round). The
-   * rail already has both, in `byId`, so the name is passed from here. Without
-   * it every cluster-scoped tab kept the label of the cluster switched away
-   * from while the mounted screen rendered the new one.
-   *
-   * Both ways in go through this: the click on a mark and the menu's `Open`.
-   * They are one gesture, and fixing one is how the two start disagreeing.
-   */
+  /** Selecting a cluster has the same destination as opening it from Home or Connections. */
   function select(id: string) {
-    setActiveCluster(id, byId.get(id)?.name);
+    const context = byId.get(id);
+    if (context) openCluster(context);
   }
 
   function remove(id: string) {

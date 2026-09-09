@@ -47,7 +47,7 @@ suite("isBuiltInKind", () => {
 suite("describe", () => {
   it("names the home route and pins it", () => {
     const info = describe("/", "prod-eu");
-    expect(info).toMatchObject({ route: "/", title: "Control room", kind: "control", pinned: true });
+    expect(info).toMatchObject({ route: "/", title: "Home", kind: "control", pinned: true });
   });
 
   it("uses the real cluster name as the sub for cluster-scoped routes", () => {
@@ -57,7 +57,7 @@ suite("describe", () => {
   });
 
   it("gives app-scoped routes no sub at all", () => {
-    for (const route of ["/applog", "/notes", "/settings", "/connections", "/connect", "/toolbox"]) {
+    for (const route of ["/", "/applog", "/notes", "/settings", "/connections", "/connect", "/toolbox"]) {
       expect(describe(route, "staging-1").sub, route).toBeUndefined();
     }
   });
@@ -354,7 +354,7 @@ suite("screenFor", () => {
   });
 
   it("gives a route with no screen a placeholder", () => {
-    for (const route of ["/", "/incidents"]) {
+    for (const route of ["/incidents"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
@@ -458,3 +458,5 @@ suite("ScreenComponent", () => {
     expect(plain).toBeTypeOf("function");
   });
 });
+
+it("registers the app landing page", () => { expect(screenFor("/")?.name).toBe("Home"); });

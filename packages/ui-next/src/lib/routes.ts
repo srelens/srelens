@@ -9,6 +9,7 @@ import { Events } from "../screens/Events";
 import { Forwards } from "../screens/Forwards";
 import { Helm } from "../screens/Helm";
 import { Logs, parseLogsRoute } from "../screens/Logs";
+import { Home } from "../screens/Home";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
@@ -57,6 +58,7 @@ export function isBuiltInKind(slug: string): slug is ResourceKind {
  */
 const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
+    "/": { title: "Home", kind: "control", pinned: true },
     "/applog": { title: "Application log", kind: "applog" },
     "/notes": { title: "Release notes", kind: "notes" },
     "/settings": { title: "Settings", kind: "settings" },
@@ -68,7 +70,6 @@ const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
 /** Routes whose tab names the cluster it is looking at. */
 const CLUSTER_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
-    "/": { title: "Control room", kind: "control", pinned: true },
     "/incidents": { title: "Incidents", kind: "incidents" },
     "/agent": { title: "Agent", kind: "agent" },
     "/resources": { title: "Workloads", kind: "workloads" },
@@ -262,6 +263,7 @@ export type ScreenComponent = ComponentType<RoutedScreenProps>;
  * here and nothing else; a route with no entry renders the Placeholder.
  */
 const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(null), {
+  "/": Home,
   "/applog": AppLog,
   "/notes": ReleaseNotes,
   // The full view of the one agent run this window holds — the console dock

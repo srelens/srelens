@@ -3,7 +3,7 @@ import { act, render, screen, fireEvent, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
 import { Rail } from "./Rail";
-import { activeCluster, currentWorkspace, openTab, setState } from "../lib/tabsStore";
+import { activeCluster, activeRoute, currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 import { defaultMark, getMark, loadMarks, setMark } from "../lib/marks";
@@ -70,6 +70,7 @@ describe("Rail", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "staging" }));
     expect(activeCluster()).toBe("staging");
+    expect(activeRoute()).toBe("/overview");
   });
 
   it("says why a cluster is out of reach in its name, classified rather than quoted", () => {
@@ -115,6 +116,7 @@ describe("Rail", () => {
     setup();
     await pick("staging", "Open staging");
     expect(activeCluster()).toBe("staging");
+    expect(activeRoute()).toBe("/overview");
   });
 
   /**
@@ -144,7 +146,7 @@ describe("Rail", () => {
 
     expect(activeCluster()).toBe("id-stage");
     const subs = currentWorkspace().tabs.map((t) => t.sub);
-    expect(subs).toEqual(["staging-eu", "staging-eu", "staging-eu"]);
+    expect(subs).toEqual([undefined, "staging-eu", "staging-eu"]);
     expect(subs).not.toContain("id-stage");
   });
 
@@ -160,7 +162,7 @@ describe("Rail", () => {
     await pick("staging-eu", "Open staging-eu");
 
     expect(activeCluster()).toBe("id-stage");
-    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual(["staging-eu", "staging-eu"]);
+    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual([undefined, "staging-eu"]);
   });
 
   it("opens the Connections tab", async () => {

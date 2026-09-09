@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 
@@ -215,7 +215,7 @@ beforeEach(() => {
   listContexts.mockReset().mockResolvedValue({ contexts: [ctx("prod")] });
   loadTabsState.mockReset().mockReturnValue(null);
   scheduleSave.mockReset();
-  connectCluster.mockReset().mockImplementation(async (name: string) => ({ context: name, reachable: true, version: "1.30" }));
+  connectCluster.mockReset().mockImplementation(async (name: string) => ({ context: name, reachable: false }));
   listCrds.mockReset().mockResolvedValue({ crds: [] });
   getForwards.mockReset().mockReturnValue([]);
   subscribeForwards.mockReset().mockReturnValue(() => {});
@@ -255,10 +255,48 @@ async function booted() {
       <Window ported={[]} onOpenInClassic={() => {}} />
     </ConsoleProvider>,
   );
-  await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+  await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
 }
 
 describe("Window boot", () => {
+  it("opens the active cluster overview after the initial connection succeeds", async () => {
+    connectCluster.mockResolvedValue({ context: "prod", reachable: true });
+    await booted();
+    await waitFor(() => expect(store.activeRoute()).toBe("/overview"));
+    expect(store.currentWorkspace().tabs.filter(tab => tab.route === "/overview")).toHaveLength(1);
+  });
+
+  it("keeps Home when the active cluster cannot connect, even if another can", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    connectCluster.mockImplementation(async (name: string) => ({ context: name, reachable: name === "stage" }));
+    await booted();
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledTimes(2));
+    expect(store.activeRoute()).toBe("/");
+    expect(screen.getByRole("heading", { name: "Home", level: 1 })).toBeTruthy();
+  });
+
+  it("does not replace work opened while the initial cluster connection is pending", async () => {
+    let resolve!: (value: unknown) => void;
+    connectCluster.mockReturnValue(new Promise(done => { resolve = done; }));
+    await booted();
+    act(() => { store.openTab("/settings"); });
+    await act(async () => resolve({ context: "prod", reachable: true }));
+    expect(store.activeRoute()).toBe("/settings");
+    expect(store.currentWorkspace().tabs.some(tab => tab.route === "/overview")).toBe(false);
+  });
+
+  it("keeps a restored tab active after connecting", async () => {
+    connectCluster.mockResolvedValue({ context: "prod", reachable: true });
+    const saved = defaultState([ctx("prod")]);
+    const tab = makeTab("/settings");
+    saved.workspaces[0].tabs.push(tab);
+    saved.workspaces[0].activeId = tab.id;
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    await waitFor(() => expect(connectCluster).toHaveBeenCalled());
+    expect(store.activeRoute()).toBe("/settings");
+  });
+
   it("builds a Default workspace from the contexts when nothing was saved", async () => {
     await booted();
     expect(store.getState().workspaces[0].name).toBe("Default");
@@ -343,7 +381,7 @@ describe("Window boot", () => {
     listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
     await booted();
     expect(store.getState().workspaces.length).toBeGreaterThan(0);
-    expect(screen.getByRole("tablist")).toBeDefined();
+    expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined();
   });
 
   it("boots to a live window when the saved currentId names a workspace that did not parse and the cluster list also errors", async () => {
@@ -384,7 +422,7 @@ describe("Window boot", () => {
     saved.workspaces[0].tabs.push(makeTab("/k/Pod/default/%zz"));
     loadTabsState.mockReturnValue(saved);
     await booted();
-    expect(screen.getByRole("tablist")).toBeDefined();
+    expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined();
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/default/%zz")).toBe(true);
   });
 
@@ -404,7 +442,7 @@ describe("Window boot", () => {
         <Window ported={[]} onOpenInClassic={() => {}} />
       </ConsoleProvider>,
     );
-    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
     act(() => store.openTab("/k/pods"));
     expect(flushSave).not.toHaveBeenCalled();
     view.unmount();
@@ -481,7 +519,7 @@ describe("Window strip", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(2);
     // Both bodies are mounted; only the active is visible.
     const headings = screen.getAllByRole("heading", { level: 1, hidden: true });
-    expect(headings.map((h) => h.textContent)).toEqual(["Control room", "Pods"]);
+    expect(headings.map((h) => h.textContent)).toEqual(["Home", "Pods"]);
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Pods");
   });
@@ -489,8 +527,8 @@ describe("Window strip", () => {
   it("selecting a tab switches the body", async () => {
     await booted();
     act(() => store.openTab("/k/pods"));
-    await userEvent.click(screen.getByRole("tab", { name: /Control room/ }));
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Control room");
+    await userEvent.click(screen.getByRole("tab", { name: /Home/ }));
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Home");
   });
 
   it("closing a tab goes through the store", async () => {
@@ -506,16 +544,12 @@ describe("Window strip", () => {
     expect(store.currentWorkspace().tabs.map((t) => t.route)).toEqual(["/", "/"]);
   });
 
-  it("names the workspace's active cluster on a new tab", async () => {
-    // `contexts[0]` would have been whichever context the kubeconfig lists
-    // first — not the current one, and not necessarily even in this
-    // workspace. The active cluster is what a new tab is about, so its name
-    // is what the tab carries.
+  it("keeps new Home tabs app-scoped even when a cluster is active", async () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod", "prod-eu")] });
     await booted();
     await userEvent.click(screen.getByRole("button", { name: /new tab/i }));
     const opened = store.currentWorkspace().tabs.at(-1)!;
-    expect(opened.sub).toBe("prod-eu");
+    expect(opened.sub).toBeUndefined();
   });
 
   it("hands the Placeholder the way back to classic, with the cluster", async () => {
@@ -525,9 +559,10 @@ describe("Window strip", () => {
         <Window ported={[]} onOpenInClassic={onOpenInClassic} />
       </ConsoleProvider>,
     );
-    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    act(() => store.openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
-    expect(onOpenInClassic).toHaveBeenCalledWith("/", "prod");
+    expect(onOpenInClassic).toHaveBeenCalledWith("/incidents", "prod");
   });
 });
 
@@ -547,7 +582,7 @@ describe("Window — the console dock's scope", () => {
         <Window ported={[]} onOpenInClassic={() => {}} />
       </ConsoleProvider>,
     );
-    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
   }
 
   it("scopes the dock to the active cluster on boot, then to a resource once one is open", async () => {
@@ -572,12 +607,12 @@ describe("Window — the console dock's scope", () => {
 });
 
 describe("Window accelerators", () => {
-  it("binds ⌘T to a new tab carrying the active cluster's name", async () => {
+  it("binds ⌘T to an app-wide Home tab", async () => {
     await booted();
     fireEvent.keyDown(window, { key: "t", metaKey: true });
     const tabs = store.currentWorkspace().tabs;
     expect(tabs).toHaveLength(2);
-    expect(tabs.at(-1)!.sub).toBe("prod");
+    expect(tabs.at(-1)!.sub).toBeUndefined();
   });
 
   it("⌘W closes the active tab and ⌘⇧T reopens it", async () => {
@@ -603,7 +638,7 @@ describe("Window accelerators", () => {
         <Window ported={[]} onOpenInClassic={() => {}} active={false} />
       </ConsoleProvider>,
     );
-    await screen.findByText(/not in the new design yet/);
+    await screen.findByRole("heading", { level: 1, name: "Home" });
     expect(screen.queryByRole("tablist")).toBeNull();
     fireEvent.keyDown(window, { key: "t", metaKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(1);
@@ -763,7 +798,7 @@ describe("Window lock cover", () => {
     await booted();
     expect(screen.getByRole("tablist")).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Clusters" })).toBeTruthy();
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Control room");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Home");
     expect(screen.queryByText("Workspace locked")).toBeNull();
   });
 
@@ -780,7 +815,7 @@ describe("Window lock cover", () => {
     expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
     // The screen under the strip is gone too — including from the hidden tab
     // surfaces, which stay mounted for every other reason.
-    expect(screen.queryByRole("heading", { level: 1, hidden: true, name: "Control room" })).toBeNull();
+    expect(screen.queryByRole("heading", { level: 1, hidden: true, name: "Home" })).toBeNull();
   });
 
   it("seals and covers on the lock chord", async () => {
@@ -880,7 +915,7 @@ describe("Window — what the cover has to take with it", () => {
 
   it("offers no way into Settings from the titlebar while the cover is up", async () => {
     await sealed();
-    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
+    const gear = within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement;
     expect(gear.disabled).toBe(true);
     await userEvent.click(gear);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
@@ -942,7 +977,7 @@ describe("Window — what the cover has to take with it", () => {
     await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
     await screen.findByRole("tablist");
     expect(
-      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
+      (within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
     expect(
@@ -996,7 +1031,7 @@ describe("Window — the launch check, before the vault has answered", () => {
 
   it("offers no way into Settings for the whole check", async () => {
     await stillChecking();
-    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
+    const gear = within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement;
     expect(gear.disabled).toBe(true);
     await userEvent.click(gear);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
@@ -1029,7 +1064,7 @@ describe("Window — the launch check, before the vault has answered", () => {
   it("gives every one of those back once the launch read says the vault is open", async () => {
     await booted();
     expect(
-      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
+      (within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
     expect(
