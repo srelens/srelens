@@ -172,7 +172,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
                  the whole point is that nothing is asked to. */
               <p
                 data-testid="no-agent-server"
-                className="text-[0.75rem] leading-relaxed text-muted"
+                className="px-3 py-3 text-[0.75rem] leading-relaxed text-muted"
               >
                 The agent, the MCP server and its audit trail live in the srelens desktop app.
                 Provider keys, model lists, the agent CLIs, starting the loopback server and

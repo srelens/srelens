@@ -46,8 +46,8 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
     catch (error) { setInstallError(error); }
     finally { setBusy(false); }
   }
-  const command = windows ? cli?.path || undefined : undefined;
-  const ready = transport === "stdio" ? (!windows || !!command) : (!statusLoading && !tokenLoading && statusError === undefined && tokenError === undefined && !!url && !!token);
+  const command = cli?.installed && cli.path ? cli.path : undefined;
+  const ready = transport === "stdio" ? (!loading && readError === null && !!command) : (!statusLoading && !tokenLoading && statusError === undefined && tokenError === undefined && !!url && !!token);
   const config = mcpClientConfig(tool, transport, { url: url ?? undefined, token, command });
   const preview = mcpClientConfig(tool, transport, { url: url ?? undefined, token: token && !revealed ? "<hidden token>" : token, command });
   async function copy() {
@@ -84,7 +84,7 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
           {tokenError !== undefined && <><FailureAlert tone="sev" title="The MCP bearer token could not be read" error={tokenError} />
             {onRetryToken && <Button variant="ghost" onClick={onRetryToken}>Retry bearer token</Button>}</>}
         </div> : transport === "http" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">Start the MCP server to obtain its address and bearer token.</p> :
-        transport === "stdio" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">The desktop executable path is required before a Windows stdio configuration can be generated.</p> :
+        transport === "stdio" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">{windows ? "The desktop executable path is required before a Windows stdio configuration can be generated." : "Install the srelens CLI before generating a stdio configuration."}</p> :
         <pre data-testid="mcp-client-config" className="scroll mt-2 whitespace-pre border-y border-rule py-2 text-[0.75rem]"><code>{preview.snippet}</code></pre>}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Button variant="secondary" disabled={!ready} onClick={() => void copy()}>Copy configuration</Button>

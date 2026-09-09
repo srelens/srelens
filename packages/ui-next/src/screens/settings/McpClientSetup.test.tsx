@@ -37,12 +37,19 @@ it("generates current HTTP config, masks its token, and copies the usable value"
   expect(copy.mock.lastCall?.[0]).toContain("9511");
   expect(copy.mock.lastCall?.[0]).toContain("b".repeat(64));
 });
-it("requires a known URL and token for HTTP config, while stdio stays available", async () => {
+it("requires known connection details before enabling either transport", async () => {
   const user = userEvent.setup(); render(<McpClientSetup url={null} token={null} />);
   await user.selectOptions(screen.getByLabelText("Transport"), "http");
   expect((screen.getByRole("button", { name: "Copy configuration" }) as HTMLButtonElement).disabled).toBe(true);
   await user.selectOptions(screen.getByLabelText("Transport"), "stdio");
-  expect(screen.getByTestId("mcp-client-config").textContent).toContain("--mcp-stdio");
+  expect(screen.queryByTestId("mcp-client-config")).toBeNull();
+  expect((screen.getByRole("button", { name: "Copy configuration" }) as HTMLButtonElement).disabled).toBe(true);
+});
+it("uses an installed Unix CLI's absolute path even when it is not on PATH", async () => {
+  const executable = "/home/user/.local/bin/srelens";
+  core.srelensCliStatus.mockResolvedValue({ installed: true, path: executable, links_to: "/Applications/srelens", on_path: false });
+  render(<McpClientSetup url={URL} token={TOKEN} />);
+  expect((await screen.findByTestId("mcp-client-config")).textContent).toContain(executable);
   expect((screen.getByRole("button", { name: "Copy configuration" }) as HTMLButtonElement).disabled).toBe(false);
 });
 it("reports installation failure and allows retry", async () => {

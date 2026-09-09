@@ -406,6 +406,7 @@ describe("Settings", () => {
       paint();
       const note = screen.getByTestId("no-agent-server");
       expect(note.textContent).toMatch(/desktop/i);
+      expect(note.className).toContain("px-3");
       expect(screen.getAllByTestId("no-agent-server")).toHaveLength(1);
       // And not in the rail: this is an absence WITHIN a section that is still
       // drawn, not an absent entry — the footnote by the nav is the report for

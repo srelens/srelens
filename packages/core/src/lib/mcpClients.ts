@@ -60,7 +60,7 @@ export function mcpClientConfig(
 ): McpClientConfig {
   const url = opts.url || DEFAULT_URL;
   const command = opts.command || "srelens";
-  const shellCommand = /^[A-Za-z0-9_./:\\-]+$/.test(command) ? command : `"${command.replace(/"/g, '\\"')}"`;
+  const shellCommand = /^[A-Za-z0-9_./:\\-]+$/.test(command) ? command : `"${command.replace(/[\\"$`]/g, "\\$&")}"`;
   const authValue = transport === "http" ? (opts.token ? `Bearer ${opts.token}` : NO_TOKEN_PLACEHOLDER) : "";
   const hint = MCP_TOOLS.find((t) => t.id === tool)?.hint ?? "";
 
